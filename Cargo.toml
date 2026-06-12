@@ -1,0 +1,51 @@
+[workspace]
+members = ["backend", "agent"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["sb-easy"]
+license = "MIT"
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "auth", "fs"] }
+
+# database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono"] }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# parsing
+base64 = "0.22"
+url = "2"
+
+# crypto & auth
+argon2 = "0.5"
+jsonwebtoken = "9"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
+
+# netlink (WireGuard kernel interface + interface management)
+neli = "0.6"
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+
+# utils
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+qrcode = { version = "0.14", features = ["image"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust-embed = "8"
+thiserror = "2"
+anyhow = "1"

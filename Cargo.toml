@@ -33,11 +33,7 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
-
-# netlink (WireGuard kernel interface + interface management)
-neli = "0.6"
-rtnetlink = "0.14"
-netlink-packet-route = "0.19"
+base64 = "0.22"
 
 # utils
 chrono = { version = "0.4", features = ["serde"] }

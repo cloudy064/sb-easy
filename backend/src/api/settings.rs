@@ -6,7 +6,7 @@ use axum::{
 use axum::routing::{get, put};
 use serde_json::{json, Value};
 
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -26,6 +26,15 @@ async fn get_settings(State(state): State<AppState>) -> Result<Json<Value>> {
         }
     }
 
+    // Override wireguard_interface with actual runtime config (from env)
+    result["wireguard_interface"] = json!({
+        "interface": state.cfg.wg_interface,
+        "listen_port": state.cfg.wg_port,
+        "address": state.cfg.wg_address,
+        "dns": state.cfg.wg_dns,
+        "mtu": state.cfg.wg_mtu,
+    });
+
     Ok(Json(result))
 }
 
@@ -33,13 +42,16 @@ async fn update_settings(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
-    for (key, value) in body.as_object().unwrap_or(&serde_json::Map::new()) {
-        let value_str = serde_json::to_string(value)?;
-        sqlx::query(
-            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')"
-        )
-        .bind(key).bind(&value_str).bind(&value_str)
-        .execute(&state.db).await?;
+    // Only persist singbox_connection and general — wireguard is read-only (env)
+    for key in &["singbox_connection", "general"] {
+        if let Some(value) = body.get(*key) {
+            let value_str = serde_json::to_string(value)?;
+            sqlx::query(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')"
+            )
+            .bind(*key).bind(&value_str).bind(&value_str)
+            .execute(&state.db).await?;
+        }
     }
 
     get_settings(State(state)).await

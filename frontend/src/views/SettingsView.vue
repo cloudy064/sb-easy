@@ -2,47 +2,52 @@
   <div>
     <div class="page-header">
       <h2>Settings</h2>
-      <p class="text-sm text-muted" style="margin-top:0.25rem">Configure WireGuard interface, sing-box connection, and general preferences.</p>
+      <p class="text-sm text-muted" style="margin-top:0.25rem">
+        Interface and firewall rules are managed internally. Configure sing-box connection and general preferences below.
+      </p>
     </div>
 
     <div class="section-stack">
-      <!-- WireGuard Interface -->
+      <!-- WireGuard Interface (read-only — managed internally) -->
       <div class="card">
         <h3 class="section-title">WireGuard Interface</h3>
-        <p class="text-sm text-muted mb-4">Settings for the WireGuard kernel interface running on this server.</p>
+        <p class="text-sm text-muted mb-4">
+          Interface lifecycle and iptables rules are handled internally by sb-easy.
+          Set these via environment variables at startup.
+        </p>
         <div class="settings-grid">
-          <div class="form-group"><label>Interface Name</label><input v-model="wg.interface" readonly style="opacity:0.55;background:#faf8f4;cursor:default" /></div>
-          <div class="form-group"><label>Listen Port</label><input v-model.number="wg.listen_port" type="number" /></div>
+          <div class="form-group"><label>Interface</label><input :value="wg.interface" readonly style="opacity:0.55;cursor:default" /></div>
+          <div class="form-group"><label>Listen Port</label><input :value="wg.listen_port" readonly style="opacity:0.55;cursor:default" /></div>
         </div>
-        <div class="form-group"><label>Server Address (CIDR)</label><input v-model="wg.address" placeholder="10.59.32.1/24" /></div>
         <div class="settings-grid">
-          <div class="form-group"><label>DNS</label><input v-model="wg.dns" /></div>
-          <div class="form-group"><label>MTU</label><input v-model.number="wg.mtu" type="number" /></div>
+          <div class="form-group"><label>Address (CIDR)</label><input :value="wg.address" readonly style="opacity:0.55;cursor:default" /></div>
+          <div class="form-group"><label>MTU</label><input :value="wg.mtu" readonly style="opacity:0.55;cursor:default" /></div>
         </div>
-        <div class="form-group"><label>Post-Up Script</label><textarea v-model="wg.post_up" rows="2" class="font-mono" placeholder="iptables rules..."></textarea></div>
-        <div class="form-group"><label>Post-Down Script</label><textarea v-model="wg.post_down" rows="2" class="font-mono" placeholder="iptables rules..."></textarea></div>
+        <p class="text-xs text-muted">
+          To change these, edit <code>WG_INTERFACE</code>, <code>WG_PORT</code>, <code>WG_ADDRESS</code>,
+          <code>WG_MTU</code> environment variables and restart.
+        </p>
       </div>
 
       <!-- Sing-box Connection -->
       <div class="card">
         <h3 class="section-title">Sing-box Connection</h3>
-        <p class="text-sm text-muted mb-4">Connection details for the sing-box instance&rsquo;s Clash API. Used for latency testing and status queries.</p>
+        <p class="text-sm text-muted mb-4">Clash API endpoint for latency testing and status queries.</p>
         <div class="settings-grid">
           <div class="form-group"><label>Clash API URL</label><input v-model="sb.api_url" placeholder="http://10.168.1.5:9090" /></div>
           <div class="form-group"><label>API Secret</label><input v-model="sb.secret" type="password" placeholder="Optional" /></div>
         </div>
-        <p class="text-xs text-muted">The sing-box instance must have <code>experimental.clash_api</code> enabled in its configuration.</p>
+        <p class="text-xs text-muted">The sing-box instance must have <code>experimental.clash_api</code> enabled.</p>
       </div>
 
       <!-- General -->
       <div class="card">
         <h3 class="section-title">General</h3>
-        <p class="text-sm text-muted mb-4">Application-wide preferences.</p>
         <div class="settings-grid">
           <div class="form-group"><label>External Hostname</label><input v-model="general.external_hostname" placeholder="39.108.98.208" /></div>
-          <div class="form-group"><label>One-Time Link Expiry (minutes)</label><input v-model.number="general.one_time_link_expiry_minutes" type="number" /></div>
+          <div class="form-group"><label>One-Time Link Expiry (min)</label><input v-model.number="general.one_time_link_expiry_minutes" type="number" /></div>
         </div>
-        <p class="text-xs text-muted">The external hostname is used in WireGuard client configs as the <code>Endpoint</code> address.</p>
+        <p class="text-xs text-muted">Hostname used as <code>Endpoint</code> in WireGuard client configs.</p>
       </div>
 
       <div style="display:flex;justify-content:flex-end">
@@ -63,17 +68,9 @@
 import { ref, onMounted } from 'vue'
 import client from '../api/client'
 
-const wg = ref({
-  interface: 'wg0', listen_port: 51820,
-  address: '10.59.32.1/24', dns: '10.59.32.1',
-  mtu: 1420, post_up: '', post_down: '',
-})
+const wg = ref({ interface: '—', listen_port: 0, address: '—', mtu: 0 })
 const sb = ref({ api_url: 'http://10.168.1.5:9090', secret: '' })
-const general = ref({
-  app_name: 'sb-easy',
-  external_hostname: '39.108.98.208',
-  one_time_link_expiry_minutes: 5,
-})
+const general = ref({ external_hostname: '39.108.98.208', one_time_link_expiry_minutes: 5 })
 const saved = ref(false)
 
 onMounted(async () => {
@@ -87,7 +84,6 @@ onMounted(async () => {
 
 async function saveSettings() {
   await client.put('/settings', {
-    wireguard_interface: wg.value,
     singbox_connection: sb.value,
     general: general.value,
   })
@@ -97,18 +93,7 @@ async function saveSettings() {
 </script>
 
 <style scoped>
-.section-title {
-  font-size: 0.95rem;
-  font-weight: 650;
-  margin-bottom: 0.25rem;
-}
-
-.settings-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 1.25rem;
-}
-@media (max-width: 600px) {
-  .settings-grid { grid-template-columns: 1fr; }
-}
+.section-title { font-size: 0.95rem; font-weight: 650; margin-bottom: 0.25rem; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.25rem; }
+@media (max-width: 600px) { .settings-grid { grid-template-columns: 1fr; } }
 </style>

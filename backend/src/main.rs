@@ -55,16 +55,16 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::init(&cfg).await?;
     info!("Database ready");
 
-    // ── WireGuard startup ─────────────────────────────────
-    // This generates keys, writes wg0.conf, applies iptables, and brings up the interface.
-    let _wg_shutdown_guard = services::wireguard::startup(&pool, &cfg).await
-        .map(|guard| {
-            info!(
-                "WireGuard interface {} is UP on port {} (UDP)",
-                cfg.wg_interface, cfg.wg_port
-            );
-            guard
-        })?;
+    // ── WireGuard startup (skip if WG_ENABLED=false) ────────
+    if cfg.wg_enabled {
+        let _guard = services::wireguard::startup(&pool, &cfg).await?;
+        info!(
+            "WireGuard interface {} is UP on port {} (UDP)",
+            cfg.wg_interface, cfg.wg_port
+        );
+    } else {
+        info!("WireGuard startup skipped (WG_ENABLED=false)");
+    }
 
     // ── Auth seed ─────────────────────────────────────────
     auth::ensure_default_user(&pool, &cfg).await?;
@@ -83,7 +83,9 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     // ── Cleanup ───────────────────────────────────────────
-    services::wireguard::shutdown(&cfg).await;
+    if cfg.wg_enabled {
+        services::wireguard::shutdown(&cfg).await;
+    }
     info!("sb-easy stopped");
 
     Ok(())

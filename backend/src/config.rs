@@ -17,6 +17,7 @@ pub struct Config {
     pub admin_password: String,
 
     // WireGuard settings
+    pub wg_enabled: bool,
     pub wg_interface: String,
     pub wg_port: u16,
     pub wg_address: String,
@@ -50,6 +51,7 @@ impl Config {
             admin_password: env::var("ADMIN_PASSWORD")
                 .unwrap_or_else(|_| "admin".into()),
 
+            wg_enabled: env::var("WG_ENABLED").unwrap_or_else(|_| "true".into()).parse().unwrap_or(true),
             wg_interface: env::var("WG_INTERFACE").unwrap_or_else(|_| "wg0".into()),
             wg_port: env::var("WG_PORT").unwrap_or_else(|_| "51820".into()).parse()?,
             wg_address: env::var("WG_ADDRESS").unwrap_or_else(|_| "10.59.32.1/24".into()),

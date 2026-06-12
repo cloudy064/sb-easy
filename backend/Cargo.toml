@@ -32,9 +32,3 @@ anyhow.workspace = true
 rand.workspace = true
 x25519-dalek.workspace = true
 futures = "0.3"
-
-# Linux-only: netlink for WireGuard kernel interface
-[target.'cfg(target_os = "linux")'.dependencies]
-neli.workspace = true
-rtnetlink.workspace = true
-netlink-packet-route.workspace = true

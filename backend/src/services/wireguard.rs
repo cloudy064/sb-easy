@@ -118,7 +118,7 @@ pub async fn sync_config(pool: &sqlx::SqlitePool, cfg: &Config) -> Result<()> {
 
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wireguard_peers WHERE enabled = 1")
         .fetch_one(pool).await?;
-    info!("WireGuard synced ({count} peers)");
+    info!("WireGuard synced ({} peers)", count.0);
     Ok(())
 }
 

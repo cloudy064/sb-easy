@@ -76,7 +76,8 @@ pub async fn startup(pool: &sqlx::SqlitePool, cfg: &Config) -> Result<WireGuardG
             info!("Creating WireGuard interface {}...", cfg.wg_interface);
             run_cmd("ip", &["link", "add", &cfg.wg_interface, "type", "wireguard"])?;
             if cfg.wg_mtu > 0 {
-                run_cmd("ip", &["link", "set", &cfg.wg_interface, "mtu", &cfg.wg_mtu.to_string()])?;
+                let mtu_str = cfg.wg_mtu.to_string();
+                run_cmd("ip", &["link", "set", &cfg.wg_interface, "mtu", &mtu_str])?;
             }
             run_cmd("ip", &["address", "add", &cfg.wg_address, "dev", &cfg.wg_interface])?;
             run_cmd("ip", &["link", "set", "up", &cfg.wg_interface])?;
@@ -280,8 +281,8 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
         .output()
         .map_err(|e| AppError::Internal(format!("{cmd}: {e}")))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!("{cmd} {:?}: {stderr}", args);
+        let err = String::from_utf8_lossy(&output.stderr);
+        warn!("{cmd} {:?}: {err}", args);
     }
     Ok(())
 }

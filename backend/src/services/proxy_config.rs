@@ -4,6 +4,17 @@
 
 use crate::models::proxy_node::ProxyNode;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+/// Compute the ETag for a host's rendered config. Single source of truth shared
+/// by the agent config endpoint and drift detection so both hash identically.
+pub fn config_etag(host_id: &str, config_str: &str, seed: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(host_id.as_bytes());
+    hasher.update(config_str.as_bytes());
+    hasher.update(seed.as_bytes());
+    format!("\"{:x}\"", hasher.finalize())
+}
 
 /// Generate a sing-box outbound JSON for a single proxy node.
 pub fn generate_outbound(node: &ProxyNode) -> Value {

@@ -11,7 +11,6 @@ use axum::{
 };
 use axum::routing::{get, post};
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 
 use crate::api::hosts::{host_outbound_nodes, host_profile_template};
 use crate::error::{AppError, Result};
@@ -45,11 +44,7 @@ async fn agent_config(
     let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
 
     // ETag scoped per host so different hosts get independent caching.
-    let mut hasher = Sha256::new();
-    hasher.update(host.id.as_bytes());
-    hasher.update(config_str.as_bytes());
-    hasher.update(state.cfg.config_hash_seed.as_bytes());
-    let etag = format!("\"{:x}\"", hasher.finalize());
+    let etag = proxy_config::config_etag(&host.id, &config_str, &state.cfg.config_hash_seed);
 
     // Touch last_seen on every poll so the UI can show liveness.
     let _ = sqlx::query("UPDATE hosts SET last_seen = ? WHERE id = ?")

@@ -39,6 +39,7 @@
           <span v-if="h.capabilities.is_wg_member" class="cap-badge cap-wg">WG</span>
           <span v-if="h.capabilities.runs_singbox" class="cap-badge cap-sb">sing-box</span>
           <span class="cap-badge cap-out">{{ h.assigned_outbounds ? h.assigned_outbounds + ' proxies' : 'all proxies' }}</span>
+          <span v-if="h.config_drift" class="cap-badge cap-drift" :title="t('hosts.drift.hint')">{{ t('hosts.drift') }}</span>
         </div>
 
         <div class="host-bottom">
@@ -299,6 +300,7 @@ async function doDelete() {
 .cap-wg   { background: #e8f0fe; color: #3c6ea8; }
 .cap-sb   { background: #e8f5e8; color: #4a7c4a; }
 .cap-out  { background: var(--paper-border); color: var(--ink-muted); }
+.cap-drift { background: var(--bad-bg); color: var(--bad); }
 
 .host-bottom { display: flex; justify-content: space-between; align-items: center; }
 .host-sb-state { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-secondary); }

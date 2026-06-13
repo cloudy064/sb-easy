@@ -43,6 +43,7 @@ export interface Host {
   assigned_outbounds?: number
   has_token?: boolean
   agent_token?: string
+  config_drift?: boolean
 }
 
 export interface ConfigProfile {

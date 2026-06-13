@@ -57,6 +57,15 @@ async fn list_hosts(State(state): State<AppState>) -> Result<Json<Vec<serde_json
         v["capabilities"] = serde_json::to_value(h.caps()).unwrap_or(json!({}));
         v["assigned_outbounds"] = json!(count.0);
         v["has_token"] = json!(!h.agent_token.is_empty());
+        // Config drift: the agent is running a config whose ETag no longer matches
+        // what the server would serve now (it hasn't repolled, or its reload failed).
+        // Only meaningful for remote hosts that have reported a running etag.
+        if !h.is_self() {
+            if let Some(reported) = reported_etag(&h) {
+                let expected = expected_config_etag(&state, &h).await;
+                v["config_drift"] = json!(reported != expected);
+            }
+        }
         out.push(v);
     }
     Ok(Json(out))
@@ -363,6 +372,22 @@ async fn fetch_host(state: &AppState, id: &str) -> Result<Host> {
     sqlx::query_as::<_, Host>("SELECT * FROM hosts WHERE id = ?")
         .bind(id).fetch_optional(&state.db).await?
         .ok_or_else(|| AppError::NotFound("Host not found".into()))
+}
+
+/// Compute the ETag of the config the server would currently serve to a host.
+pub async fn expected_config_etag(state: &AppState, host: &Host) -> String {
+    let nodes = host_outbound_nodes(state, &host.id).await.unwrap_or_default();
+    let template = host_profile_template(state, host).await;
+    let config = crate::services::proxy_config::render_host_config(&template, &nodes);
+    let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
+    crate::services::proxy_config::config_etag(&host.id, &config_str, &state.cfg.config_hash_seed)
+}
+
+/// The ETag the agent last reported running (from singbox_state JSON), if any.
+fn reported_etag(host: &Host) -> Option<String> {
+    let st = host.singbox_state.as_ref()?;
+    let v: serde_json::Value = serde_json::from_str(st).ok()?;
+    v.get("etag").and_then(|e| e.as_str()).map(|s| s.to_string())
 }
 
 // ─── Shared helpers used by the agent endpoint ──────────────────────────────

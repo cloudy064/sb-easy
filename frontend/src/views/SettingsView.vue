@@ -1,7 +1,7 @@
 <template>
   <div>
     <div class="page-header">
-      <h2>Settings</h2>
+      <h2>{{ t('page.settings.title') }}</h2>
       <p class="text-sm text-muted" style="margin-top:0.25rem">
         Interface and firewall rules are managed internally. Configure sing-box connection and general preferences below.
       </p>
@@ -50,6 +50,21 @@
         <p class="text-xs text-muted">Hostname used as <code>Endpoint</code> in WireGuard client configs.</p>
       </div>
 
+      <!-- Backup & Restore -->
+      <div class="card">
+        <h3 class="section-title">Backup &amp; Restore</h3>
+        <p class="text-sm text-muted mb-4">
+          Export all nodes, clients, subscriptions and settings as a JSON file, or restore from one.
+          Restore upserts records and never deletes data the backup doesn't mention.
+        </p>
+        <div class="flex-center gap-3">
+          <button class="btn-secondary btn-sm" @click="exportBackup">Export backup</button>
+          <button class="btn-secondary btn-sm" @click="fileInput?.click()">Import backup…</button>
+          <input ref="fileInput" type="file" accept="application/json" style="display:none" @change="importBackup" />
+          <span v-if="restoreMsg" class="text-xs text-muted">{{ restoreMsg }}</span>
+        </div>
+      </div>
+
       <div style="display:flex;justify-content:flex-end">
         <button class="btn-primary" @click="saveSettings">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:0.4rem">
@@ -65,13 +80,17 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '../composables/i18n'
+const { t } = useI18n()
 import { ref, onMounted } from 'vue'
 import client from '../api/client'
 
 const wg = ref({ interface: '—', listen_port: 0, address: '—', mtu: 0 })
-const sb = ref({ api_url: 'http://10.168.1.5:9090', secret: '' })
-const general = ref({ external_hostname: '39.108.98.208', one_time_link_expiry_minutes: 5 })
+const sb = ref({ api_url: 'http://127.0.0.1:9090', secret: '' })
+const general = ref({ external_hostname: '', one_time_link_expiry_minutes: 5 })
 const saved = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const restoreMsg = ref('')
 
 onMounted(async () => {
   try {
@@ -89,6 +108,35 @@ async function saveSettings() {
   })
   saved.value = true
   setTimeout(() => (saved.value = false), 2200)
+}
+
+async function exportBackup() {
+  const { data } = await client.get('/settings/backup')
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `sb-easy-backup-${new Date().toISOString().slice(0, 10)}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function importBackup(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    const text = await file.text()
+    const payload = JSON.parse(text)
+    const { data } = await client.post('/settings/restore', payload)
+    const r = data.restored || {}
+    restoreMsg.value = `Restored ${r.proxy_nodes || 0} nodes, ${r.subscriptions || 0} subscriptions, ${r.app_settings || 0} settings.`
+  } catch (err) {
+    restoreMsg.value = 'Import failed — invalid backup file.'
+  } finally {
+    input.value = ''
+    setTimeout(() => (restoreMsg.value = ''), 5000)
+  }
 }
 </script>
 

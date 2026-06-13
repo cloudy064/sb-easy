@@ -2,8 +2,8 @@
   <div>
     <div class="page-header flex-between">
       <div>
-        <h2>Nodes</h2>
-        <p class="text-sm text-muted" style="margin-top:0.25rem">Manage proxy outbound nodes. Import via subscriptions or add manually.</p>
+        <h2>{{ t('page.nodes.title') }}</h2>
+        <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.nodes.desc') }}</p>
       </div>
       <button class="btn-primary" @click="showCreate = true">Add Node</button>
     </div>
@@ -99,6 +99,50 @@
           <template v-if="createForm.node_type === 'trojan' || createForm.node_type === 'hysteria2'">
             <div class="form-group"><label>Password</label><input v-model="trConfig.password" placeholder="password" /></div>
           </template>
+
+          <!-- Advanced: TLS / transport (not for shadowsocks) -->
+          <template v-if="createForm.node_type !== 'shadowsocks'">
+            <button type="button" class="btn-ghost btn-sm adv-toggle" @click="showAdvanced = !showAdvanced">
+              {{ showAdvanced ? '▾' : '▸' }} Advanced (TLS / Reality / Transport)
+            </button>
+            <div v-if="showAdvanced" class="adv-box">
+              <label class="adv-check">
+                <input type="checkbox" v-model="adv.tlsEnabled" /> Enable TLS
+              </label>
+              <template v-if="adv.tlsEnabled">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                  <div class="form-group"><label>SNI (server_name)</label><input v-model="adv.sni" placeholder="example.com" /></div>
+                  <div class="form-group"><label>uTLS Fingerprint</label><input v-model="adv.fingerprint" placeholder="chrome" /></div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                  <div class="form-group"><label>ALPN (comma-sep)</label><input v-model="adv.alpn" placeholder="h2,http/1.1" /></div>
+                  <label class="adv-check" style="align-self:center"><input type="checkbox" v-model="adv.insecure" /> Allow insecure</label>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                  <div class="form-group"><label>Reality public_key</label><input v-model="adv.realityPbk" placeholder="optional" /></div>
+                  <div class="form-group"><label>Reality short_id</label><input v-model="adv.realitySid" placeholder="optional" /></div>
+                </div>
+              </template>
+              <div class="form-group"><label>Transport</label>
+                <select v-model="adv.transport">
+                  <option value="">None (TCP)</option>
+                  <option value="ws">WebSocket</option>
+                  <option value="grpc">gRPC</option>
+                  <option value="http">HTTP</option>
+                </select>
+              </div>
+              <template v-if="adv.transport === 'ws' || adv.transport === 'http'">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                  <div class="form-group"><label>Path</label><input v-model="adv.path" placeholder="/" /></div>
+                  <div class="form-group"><label>Host header</label><input v-model="adv.wsHost" placeholder="example.com" /></div>
+                </div>
+              </template>
+              <template v-if="adv.transport === 'grpc'">
+                <div class="form-group"><label>gRPC service_name</label><input v-model="adv.grpcService" placeholder="GunService" /></div>
+              </template>
+            </div>
+          </template>
+
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreate = false">Cancel</button>
             <button type="submit" class="btn-primary">Create Node</button>
@@ -138,6 +182,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '../composables/i18n'
+const { t } = useI18n()
 import { ref, computed, onMounted } from 'vue'
 import { useProxyNodesStore } from '../stores/proxyNodes'
 import type { ProxyNode } from '../types'
@@ -154,6 +200,56 @@ const ssConfig = ref({ method: 'aes-256-gcm', password: '' })
 const vmConfig = ref({ uuid: '' })
 const trConfig = ref({ password: '' })
 const editForm = ref({ tag: '', server: '', server_port: 443 })
+
+const showAdvanced = ref(false)
+const adv = ref({
+  tlsEnabled: false, sni: '', fingerprint: '', alpn: '', insecure: false,
+  realityPbk: '', realitySid: '',
+  transport: '', path: '/', wsHost: '', grpcService: '',
+})
+
+function buildTls() {
+  if (!adv.value.tlsEnabled) return undefined
+  const tls: any = { enabled: true }
+  if (adv.value.sni) tls.server_name = adv.value.sni
+  if (adv.value.insecure) tls.insecure = true
+  if (adv.value.alpn) tls.alpn = adv.value.alpn.split(',').map(s => s.trim()).filter(Boolean)
+  if (adv.value.fingerprint) tls.utls = { enabled: true, fingerprint: adv.value.fingerprint }
+  if (adv.value.realityPbk) {
+    tls.reality = { enabled: true, public_key: adv.value.realityPbk, short_id: adv.value.realitySid || '' }
+  }
+  return tls
+}
+
+function buildTransport() {
+  const t = adv.value.transport
+  if (!t) return undefined
+  if (t === 'ws') {
+    const tr: any = { type: 'ws', path: adv.value.path || '/' }
+    if (adv.value.wsHost) tr.headers = { Host: adv.value.wsHost }
+    return tr
+  }
+  if (t === 'grpc') return { type: 'grpc', service_name: adv.value.grpcService || '' }
+  if (t === 'http') {
+    const tr: any = { type: 'http', path: adv.value.path || '/' }
+    if (adv.value.wsHost) tr.host = [adv.value.wsHost]
+    return tr
+  }
+  return undefined
+}
+
+function resetForm() {
+  createForm.value = { tag: '', node_type: 'shadowsocks', server: '', server_port: 443 }
+  ssConfig.value = { method: 'aes-256-gcm', password: '' }
+  vmConfig.value = { uuid: '' }
+  trConfig.value = { password: '' }
+  showAdvanced.value = false
+  adv.value = {
+    tlsEnabled: false, sni: '', fingerprint: '', alpn: '', insecure: false,
+    realityPbk: '', realitySid: '',
+    transport: '', path: '/', wsHost: '', grpcService: '',
+  }
+}
 
 onMounted(() => store.fetchNodes())
 
@@ -179,13 +275,23 @@ function latencyColor(ms: number) {
 
 async function doCreate() {
   let config: any = {}
-  if (createForm.value.node_type === 'shadowsocks') config = { method: ssConfig.value.method, password: ssConfig.value.password }
-  else if (createForm.value.node_type === 'vmess') config = { uuid: vmConfig.value.uuid, alter_id: 0, security: 'auto' }
-  else if (createForm.value.node_type === 'vless') config = { uuid: vmConfig.value.uuid, flow: '', packet_encoding: 'xudp' }
-  else if (createForm.value.node_type === 'trojan') config = { password: trConfig.value.password }
-  else if (createForm.value.node_type === 'hysteria2') config = { password: trConfig.value.password }
+  const type = createForm.value.node_type
+  if (type === 'shadowsocks') config = { method: ssConfig.value.method, password: ssConfig.value.password }
+  else if (type === 'vmess') config = { uuid: vmConfig.value.uuid, alter_id: 0, security: 'auto' }
+  else if (type === 'vless') config = { uuid: vmConfig.value.uuid, flow: '', packet_encoding: 'xudp' }
+  else if (type === 'trojan') config = { password: trConfig.value.password }
+  else if (type === 'hysteria2') config = { password: trConfig.value.password }
+
+  if (type !== 'shadowsocks') {
+    const tls = buildTls()
+    const transport = buildTransport()
+    if (tls) config.tls = tls
+    if (transport) config.transport = transport
+  }
+
   await store.createNode({ ...createForm.value, protocol_config: config, enabled: true })
   showCreate.value = false
+  resetForm()
 }
 
 function editNode(node: ProxyNode) {
@@ -275,7 +381,21 @@ async function toggleNode(node: ProxyNode) {
 .proto-vmess   { background: #e8f5e8; color: #4a7c4a; }
 .proto-trojan  { background: #faf2e0; color: #8a6c2c; }
 .proto-vless   { background: #faeceb; color: #9c4a44; }
-.proto-hy2     { background: #f5f1ea; color: #6b6259; }
+.proto-hy2     { background: var(--paper-border); color: #6b6259; }
 .proto-tuic    { background: #ecf4f7; color: #4a6c7c; }
 .proto-default { background: #f3f0ea; color: var(--ink-muted); }
+
+.adv-toggle { padding-left: 0; margin-bottom: 0.5rem; color: var(--accent); }
+.adv-box {
+  border: 1px solid var(--paper-border);
+  border-radius: var(--radius-sm);
+  padding: 1rem;
+  background: var(--paper-bg);
+  margin-bottom: 1.1rem;
+}
+.adv-check {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.82rem; color: var(--ink-secondary); margin-bottom: 0.85rem;
+}
+.adv-check input { width: auto; }
 </style>

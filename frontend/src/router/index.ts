@@ -15,9 +15,13 @@ const router = createRouter({
       meta: { requiresAuth: true },
       children: [
         { path: '', name: 'Dashboard', component: () => import('../views/DashboardView.vue') },
+        { path: 'monitor', name: 'Monitor', component: () => import('../views/MonitorView.vue') },
         { path: 'clients', name: 'Clients', component: () => import('../views/ClientsView.vue') },
         { path: 'nodes', name: 'Nodes', component: () => import('../views/NodesView.vue') },
+        { path: 'proxies', name: 'Proxies', component: () => import('../views/ProxiesView.vue') },
         { path: 'subscriptions', name: 'Subscriptions', component: () => import('../views/SubscriptionsView.vue') },
+        { path: 'config', name: 'Config', component: () => import('../views/ConfigView.vue') },
+        { path: 'users', name: 'Users', component: () => import('../views/UsersView.vue') },
         { path: 'settings', name: 'Settings', component: () => import('../views/SettingsView.vue') },
       ],
     },
@@ -29,6 +33,8 @@ router.beforeEach((to, _from, next) => {
   if (to.meta.requiresAuth && !auth.token) {
     next('/login')
   } else if (to.path === '/login' && auth.token) {
+    next('/')
+  } else if (to.name === 'Users' && auth.role !== 'admin') {
     next('/')
   } else {
     next()

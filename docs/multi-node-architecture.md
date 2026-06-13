@@ -14,11 +14,11 @@
 | 每机 Clash 路由 | ✅ | `singbox_proxy`/`singbox_ws` 支持 `?host=<id>` 路由到各机 Clash API（含 secret），缺省走本地 |
 | 前端 Hosts 视图 | ✅ | 主机列表/在线状态/能力徽章/安装命令+token/出站分配/增删/WG 配置下载；Monitor·Proxies·Logs 加 Host 选择器；Nodes 文案改 Proxies |
 | WG peer 自动配置 | ✅ | WG 成员 Host 自动 provision 一条 /32 peer（精确路由 reachback）、回填 `wg_address`/`wg_public_key`/默认 `clash_api`；`GET /hosts/{id}/wg-config` 下发主机 WG 配置；删除/切换成员自动 de/provision；Clients 列表排除 host-peer |
-| 配置变更 push reload | ⏳ 待做 | 当前仍靠 agent ETag 轮询；长连 push 为后续 |
+| 配置变更感知 | ✅ | 决策：不引入长连，保持轮询、缩短间隔（用户选择）。agent 默认间隔 30s→**10s**、可配、2s 下限；`agent/.env.example` 文档化该旋钮 |
 
 构建验证：`cargo build`（backend+agent）通过；前端 `vue-tsc` + `vite build` 通过。运行时冒烟：迁移/seed、per-host 配置渲染、ETag 304、按机出站分配、agent 鉴权（401/200）、状态上报、全局 token 向后兼容、`?host=` 路由解析、WG host-peer provision/deprovision 全生命周期（含 update 切换成员）、wg-config 下发，均无 panic。
 
-**阶段1 + 阶段2 全部落地。** 唯一遗留增强：配置变更主动 push reload（当前 ETag 轮询已能感知）。
+**阶段1 + 阶段2 全部落地。** 配置变更感知按用户决策用短间隔轮询（10s）解决，不做长连 push。后续阶段3 可选增强：下行命令通道（restart/测速）、配置漂移检测、多 hub/站点互联、Profile 可视化编辑。
 
 下方为原始设计。
 

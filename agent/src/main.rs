@@ -34,10 +34,14 @@ async fn main() -> Result<()> {
         warn!("AGENT_TOKEN is empty — the server will reject requests (401). Set it to this host's token.");
     }
 
+    // Poll interval. Shorter = lower config-change latency (the panel pushes no
+    // signal; the agent discovers changes by polling with ETag/304). Clamped to a
+    // 2s floor so a misconfiguration can't hammer the server.
     let interval_secs: u64 = std::env::var("AGENT_INTERVAL")
-        .unwrap_or_else(|_| "30".into())
-        .parse()
-        .unwrap_or(30);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10)
+        .max(2);
 
     let config_path = std::env::var("SINGBOX_CONFIG_PATH")
         .unwrap_or_else(|_| "/etc/sing-box/config.d/90-generated.json".to_string());

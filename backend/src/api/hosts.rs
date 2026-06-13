@@ -10,10 +10,16 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
-use crate::models::host::{Capabilities, ConfigProfile, CreateHostRequest, Host, UpdateHostRequest};
+use crate::models::host::{
+    Capabilities, ConfigProfile, CreateHostRequest, EnqueueCommandRequest, Host, HostCommand,
+    UpdateHostRequest,
+};
 use crate::models::ProxyNode;
 use crate::services::wireguard as wg;
 use crate::AppState;
+
+/// Commands the panel may enqueue for an agent to run.
+const ALLOWED_COMMANDS: [&str; 2] = ["reload", "restart"];
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -24,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/rotate-token", post(rotate_token))
         .route("/{id}/outbounds", put(set_outbounds).get(get_outbounds))
         .route("/{id}/wg-config", get(download_wg_config))
+        .route("/{id}/commands", get(list_commands).post(enqueue_command))
 }
 
 /// Generate a fresh per-host agent token (64 hex chars).
@@ -251,6 +258,38 @@ async fn get_outbounds(State(state): State<AppState>, Path(id): Path<String>) ->
         .bind(&id).fetch_all(&state.db).await?;
     let node_ids: Vec<String> = ids.into_iter().map(|(n,)| n).collect();
     Ok(Json(json!({ "host_id": id, "node_ids": node_ids, "uses_all_when_empty": true })))
+}
+
+/// POST /api/hosts/{id}/commands — enqueue a command for the host's agent.
+async fn enqueue_command(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EnqueueCommandRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let host = fetch_host(&state, &id).await?;
+    if host.is_self() {
+        return Err(AppError::BadRequest("The self host has no remote agent".into()));
+    }
+    let cmd = req.command.trim().to_lowercase();
+    if !ALLOWED_COMMANDS.contains(&cmd.as_str()) {
+        return Err(AppError::BadRequest(format!("Unknown command: {cmd}")));
+    }
+    let cmd_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO host_commands (id, host_id, command, status, created_at) VALUES (?,?,?,'pending',?)")
+        .bind(&cmd_id).bind(&id).bind(&cmd).bind(Utc::now().to_rfc3339())
+        .execute(&state.db).await?;
+    Ok(Json(json!({ "id": cmd_id, "command": cmd, "status": "pending" })))
+}
+
+/// GET /api/hosts/{id}/commands — recent commands and their status.
+async fn list_commands(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Vec<HostCommand>>> {
+    let cmds = sqlx::query_as::<_, HostCommand>(
+        "SELECT * FROM host_commands WHERE host_id = ? ORDER BY created_at DESC LIMIT 20",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(cmds))
 }
 
 /// GET /api/hosts/profiles — list config profiles.

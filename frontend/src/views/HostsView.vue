@@ -44,6 +44,8 @@
         <div class="host-bottom">
           <span class="host-sb-state">{{ singboxState(h) }}</span>
           <div class="flex-center gap-2">
+            <button v-if="!h.capabilities.is_self" class="btn-ghost btn-sm" @click="sendCmd(h, 'reload')">{{ t('hosts.reload') }}</button>
+            <button v-if="!h.capabilities.is_self" class="btn-ghost btn-sm" @click="sendCmd(h, 'restart')">{{ t('hosts.restart') }}</button>
             <button class="btn-ghost btn-sm" @click="openOutbounds(h)">{{ t('hosts.proxies') }}</button>
             <button v-if="!h.capabilities.is_self && h.capabilities.is_wg_member && h.wg_address" class="btn-ghost btn-sm" @click="store.downloadWgConfig(h)">{{ t('hosts.wgconfig') }}</button>
             <button v-if="!h.capabilities.is_self" class="btn-ghost btn-sm" @click="openInstall(h)">{{ t('hosts.install') }}</button>
@@ -120,6 +122,8 @@
       </div>
     </div>
 
+    <div v-if="toast" class="toast"><div class="toast-item toast-success">{{ toast }}</div></div>
+
     <!-- Delete -->
     <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null">
       <div class="modal">
@@ -152,6 +156,20 @@ const deleteTarget = ref<Host | null>(null)
 const selectedNodes = ref<string[]>([])
 const installCommand = ref('')
 const copied = ref(false)
+const toast = ref('')
+
+async function sendCmd(h: Host, command: 'reload' | 'restart') {
+  try {
+    await store.enqueueCommand(h.id, command)
+    showToast(t('hosts.cmd.queued') + ` (${command})`)
+  } catch {
+    showToast(t('hosts.cmd.failed'))
+  }
+}
+function showToast(msg: string) {
+  toast.value = msg
+  setTimeout(() => (toast.value = ''), 2200)
+}
 
 const form = ref({
   name: '',

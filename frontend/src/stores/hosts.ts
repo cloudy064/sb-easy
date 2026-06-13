@@ -70,6 +70,11 @@ export const useHostsStore = defineStore('hosts', () => {
     await fetchHosts()
   }
 
+  async function enqueueCommand(id: string, command: 'reload' | 'restart') {
+    const { data } = await client.post(`/hosts/${id}/commands`, { command })
+    return data
+  }
+
   async function downloadWgConfig(host: Host) {
     const { data } = await client.get(`/hosts/${host.id}/wg-config`, { responseType: 'blob' })
     const url = URL.createObjectURL(data as Blob)
@@ -83,6 +88,6 @@ export const useHostsStore = defineStore('hosts', () => {
   return {
     hosts, profiles, loading,
     fetchHosts, fetchProfiles, createHost, updateHost, deleteHost,
-    revealToken, rotateToken, getOutbounds, setOutbounds, downloadWgConfig,
+    revealToken, rotateToken, getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
   }
 })

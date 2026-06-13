@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::hosts::{host_outbound_nodes, host_profile_template};
 use crate::error::{AppError, Result};
-use crate::models::host::{AgentStatusReport, Host};
+use crate::models::host::{AgentStatusReport, CommandAck, Host, HostCommand};
 use crate::services::proxy_config;
 use crate::AppState;
 
@@ -23,6 +23,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/config", get(agent_config))
         .route("/status", post(agent_status))
+        .route("/commands", get(agent_commands))
+        .route("/commands/{cmd_id}/ack", post(agent_command_ack))
         .route("/health", get(agent_health))
 }
 
@@ -103,6 +105,42 @@ async fn agent_status(
         .execute(&state.db)
         .await?;
 
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// GET /api/agent/commands — pending commands for the calling host.
+async fn agent_commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<HostCommand>>> {
+    let host = resolve_host(&state, &headers).await?;
+    let cmds = sqlx::query_as::<_, HostCommand>(
+        "SELECT * FROM host_commands WHERE host_id = ? AND status = 'pending' ORDER BY created_at",
+    )
+    .bind(&host.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(cmds))
+}
+
+/// POST /api/agent/commands/{cmd_id}/ack — agent reports a command's result.
+async fn agent_command_ack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(cmd_id): axum::extract::Path<String>,
+    Json(ack): Json<CommandAck>,
+) -> Result<Json<serde_json::Value>> {
+    let host = resolve_host(&state, &headers).await?;
+    let status = if ack.status == "done" { "done" } else { "failed" };
+    // Scope the update to the calling host so an agent can only ack its own commands.
+    sqlx::query("UPDATE host_commands SET status = ?, result = ?, acked_at = ? WHERE id = ? AND host_id = ?")
+        .bind(status)
+        .bind(&ack.result)
+        .bind(Utc::now().to_rfc3339())
+        .bind(&cmd_id)
+        .bind(&host.id)
+        .execute(&state.db)
+        .await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

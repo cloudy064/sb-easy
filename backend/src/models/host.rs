@@ -91,6 +91,30 @@ pub struct AgentStatusReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct HostCommand {
+    pub id: String,
+    pub host_id: String,
+    pub command: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub created_at: String,
+    pub acked_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnqueueCommandRequest {
+    pub command: String,
+}
+
+/// Result the agent posts back after running a command.
+#[derive(Debug, Deserialize)]
+pub struct CommandAck {
+    pub status: String, // done | failed
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConfigProfile {
     pub id: String,
     pub name: String,

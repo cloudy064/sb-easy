@@ -14,6 +14,7 @@ use super::settings;
 use super::system;
 use super::users;
 use super::agent;
+use super::hosts;
 
 /// Build the complete API router.
 pub fn build(state: AppState) -> Router {
@@ -34,6 +35,7 @@ pub fn build(state: AppState) -> Router {
         .nest("/api/sing-box", singbox_proxy::router())
         .nest("/api/settings", settings::router())
         .nest("/api/users", users::router())
+        .nest("/api/hosts", hosts::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,

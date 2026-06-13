@@ -144,13 +144,12 @@ pub fn generate_outbounds_array(nodes: &[ProxyNode]) -> Vec<Value> {
     outbounds
 }
 
-/// Generate a complete sing-box config.json.
-pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
+/// The built-in default profile template (sing-box config minus outbounds).
+/// Mirrors `migrations/003_multi_host.sql`'s `default` profile and is used as a
+/// fallback when a host has no profile assigned or the stored template is invalid.
+pub fn default_profile_template() -> Value {
     json!({
-        "log": {
-            "level": "info",
-            "timestamp": true
-        },
+        "log": { "level": "info", "timestamp": true },
         "dns": {
             "servers": [
                 { "type": "udp", "tag": "cn-dns", "server": "223.5.5.5" },
@@ -177,7 +176,6 @@ pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
                 "listen_port": 7890
             }
         ],
-        "outbounds": generate_outbounds_array(nodes),
         "route": {
             "rules": [
                 { "action": "sniff" },
@@ -189,9 +187,45 @@ pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
             ],
             "final": "Proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": {
-                "server": "cn-dns"
-            }
+            "default_domain_resolver": { "server": "cn-dns" }
         }
     })
+}
+
+/// Render a per-host sing-box config by injecting this host's assigned outbounds
+/// into its profile template. The template carries log/dns/inbounds/route; the
+/// outbounds array (proxies + Auto/Proxy selectors) is built from `nodes`.
+///
+/// If `nodes` is empty there is no `Proxy` selector, so any `route.final` that
+/// points at `Proxy` is rewritten to `direct` to keep the config valid.
+pub fn render_host_config(template: &Value, nodes: &[ProxyNode]) -> Value {
+    let mut config = template.clone();
+    let mut outbounds = generate_outbounds_array(nodes);
+    let has_proxy = outbounds.iter().any(|o| o["tag"] == "Proxy");
+
+    // Empty case only: no proxies → no Proxy selector. Add a direct outbound and
+    // repoint route.final at it so the config stays valid. (When proxies exist
+    // the output is byte-for-byte the same as the previous global config.)
+    if !has_proxy {
+        outbounds.push(json!({ "type": "direct", "tag": "direct" }));
+    }
+
+    let obj = config.as_object_mut().expect("profile template must be a JSON object");
+    obj.insert("outbounds".into(), Value::Array(outbounds));
+
+    if !has_proxy {
+        if let Some(route) = obj.get_mut("route").and_then(|v| v.as_object_mut()) {
+            if route.get("final").map(|f| f == "Proxy").unwrap_or(false) {
+                route.insert("final".into(), Value::String("direct".into()));
+            }
+        }
+    }
+
+    config
+}
+
+/// Generate a complete sing-box config.json from the built-in default profile.
+/// Retained for backward compatibility; prefer `render_host_config`.
+pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
+    render_host_config(&default_profile_template(), nodes)
 }

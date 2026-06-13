@@ -26,11 +26,14 @@ pub fn router() -> Router<AppState> {
         .route("/sync", post(sync_config))
 }
 
-/// GET /api/wireguard/peers — list all peers with live stats merged.
+/// GET /api/wireguard/peers — list end-user peers with live stats merged.
+/// Managed-host peers (host_id set) are excluded; they live in the Hosts view.
 async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<serde_json::Value>>> {
-    let peers = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers ORDER BY address")
-        .fetch_all(&state.db)
-        .await?;
+    let peers = sqlx::query_as::<_, WireGuardPeer>(
+        "SELECT * FROM wireguard_peers WHERE host_id IS NULL ORDER BY address",
+    )
+    .fetch_all(&state.db)
+    .await?;
 
     let stats = wg::get_peer_stats(&state.cfg.wg_interface).unwrap_or_default();
 

@@ -50,14 +50,16 @@ async fn ws_handler(
 }
 
 async fn proxy(mut client: WebSocket, state: AppState, kind: String, params: HashMap<String, String>) {
-    let base = state.cfg.singbox_api_url.trim_end_matches('/');
+    // Per-host target over the WG intranet when `?host=<id>` is given, else local.
+    let (base, secret) =
+        crate::api::hosts::resolve_clash_target(&state, params.get("host").map(|s| s.as_str())).await;
     let ws_base = base
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
 
     let mut qs: Vec<String> = Vec::new();
-    if !state.cfg.singbox_api_secret.is_empty() {
-        qs.push(format!("token={}", encode_query_component(&state.cfg.singbox_api_secret)));
+    if !secret.is_empty() {
+        qs.push(format!("token={}", encode_query_component(&secret)));
     }
     if kind == "logs" {
         if let Some(level) = params.get("level") {

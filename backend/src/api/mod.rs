@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod auth;
 pub mod config_download;
+pub mod hosts;
 pub mod proxy_nodes;
 pub mod router;
 pub mod settings;

@@ -311,6 +311,128 @@ pub fn generate_client_config(cfg: &Config, peer: &WireGuardPeer, server_pubkey:
     Ok(c)
 }
 
+// ── Managed-host peers (intranet members for reachback) ─────
+//
+// A WG-member Host is provisioned as a special peer: stored with a /32 address
+// so the server side gets `AllowedIPs = <ip>/32` and can route precisely to that
+// host (needed to reach its Clash API over the tunnel). End-user clients keep
+// their broader address; host peers carry `host_id` to distinguish them.
+
+/// Derive the WG subnet CIDR from the server address ("10.59.32.1/24" →
+/// "10.59.32.0/24"). Used as a host's AllowedIPs so it routes the intranet
+/// (not all traffic) through the hub.
+pub fn wg_subnet(address: &str) -> String {
+    if let Some((host, prefix)) = address.split_once('/') {
+        let mut o: Vec<&str> = host.split('.').collect();
+        if o.len() == 4 && prefix == "24" {
+            o[3] = "0";
+            return format!("{}/{}", o.join("."), prefix);
+        }
+        return format!("{host}/{prefix}");
+    }
+    address.to_string()
+}
+
+/// Ensure a WG peer exists for this host; returns `(ip, public_key)`. Idempotent:
+/// if one already exists it is returned unchanged.
+pub async fn provision_host_peer(
+    pool: &sqlx::SqlitePool,
+    cfg: &Config,
+    host_id: &str,
+    host_name: &str,
+) -> Result<(String, String)> {
+    use uuid::Uuid;
+
+    if let Some(p) = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?
+    {
+        let ip = p.address.split('/').next().unwrap_or(&p.address).to_string();
+        return Ok((ip, p.public_key));
+    }
+
+    let (private_key, public_key) = generate_keypair()?;
+    let preshared_key = generate_psk()?;
+    let alloc = next_available_ip(pool, &cfg.wg_address).await?;
+    let ip = alloc.split('/').next().unwrap_or(&alloc).to_string();
+    let address = format!("{ip}/32");
+    let subnet = wg_subnet(&cfg.wg_address);
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO wireguard_peers (id, name, private_key, public_key, preshared_key, address, dns, enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes, created_at, updated_at, notes, host_id) \
+         VALUES (?,?,?,?,?,?,?,1,25,?,NULL,0,?,?,NULL,?)",
+    )
+    .bind(&id)
+    .bind(format!("host: {host_name}"))
+    .bind(&private_key)
+    .bind(&public_key)
+    .bind(&preshared_key)
+    .bind(&address)
+    .bind("")
+    .bind(&subnet)
+    .bind(&now)
+    .bind(&now)
+    .bind(host_id)
+    .execute(pool)
+    .await?;
+
+    let _ = sync_config(pool, cfg).await;
+    Ok((ip, public_key))
+}
+
+/// Remove the WG peer backing a host (on host delete or when WG membership is
+/// turned off). Best-effort; safe when no peer exists.
+pub async fn deprovision_host_peer(pool: &sqlx::SqlitePool, cfg: &Config, host_id: &str) {
+    if let Ok(Some(p)) = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await
+    {
+        remove_peer(&cfg.wg_interface, &p.public_key).ok();
+        let _ = sqlx::query("DELETE FROM wireguard_peers WHERE id = ?").bind(&p.id).execute(pool).await;
+        let _ = sync_config(pool, cfg).await;
+    }
+}
+
+/// Generate the WG config a managed host installs. Unlike a client config it
+/// routes only the intranet subnet (AllowedIPs = WG subnet), not all traffic.
+pub async fn generate_host_wg_config(pool: &sqlx::SqlitePool, cfg: &Config, host_id: &str) -> Result<String> {
+    let peer = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Host has no WireGuard peer".into()))?;
+
+    let server_pubkey = load_or_generate_server_key(pool)
+        .await
+        .and_then(|pk| public_key_from_private(&pk))
+        .unwrap_or_else(|_| "UNKNOWN".into());
+    let subnet = wg_subnet(&cfg.wg_address);
+
+    let label = peer.name.strip_prefix("host: ").unwrap_or(&peer.name);
+    let mut c = String::new();
+    c.push_str(&format!("# sb-easy managed host: {}\n[Interface]\n", label));
+    c.push_str(&format!("PrivateKey = {}\n", peer.private_key));
+    c.push_str(&format!("Address = {}\n", peer.address));
+    if cfg.wg_mtu > 0 {
+        c.push_str(&format!("MTU = {}\n", cfg.wg_mtu));
+    }
+    c.push_str("\n[Peer]\n");
+    c.push_str(&format!("PublicKey = {}\n", server_pubkey));
+    if let Some(ref psk) = peer.preshared_key {
+        if !psk.is_empty() {
+            c.push_str(&format!("PresharedKey = {}\n", psk));
+        }
+    }
+    c.push_str(&format!("AllowedIPs = {}\n", subnet));
+    c.push_str(&format!("Endpoint = {}:{}\n", cfg.external_hostname, cfg.wg_port));
+    c.push_str("PersistentKeepalive = 25\n");
+    Ok(c)
+}
+
 // ── IP pool ─────────────────────────────────────────────────
 
 pub async fn next_available_ip(pool: &sqlx::SqlitePool, subnet: &str) -> Result<String> {

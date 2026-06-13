@@ -23,14 +23,16 @@ async fn login_handler(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    // Look up user
-    let user: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, username, password_hash FROM users WHERE username = 'admin' LIMIT 1"
+    // Look up user by the supplied username (defaults to "admin").
+    let lookup = req.username.clone().unwrap_or_else(|| "admin".into());
+    let user: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, username, password_hash, role FROM users WHERE username = ? LIMIT 1"
     )
+    .bind(&lookup)
     .fetch_optional(&state.db)
     .await?;
 
-    let (user_id, username, password_hash) = user
+    let (user_id, username, password_hash, role) = user
         .ok_or_else(|| AppError::Unauthorized("Invalid credentials".into()))?;
 
     // Verify password
@@ -39,9 +41,9 @@ async fn login_handler(
     }
 
     // Generate JWT
-    let token = auth::create_token(&user_id, &username, &state.cfg.jwt_secret)?;
+    let token = auth::create_token(&user_id, &username, &role, &state.cfg.jwt_secret)?;
 
-    Ok(Json(LoginResponse { token, username }))
+    Ok(Json(LoginResponse { token, username, role }))
 }
 
 /// GET /api/auth/session
@@ -57,11 +59,18 @@ async fn session_handler(
 
     Ok(Json(SessionInfo {
         username: claims.username,
+        role: claims.role,
         authenticated: true,
     }))
 }
 
-/// Authentication middleware — protects routes by requiring valid JWT.
+fn is_safe_method(m: &axum::http::Method) -> bool {
+    matches!(*m, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS)
+}
+
+/// Authentication middleware for protected routes. Verifies the JWT, enforces
+/// read-only access for the `viewer` role, injects Claims into request
+/// extensions, and audit-logs successful mutating requests.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request<axum::body::Body>,
@@ -72,14 +81,30 @@ pub async fn auth_middleware(
         .get("authorization")
         .and_then(|v| v.to_str().ok());
 
-    match auth_header {
-        Some(header) => {
-            let token = header.strip_prefix("Bearer ").unwrap_or("");
-            match auth::verify_token(token, &state.cfg.jwt_secret) {
-                Ok(_) => Ok(next.run(request).await),
-                Err(_) => Err(StatusCode::UNAUTHORIZED),
-            }
-        }
-        None => Err(StatusCode::UNAUTHORIZED),
+    let token = match auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(t) => t,
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+    let claims = auth::verify_token(token, &state.cfg.jwt_secret)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let method = request.method().clone();
+
+    // RBAC: viewers may only perform safe (read) requests.
+    if claims.role == "viewer" && !is_safe_method(&method) {
+        return Err(StatusCode::FORBIDDEN);
     }
+
+    let actor = claims.username.clone();
+    let path = request.uri().path().to_string();
+    request.extensions_mut().insert(claims);
+
+    let response = next.run(request).await;
+
+    // Audit successful mutations.
+    if !is_safe_method(&method) && response.status().is_success() {
+        crate::services::audit::record(&state.db, &actor, method.as_str(), &path).await;
+    }
+
+    Ok(response)
 }

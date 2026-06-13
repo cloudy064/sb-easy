@@ -16,6 +16,12 @@ pub struct Config {
     /// Default admin password (only used for initial seed)
     pub admin_password: String,
 
+    /// Shared token the agent must present to fetch config (empty = endpoint disabled)
+    pub agent_token: String,
+
+    /// Allowed CORS origins (comma-separated). Empty/"*" = permissive.
+    pub cors_origins: String,
+
     // WireGuard settings
     pub wg_enabled: bool,
     pub wg_interface: String,
@@ -23,8 +29,6 @@ pub struct Config {
     pub wg_address: String,
     pub wg_dns: String,
     pub wg_mtu: u32,
-    pub wg_post_up: String,
-    pub wg_post_down: String,
 
     // Sing-box settings
     pub singbox_api_url: String,
@@ -50,6 +54,8 @@ impl Config {
                 .context("JWT_SECRET must be set")?,
             admin_password: env::var("ADMIN_PASSWORD")
                 .unwrap_or_else(|_| "admin".into()),
+            agent_token: env::var("AGENT_TOKEN").unwrap_or_default(),
+            cors_origins: env::var("CORS_ORIGINS").unwrap_or_default(),
 
             wg_enabled: env::var("WG_ENABLED").unwrap_or_else(|_| "true".into()).parse().unwrap_or(true),
             wg_interface: env::var("WG_INTERFACE").unwrap_or_else(|_| "wg0".into()),
@@ -57,15 +63,13 @@ impl Config {
             wg_address: env::var("WG_ADDRESS").unwrap_or_else(|_| "10.59.32.1/24".into()),
             wg_dns: env::var("WG_DNS").unwrap_or_else(|_| "10.59.32.1".into()),
             wg_mtu: env::var("WG_MTU").unwrap_or_else(|_| "1420".into()).parse()?,
-            wg_post_up: env::var("WG_POST_UP").unwrap_or_default(),
-            wg_post_down: env::var("WG_POST_DOWN").unwrap_or_default(),
 
             singbox_api_url: env::var("SINGBOX_API_URL")
-                .unwrap_or_else(|_| "http://10.168.1.5:9090".into()),
+                .unwrap_or_else(|_| "http://127.0.0.1:9090".into()),
             singbox_api_secret: env::var("SINGBOX_API_SECRET").unwrap_or_default(),
 
             external_hostname: env::var("EXTERNAL_HOSTNAME")
-                .unwrap_or_else(|_| "39.108.98.208".into()),
+                .unwrap_or_else(|_| "127.0.0.1".into()),
 
             config_hash_seed: env::var("CONFIG_HASH_SEED").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
         })

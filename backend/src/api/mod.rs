@@ -5,8 +5,10 @@ pub mod proxy_nodes;
 pub mod router;
 pub mod settings;
 pub mod singbox_proxy;
+pub mod singbox_ws;
 pub mod subscriptions;
 pub mod system;
+pub mod users;
 pub mod wireguard;
 
 use crate::AppState;

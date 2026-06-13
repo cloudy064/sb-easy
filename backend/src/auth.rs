@@ -17,16 +17,24 @@ use crate::error::{AppError, Result};
 
 const TOKEN_EXPIRY_HOURS: i64 = 72;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // user id
     pub username: String,
+    #[serde(default = "default_role")]
+    pub role: String,
     pub exp: usize,
     pub iat: usize,
 }
 
+fn default_role() -> String {
+    "admin".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginRequest {
+    #[serde(default)]
+    pub username: Option<String>,
     pub password: String,
 }
 
@@ -34,20 +42,23 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub token: String,
     pub username: String,
+    pub role: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SessionInfo {
     pub username: String,
+    pub role: String,
     pub authenticated: bool,
 }
 
 /// Generate a JWT token for a user.
-pub fn create_token(user_id: &str, username: &str, secret: &str) -> Result<String> {
+pub fn create_token(user_id: &str, username: &str, role: &str, secret: &str) -> Result<String> {
     let now = Utc::now();
     let claims = Claims {
         sub: user_id.to_string(),
         username: username.to_string(),
+        role: role.to_string(),
         exp: (now + Duration::hours(TOKEN_EXPIRY_HOURS)).timestamp() as usize,
         iat: now.timestamp() as usize,
     };

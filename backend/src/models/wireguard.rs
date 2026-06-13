@@ -16,6 +16,8 @@ pub struct WireGuardPeer {
     pub persistent_keepalive: i32,
     pub allowed_ips: String,
     pub expire_at: Option<String>,
+    #[serde(default)]
+    pub quota_bytes: i64,
     pub created_at: String,
     pub updated_at: String,
     pub notes: Option<String>,
@@ -33,6 +35,8 @@ pub struct CreatePeerRequest {
     #[serde(default = "default_allowed_ips")]
     pub allowed_ips: Option<String>,
     pub expire_at: Option<String>,
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
     pub notes: Option<String>,
 }
 
@@ -48,6 +52,7 @@ pub struct UpdatePeerRequest {
     pub persistent_keepalive: Option<i32>,
     pub allowed_ips: Option<String>,
     pub expire_at: Option<String>,
+    pub quota_bytes: Option<i64>,
     pub notes: Option<String>,
 }
 

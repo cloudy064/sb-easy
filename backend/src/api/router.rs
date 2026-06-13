@@ -9,8 +9,10 @@ use super::proxy_nodes;
 use super::subscriptions;
 use super::config_download;
 use super::singbox_proxy;
+use super::singbox_ws;
 use super::settings;
 use super::system;
+use super::users;
 use super::agent;
 
 /// Build the complete API router.
@@ -18,6 +20,9 @@ pub fn build(state: AppState) -> Router {
     let public = Router::new()
         .nest("/api/auth", auth::router())
         .nest("/api/agent", agent::router())
+        // WebSocket streams authenticate via ?token=<jwt> in-handler, since
+        // browsers can't set an Authorization header on the WS handshake.
+        .nest("/api/sing-box", singbox_ws::router())
         .route("/api/system/status", axum::routing::get(system::status_handler));
 
     // Protected routes: require JWT
@@ -28,6 +33,7 @@ pub fn build(state: AppState) -> Router {
         .nest("/api/config", config_download::router())
         .nest("/api/sing-box", singbox_proxy::router())
         .nest("/api/settings", settings::router())
+        .nest("/api/users", users::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,

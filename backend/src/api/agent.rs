@@ -26,7 +26,10 @@ async fn agent_config(
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
     use axum::http::StatusCode;
+    #[allow(unused_imports)]
     use axum::response::IntoResponse;
+
+    verify_agent_token(&state, &headers)?;
 
     let nodes = sqlx::query_as::<_, ProxyNode>(
         "SELECT * FROM proxy_nodes WHERE enabled = 1"
@@ -72,4 +75,25 @@ async fn agent_config(
 /// GET /api/agent/health — simple health check for the agent.
 async fn agent_health() -> Json<serde_json::Value> {
     serde_json::json!({"status": "ok"}).into()
+}
+
+/// Require the agent to present the shared bearer token (AGENT_TOKEN).
+/// If AGENT_TOKEN is unset, the config endpoint is disabled entirely — it
+/// returns proxy-node credentials and must never be served unauthenticated.
+fn verify_agent_token(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    let expected = state.cfg.agent_token.trim();
+    if expected.is_empty() {
+        return Err(AppError::Forbidden(
+            "Agent endpoint disabled: set AGENT_TOKEN to enable".into(),
+        ));
+    }
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.trim());
+    match presented {
+        Some(t) if t == expected => Ok(()),
+        _ => Err(AppError::Unauthorized("Invalid agent token".into())),
+    }
 }

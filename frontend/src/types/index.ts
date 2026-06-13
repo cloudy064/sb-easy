@@ -19,6 +19,40 @@ export interface WireGuardPeer {
   expired?: boolean
 }
 
+export interface HostCapabilities {
+  runs_singbox: boolean
+  is_wg_member: boolean
+  is_wg_hub: boolean
+  is_self: boolean
+}
+
+export interface Host {
+  id: string
+  name: string
+  capabilities: HostCapabilities
+  profile_id: string | null
+  wg_address: string | null
+  wg_public_key: string | null
+  wg_endpoint: string | null
+  clash_api: string | null
+  last_seen: string | null
+  singbox_state: string | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  assigned_outbounds?: number
+  has_token?: boolean
+  agent_token?: string
+}
+
+export interface ConfigProfile {
+  id: string
+  name: string
+  template: string
+  created_at: string
+  updated_at: string
+}
+
 export interface ProxyNode {
   id: string
   tag: string

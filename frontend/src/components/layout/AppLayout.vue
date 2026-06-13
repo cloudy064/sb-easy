@@ -23,6 +23,19 @@
           </svg>
           {{ t('nav.monitor') }}
         </router-link>
+        <router-link to="/logs" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h4"/>
+          </svg>
+          {{ t('nav.logs') }}
+        </router-link>
+        <router-link to="/hosts" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="1" y="2" width="16" height="6" rx="1"/><rect x="1" y="10" width="16" height="6" rx="1"/>
+            <circle cx="4" cy="5" r="0.8" fill="currentColor"/><circle cx="4" cy="13" r="0.8" fill="currentColor"/>
+          </svg>
+          {{ t('nav.hosts') }}
+        </router-link>
         <router-link to="/clients" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M9 1v16M1 9h16"/><circle cx="9" cy="9" r="2"/><circle cx="9" cy="1" r="1.5"/>

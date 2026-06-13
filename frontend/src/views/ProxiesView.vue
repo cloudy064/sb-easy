@@ -6,6 +6,7 @@
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.proxies.desc') }}</p>
       </div>
       <div class="flex-center gap-3">
+        <HostSelect @change="load" />
         <button class="btn-secondary btn-sm" @click="load">Refresh</button>
       </div>
     </div>
@@ -62,7 +63,11 @@ import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
 import { ref, reactive, onMounted } from 'vue'
 import client from '../api/client'
+import HostSelect from '../components/HostSelect.vue'
+import { useHostTarget } from '../composables/hostTarget'
 import type { ProxyGroup } from '../types'
+
+const { reqParams } = useHostTarget()
 
 const loading = ref(true)
 const switching = ref(false)
@@ -85,7 +90,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const { data } = await client.get('/sing-box/proxies')
+    const { data } = await client.get('/sing-box/proxies', { params: reqParams.value })
     const all = data.proxies || {}
     const result: ProxyGroup[] = []
     for (const name of Object.keys(all)) {
@@ -117,7 +122,7 @@ async function select(group: ProxyGroup, node: string) {
   if (!group.selectable || group.now === node) return
   switching.value = true
   try {
-    await client.put(`/sing-box/proxies/${encodeURIComponent(group.name)}`, { name: node })
+    await client.put(`/sing-box/proxies/${encodeURIComponent(group.name)}`, { name: node }, { params: reqParams.value })
     group.now = node
     notify(`${group.name} → ${node}`)
   } catch {
@@ -131,7 +136,7 @@ async function testGroup(name: string) {
   testing[name] = true
   try {
     const { data } = await client.get(`/sing-box/group/${encodeURIComponent(name)}/delay`, {
-      params: { url: 'https://www.gstatic.com/generate_204', timeout: 5000 },
+      params: { url: 'https://www.gstatic.com/generate_204', timeout: 5000, ...reqParams.value },
     })
     for (const node of Object.keys(data || {})) delays[node] = data[node]
     notify(`Tested ${name}`)

@@ -32,6 +32,23 @@ export const useHostsStore = defineStore('hosts', () => {
     profiles.value = data
   }
 
+  async function createProfile(name: string, template: unknown): Promise<ConfigProfile> {
+    const { data } = await client.post('/hosts/profiles', { name, template })
+    await fetchProfiles()
+    return data
+  }
+
+  async function updateProfile(id: string, name: string, template: unknown): Promise<ConfigProfile> {
+    const { data } = await client.put(`/hosts/profiles/${id}`, { name, template })
+    await fetchProfiles()
+    return data
+  }
+
+  async function deleteProfile(id: string) {
+    await client.delete(`/hosts/profiles/${id}`)
+    await fetchProfiles()
+  }
+
   async function createHost(body: CreateHostBody): Promise<Host> {
     const { data } = await client.post('/hosts', body)
     await fetchHosts()
@@ -89,5 +106,6 @@ export const useHostsStore = defineStore('hosts', () => {
     hosts, profiles, loading,
     fetchHosts, fetchProfiles, createHost, updateHost, deleteHost,
     revealToken, rotateToken, getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
+    createProfile, updateProfile, deleteProfile,
   }
 })

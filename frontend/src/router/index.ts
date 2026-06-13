@@ -18,6 +18,7 @@ const router = createRouter({
         { path: 'monitor', name: 'Monitor', component: () => import('../views/MonitorView.vue') },
         { path: 'logs', name: 'Logs', component: () => import('../views/LogsView.vue') },
         { path: 'hosts', name: 'Hosts', component: () => import('../views/HostsView.vue') },
+        { path: 'profiles', name: 'Profiles', component: () => import('../views/ProfilesView.vue') },
         { path: 'clients', name: 'Clients', component: () => import('../views/ClientsView.vue') },
         { path: 'nodes', name: 'Nodes', component: () => import('../views/NodesView.vue') },
         { path: 'proxies', name: 'Proxies', component: () => import('../views/ProxiesView.vue') },

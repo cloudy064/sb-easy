@@ -36,6 +36,12 @@
           </svg>
           {{ t('nav.hosts') }}
         </router-link>
+        <router-link to="/profiles" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h3"/><path d="M12 2v3h3"/>
+          </svg>
+          {{ t('nav.profiles') }}
+        </router-link>
         <router-link to="/clients" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M9 1v16M1 9h16"/><circle cx="9" cy="9" r="2"/><circle cx="9" cy="1" r="1.5"/>

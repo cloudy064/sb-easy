@@ -24,7 +24,8 @@ const ALLOWED_COMMANDS: [&str; 2] = ["reload", "restart"];
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_hosts).post(create_host))
-        .route("/profiles", get(list_profiles))
+        .route("/profiles", get(list_profiles).post(create_profile))
+        .route("/profiles/{pid}", get(get_profile).put(update_profile).delete(delete_profile))
         .route("/{id}", get(get_host).put(update_host).delete(delete_host))
         .route("/{id}/token", get(reveal_token))
         .route("/{id}/rotate-token", post(rotate_token))
@@ -297,6 +298,65 @@ async fn list_profiles(State(state): State<AppState>) -> Result<Json<Vec<ConfigP
     let profiles = sqlx::query_as::<_, ConfigProfile>("SELECT * FROM config_profiles ORDER BY name")
         .fetch_all(&state.db).await?;
     Ok(Json(profiles))
+}
+
+#[derive(Deserialize)]
+struct ProfileRequest {
+    name: String,
+    /// sing-box config minus the outbounds array. Must be a JSON object.
+    template: serde_json::Value,
+}
+
+/// Reject templates that aren't a JSON object (render injects `outbounds` into it).
+fn validate_template(t: &serde_json::Value) -> Result<String> {
+    if !t.is_object() {
+        return Err(AppError::BadRequest("Profile template must be a JSON object".into()));
+    }
+    Ok(t.to_string())
+}
+
+/// GET /api/hosts/profiles/{pid}
+async fn get_profile(State(state): State<AppState>, Path(pid): Path<String>) -> Result<Json<ConfigProfile>> {
+    let p = sqlx::query_as::<_, ConfigProfile>("SELECT * FROM config_profiles WHERE id = ?")
+        .bind(&pid).fetch_optional(&state.db).await?
+        .ok_or_else(|| AppError::NotFound("Profile not found".into()))?;
+    Ok(Json(p))
+}
+
+/// POST /api/hosts/profiles — create a config profile.
+async fn create_profile(State(state): State<AppState>, Json(req): Json<ProfileRequest>) -> Result<Json<ConfigProfile>> {
+    let template = validate_template(&req.template)?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO config_profiles (id, name, template, created_at, updated_at) VALUES (?,?,?,?,?)")
+        .bind(&id).bind(&req.name).bind(&template).bind(&now).bind(&now)
+        .execute(&state.db).await?;
+    get_profile(State(state), Path(id)).await
+}
+
+/// PUT /api/hosts/profiles/{pid}
+async fn update_profile(State(state): State<AppState>, Path(pid): Path<String>, Json(req): Json<ProfileRequest>) -> Result<Json<ConfigProfile>> {
+    let template = validate_template(&req.template)?;
+    let exists = sqlx::query_as::<_, ConfigProfile>("SELECT * FROM config_profiles WHERE id = ?")
+        .bind(&pid).fetch_optional(&state.db).await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Profile not found".into()));
+    }
+    sqlx::query("UPDATE config_profiles SET name=?, template=?, updated_at=? WHERE id=?")
+        .bind(&req.name).bind(&template).bind(Utc::now().to_rfc3339()).bind(&pid)
+        .execute(&state.db).await?;
+    get_profile(State(state), Path(pid)).await
+}
+
+/// DELETE /api/hosts/profiles/{pid} — `default` is protected; hosts using the
+/// deleted profile fall back to `default`.
+async fn delete_profile(State(state): State<AppState>, Path(pid): Path<String>) -> Result<Json<serde_json::Value>> {
+    if pid == "default" {
+        return Err(AppError::BadRequest("Cannot delete the default profile".into()));
+    }
+    sqlx::query("UPDATE hosts SET profile_id = 'default' WHERE profile_id = ?").bind(&pid).execute(&state.db).await?;
+    sqlx::query("DELETE FROM config_profiles WHERE id = ?").bind(&pid).execute(&state.db).await?;
+    Ok(Json(json!({"success": true})))
 }
 
 async fn fetch_host(state: &AppState, id: &str) -> Result<Host> {

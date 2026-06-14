@@ -3,6 +3,7 @@
 # Node / Vue
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
 
 # Environment
 .env
@@ -22,3 +23,6 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Cutover backups (local safety net, not for VCS)
+cutover-backup-*/

@@ -60,6 +60,48 @@
   --radius-xl:      24px;
 }
 
+/* ── Dark theme ────────────────────────────────────────
+   Overrides the same semantic tokens, so any surface built on
+   var(--paper-*) / var(--ink-*) adapts automatically. */
+
+:root[data-theme="dark"] {
+  --paper-bg:       #1a1816;
+  --paper-surface:  #232020;
+  --paper-border:   #36312c;
+  --paper-border-hover: #4a443c;
+  --paper-shadow:   0 1px 0 rgba(0,0,0,.2),
+                    0 2px 4px rgba(0,0,0,.25),
+                    0 8px 20px rgba(0,0,0,.3);
+  --paper-shadow-hover: 0 1px 0 rgba(0,0,0,.25),
+                        0 3px 6px rgba(0,0,0,.3),
+                        0 12px 28px rgba(0,0,0,.4);
+  --paper-shadow-card: 0 0 0 1px rgba(255,255,255,.03),
+                       0 1px 2px rgba(0,0,0,.3),
+                       0 4px 12px rgba(0,0,0,.25);
+
+  --ink-primary:    #ece5da;
+  --ink-secondary:  #c2b9ac;
+  --ink-muted:      #8f857a;
+  --ink-placeholder:#6a6258;
+
+  --accent:         #d98b4a;
+  --accent-subtle:  #2e251c;
+  --accent-hover:   #e8a060;
+  --accent-dim:     #6b4f33;
+
+  --ok:             #7faa6a;
+  --ok-bg:          #232c1e;
+  --warn:           #c79a52;
+  --warn-bg:        #2e2616;
+  --bad:            #d4756b;
+  --bad-bg:         #2e1d1b;
+  --info:           #7a9cb0;
+  --info-bg:        #1c272c;
+}
+
+:root[data-theme="dark"] code { background: var(--paper-bg); }
+:root[data-theme="dark"] .badge-gray { background: #2c2824; color: var(--ink-muted); }
+
 /* ── Base ──────────────────────────────────────────── */
 
 html {
@@ -67,6 +109,8 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+body { transition: background 0.2s, color 0.2s; }
 
 body {
   font-family: var(--font);

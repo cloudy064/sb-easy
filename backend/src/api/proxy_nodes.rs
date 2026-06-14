@@ -141,9 +141,10 @@ async fn test_node_latency(state: &AppState, node: &ProxyNode) -> Result<Option<
 
     let timeout = 5000;
     let url = format!(
-        "{}/proxies/{}/delay?url=https://www.gstatic.com/generate_204&timeout={}",
+        "{}/proxies/{}/delay?url={}&timeout={}",
         state.cfg.singbox_api_url.trim_end_matches('/'),
-        urlencoding(&node.tag),
+        crate::util::encode_query_component(&node.tag),
+        crate::util::encode_query_component("https://www.gstatic.com/generate_204"),
         timeout,
     );
 
@@ -163,18 +164,12 @@ async fn test_node_latency(state: &AppState, node: &ProxyNode) -> Result<Option<
             let body: serde_json::Value = resp.json().await.unwrap_or(json!({}));
             Ok(body["delay"].as_f64())
         }
-        Ok(resp) => {
+        Ok(_) => {
             // Node might be unreachable
             Ok(None)
         }
         Err(_) => Ok(None),
     }
-}
-
-fn urlencoding(s: &str) -> String {
-    s.replace(' ', "%20")
-        .replace('/', "%2F")
-        .replace('+', "%2B")
 }
 
 fn extract_key_material(node_type: &str, config: &serde_json::Value) -> String {

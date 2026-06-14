@@ -4,6 +4,17 @@
 
 use crate::models::proxy_node::ProxyNode;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+/// Compute the ETag for a host's rendered config. Single source of truth shared
+/// by the agent config endpoint and drift detection so both hash identically.
+pub fn config_etag(host_id: &str, config_str: &str, seed: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(host_id.as_bytes());
+    hasher.update(config_str.as_bytes());
+    hasher.update(seed.as_bytes());
+    format!("\"{:x}\"", hasher.finalize())
+}
 
 /// Generate a sing-box outbound JSON for a single proxy node.
 pub fn generate_outbound(node: &ProxyNode) -> Value {
@@ -144,13 +155,12 @@ pub fn generate_outbounds_array(nodes: &[ProxyNode]) -> Vec<Value> {
     outbounds
 }
 
-/// Generate a complete sing-box config.json.
-pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
+/// The built-in default profile template (sing-box config minus outbounds).
+/// Mirrors `migrations/003_multi_host.sql`'s `default` profile and is used as a
+/// fallback when a host has no profile assigned or the stored template is invalid.
+pub fn default_profile_template() -> Value {
     json!({
-        "log": {
-            "level": "info",
-            "timestamp": true
-        },
+        "log": { "level": "info", "timestamp": true },
         "dns": {
             "servers": [
                 { "type": "udp", "tag": "cn-dns", "server": "223.5.5.5" },
@@ -177,7 +187,6 @@ pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
                 "listen_port": 7890
             }
         ],
-        "outbounds": generate_outbounds_array(nodes),
         "route": {
             "rules": [
                 { "action": "sniff" },
@@ -189,9 +198,166 @@ pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
             ],
             "final": "Proxy",
             "auto_detect_interface": true,
-            "default_domain_resolver": {
-                "server": "cn-dns"
-            }
+            "default_domain_resolver": { "server": "cn-dns" }
         }
     })
+}
+
+/// Render a per-host sing-box config by injecting this host's assigned outbounds
+/// into its profile template. The template carries log/dns/inbounds/route; the
+/// outbounds array (proxies + Auto/Proxy selectors) is built from `nodes`.
+///
+/// If `nodes` is empty there is no `Proxy` selector, so any `route.final` that
+/// points at `Proxy` is rewritten to `direct` to keep the config valid.
+pub fn render_host_config(template: &Value, nodes: &[ProxyNode]) -> Value {
+    let mut config = template.clone();
+    let mut outbounds = generate_outbounds_array(nodes);
+    let has_proxy = outbounds.iter().any(|o| o["tag"] == "Proxy");
+
+    // Empty case only: no proxies → no Proxy selector. Add a direct outbound and
+    // repoint route.final at it so the config stays valid. (When proxies exist
+    // the output is byte-for-byte the same as the previous global config.)
+    if !has_proxy {
+        outbounds.push(json!({ "type": "direct", "tag": "direct" }));
+    }
+
+    let obj = config.as_object_mut().expect("profile template must be a JSON object");
+    obj.insert("outbounds".into(), Value::Array(outbounds));
+
+    if !has_proxy {
+        if let Some(route) = obj.get_mut("route").and_then(|v| v.as_object_mut()) {
+            if route.get("final").map(|f| f == "Proxy").unwrap_or(false) {
+                route.insert("final".into(), Value::String("direct".into()));
+            }
+        }
+    }
+
+    config
+}
+
+/// Generate a complete sing-box config.json from the built-in default profile.
+/// Retained for backward compatibility; prefer `render_host_config`.
+pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
+    render_host_config(&default_profile_template(), nodes)
+}
+
+/// Strip the scheme from a Clash API URL → "host:port" for external_controller.
+pub fn controller_addr(api_url: &str) -> String {
+    api_url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::proxy_node::ProxyNode;
+
+    fn node(tag: &str, node_type: &str, cfg: serde_json::Value) -> ProxyNode {
+        ProxyNode {
+            id: format!("id-{tag}"),
+            tag: tag.into(),
+            node_type: node_type.into(),
+            enabled: true,
+            server: "1.2.3.4".into(),
+            server_port: 443,
+            protocol_config: cfg.to_string(),
+            subscription_id: None,
+            fingerprint: format!("fp-{tag}"),
+            latency: None,
+            last_latency_test: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn outbound_has_type_and_tag() {
+        let ss = generate_outbound(&node("hk", "shadowsocks", json!({"method":"aes-256-gcm","password":"p"})));
+        assert_eq!(ss["type"], "shadowsocks");
+        assert_eq!(ss["tag"], "hk");
+        assert_eq!(ss["method"], "aes-256-gcm");
+    }
+
+    #[test]
+    fn render_empty_falls_back_to_direct() {
+        let cfg = render_host_config(&default_profile_template(), &[]);
+        let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap()
+            .iter().filter_map(|o| o["tag"].as_str()).collect();
+        assert!(tags.contains(&"direct"));
+        assert!(!tags.contains(&"Proxy"));
+        // final must not dangle on a missing Proxy selector.
+        assert_eq!(cfg["route"]["final"], "direct");
+    }
+
+    #[test]
+    fn render_with_proxies_adds_auto_and_proxy() {
+        let nodes = vec![node("hk", "shadowsocks", json!({"method":"aes-256-gcm","password":"p"}))];
+        let cfg = render_host_config(&default_profile_template(), &nodes);
+        let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap()
+            .iter().filter_map(|o| o["tag"].as_str()).collect();
+        assert!(tags.contains(&"hk"));
+        assert!(tags.contains(&"Auto"));
+        assert!(tags.contains(&"Proxy"));
+        assert_eq!(cfg["route"]["final"], "Proxy");
+    }
+
+    #[test]
+    fn clash_api_injected_when_absent() {
+        let mut cfg = json!({"log": {"level": "info"}});
+        inject_clash_api(&mut cfg, "127.0.0.1:9090", "sec");
+        assert_eq!(cfg["experimental"]["clash_api"]["external_controller"], "127.0.0.1:9090");
+        assert_eq!(cfg["experimental"]["clash_api"]["secret"], "sec");
+    }
+
+    #[test]
+    fn clash_api_not_clobbered_when_present() {
+        let mut cfg = json!({"experimental": {"clash_api": {"external_controller": "0.0.0.0:9090", "secret": "mine"}}});
+        inject_clash_api(&mut cfg, "127.0.0.1:9090", "other");
+        // existing controller/secret preserved
+        assert_eq!(cfg["experimental"]["clash_api"]["external_controller"], "0.0.0.0:9090");
+        assert_eq!(cfg["experimental"]["clash_api"]["secret"], "mine");
+    }
+
+    #[test]
+    fn controller_addr_strips_scheme() {
+        assert_eq!(controller_addr("http://127.0.0.1:9090"), "127.0.0.1:9090");
+        assert_eq!(controller_addr("https://10.0.0.1:9090/"), "10.0.0.1:9090");
+        assert_eq!(controller_addr("127.0.0.1:9090"), "127.0.0.1:9090");
+    }
+
+    #[test]
+    fn etag_is_deterministic_and_host_scoped() {
+        let a = config_etag("self", "{\"x\":1}", "seed");
+        let b = config_etag("self", "{\"x\":1}", "seed");
+        let other_host = config_etag("edge", "{\"x\":1}", "seed");
+        let other_body = config_etag("self", "{\"x\":2}", "seed");
+        assert_eq!(a, b);
+        assert_ne!(a, other_host);
+        assert_ne!(a, other_body);
+    }
+}
+
+/// Inject `experimental.clash_api` so the running sing-box exposes the control
+/// API the panel talks to (live traffic/connections/logs, proxy switching).
+/// No-op if the config already declares a clash_api (full-mode profiles keep
+/// their own), so we never clobber a hand-tuned controller/secret.
+pub fn inject_clash_api(config: &mut Value, controller: &str, secret: &str) {
+    if controller.is_empty() {
+        return;
+    }
+    if config.pointer("/experimental/clash_api").is_some() {
+        return;
+    }
+    let Some(obj) = config.as_object_mut() else { return };
+    let exp = obj.entry("experimental").or_insert_with(|| json!({}));
+    let Some(exp_obj) = exp.as_object_mut() else { return };
+    let mut api = json!({ "external_controller": controller });
+    if !secret.is_empty() {
+        api["secret"] = json!(secret);
+    }
+    exp_obj.insert("clash_api".into(), api);
 }

@@ -44,18 +44,23 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // Client-facing message. For 5xx we log the detail but return a generic
+        // string so internal errors (DB/IO/serde) don't leak to callers.
         let (status, message) = match &self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            AppError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            AppError::Serde(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            AppError::Io(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            AppError::Utf8(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            AppError::Any(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            AppError::Internal(_)
+            | AppError::Database(_)
+            | AppError::Serde(_)
+            | AppError::Io(_)
+            | AppError::Utf8(_)
+            | AppError::Any(_) => {
+                tracing::error!("internal error: {self}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+            }
         };
 
         (status, Json(json!({ "error": message }))).into_response()

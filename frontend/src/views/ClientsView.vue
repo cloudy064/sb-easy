@@ -2,8 +2,8 @@
   <div>
     <div class="page-header flex-between">
       <div>
-        <h2>Clients</h2>
-        <p class="text-sm text-muted" style="margin-top:0.25rem">Manage VPN clients, download configs, and monitor connections.</p>
+        <h2>{{ t('page.clients.title') }}</h2>
+        <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.clients.desc') }}</p>
       </div>
       <div class="flex-center gap-3">
         <button class="btn-secondary btn-sm" @click="syncConfig">Sync Config</button>
@@ -25,7 +25,11 @@
       <article v-for="peer in store.peers" :key="peer.id" class="card peer-card">
         <div class="peer-card-top">
           <div class="peer-info">
-            <h3 class="peer-name">{{ peer.name }}</h3>
+            <h3 class="peer-name">
+              <span class="online-dot" :class="isOnline(peer) ? 'on' : 'off'" :title="isOnline(peer) ? 'Online' : 'Offline'"></span>
+              {{ peer.name }}
+              <span v-if="peer.expired" class="badge badge-red" style="margin-left:0.4rem">Expired</span>
+            </h3>
             <span class="peer-addr">{{ peer.address }}</span>
           </div>
           <label class="toggle">
@@ -54,6 +58,11 @@
             <span class="peer-stat-label">Expires</span>
             <span class="peer-stat-value text-sm">{{ peer.expire_at }}</span>
           </div>
+          <div class="peer-stat" v-if="peer.quota_bytes && peer.quota_bytes > 0" style="grid-column:1/-1">
+            <span class="peer-stat-label">Quota</span>
+            <span class="peer-stat-value text-sm">{{ formatBytes(usedBytes(peer)) }} / {{ formatBytes(peer.quota_bytes) }}</span>
+            <div class="quota-bar"><div class="quota-fill" :class="quotaClass(peer)" :style="{ width: quotaPct(peer) + '%' }"></div></div>
+          </div>
         </div>
 
         <div class="peer-actions" v-if="peer.enabled || peer.latest_handshake">
@@ -78,6 +87,7 @@
           <div class="form-group"><label>Address</label><input v-model="form.address" placeholder="Auto-assign if left empty (10.59.32.x/24)" /></div>
           <div class="form-group"><label>DNS Server</label><input v-model="form.dns" placeholder="10.59.32.1" /></div>
           <div class="form-group"><label>Persistent Keepalive (seconds)</label><input v-model.number="form.persistent_keepalive" type="number" /></div>
+          <div class="form-group"><label>Traffic Quota (GB, 0 = unlimited)</label><input v-model.number="form.quota_gb" type="number" min="0" step="0.5" /></div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreate = false">Cancel</button>
             <button type="submit" class="btn-primary">Add Client</button>
@@ -94,6 +104,7 @@
           <div class="form-group"><label>Name</label><input v-model="editForm.name" required /></div>
           <div class="form-group"><label>DNS</label><input v-model="editForm.dns" /></div>
           <div class="form-group"><label>Keepalive</label><input v-model.number="editForm.persistent_keepalive" type="number" /></div>
+          <div class="form-group"><label>Traffic Quota (GB, 0 = unlimited)</label><input v-model.number="editForm.quota_gb" type="number" min="0" step="0.5" /></div>
           <div class="form-group"><label>Allowed IPs</label><input v-model="editForm.allowed_ips" /></div>
           <div class="form-group"><label>Notes</label><input v-model="editForm.notes" /></div>
           <div class="modal-actions">
@@ -128,6 +139,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '../composables/i18n'
+const { t } = useI18n()
 import { ref, onMounted } from 'vue'
 import { useWireGuardStore } from '../stores/wireguard'
 import type { WireGuardPeer } from '../types'
@@ -139,18 +152,21 @@ const editTarget = ref<WireGuardPeer | null>(null)
 const deleteTarget = ref<WireGuardPeer | null>(null)
 const qrPeer = ref<WireGuardPeer | null>(null)
 
-const form = ref({ name: '', address: '', dns: '10.59.32.1', persistent_keepalive: 25 })
-const editForm = ref({ name: '', dns: '', persistent_keepalive: 25, allowed_ips: '', notes: '' })
+const GB = 1024 * 1024 * 1024
+const form = ref({ name: '', address: '', dns: '10.59.32.1', persistent_keepalive: 25, quota_gb: 0 })
+const editForm = ref({ name: '', dns: '', persistent_keepalive: 25, quota_gb: 0, allowed_ips: '', notes: '' })
 
 onMounted(() => store.fetchPeers())
 
 async function doCreate() {
+  const { quota_gb, ...rest } = form.value
   await store.createPeer({
-    ...form.value,
+    ...rest,
     address: form.value.address || undefined,
+    quota_bytes: Math.round((quota_gb || 0) * GB),
   })
   showCreate.value = false
-  form.value = { name: '', address: '', dns: '10.59.32.1', persistent_keepalive: 25 }
+  form.value = { name: '', address: '', dns: '10.59.32.1', persistent_keepalive: 25, quota_gb: 0 }
 }
 
 function editPeer(peer: WireGuardPeer) {
@@ -158,14 +174,33 @@ function editPeer(peer: WireGuardPeer) {
   editForm.value = {
     name: peer.name, dns: peer.dns,
     persistent_keepalive: peer.persistent_keepalive,
+    quota_gb: peer.quota_bytes ? +(peer.quota_bytes / GB).toFixed(2) : 0,
     allowed_ips: peer.allowed_ips, notes: peer.notes || '',
   }
 }
 
 async function doUpdate() {
   if (!editTarget.value) return
-  await store.updatePeer(editTarget.value.id, editForm.value)
+  const { quota_gb, ...rest } = editForm.value
+  await store.updatePeer(editTarget.value.id, {
+    ...rest,
+    quota_bytes: Math.round((quota_gb || 0) * GB),
+  })
   editTarget.value = null
+}
+
+function usedBytes(peer: WireGuardPeer) {
+  return (peer.transfer_rx || 0) + (peer.transfer_tx || 0)
+}
+function quotaPct(peer: WireGuardPeer) {
+  if (!peer.quota_bytes) return 0
+  return Math.min(100, (usedBytes(peer) / peer.quota_bytes) * 100)
+}
+function quotaClass(peer: WireGuardPeer) {
+  const p = quotaPct(peer)
+  if (p >= 100) return 'q-bad'
+  if (p >= 80) return 'q-warn'
+  return 'q-ok'
 }
 
 function confirmDelete(peer: WireGuardPeer) { deleteTarget.value = peer }
@@ -180,6 +215,12 @@ function showQr(peer: WireGuardPeer) { qrPeer.value = peer }
 async function syncConfig() {
   await client.post('/wireguard/sync')
   await store.fetchPeers()
+}
+
+function isOnline(peer: WireGuardPeer) {
+  // A handshake within the last 3 minutes means the tunnel is live.
+  if (!peer.latest_handshake) return false
+  return Date.now() / 1000 - peer.latest_handshake < 180
 }
 
 function formatTime(ts: number) {
@@ -213,6 +254,15 @@ function formatBytes(b: number) {
   font-weight: 650;
   color: var(--ink-primary);
 }
+.online-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+.online-dot.on  { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+.online-dot.off { background: #cbc4b8; }
 
 .peer-addr {
   font-family: var(--font-mono);
@@ -227,9 +277,9 @@ function formatBytes(b: number) {
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 0.75rem;
   padding: 0.75rem;
-  background: #faf8f4;
+  background: var(--paper-bg);
   border-radius: var(--radius-sm);
-  border: 1px solid #f0ece5;
+  border: 1px solid var(--paper-border);
 }
 
 .peer-stat {
@@ -251,4 +301,17 @@ function formatBytes(b: number) {
   gap: 0.3rem;
   flex-wrap: wrap;
 }
+
+.quota-bar {
+  width: 100%;
+  height: 5px;
+  background: var(--paper-border);
+  border-radius: 3px;
+  margin-top: 0.3rem;
+  overflow: hidden;
+}
+.quota-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+.q-ok   { background: var(--ok); }
+.q-warn { background: var(--warn); }
+.q-bad  { background: var(--bad); }
 </style>

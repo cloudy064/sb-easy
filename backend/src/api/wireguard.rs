@@ -26,19 +26,24 @@ pub fn router() -> Router<AppState> {
         .route("/sync", post(sync_config))
 }
 
-/// GET /api/wireguard/peers — list all peers with live stats merged.
+/// GET /api/wireguard/peers — list end-user peers with live stats merged.
+/// Managed-host peers (host_id set) are excluded; they live in the Hosts view.
 async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<serde_json::Value>>> {
-    let peers = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers ORDER BY address")
-        .fetch_all(&state.db)
-        .await?;
+    let peers = sqlx::query_as::<_, WireGuardPeer>(
+        "SELECT * FROM wireguard_peers WHERE host_id IS NULL ORDER BY address",
+    )
+    .fetch_all(&state.db)
+    .await?;
 
     let stats = wg::get_peer_stats(&state.cfg.wg_interface).unwrap_or_default();
 
+    let now = Utc::now();
     let result: Vec<serde_json::Value> = peers
         .into_iter()
         .map(|peer| {
             let stat = stats.iter().find(|s| s.public_key == peer.public_key);
             let mut v = serde_json::to_value(&peer).unwrap_or(json!({}));
+            v["expired"] = json!(wg::peer_expired(&peer, now));
             if let Some(s) = stat {
                 v["endpoint"] = json!(s.endpoint);
                 v["latest_handshake"] = json!(s.latest_handshake);
@@ -80,18 +85,19 @@ async fn create_peer(
         persistent_keepalive: req.persistent_keepalive.unwrap_or(25),
         allowed_ips: req.allowed_ips.unwrap_or_else(|| "0.0.0.0/0, ::/0".into()),
         expire_at: req.expire_at,
+        quota_bytes: req.quota_bytes.unwrap_or(0),
         created_at: now.clone(),
         updated_at: now,
         notes: req.notes,
     };
 
     sqlx::query(
-        "INSERT INTO wireguard_peers (id, name, private_key, public_key, preshared_key, address, dns, enabled, persistent_keepalive, allowed_ips, expire_at, created_at, updated_at, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO wireguard_peers (id, name, private_key, public_key, preshared_key, address, dns, enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes, created_at, updated_at, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(&peer.id).bind(&peer.name).bind(&peer.private_key).bind(&peer.public_key)
     .bind(&peer.preshared_key).bind(&peer.address).bind(&peer.dns)
     .bind(peer.enabled).bind(peer.persistent_keepalive).bind(&peer.allowed_ips)
-    .bind(&peer.expire_at).bind(&peer.created_at).bind(&peer.updated_at).bind(&peer.notes)
+    .bind(&peer.expire_at).bind(peer.quota_bytes).bind(&peer.created_at).bind(&peer.updated_at).bind(&peer.notes)
     .execute(&state.db)
     .await?;
 
@@ -129,14 +135,15 @@ async fn update_peer(
     if let Some(ka) = req.persistent_keepalive { peer.persistent_keepalive = ka; }
     if let Some(ips) = req.allowed_ips { peer.allowed_ips = ips; }
     if let Some(exp) = req.expire_at { peer.expire_at = Some(exp); }
+    if let Some(q) = req.quota_bytes { peer.quota_bytes = q; }
     if let Some(notes) = req.notes { peer.notes = Some(notes); }
     peer.updated_at = Utc::now().to_rfc3339();
 
     sqlx::query(
-        "UPDATE wireguard_peers SET name=?, enabled=?, dns=?, persistent_keepalive=?, allowed_ips=?, expire_at=?, updated_at=?, notes=? WHERE id=?"
+        "UPDATE wireguard_peers SET name=?, enabled=?, dns=?, persistent_keepalive=?, allowed_ips=?, expire_at=?, quota_bytes=?, updated_at=?, notes=? WHERE id=?"
     )
     .bind(&peer.name).bind(peer.enabled).bind(&peer.dns).bind(peer.persistent_keepalive)
-    .bind(&peer.allowed_ips).bind(&peer.expire_at).bind(&peer.updated_at).bind(&peer.notes)
+    .bind(&peer.allowed_ips).bind(&peer.expire_at).bind(peer.quota_bytes).bind(&peer.updated_at).bind(&peer.notes)
     .bind(&peer.id)
     .execute(&state.db)
     .await?;

@@ -54,71 +54,200 @@ pub async fn startup(pool: &sqlx::SqlitePool, cfg: &Config) -> Result<WireGuardG
 
     #[cfg(target_os = "linux")]
     {
+        let rt = load_wg_runtime(pool, cfg).await;
+
         // 1. Load/generate server keypair
         let private_key = load_or_generate_server_key(pool).await?;
         let public_key = public_key_from_private(&private_key).unwrap_or_default();
         info!("Server public key: {public_key}");
 
         // 2. Generate wg conf from DB
-        let conf = build_wg_conf(pool, cfg, &private_key).await?;
-        let conf_path = format!("/etc/wireguard/{}.conf", cfg.wg_interface);
+        let conf = build_wg_conf(pool, cfg, &private_key, &rt).await?;
+        let conf_path = format!("/etc/wireguard/{}.conf", rt.interface);
 
         // Write config
         std::fs::create_dir_all("/etc/wireguard").ok();
         std::fs::write(&conf_path, &conf)
             .map_err(|e| AppError::Internal(format!("write {}: {e}", conf_path)))?;
 
-        // 3. Bring up interface (idempotent — wg-quick handles both create and reconfigure)
-        if interface_exists(cfg) {
-            info!("Interface {} exists — syncing config via wg syncconf", cfg.wg_interface);
-            run_cmd("wg", &["syncconf", &cfg.wg_interface, &conf_path])?;
+        // 3. Bring up interface
+        if interface_exists_by_name(&rt.interface) {
+            info!("Interface {} exists — syncing config via wg syncconf", rt.interface);
+            run_cmd("wg", &["syncconf", &rt.interface, &conf_path])?;
         } else {
-            info!("Creating WireGuard interface {}...", cfg.wg_interface);
-            run_cmd("ip", &["link", "add", &cfg.wg_interface, "type", "wireguard"])?;
-            if cfg.wg_mtu > 0 {
-                let mtu_str = cfg.wg_mtu.to_string();
-                run_cmd("ip", &["link", "set", &cfg.wg_interface, "mtu", &mtu_str])?;
+            info!("Creating WireGuard interface {}...", rt.interface);
+            run_cmd("ip", &["link", "add", &rt.interface, "type", "wireguard"])?;
+            if rt.mtu > 0 {
+                let mtu_s = rt.mtu.to_string();
+                run_cmd("ip", &["link", "set", &rt.interface, "mtu", &mtu_s])?;
             }
-            run_cmd("ip", &["address", "add", &cfg.wg_address, "dev", &cfg.wg_interface])?;
-            run_cmd("ip", &["link", "set", "up", &cfg.wg_interface])?;
-            run_cmd("wg", &["setconf", &cfg.wg_interface, &conf_path])?;
-
-            // Apply post-up iptables rules
-            if !cfg.wg_post_up.is_empty() {
-                run_cmd("sh", &["-c", &cfg.wg_post_up])?;
-            }
-            info!("WireGuard interface {} is UP", cfg.wg_interface);
+            run_cmd("ip", &["address", "add", &rt.address, "dev", &rt.interface])?;
+            run_cmd("ip", &["link", "set", "up", &rt.interface])?;
+            run_cmd("wg", &["setconf", &rt.interface, &conf_path])?;
+            info!("WireGuard interface {} is UP", rt.interface);
         }
+
+        // NAT/forwarding: fixed internal rules derived from config (replaces the
+        // old arbitrary WG_POST_UP shell, which was an RCE surface).
+        setup_nat(&rt.interface, &rt.address);
 
         Ok(WireGuardGuard)
     }
 }
 
-pub async fn shutdown(cfg: &Config) {
+pub async fn shutdown(pool: &sqlx::SqlitePool, cfg: &Config) {
     #[cfg(not(target_os = "linux"))]
     { return; }
 
     #[cfg(target_os = "linux")]
     {
-        // Post-down iptables
-        if !cfg.wg_post_down.is_empty() {
-            run_cmd("sh", &["-c", &cfg.wg_post_down]).ok();
+        let rt = load_wg_runtime(pool, cfg).await;
+        teardown_nat(&rt.interface, &rt.address);
+        if interface_exists_by_name(&rt.interface) {
+            info!("Removing WireGuard interface {}...", rt.interface);
+            run_cmd("ip", &["link", "delete", &rt.interface]).ok();
         }
-        if interface_exists(cfg) {
-            info!("Removing WireGuard interface {}...", cfg.wg_interface);
-            run_cmd("ip", &["link", "delete", &cfg.wg_interface]).ok();
+    }
+}
+
+/// Configure NAT masquerade + forwarding for the WireGuard subnet using fixed,
+/// internally-constructed iptables rules. The egress interface is auto-detected
+/// from the default route (override with WG_EGRESS). No shell interpolation.
+#[cfg(target_os = "linux")]
+fn setup_nat(interface: &str, address: &str) {
+    let subnet = match subnet_cidr(address) {
+        Some(s) => s,
+        None => {
+            warn!("NAT skipped: could not derive subnet from {address}");
+            return;
         }
+    };
+    let egress = egress_interface();
+    run_cmd("sysctl", &["-w", "net.ipv4.ip_forward=1"]).ok();
+    // -C checks existence; only add when missing to stay idempotent.
+    if run_cmd_ok("iptables", &["-t", "nat", "-C", "POSTROUTING", "-s", &subnet, "-o", &egress, "-j", "MASQUERADE"]).is_err() {
+        run_cmd("iptables", &["-t", "nat", "-A", "POSTROUTING", "-s", &subnet, "-o", &egress, "-j", "MASQUERADE"]).ok();
+    }
+    if run_cmd_ok("iptables", &["-C", "FORWARD", "-i", interface, "-j", "ACCEPT"]).is_err() {
+        run_cmd("iptables", &["-A", "FORWARD", "-i", interface, "-j", "ACCEPT"]).ok();
+    }
+    if run_cmd_ok("iptables", &["-C", "FORWARD", "-o", interface, "-j", "ACCEPT"]).is_err() {
+        run_cmd("iptables", &["-A", "FORWARD", "-o", interface, "-j", "ACCEPT"]).ok();
+    }
+    info!("NAT configured: {subnet} → {egress} (masquerade)");
+}
+
+#[cfg(target_os = "linux")]
+fn teardown_nat(interface: &str, address: &str) {
+    let Some(subnet) = subnet_cidr(address) else { return };
+    let egress = egress_interface();
+    run_cmd("iptables", &["-t", "nat", "-D", "POSTROUTING", "-s", &subnet, "-o", &egress, "-j", "MASQUERADE"]).ok();
+    run_cmd("iptables", &["-D", "FORWARD", "-i", interface, "-j", "ACCEPT"]).ok();
+    run_cmd("iptables", &["-D", "FORWARD", "-o", interface, "-j", "ACCEPT"]).ok();
+}
+
+/// Derive the network CIDR ("10.59.32.1/24" → "10.59.32.0/24").
+#[cfg(target_os = "linux")]
+fn subnet_cidr(address: &str) -> Option<String> {
+    let (host, prefix) = address.split_once('/')?;
+    let mut octets: Vec<&str> = host.split('.').collect();
+    if octets.len() != 4 {
+        return None;
+    }
+    // Zero host bits only for the common /24 case; otherwise keep the given host.
+    if prefix == "24" {
+        octets[3] = "0";
+    }
+    Some(format!("{}/{}", octets.join("."), prefix))
+}
+
+/// Detect the egress interface: WG_EGRESS env override, else the default route's
+/// device, else "eth0".
+#[cfg(target_os = "linux")]
+fn egress_interface() -> String {
+    if let Ok(v) = std::env::var("WG_EGRESS") {
+        if !v.trim().is_empty() {
+            return v;
+        }
+    }
+    if let Ok(out) = Command::new("ip").args(["route", "show", "default"]).output() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        // "default via X dev eth0 ..."
+        if let Some(idx) = s.split_whitespace().position(|t| t == "dev") {
+            if let Some(dev) = s.split_whitespace().nth(idx + 1) {
+                return dev.to_string();
+            }
+        }
+    }
+    "eth0".to_string()
+}
+
+/// Like run_cmd but returns Err when the command exits non-zero (used for the
+/// iptables `-C` existence checks).
+#[cfg(target_os = "linux")]
+fn run_cmd_ok(cmd: &str, args: &[&str]) -> Result<()> {
+    let output = Command::new(cmd)
+        .args(args)
+        .output()
+        .map_err(|e| AppError::Internal(format!("{cmd}: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Internal(format!("{cmd} exited non-zero")))
     }
 }
 
 // ── Peer sync ───────────────────────────────────────────────
 
+/// Reconcile DB settings + env config into effective WG parameters.
+/// app_settings in the DB take priority (set via UI), env vars are fallback.
+struct WgRuntime {
+    interface: String,
+    port: u16,
+    address: String,
+    #[allow(dead_code)]
+    dns: String,
+    mtu: u32,
+}
+
+async fn load_wg_runtime(pool: &sqlx::SqlitePool, cfg: &Config) -> WgRuntime {
+    let db: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM app_settings WHERE key = 'wireguard_interface'"
+    ).fetch_optional(pool).await.ok().flatten();
+
+    let db_val = db.as_ref()
+        .and_then(|(v,)| serde_json::from_str::<serde_json::Value>(v).ok());
+
+    WgRuntime {
+        interface: str_or(db_val.as_ref(), "interface", &cfg.wg_interface),
+        port: u16_or(db_val.as_ref(), "listen_port", cfg.wg_port),
+        address: str_or(db_val.as_ref(), "address", &cfg.wg_address),
+        dns: str_or(db_val.as_ref(), "dns", &cfg.wg_dns),
+        mtu: u32_or(db_val.as_ref(), "mtu", cfg.wg_mtu),
+    }
+}
+
+fn str_or(db: Option<&serde_json::Value>, key: &str, fallback: &str) -> String {
+    db.and_then(|v| v.get(key).and_then(|v| v.as_str())).unwrap_or(fallback).to_string()
+}
+fn u16_or(db: Option<&serde_json::Value>, key: &str, fallback: u16) -> u16 {
+    db.and_then(|v| v.get(key).and_then(|v| v.as_u64())).map(|n| n as u16).unwrap_or(fallback)
+}
+fn u32_or(db: Option<&serde_json::Value>, key: &str, fallback: u32) -> u32 {
+    db.and_then(|v| v.get(key).and_then(|v| v.as_u64())).map(|n| n as u32).unwrap_or(fallback)
+}
+
 pub async fn sync_config(pool: &sqlx::SqlitePool, cfg: &Config) -> Result<()> {
+    let rt = load_wg_runtime(pool, cfg).await;
+    sync_config_with(pool, cfg, &rt).await
+}
+
+async fn sync_config_with(pool: &sqlx::SqlitePool, cfg: &Config, rt: &WgRuntime) -> Result<()> {
     let private_key = load_or_generate_server_key(pool).await?;
-    let conf = build_wg_conf(pool, cfg, &private_key).await?;
-    let conf_path = format!("/etc/wireguard/{}.conf", cfg.wg_interface);
+    let conf = build_wg_conf(pool, cfg, &private_key, rt).await?;
+    let conf_path = format!("/etc/wireguard/{}.conf", rt.interface);
     std::fs::write(&conf_path, &conf).map_err(|e| AppError::Internal(e.to_string()))?;
-    run_cmd("wg", &["syncconf", &cfg.wg_interface, &conf_path])?;
+    run_cmd("wg", &["syncconf", &rt.interface, &conf_path])?;
 
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wireguard_peers WHERE enabled = 1")
         .fetch_one(pool).await?;
@@ -182,16 +311,210 @@ pub fn generate_client_config(cfg: &Config, peer: &WireGuardPeer, server_pubkey:
     Ok(c)
 }
 
+// ── Managed-host peers (intranet members for reachback) ─────
+//
+// A WG-member Host is provisioned as a special peer: stored with a /32 address
+// so the server side gets `AllowedIPs = <ip>/32` and can route precisely to that
+// host (needed to reach its Clash API over the tunnel). End-user clients keep
+// their broader address; host peers carry `host_id` to distinguish them.
+
+/// Derive the WG subnet CIDR from the server address ("10.59.32.1/24" →
+/// "10.59.32.0/24"). Used as a host's AllowedIPs so it routes the intranet
+/// (not all traffic) through the hub.
+pub fn wg_subnet(address: &str) -> String {
+    if let Some((host, prefix)) = address.split_once('/') {
+        let mut o: Vec<&str> = host.split('.').collect();
+        if o.len() == 4 && prefix == "24" {
+            o[3] = "0";
+            return format!("{}/{}", o.join("."), prefix);
+        }
+        return format!("{host}/{prefix}");
+    }
+    address.to_string()
+}
+
+/// Ensure a WG peer exists for this host; returns `(ip, public_key)`. Idempotent:
+/// if one already exists it is returned unchanged.
+pub async fn provision_host_peer(
+    pool: &sqlx::SqlitePool,
+    cfg: &Config,
+    host_id: &str,
+    host_name: &str,
+) -> Result<(String, String)> {
+    use uuid::Uuid;
+
+    if let Some(p) = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?
+    {
+        let ip = p.address.split('/').next().unwrap_or(&p.address).to_string();
+        return Ok((ip, p.public_key));
+    }
+
+    let (private_key, public_key) = generate_keypair()?;
+    let preshared_key = generate_psk()?;
+    let alloc = next_available_ip(pool, &cfg.wg_address).await?;
+    let ip = alloc.split('/').next().unwrap_or(&alloc).to_string();
+    let address = format!("{ip}/32");
+    let subnet = wg_subnet(&cfg.wg_address);
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO wireguard_peers (id, name, private_key, public_key, preshared_key, address, dns, enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes, created_at, updated_at, notes, host_id) \
+         VALUES (?,?,?,?,?,?,?,1,25,?,NULL,0,?,?,NULL,?)",
+    )
+    .bind(&id)
+    .bind(format!("host: {host_name}"))
+    .bind(&private_key)
+    .bind(&public_key)
+    .bind(&preshared_key)
+    .bind(&address)
+    .bind("")
+    .bind(&subnet)
+    .bind(&now)
+    .bind(&now)
+    .bind(host_id)
+    .execute(pool)
+    .await?;
+
+    let _ = sync_config(pool, cfg).await;
+    Ok((ip, public_key))
+}
+
+/// Remove the WG peer backing a host (on host delete or when WG membership is
+/// turned off). Best-effort; safe when no peer exists.
+pub async fn deprovision_host_peer(pool: &sqlx::SqlitePool, cfg: &Config, host_id: &str) {
+    if let Ok(Some(p)) = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await
+    {
+        remove_peer(&cfg.wg_interface, &p.public_key).ok();
+        let _ = sqlx::query("DELETE FROM wireguard_peers WHERE id = ?").bind(&p.id).execute(pool).await;
+        let _ = sync_config(pool, cfg).await;
+    }
+}
+
+/// Generate the WG config a managed host installs.
+///
+/// Connectivity model:
+/// - Hub peer (the central server): `AllowedIPs = <subnet>`, so by default the
+///   whole intranet is reached through the hub (site-to-site via relay).
+/// - Mesh peers: every *other* host that advertises a public `wg_endpoint` is
+///   added as a direct `[Peer]` with `AllowedIPs = <that host>/32`. WireGuard
+///   prefers the most specific route, so traffic to a directly-reachable host
+///   goes peer-to-peer while everything else still falls back to the hub.
+/// A host that itself has a public endpoint also gets a `ListenPort` so others
+/// can dial it.
+pub async fn generate_host_wg_config(pool: &sqlx::SqlitePool, cfg: &Config, host_id: &str) -> Result<String> {
+    let peer = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Host has no WireGuard peer".into()))?;
+
+    let this_host = sqlx::query_as::<_, crate::models::Host>("SELECT * FROM hosts WHERE id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let server_pubkey = load_or_generate_server_key(pool)
+        .await
+        .and_then(|pk| public_key_from_private(&pk))
+        .unwrap_or_else(|_| "UNKNOWN".into());
+    let subnet = wg_subnet(&cfg.wg_address);
+
+    let label = peer.name.strip_prefix("host: ").unwrap_or(&peer.name);
+    let mut c = String::new();
+    c.push_str(&format!("# sb-easy managed host: {}\n[Interface]\n", label));
+    c.push_str(&format!("PrivateKey = {}\n", peer.private_key));
+    c.push_str(&format!("Address = {}\n", peer.address));
+    if cfg.wg_mtu > 0 {
+        c.push_str(&format!("MTU = {}\n", cfg.wg_mtu));
+    }
+    // If this host is directly reachable, listen so mesh peers can dial it.
+    if let Some(port) = this_host.as_ref().and_then(|h| endpoint_port(h.wg_endpoint.as_deref())) {
+        c.push_str(&format!("ListenPort = {}\n", port));
+    }
+
+    // Hub peer (the central server).
+    c.push_str("\n# Hub (central server)\n[Peer]\n");
+    c.push_str(&format!("PublicKey = {}\n", server_pubkey));
+    if let Some(ref psk) = peer.preshared_key {
+        if !psk.is_empty() {
+            c.push_str(&format!("PresharedKey = {}\n", psk));
+        }
+    }
+    c.push_str(&format!("AllowedIPs = {}\n", subnet));
+    c.push_str(&format!("Endpoint = {}:{}\n", cfg.external_hostname, cfg.wg_port));
+    c.push_str("PersistentKeepalive = 25\n");
+
+    // Mesh peers. Include another host O as a direct peer when EITHER we can dial
+    // it (O has a public endpoint) OR it can dial us (this host has one) — so the
+    // pairing is symmetric and both ends accept the tunnel. Two NAT-bound hosts
+    // (neither has an endpoint) are simply omitted and fall back to the hub.
+    let this_has_endpoint = this_host
+        .as_ref()
+        .and_then(|h| endpoint_port(h.wg_endpoint.as_deref()))
+        .is_some();
+    let others = sqlx::query_as::<_, crate::models::Host>(
+        "SELECT * FROM hosts WHERE id != ? AND enabled = 1 AND wg_public_key IS NOT NULL AND wg_address IS NOT NULL",
+    )
+    .bind(host_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for o in others {
+        let (Some(pk), Some(addr)) = (o.wg_public_key.as_deref(), o.wg_address.as_deref()) else {
+            continue;
+        };
+        let o_endpoint = o.wg_endpoint.as_deref().filter(|e| endpoint_port(Some(e)).is_some());
+        if o_endpoint.is_none() && !this_has_endpoint {
+            continue; // neither side is dialable → relay via hub
+        }
+        let ip32 = format!("{}/32", addr.split('/').next().unwrap_or(addr));
+        c.push_str(&format!("\n# Mesh: {}\n[Peer]\n", o.name));
+        c.push_str(&format!("PublicKey = {}\n", pk));
+        c.push_str(&format!("AllowedIPs = {}\n", ip32));
+        if let Some(ep) = o_endpoint {
+            c.push_str(&format!("Endpoint = {}\n", ep));
+        }
+        c.push_str("PersistentKeepalive = 25\n");
+    }
+
+    Ok(c)
+}
+
+/// Extract the port from a "host:port" endpoint, if present and valid.
+fn endpoint_port(endpoint: Option<&str>) -> Option<u16> {
+    endpoint?.rsplit_once(':').and_then(|(_, p)| p.trim().parse::<u16>().ok())
+}
+
 // ── IP pool ─────────────────────────────────────────────────
 
 pub async fn next_available_ip(pool: &sqlx::SqlitePool, subnet: &str) -> Result<String> {
-    let base = subnet.rsplitn(2, '.').last().unwrap_or("10.59.32");
+    // subnet looks like "10.59.32.1/24" — derive the /24 base ("10.59.32").
+    let host = subnet.split('/').next().unwrap_or(subnet);
+    let base = host.rsplit_once('.').map(|(b, _)| b).unwrap_or("10.59.32");
+
+    // Collect the host octets already taken in this /24.
     let existing: Vec<(String,)> = sqlx::query_as("SELECT address FROM wireguard_peers")
         .fetch_all(pool).await.unwrap_or_default();
-    for i in 2..=254 {
-        let prefix = format!("{base}.{i}");
-        if !existing.iter().any(|(a,)| a.starts_with(&prefix)) {
-            return Ok(format!("{prefix}/24"));
+    let taken: std::collections::HashSet<u8> = existing
+        .iter()
+        .filter_map(|(a,)| {
+            let h = a.split('/').next().unwrap_or(a);
+            let (b, last) = h.rsplit_once('.')?;
+            if b == base { last.parse::<u8>().ok() } else { None }
+        })
+        .collect();
+
+    for i in 2u8..=254 {
+        if !taken.contains(&i) {
+            return Ok(format!("{base}.{i}/24"));
         }
     }
     Err(AppError::Internal("No available IPs in subnet".into()))
@@ -242,19 +565,31 @@ pub fn get_server_private_key(_cfg: &Config) -> Result<String> {
 
 // ── Internal helpers ────────────────────────────────────────
 
-async fn build_wg_conf(pool: &sqlx::SqlitePool, cfg: &Config, private_key: &str) -> Result<String> {
+async fn build_wg_conf(pool: &sqlx::SqlitePool, _cfg: &Config, private_key: &str, rt: &WgRuntime) -> Result<String> {
     let peers = sqlx::query_as::<_, WireGuardPeer>(
         "SELECT * FROM wireguard_peers WHERE enabled = 1"
     ).fetch_all(pool).await?;
 
-    // WireGuard raw config (for wg setconf/syncconf).
-    // Only kernel-level keys: PrivateKey, ListenPort, FwMark in [Interface].
-    // Address, MTU, DNS, PostUp/PostDown are managed separately (ip, iptables).
     let mut conf = String::from("# Generated by sb-easy\n\n[Interface]\n");
     conf.push_str(&format!("PrivateKey = {}\n", private_key));
-    conf.push_str(&format!("ListenPort = {}\n", cfg.wg_port));
+    conf.push_str(&format!("ListenPort = {}\n", rt.port));
 
+    let now = chrono::Utc::now();
+    let stats = get_peer_stats(&rt.interface).unwrap_or_default();
     for peer in &peers {
+        // Skip peers whose expiry has passed — enabled but expired peers stay in
+        // the DB (visible in the UI) but are not written into the live config.
+        if peer_expired(peer, now) {
+            continue;
+        }
+        // Skip peers that have exhausted their traffic quota (0 = unlimited).
+        if peer.quota_bytes > 0 {
+            if let Some(s) = stats.iter().find(|s| s.public_key == peer.public_key) {
+                if s.transfer_rx + s.transfer_tx >= peer.quota_bytes {
+                    continue;
+                }
+            }
+        }
         conf.push_str(&format!("\n# Client: {}\n[Peer]\nPublicKey = {}\n", peer.name, peer.public_key));
         if let Some(ref psk) = peer.preshared_key {
             if !psk.is_empty() { conf.push_str(&format!("PresharedKey = {}\n", psk)); }
@@ -267,9 +602,19 @@ async fn build_wg_conf(pool: &sqlx::SqlitePool, cfg: &Config, private_key: &str)
     Ok(conf)
 }
 
-fn interface_exists(cfg: &Config) -> bool {
+/// True if the peer has an `expire_at` timestamp that is in the past.
+pub fn peer_expired(peer: &WireGuardPeer, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match peer.expire_at.as_deref() {
+        Some(ts) if !ts.is_empty() => chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| t.with_timezone(&chrono::Utc) < now)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn interface_exists_by_name(name: &str) -> bool {
     Command::new("ip")
-        .args(["link", "show", &cfg.wg_interface])
+        .args(["link", "show", name])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -285,4 +630,54 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
         warn!("{cmd} {:?}: {err}", args);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subnet_derivation() {
+        assert_eq!(wg_subnet("10.59.32.1/24"), "10.59.32.0/24");
+        // non-/24 keeps the given host (we don't zero arbitrary prefixes)
+        assert_eq!(wg_subnet("10.0.0.5/16"), "10.0.0.5/16");
+        assert_eq!(wg_subnet("nonsense"), "nonsense");
+    }
+
+    #[test]
+    fn keypair_public_matches_derivation() {
+        let (private, public) = generate_keypair().unwrap();
+        assert_eq!(public_key_from_private(&private).unwrap(), public);
+    }
+
+    #[test]
+    fn endpoint_port_parsing() {
+        assert_eq!(endpoint_port(Some("1.2.3.4:51820")), Some(51820));
+        assert_eq!(endpoint_port(Some("host.example:443")), Some(443));
+        assert_eq!(endpoint_port(Some("no-colon")), None);
+        assert_eq!(endpoint_port(Some("host:notaport")), None);
+        assert_eq!(endpoint_port(None), None);
+    }
+
+    fn peer_with_expiry(expire_at: Option<&str>) -> WireGuardPeer {
+        WireGuardPeer {
+            id: "p".into(), name: "p".into(),
+            private_key: "k".into(), public_key: "k".into(), preshared_key: None,
+            address: "10.59.32.2/32".into(), dns: "".into(), enabled: true,
+            persistent_keepalive: 25, allowed_ips: "0.0.0.0/0".into(),
+            expire_at: expire_at.map(|s| s.to_string()), quota_bytes: 0,
+            created_at: "now".into(), updated_at: "now".into(), notes: None,
+        }
+    }
+
+    #[test]
+    fn expiry_check() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(peer_expired(&peer_with_expiry(Some(&past)), now));
+        assert!(!peer_expired(&peer_with_expiry(Some(&future)), now));
+        assert!(!peer_expired(&peer_with_expiry(None), now));
+        assert!(!peer_expired(&peer_with_expiry(Some("")), now));
+    }
 }

@@ -8,22 +8,31 @@
         </svg>
       </div>
       <h1 class="login-title">sb-easy</h1>
-      <p class="login-desc">WireGuard & Sing-box Management</p>
+      <p class="login-desc">{{ t('login.subtitle') }}</p>
 
       <form @submit.prevent="doLogin" class="login-form">
         <div class="form-group">
-          <label>Password</label>
+          <label>{{ t('login.username') }}</label>
+          <input
+            v-model="username"
+            type="text"
+            placeholder="admin"
+            autocomplete="username"
+            class="login-input"
+          />
+        </div>
+        <div class="form-group">
+          <label>{{ t('login.password') }}</label>
           <input
             v-model="password"
             type="password"
-            placeholder="Enter admin password"
-            autofocus
+            autocomplete="current-password"
             class="login-input"
           />
         </div>
         <button type="submit" class="btn-primary w-full login-btn" :disabled="loading">
           <span v-if="loading" class="spinner" style="width:16px;height:16px;border-width:1.5px"></span>
-          <span v-else>Sign In</span>
+          <span v-else>{{ t('login.signin') }}</span>
         </button>
       </form>
 
@@ -36,9 +45,12 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useI18n } from '../composables/i18n'
 
+const { t } = useI18n()
 const router = useRouter()
 const auth = useAuthStore()
+const username = ref('')
 const password = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -47,7 +59,7 @@ async function doLogin() {
   error.value = ''
   loading.value = true
   try {
-    await auth.login(password.value)
+    await auth.login(password.value, username.value || undefined)
     router.push('/')
   } catch (e: any) {
     error.value = e.response?.data?.error || 'Login failed'

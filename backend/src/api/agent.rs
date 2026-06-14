@@ -1,47 +1,55 @@
-//! Agent API — endpoint for sb-easy-agent running on sing-box node (10.168.1.5).
+//! Agent API — endpoints for sb-easy-agent running on a managed host.
+//!
+//! Each host authenticates with its own per-host `agent_token` (provisioned when
+//! the host is created). The endpoint resolves the calling host from that token
+//! and serves a config rendered specifically for it. For backward compatibility
+//! the legacy global `AGENT_TOKEN` env still maps to the built-in `self` host.
 use axum::{
     extract::State,
     http::HeaderMap,
     Json, Router,
 };
-use axum::routing::get;
-use sha2::{Digest, Sha256};
+use axum::routing::{get, post};
+use chrono::Utc;
 
 use crate::error::{AppError, Result};
-use crate::models::proxy_node::ProxyNode;
+use crate::models::host::{AgentStatusReport, CommandAck, Host, HostCommand};
 use crate::services::proxy_config;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/config", get(agent_config))
+        .route("/status", post(agent_status))
+        .route("/commands", get(agent_commands))
+        .route("/commands/{cmd_id}/ack", post(agent_command_ack))
         .route("/health", get(agent_health))
 }
 
 /// GET /api/agent/config
-/// Returns full sing-box config with ETag support for incremental updates.
-/// Agent sends If-None-Match header with last ETag; server returns 304 if unchanged.
+/// Returns the sing-box config rendered for the calling host, with ETag support
+/// (agent sends If-None-Match; server returns 304 when unchanged).
 async fn agent_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
     use axum::http::StatusCode;
-    use axum::response::IntoResponse;
 
-    let nodes = sqlx::query_as::<_, ProxyNode>(
-        "SELECT * FROM proxy_nodes WHERE enabled = 1"
-    ).fetch_all(&state.db).await?;
+    let host = resolve_host(&state, &headers).await?;
 
-    let config = proxy_config::generate_full_config(&nodes);
+    let config = crate::api::hosts::render_host_served(&state, &host).await;
     let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
 
-    // Compute ETag from config content + cached config hash
-    let mut hasher = Sha256::new();
-    hasher.update(config_str.as_bytes());
-    hasher.update(state.cfg.config_hash_seed.as_bytes());
-    let etag = format!("\"{:x}\"", hasher.finalize());
+    // ETag scoped per host so different hosts get independent caching.
+    let etag = proxy_config::config_etag(&host.id, &config_str, &state.cfg.config_hash_seed);
 
-    // Check If-None-Match header
+    // Touch last_seen on every poll so the UI can show liveness.
+    let _ = sqlx::query("UPDATE hosts SET last_seen = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&host.id)
+        .execute(&state.db)
+        .await;
+
     if let Some(if_none_match) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
         if if_none_match == etag {
             let mut resp = axum::response::Response::new(axum::body::Body::empty());
@@ -54,9 +62,7 @@ async fn agent_config(
         }
     }
 
-    let mut resp = axum::response::Response::new(
-        axum::body::Body::from(config_str),
-    );
+    let mut resp = axum::response::Response::new(axum::body::Body::from(config_str));
     *resp.status_mut() = StatusCode::OK;
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -69,7 +75,106 @@ async fn agent_config(
     Ok(resp)
 }
 
+/// POST /api/agent/status — agent heartbeat: report sing-box state.
+async fn agent_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(report): Json<AgentStatusReport>,
+) -> Result<Json<serde_json::Value>> {
+    let host = resolve_host(&state, &headers).await?;
+
+    let state_json = serde_json::json!({
+        "version": report.singbox_version,
+        "running": report.singbox_running,
+        "etag": report.config_etag,
+    })
+    .to_string();
+
+    sqlx::query("UPDATE hosts SET last_seen = ?, singbox_state = ? WHERE id = ?")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&state_json)
+        .bind(&host.id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// GET /api/agent/commands — pending commands for the calling host.
+async fn agent_commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<HostCommand>>> {
+    let host = resolve_host(&state, &headers).await?;
+    let cmds = sqlx::query_as::<_, HostCommand>(
+        "SELECT * FROM host_commands WHERE host_id = ? AND status = 'pending' ORDER BY created_at",
+    )
+    .bind(&host.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(cmds))
+}
+
+/// POST /api/agent/commands/{cmd_id}/ack — agent reports a command's result.
+async fn agent_command_ack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(cmd_id): axum::extract::Path<String>,
+    Json(ack): Json<CommandAck>,
+) -> Result<Json<serde_json::Value>> {
+    let host = resolve_host(&state, &headers).await?;
+    let status = if ack.status == "done" { "done" } else { "failed" };
+    // Scope the update to the calling host so an agent can only ack its own commands.
+    sqlx::query("UPDATE host_commands SET status = ?, result = ?, acked_at = ? WHERE id = ? AND host_id = ?")
+        .bind(status)
+        .bind(&ack.result)
+        .bind(Utc::now().to_rfc3339())
+        .bind(&cmd_id)
+        .bind(&host.id)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 /// GET /api/agent/health — simple health check for the agent.
 async fn agent_health() -> Json<serde_json::Value> {
     serde_json::json!({"status": "ok"}).into()
+}
+
+/// Resolve the calling host from its bearer token.
+///
+/// 1. Match a host whose per-host `agent_token` equals the presented token.
+/// 2. Backward compatibility: if the legacy global `AGENT_TOKEN` is set and
+///    matches, serve the built-in `self` host.
+/// Otherwise reject. An empty/missing token is always rejected.
+async fn resolve_host(state: &AppState, headers: &HeaderMap) -> Result<Host> {
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| AppError::Unauthorized("Missing agent token".into()))?;
+
+    if let Some(host) = sqlx::query_as::<_, Host>(
+        "SELECT * FROM hosts WHERE agent_token = ? AND agent_token != '' AND enabled = 1",
+    )
+    .bind(presented)
+    .fetch_optional(&state.db)
+    .await?
+    {
+        return Ok(host);
+    }
+
+    let global = state.cfg.agent_token.trim();
+    if !global.is_empty() && presented == global {
+        if let Some(host) = sqlx::query_as::<_, Host>("SELECT * FROM hosts WHERE id = 'self'")
+            .fetch_optional(&state.db)
+            .await?
+        {
+            return Ok(host);
+        }
+    }
+
+    Err(AppError::Unauthorized("Invalid agent token".into()))
 }

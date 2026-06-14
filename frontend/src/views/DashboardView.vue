@@ -1,8 +1,8 @@
 <template>
   <div>
     <div class="page-header">
-      <h2>Dashboard</h2>
-      <p class="text-sm text-muted" style="margin-top:0.25rem">Overview of your VPN clients, proxy nodes, and subscriptions.</p>
+      <h2>{{ t('page.dashboard.title') }}</h2>
+      <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.dashboard.desc') }}</p>
     </div>
 
     <div class="grid-4" style="margin-bottom:2.25rem">
@@ -71,6 +71,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '../composables/i18n'
+const { t } = useI18n()
 import { ref, computed, onMounted } from 'vue'
 import { useWireGuardStore } from '../stores/wireguard'
 import { useProxyNodesStore } from '../stores/proxyNodes'
@@ -155,7 +157,7 @@ function latencyClass(ms: number | null) {
   justify-content: space-between;
   align-items: center;
   padding: 0.55rem 0;
-  border-bottom: 1px solid #f5f1ea;
+  border-bottom: 1px solid var(--paper-border);
 }
 .list-row:last-child { border-bottom: none; }
 .list-row-name { font-size: 0.85rem; font-weight: 500; }

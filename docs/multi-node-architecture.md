@@ -31,7 +31,12 @@
 
 阶段3 验证：命令通道全生命周期 + 守卫、Profile CRUD + 渲染、漂移三态（同步/改配置/重拉）、mesh 配置生成（公网+NAT 混合拓扑对称性），均 `cargo build`+前端构建通过、运行时无 panic。
 
-**至此阶段1+2+3 全部完成。** 仅 self 主机的进程内 sing-box 直管为内置 agent 的薄实现（当前 self 配置变更后未自动本地 reload，可后续补）；其余架构目标均落地。
+**至此阶段1+2+3 全部完成。**
+
+### self 主机进程内自管理（2026-06-14 完成）
+内置 agent：`services/self_agent.rs` 一个进程内循环，与远程 agent 同构（轮询 + ETag + 写文件 + reload），但无 HTTP。opt-in——设 `SELF_SINGBOX_CONFIG_PATH` 才启用：周期性渲染 self 配置，ETag 变化才写本地文件并跑 `SELF_RELOAD_CMD`（默认 `sudo systemctl reload sing-box`），间隔 `SELF_SINGBOX_INTERVAL`（默认 10s、2s 下限）。验证：启动即写、加代理后自动重渲染、ETag 去重使 reload 只在变更时触发、无 panic。
+
+**第 9 节"服务器即客户端"的内置 agent 至此落地。架构方案全部目标完成。**
 
 下方为原始设计。
 

@@ -91,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Build state and start HTTP server ─────────────────
     let shutdown_pool = pool.clone();
     let state = AppState { db: pool, cfg: cfg.clone() };
+
+    // In-process management of the built-in `self` host's sing-box (opt-in).
+    tokio::spawn(services::self_agent::run(state.clone()));
+
     let addr: SocketAddr = cfg.bind_addr.parse()?;
     info!("Web UI listening on http://{}", addr);
 

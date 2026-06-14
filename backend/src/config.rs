@@ -39,6 +39,12 @@ pub struct Config {
 
     /// Config hash seed for Agent ETag
     pub config_hash_seed: String,
+
+    /// In-process management of the built-in `self` host's sing-box.
+    /// Empty path = disabled (self config is renderable but not auto-applied).
+    pub self_singbox_config_path: String,
+    pub self_reload_cmd: String,
+    pub self_singbox_interval: u64,
 }
 
 impl Config {
@@ -72,6 +78,15 @@ impl Config {
                 .unwrap_or_else(|_| "127.0.0.1".into()),
 
             config_hash_seed: env::var("CONFIG_HASH_SEED").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
+
+            self_singbox_config_path: env::var("SELF_SINGBOX_CONFIG_PATH").unwrap_or_default(),
+            self_reload_cmd: env::var("SELF_RELOAD_CMD")
+                .unwrap_or_else(|_| "sudo systemctl reload sing-box".into()),
+            self_singbox_interval: env::var("SELF_SINGBOX_INTERVAL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10)
+                .max(2),
         })
     }
 }

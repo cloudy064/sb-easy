@@ -121,8 +121,14 @@ pub struct CommandAck {
 pub struct ConfigProfile {
     pub id: String,
     pub name: String,
-    /// JSON: sing-box config minus the outbounds array.
+    /// JSON. In 'managed' mode: config minus outbounds (outbounds injected per
+    /// host). In 'full' mode: a complete sing-box config, run verbatim.
     pub template: String,
+    /// 'managed' | 'full'
+    #[serde(default = "default_mode")]
+    pub mode: String,
     pub created_at: String,
     pub updated_at: String,
 }
+
+fn default_mode() -> String { "managed".into() }

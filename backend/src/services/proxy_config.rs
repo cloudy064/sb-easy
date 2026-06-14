@@ -253,8 +253,13 @@ pub fn controller_addr(api_url: &str) -> String {
 
 /// Inject `experimental.clash_api` so the running sing-box exposes the control
 /// API the panel talks to (live traffic/connections/logs, proxy switching).
+/// No-op if the config already declares a clash_api (full-mode profiles keep
+/// their own), so we never clobber a hand-tuned controller/secret.
 pub fn inject_clash_api(config: &mut Value, controller: &str, secret: &str) {
     if controller.is_empty() {
+        return;
+    }
+    if config.pointer("/experimental/clash_api").is_some() {
         return;
     }
     let Some(obj) = config.as_object_mut() else { return };

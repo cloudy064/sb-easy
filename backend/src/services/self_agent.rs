@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use tracing::{error, info, warn};
 
-use crate::api::hosts::{host_outbound_nodes, host_profile_template};
 use crate::models::Host;
 use crate::services::proxy_config;
 use crate::AppState;
@@ -63,12 +62,16 @@ pub async fn render_self(state: &AppState) -> Option<(String, String)> {
     if !host.enabled || !host.caps().runs_singbox {
         return None;
     }
-    let nodes = host_outbound_nodes(state, "self").await.ok()?;
-    let template = host_profile_template(state, &host).await;
-    let mut config = proxy_config::render_host_config(&template, &nodes);
-    // Expose the Clash API so the panel can monitor/control this sing-box.
+    // Render honoring the self profile's mode (managed vs full), exposing the
+    // Clash API at the controller/secret the panel is configured to use.
     let controller = proxy_config::controller_addr(&state.cfg.singbox_api_url);
-    proxy_config::inject_clash_api(&mut config, &controller, &state.cfg.singbox_api_secret);
+    let config = crate::api::hosts::render_config_for(
+        state,
+        &host,
+        &controller,
+        &state.cfg.singbox_api_secret,
+    )
+    .await;
     let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
     let etag = proxy_config::config_etag("self", &config_str, &state.cfg.config_hash_seed);
     Some((etag, config_str))

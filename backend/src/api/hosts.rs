@@ -313,8 +313,18 @@ async fn list_profiles(State(state): State<AppState>) -> Result<Json<Vec<ConfigP
 #[derive(Deserialize)]
 struct ProfileRequest {
     name: String,
-    /// sing-box config minus the outbounds array. Must be a JSON object.
+    /// 'managed' (config minus outbounds) or 'full' (complete config). Default managed.
+    #[serde(default)]
+    mode: Option<String>,
+    /// sing-box config (full or minus-outbounds per mode). Must be a JSON object.
     template: serde_json::Value,
+}
+
+fn normalize_mode(m: Option<&str>) -> String {
+    match m {
+        Some("full") => "full".into(),
+        _ => "managed".into(),
+    }
 }
 
 /// Reject templates that aren't a JSON object (render injects `outbounds` into it).
@@ -336,10 +346,11 @@ async fn get_profile(State(state): State<AppState>, Path(pid): Path<String>) -> 
 /// POST /api/hosts/profiles — create a config profile.
 async fn create_profile(State(state): State<AppState>, Json(req): Json<ProfileRequest>) -> Result<Json<ConfigProfile>> {
     let template = validate_template(&req.template)?;
+    let mode = normalize_mode(req.mode.as_deref());
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO config_profiles (id, name, template, created_at, updated_at) VALUES (?,?,?,?,?)")
-        .bind(&id).bind(&req.name).bind(&template).bind(&now).bind(&now)
+    sqlx::query("INSERT INTO config_profiles (id, name, template, mode, created_at, updated_at) VALUES (?,?,?,?,?,?)")
+        .bind(&id).bind(&req.name).bind(&template).bind(&mode).bind(&now).bind(&now)
         .execute(&state.db).await?;
     get_profile(State(state), Path(id)).await
 }
@@ -352,8 +363,9 @@ async fn update_profile(State(state): State<AppState>, Path(pid): Path<String>, 
     if exists.is_none() {
         return Err(AppError::NotFound("Profile not found".into()));
     }
-    sqlx::query("UPDATE config_profiles SET name=?, template=?, updated_at=? WHERE id=?")
-        .bind(&req.name).bind(&template).bind(Utc::now().to_rfc3339()).bind(&pid)
+    let mode = normalize_mode(req.mode.as_deref());
+    sqlx::query("UPDATE config_profiles SET name=?, template=?, mode=?, updated_at=? WHERE id=?")
+        .bind(&req.name).bind(&template).bind(&mode).bind(Utc::now().to_rfc3339()).bind(&pid)
         .execute(&state.db).await?;
     get_profile(State(state), Path(pid)).await
 }
@@ -375,25 +387,59 @@ async fn fetch_host(state: &AppState, id: &str) -> Result<Host> {
         .ok_or_else(|| AppError::NotFound("Host not found".into()))
 }
 
-/// Render the exact config served to a host: its assigned outbounds injected
-/// into its profile, plus `experimental.clash_api` so the host's sing-box
-/// exposes the control API the panel reaches (over WG for remote hosts). Single
+/// Look up a host's config profile row (with mode), if any.
+pub async fn host_profile(state: &AppState, host: &Host) -> Option<ConfigProfile> {
+    let pid = host.profile_id.as_deref()?;
+    sqlx::query_as::<_, ConfigProfile>("SELECT * FROM config_profiles WHERE id = ?")
+        .bind(pid)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Render a host's full config honoring its profile mode, then ensure a Clash
+/// API is present (at `controller`/`secret`) so the panel can monitor it.
+/// - 'full' mode: the profile template IS the complete config, run verbatim.
+/// - 'managed' mode: template (config minus outbounds) + injected proxies.
+pub async fn render_config_for(
+    state: &AppState,
+    host: &Host,
+    controller: &str,
+    secret: &str,
+) -> serde_json::Value {
+    use crate::services::proxy_config;
+    let profile = host_profile(state, host).await;
+    let mode = profile.as_ref().map(|p| p.mode.as_str()).unwrap_or("managed");
+
+    let mut config = if mode == "full" {
+        profile
+            .as_ref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(&p.template).ok())
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| serde_json::json!({}))
+    } else {
+        let nodes = host_outbound_nodes(state, &host.id).await.unwrap_or_default();
+        let template = host_profile_template(state, host).await;
+        proxy_config::render_host_config(&template, &nodes)
+    };
+
+    proxy_config::inject_clash_api(&mut config, controller, secret);
+    config
+}
+
+/// Render the exact config served to a (remote) host. Clash API listens at the
+/// address the panel reaches it (host.clash_api) or all interfaces. Single
 /// source of truth for the agent endpoint and drift detection.
 pub async fn render_host_served(state: &AppState, host: &Host) -> serde_json::Value {
     use crate::services::proxy_config;
-    let nodes = host_outbound_nodes(state, &host.id).await.unwrap_or_default();
-    let template = host_profile_template(state, host).await;
-    let mut config = proxy_config::render_host_config(&template, &nodes);
-    // Where this host's sing-box should expose its Clash API. Prefer the address
-    // the panel will reach it at (host.clash_api); else listen on all interfaces.
     let controller = host
         .clash_api
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(proxy_config::controller_addr)
         .unwrap_or_else(|| "0.0.0.0:9090".to_string());
-    proxy_config::inject_clash_api(&mut config, &controller, &host.clash_secret);
-    config
+    render_config_for(state, host, &controller, &host.clash_secret).await
 }
 
 /// Compute the ETag of the config the server would currently serve to a host.

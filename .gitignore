@@ -23,3 +23,6 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Go build output
+/bin/

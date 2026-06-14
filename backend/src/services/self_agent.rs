@@ -53,8 +53,8 @@ pub async fn run(state: AppState) {
 }
 
 /// Render the self host's config and its ETag, or None if self isn't an enabled
-/// sing-box host.
-async fn render_self(state: &AppState) -> Option<(String, String)> {
+/// sing-box host. Shared with the in-process sing-box supervisor.
+pub async fn render_self(state: &AppState) -> Option<(String, String)> {
     let host = sqlx::query_as::<_, Host>("SELECT * FROM hosts WHERE id = 'self'")
         .fetch_optional(&state.db)
         .await

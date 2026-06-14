@@ -92,8 +92,14 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_pool = pool.clone();
     let state = AppState { db: pool, cfg: cfg.clone() };
 
-    // In-process management of the built-in `self` host's sing-box (opt-in).
-    tokio::spawn(services::self_agent::run(state.clone()));
+    // Built-in `self` host's sing-box management (opt-in):
+    // - SINGBOX_MANAGED=true → sb-easy supervises sing-box as a child process.
+    // - else SELF_SINGBOX_CONFIG_PATH set → write config + external reload cmd.
+    if state.cfg.singbox_managed {
+        tokio::spawn(services::singbox_supervisor::run(state.clone()));
+    } else {
+        tokio::spawn(services::self_agent::run(state.clone()));
+    }
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
     info!("Web UI listening on http://{}", addr);

@@ -45,6 +45,13 @@ pub struct Config {
     pub self_singbox_config_path: String,
     pub self_reload_cmd: String,
     pub self_singbox_interval: u64,
+
+    /// When true, sb-easy supervises sing-box itself as a child process
+    /// (spawn / restart-on-change / respawn-on-crash) — no external sing-box
+    /// service to run. Overrides the external-reload self-agent mode.
+    pub singbox_managed: bool,
+    /// Path to the sing-box binary to supervise.
+    pub singbox_bin: String,
 }
 
 impl Config {
@@ -87,6 +94,11 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10)
                 .max(2),
+
+            singbox_managed: env::var("SINGBOX_MANAGED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            singbox_bin: env::var("SINGBOX_BIN").unwrap_or_else(|_| "sing-box".into()),
         })
     }
 }

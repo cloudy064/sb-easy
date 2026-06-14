@@ -36,7 +36,20 @@
 ### self 主机进程内自管理（2026-06-14 完成）
 内置 agent：`services/self_agent.rs` 一个进程内循环，与远程 agent 同构（轮询 + ETag + 写文件 + reload），但无 HTTP。opt-in——设 `SELF_SINGBOX_CONFIG_PATH` 才启用：周期性渲染 self 配置，ETag 变化才写本地文件并跑 `SELF_RELOAD_CMD`（默认 `sudo systemctl reload sing-box`），间隔 `SELF_SINGBOX_INTERVAL`（默认 10s、2s 下限）。验证：启动即写、加代理后自动重渲染、ETag 去重使 reload 只在变更时触发、无 panic。
 
-**第 9 节"服务器即客户端"的内置 agent 至此落地。架构方案全部目标完成。**
+**第 9 节"服务器即客户端"的内置 agent 至此落地。**
+
+### 单一二进制 + 托管 sing-box（2026-06-14，路线 A）
+用户要求："不要单独的 sb-easy-agent、面板调角色、服务器即客户端、完全不用额外跑 sing-box（但手机等仍走配置接入）"。决策路线 A：sb-easy 托管 sing-box 子进程（不重写 sing-box）。已落地：
+- **sing-box 监督器**（`services/singbox_supervisor.rs`，`Singbox` 句柄）：`SINGBOX_MANAGED=true` 时 sb-easy 自己 spawn `sing-box run -c`、改配置 SIGHUP 重载、崩溃重生。运维上只管 sb-easy。验证：spawn/写配置/重载/重生四项 + `sing-box check` 通过。
+- **clash_api 注入**：渲染配置注入 `experimental.clash_api`（self 取 SINGBOX_API_URL/secret；远程取 host.clash_api/secret，缺省 0.0.0.0:9090），使被托管的 sing-box 暴露面板监控所需 API。统一到 `render_host_served`（agent 端点 + 漂移检测同源，etag 一致）。
+- **agent 折叠进主二进制**：`sb-easy agent`（`agent_mode.rs`）——受管节点跑同一个二进制，连面板拉配置 + 进程内托管 sing-box + 跑命令 + 上报状态。standalone `sb-easy-agent` crate 标记弃用。验证：端到端拉配置/起 sing-box/上报在线/ack restart。
+- **镜像捆绑 sing-box**：Dockerfile 新增 sing-box 下载 stage，镜像内含 sing-box 二进制 → 真·单产物部署。
+- **手机兼容保留**：手机不跑 sb-easy，继续走 WG 配置/二维码或 sing-box 订阅导入。
+- **面板调角色**：沿用 Host 能力位 + 编辑模态；远程节点角色在中心面板改、节点拉取应用。
+
+剩余可选：把 SINGBOX_API_URL 这类连接设置也纳入面板/profile 可视化；以及给 host 增加"WG 内网 IP 作 clash 监听"的更细控制。
+
+**架构方案全部目标完成（含单一二进制 + 托管 sing-box 路线 A）。**
 
 下方为原始设计。
 

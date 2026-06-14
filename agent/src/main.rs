@@ -1,10 +1,13 @@
-//! sb-easy-agent: Configuration sync agent for sing-box hosts.
+//! sb-easy-agent: standalone configuration sync agent for sing-box hosts.
+//!
+//! DEPRECATED: prefer `sb-easy agent` (the agent folded into the main binary),
+//! which also supervises sing-box in process so a node runs only one thing.
+//! This standalone binary is kept for compatibility; it writes the config and
+//! runs an external reload command instead of supervising sing-box.
 //!
 //! Authenticates with its per-host `AGENT_TOKEN`, polls the sb-easy server for
 //! this host's sing-box configuration, writes it when changed, reloads sing-box,
 //! and reports status back on each cycle.
-//!
-//! Usage: sb-easy-agent [--server URL] [--interval SECONDS]
 
 use std::process::Command;
 use std::time::Duration;

@@ -17,6 +17,26 @@ COPY migrations migrations/
 RUN cargo build --release -p sb-easy && \
     cp target/release/sb-easy /sb-easy
 
+# ===== Stage 1b: Bundle sing-box binary =====
+# So the image ships one artifact: sb-easy can supervise sing-box itself
+# (SINGBOX_MANAGED=true) with no separate sing-box install.
+FROM debian:bookworm-slim AS singbox
+ARG SINGBOX_VERSION=1.13.12
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) A=amd64 ;; \
+      arm64) A=arm64 ;; \
+      arm) A=armv7 ;; \
+      *) A=amd64 ;; \
+    esac; \
+    curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${A}.tar.gz" -o /tmp/sb.tgz; \
+    tar -xzf /tmp/sb.tgz -C /tmp; \
+    install -m 0755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-${A}/sing-box" /usr/local/bin/sing-box; \
+    /usr/local/bin/sing-box version
+
 # ===== Stage 2: Build Frontend =====
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
@@ -42,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=backend-builder /sb-easy /usr/local/bin/sb-easy
+COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 COPY migrations /app/migrations
 COPY docker-entrypoint.sh /docker-entrypoint.sh

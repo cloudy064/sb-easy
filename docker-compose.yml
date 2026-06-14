@@ -1,46 +1,47 @@
-version: '3.8'
+# sb-easy — all-in-one panel that supervises the bundled sing-box in process.
+# No separate sing-box install: the image contains and manages it.
+#
+# Host networking is used because sb-easy is a VPN gateway: the WireGuard hub
+# (UDP 51820), sing-box tun, and Clash API all need to live in the host network
+# namespace, exactly like a bare-metal install.
+#
+# Quick start:
+#   JWT_SECRET=$(openssl rand -hex 32) EXTERNAL_HOSTNAME=your.host \
+#     docker compose up -d --build
+#
+# NOTE: do not run this on a box that already runs sing-box on :9090 / a tun —
+# the managed instance would conflict. Stop the old one first.
 
 services:
   sb-easy:
     build: .
+    image: sb-easy:latest
     container_name: sb-easy
     restart: unless-stopped
-    ports:
-      - "51821:51821/tcp"       # Web UI (same port as wg-easy)
-      - "51820:51820/udp"       # WireGuard UDP
+    network_mode: host
     cap_add:
-      - NET_ADMIN              # Required for `wg` and `iptables`
-      - SYS_MODULE             # For WireGuard kernel module
-    volumes:
-      - /etc/wireguard:/etc/wireguard:rw
-      - sb-easy-data:/app/data
-    environment:
-      - BIND_ADDR=0.0.0.0:51821
-      - DATABASE_URL=sqlite:/app/data/sb-easy.db?mode=rwc
-      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
-      - WG_INTERFACE=wg0
-      - WG_PORT=51820
-      - WG_ADDRESS=10.59.32.1/24
-      - WG_DNS=10.59.32.1
-      - WG_MTU=1420
-      - WG_POST_UP=iptables -t nat -A POSTROUTING -s 10.59.32.0/24 -o eth0 -j MASQUERADE; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT
-      - WG_POST_DOWN=iptables -t nat -D POSTROUTING -s 10.59.32.0/24 -o eth0 -j MASQUERADE; iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT
-      - SINGBOX_API_URL=http://10.168.1.5:9090
-      - SINGBOX_API_SECRET=${SINGBOX_API_SECRET:-}
-      - EXTERNAL_HOSTNAME=39.108.98.208
-      - RUST_LOG=info
+      - NET_ADMIN          # wg / ip / iptables / tun
+      - SYS_MODULE         # load the wireguard kernel module if absent
+    devices:
+      - /dev/net/tun:/dev/net/tun   # sing-box tun inbound
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ./data:/app/data            # DB + generated sing-box config persist here
+    environment:
+      - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - EXTERNAL_HOSTNAME=${EXTERNAL_HOSTNAME:-127.0.0.1}
+      - SINGBOX_API_SECRET=${SINGBOX_API_SECRET:-}
+      - WG_PORT=51820
+      - WG_ADDRESS=10.59.32.1/24
+      - WG_DNS=10.59.32.1
+      # SINGBOX_MANAGED / SINGBOX_BIN / SINGBOX_API_URL default to managed mode
+      # via the image (see Dockerfile ENV); override here if needed.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:51821/api/system/status"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:51821/api/system/status"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 10s
-    network_mode: bridge
-
-volumes:
-  sb-easy-data:
-    name: sb-easy-data
+      start_period: 15s

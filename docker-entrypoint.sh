@@ -1,10 +1,9 @@
 #!/bin/sh
 set -e
 
-# Run database migrations
-echo "sb-easy entrypoint: running migrations..."
-# Migrations are embedded in the binary via sqlx::migrate!
-# They run automatically when the app starts.
+# Ensure persistent data dir exists (DB + generated sing-box config live here).
+mkdir -p /app/data
 
-# Start the application
+# Migrations run automatically on startup (embedded in the binary).
+# Managed mode (default) supervises the bundled sing-box in process.
 exec "$@"

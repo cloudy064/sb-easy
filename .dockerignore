@@ -1,0 +1,11 @@
+# Keep the build context small — these are rebuilt inside the image or unneeded.
+target/
+bin/
+frontend/node_modules/
+frontend/dist/
+data/
+.git/
+*.db
+*.db-*
+**/*.tsbuildinfo
+.env

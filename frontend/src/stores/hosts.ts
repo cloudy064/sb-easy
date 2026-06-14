@@ -22,7 +22,7 @@ export const useHostsStore = defineStore('hosts', () => {
     loading.value = true
     try {
       const { data } = await client.get('/hosts')
-      hosts.value = data
+      hosts.value = Array.isArray(data) ? data : []
     } finally {
       loading.value = false
     }
@@ -30,7 +30,7 @@ export const useHostsStore = defineStore('hosts', () => {
 
   async function fetchProfiles() {
     const { data } = await client.get('/hosts/profiles')
-    profiles.value = data
+    profiles.value = Array.isArray(data) ? data : []
   }
 
   async function createProfile(name: string, template: unknown): Promise<ConfigProfile> {

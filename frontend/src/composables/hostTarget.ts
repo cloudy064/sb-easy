@@ -14,7 +14,8 @@ export function useHostTarget() {
     const { data } = await client.get('/hosts')
     // Only hosts that run sing-box can serve live data; a non-self host needs a
     // reachable Clash API (over WG) to actually return anything.
-    hosts.value = (data as Host[]).filter((h) => h.capabilities?.runs_singbox)
+    const list = Array.isArray(data) ? (data as Host[]) : []
+    hosts.value = list.filter((h) => h.capabilities?.runs_singbox)
     if (!hosts.value.some((h) => h.id === selectedHost.value)) {
       selectedHost.value = 'self'
     }

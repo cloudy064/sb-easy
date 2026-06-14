@@ -1,5 +1,8 @@
 //! Aggregate all API routers into the main application router.
 use axum::{middleware, Router};
+use axum::routing::any;
+use axum::http::StatusCode;
+use axum::Json;
 
 use crate::AppState;
 
@@ -41,5 +44,15 @@ pub fn build(state: AppState) -> Router {
             auth::auth_middleware,
         ));
 
-    public.merge(protected).with_state(state)
+    // Catch-all for unmatched /api/* paths. Without this they fall through to the
+    // SPA fallback (index.html, 200) and the frontend silently parses HTML as
+    // JSON — e.g. a stale binary missing a route would blank the page. Specific
+    // routes above take precedence over this wildcard.
+    let api_fallback = Router::new().route("/api/{*rest}", any(api_not_found));
+
+    public.merge(protected).merge(api_fallback).with_state(state)
+}
+
+async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not found" })))
 }

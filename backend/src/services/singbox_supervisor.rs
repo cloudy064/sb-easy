@@ -1,12 +1,12 @@
 //! In-process sing-box supervisor.
 //!
-//! When `SINGBOX_MANAGED=true`, sb-easy owns the sing-box lifecycle itself: it
-//! renders the `self` host's config, spawns `sing-box run -c <path>`, reloads it
-//! on config change (SIGHUP), and respawns it if it crashes. The operator runs
-//! and manages only sb-easy — there is no separate sing-box service.
+//! sb-easy can own the sing-box lifecycle itself: write the config, spawn
+//! `sing-box run -c <path>`, reload it on config change (SIGHUP), and respawn it
+//! if it crashes. The operator runs and manages only sb-easy — there is no
+//! separate sing-box service.
 //!
-//! This supersedes the external-reload self-agent (which shells out to
-//! systemctl). Disabled by default so existing deployments are unaffected.
+//! Used in two places: the panel's `self` host (when SINGBOX_MANAGED=true) and
+//! agent mode (`sb-easy agent`), both via the reusable `Singbox` handle.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -17,61 +17,69 @@ use tracing::{error, info, warn};
 use crate::services::self_agent::render_self;
 use crate::AppState;
 
-/// Default config path when SELF_SINGBOX_CONFIG_PATH is not set.
-const DEFAULT_CONFIG_PATH: &str = "data/sing-box.gen.json";
+/// Default config path when none is configured.
+pub const DEFAULT_CONFIG_PATH: &str = "data/sing-box.gen.json";
 
-pub async fn run(state: AppState) {
-    if !state.cfg.singbox_managed {
-        return;
+/// A supervised sing-box process: write config, reload, respawn.
+pub struct Singbox {
+    bin: String,
+    config_path: String,
+    child: Option<Child>,
+}
+
+impl Singbox {
+    pub fn new(bin: String, config_path: String) -> Self {
+        Self { bin, config_path, child: None }
     }
-    let bin = state.cfg.singbox_bin.clone();
-    let path = {
-        let p = state.cfg.self_singbox_config_path.trim();
-        if p.is_empty() { DEFAULT_CONFIG_PATH.to_string() } else { p.to_string() }
-    };
-    let interval = Duration::from_secs(state.cfg.self_singbox_interval);
-    info!("sing-box supervisor enabled: bin={bin} config={path} (every {}s)", state.cfg.self_singbox_interval);
 
-    let mut child: Option<Child> = None;
-    let mut last_etag = String::new();
+    /// Write the config and load it: SIGHUP-reload a live child, else spawn one.
+    pub async fn apply(&mut self, config_str: &str) -> std::io::Result<()> {
+        tokio::fs::write(&self.config_path, config_str).await?;
+        if self.is_alive() {
+            info!("config changed → reloading sing-box");
+            self.reload_now();
+        } else {
+            self.child = spawn(&self.bin, &self.config_path);
+        }
+        Ok(())
+    }
 
-    loop {
-        // 1. Desired config changed? Write it and reload (or start) sing-box.
-        if let Some((etag, config_str)) = render_self(&state).await {
-            if etag != last_etag {
-                if let Err(e) = tokio::fs::write(&path, &config_str).await {
-                    error!("sing-box config write to {path} failed: {e}");
-                } else {
-                    last_etag = etag;
-                    let alive = child.as_mut().map(is_alive).unwrap_or(false);
-                    if alive {
-                        info!("config changed → reloading sing-box");
-                        if let Some(c) = child.as_ref() {
-                            reload(c);
-                        }
-                    } else {
-                        child = spawn(&bin, &path);
-                    }
-                }
+    /// Respawn if the process exited unexpectedly. Call each tick.
+    pub fn ensure_alive(&mut self) {
+        if let Some(c) = self.child.as_mut() {
+            if let Ok(Some(status)) = c.try_wait() {
+                warn!("sing-box exited ({status}) — respawning");
+                self.child = spawn(&self.bin, &self.config_path);
             }
         }
+    }
 
-        // 2. Keep it alive: respawn if it exited unexpectedly.
-        match child.as_mut() {
-            Some(c) => {
-                if let Ok(Some(status)) = c.try_wait() {
-                    warn!("sing-box exited ({status}) — respawning");
-                    child = spawn(&bin, &path);
-                }
-            }
-            None if !last_etag.is_empty() => {
-                // Config exists but no process (initial spawn failed) — retry.
-                child = spawn(&bin, &path);
-            }
-            None => {}
+    /// Start the process if it isn't running (config must already be written).
+    pub fn start_if_stopped(&mut self) {
+        if !self.is_alive() {
+            self.child = spawn(&self.bin, &self.config_path);
         }
+    }
 
-        tokio::time::sleep(interval).await;
+    /// SIGHUP the child so it re-reads its config in place.
+    pub fn reload_now(&self) {
+        if let Some(pid) = self.child.as_ref().and_then(|c| c.id()) {
+            let _ = std::process::Command::new("kill")
+                .args(["-HUP", &pid.to_string()])
+                .status();
+        }
+    }
+
+    /// Hard restart: kill then respawn.
+    pub async fn restart(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill().await;
+        }
+        self.child = spawn(&self.bin, &self.config_path);
+    }
+
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.as_mut().map(|c| c.try_wait()), Some(Ok(None)))
     }
 }
 
@@ -80,7 +88,6 @@ fn spawn(bin: &str, config_path: &str) -> Option<Child> {
     match Command::new(bin)
         .args(["run", "-c", config_path])
         .stdin(Stdio::null())
-        .kill_on_drop(false)
         .spawn()
     {
         Ok(c) => {
@@ -94,15 +101,33 @@ fn spawn(bin: &str, config_path: &str) -> Option<Child> {
     }
 }
 
-fn is_alive(c: &mut Child) -> bool {
-    matches!(c.try_wait(), Ok(None))
-}
+/// Panel-side supervisor loop for the built-in `self` host (SINGBOX_MANAGED=true).
+pub async fn run(state: AppState) {
+    if !state.cfg.singbox_managed {
+        return;
+    }
+    let path = {
+        let p = state.cfg.self_singbox_config_path.trim();
+        if p.is_empty() { DEFAULT_CONFIG_PATH.to_string() } else { p.to_string() }
+    };
+    let interval = Duration::from_secs(state.cfg.self_singbox_interval);
+    info!(
+        "sing-box supervisor enabled: bin={} config={path} (every {}s)",
+        state.cfg.singbox_bin, state.cfg.self_singbox_interval
+    );
 
-/// Ask sing-box to reload its config in place (SIGHUP). Falls back to nothing if
-/// the pid is unavailable; the next loop tick will respawn if it died.
-fn reload(c: &Child) {
-    let Some(pid) = c.id() else { return };
-    let _ = std::process::Command::new("kill")
-        .args(["-HUP", &pid.to_string()])
-        .status();
+    let mut sb = Singbox::new(state.cfg.singbox_bin.clone(), path);
+    let mut last_etag = String::new();
+    loop {
+        if let Some((etag, config_str)) = render_self(&state).await {
+            if etag != last_etag {
+                match sb.apply(&config_str).await {
+                    Ok(_) => last_etag = etag,
+                    Err(e) => error!("sing-box config write failed: {e}"),
+                }
+            }
+        }
+        sb.ensure_alive();
+        tokio::time::sleep(interval).await;
+    }
 }

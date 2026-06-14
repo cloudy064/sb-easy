@@ -12,7 +12,6 @@ use axum::{
 use axum::routing::{get, post};
 use chrono::Utc;
 
-use crate::api::hosts::{host_outbound_nodes, host_profile_template};
 use crate::error::{AppError, Result};
 use crate::models::host::{AgentStatusReport, CommandAck, Host, HostCommand};
 use crate::services::proxy_config;
@@ -38,9 +37,7 @@ async fn agent_config(
 
     let host = resolve_host(&state, &headers).await?;
 
-    let nodes = host_outbound_nodes(&state, &host.id).await?;
-    let template = host_profile_template(&state, &host).await;
-    let config = proxy_config::render_host_config(&template, &nodes);
+    let config = crate::api::hosts::render_host_served(&state, &host).await;
     let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
 
     // ETag scoped per host so different hosts get independent caching.

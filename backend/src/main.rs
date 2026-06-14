@@ -12,6 +12,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod agent_mode;
 mod api;
 mod auth;
 mod config;
@@ -66,6 +67,15 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    let _ = dotenvy::dotenv();
+
+    // `sb-easy agent` runs this same binary as a managed node (no panel): it
+    // pulls config from a remote panel and supervises sing-box in process.
+    if std::env::args().nth(1).as_deref() == Some("agent") {
+        info!("sb-easy v{} starting (agent mode)", env!("CARGO_PKG_VERSION"));
+        return agent_mode::run().await;
+    }
 
     let cfg = config::Config::from_env()?;
     info!("sb-easy v{} starting", env!("CARGO_PKG_VERSION"));

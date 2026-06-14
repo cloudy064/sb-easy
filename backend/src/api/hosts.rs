@@ -375,11 +375,30 @@ async fn fetch_host(state: &AppState, id: &str) -> Result<Host> {
         .ok_or_else(|| AppError::NotFound("Host not found".into()))
 }
 
-/// Compute the ETag of the config the server would currently serve to a host.
-pub async fn expected_config_etag(state: &AppState, host: &Host) -> String {
+/// Render the exact config served to a host: its assigned outbounds injected
+/// into its profile, plus `experimental.clash_api` so the host's sing-box
+/// exposes the control API the panel reaches (over WG for remote hosts). Single
+/// source of truth for the agent endpoint and drift detection.
+pub async fn render_host_served(state: &AppState, host: &Host) -> serde_json::Value {
+    use crate::services::proxy_config;
     let nodes = host_outbound_nodes(state, &host.id).await.unwrap_or_default();
     let template = host_profile_template(state, host).await;
-    let config = crate::services::proxy_config::render_host_config(&template, &nodes);
+    let mut config = proxy_config::render_host_config(&template, &nodes);
+    // Where this host's sing-box should expose its Clash API. Prefer the address
+    // the panel will reach it at (host.clash_api); else listen on all interfaces.
+    let controller = host
+        .clash_api
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(proxy_config::controller_addr)
+        .unwrap_or_else(|| "0.0.0.0:9090".to_string());
+    proxy_config::inject_clash_api(&mut config, &controller, &host.clash_secret);
+    config
+}
+
+/// Compute the ETag of the config the server would currently serve to a host.
+pub async fn expected_config_etag(state: &AppState, host: &Host) -> String {
+    let config = render_host_served(state, host).await;
     let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
     crate::services::proxy_config::config_etag(&host.id, &config_str, &state.cfg.config_hash_seed)
 }

@@ -8,6 +8,7 @@ export interface CreateHostBody {
   capabilities?: Partial<HostCapabilities>
   profile_id?: string
   wg_address?: string
+  wg_endpoint?: string
   clash_api?: string
   clash_secret?: string
 }

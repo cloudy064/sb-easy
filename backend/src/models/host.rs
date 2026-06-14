@@ -60,6 +60,9 @@ pub struct CreateHostRequest {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub wg_address: Option<String>,
+    /// Public `host:port` this host can be dialed at — promotes it to a mesh peer.
+    #[serde(default)]
+    pub wg_endpoint: Option<String>,
     #[serde(default)]
     pub clash_api: Option<String>,
     #[serde(default)]

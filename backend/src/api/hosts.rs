@@ -88,8 +88,8 @@ async fn create_host(
     let profile_id = req.profile_id.unwrap_or_else(|| "default".into());
 
     sqlx::query(
-        "INSERT INTO hosts (id, name, agent_token, capabilities, profile_id, wg_address, clash_api, clash_secret, enabled, created_at, updated_at) \
-         VALUES (?,?,?,?,?,?,?,?,1,?,?)",
+        "INSERT INTO hosts (id, name, agent_token, capabilities, profile_id, wg_address, wg_endpoint, clash_api, clash_secret, enabled, created_at, updated_at) \
+         VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
     )
     .bind(&id)
     .bind(&req.name)
@@ -97,6 +97,7 @@ async fn create_host(
     .bind(&caps_str)
     .bind(&profile_id)
     .bind(&req.wg_address)
+    .bind(req.wg_endpoint.as_deref().filter(|e| !e.trim().is_empty()))
     .bind(&req.clash_api)
     .bind(req.clash_secret.unwrap_or_default())
     .bind(&now)

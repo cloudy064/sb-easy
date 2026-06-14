@@ -37,6 +37,7 @@
           <span v-if="h.capabilities.is_self" class="cap-badge cap-self">SELF</span>
           <span v-if="h.capabilities.is_wg_hub" class="cap-badge cap-hub">WG HUB</span>
           <span v-if="h.capabilities.is_wg_member" class="cap-badge cap-wg">WG</span>
+          <span v-if="h.wg_endpoint" class="cap-badge cap-mesh" :title="h.wg_endpoint">MESH</span>
           <span v-if="h.capabilities.runs_singbox" class="cap-badge cap-sb">sing-box</span>
           <span class="cap-badge cap-out">{{ h.assigned_outbounds ? h.assigned_outbounds + ' proxies' : 'all proxies' }}</span>
           <span v-if="h.config_drift" class="cap-badge cap-drift" :title="t('hosts.drift.hint')">{{ t('hosts.drift') }}</span>
@@ -76,6 +77,8 @@
             <div class="form-group"><label>{{ t('hosts.clash') }}</label><input v-model="form.clash_api" placeholder="http://10.59.32.10:9090" /></div>
           </div>
           <p class="text-xs text-muted" style="margin:-0.4rem 0 0.9rem">{{ t('hosts.clash.hint') }}</p>
+          <div class="form-group"><label>{{ t('hosts.endpoint') }}</label><input v-model="form.wg_endpoint" placeholder="203.0.113.10:51820" /></div>
+          <p class="text-xs text-muted" style="margin:-0.4rem 0 0.9rem">{{ t('hosts.endpoint.hint') }}</p>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreate = false">{{ t('action.cancel') }}</button>
             <button type="submit" class="btn-primary">{{ t('hosts.create') }}</button>
@@ -177,6 +180,7 @@ const form = ref({
   profile_id: 'default',
   caps: { runs_singbox: true, is_wg_member: true },
   wg_address: '',
+  wg_endpoint: '',
   clash_api: '',
 })
 
@@ -185,7 +189,7 @@ onMounted(async () => {
 })
 
 function openCreate() {
-  form.value = { name: '', profile_id: 'default', caps: { runs_singbox: true, is_wg_member: true }, wg_address: '', clash_api: '' }
+  form.value = { name: '', profile_id: 'default', caps: { runs_singbox: true, is_wg_member: true }, wg_address: '', wg_endpoint: '', clash_api: '' }
   showCreate.value = true
 }
 
@@ -195,6 +199,7 @@ async function doCreate() {
     profile_id: form.value.profile_id,
     capabilities: { ...form.value.caps },
     wg_address: form.value.wg_address || undefined,
+    wg_endpoint: form.value.wg_endpoint || undefined,
     clash_api: form.value.clash_api || undefined,
   })
   showCreate.value = false
@@ -298,6 +303,7 @@ async function doDelete() {
 .cap-self { background: var(--accent-subtle); color: var(--accent); }
 .cap-hub  { background: #faf2e0; color: #8a6c2c; }
 .cap-wg   { background: #e8f0fe; color: #3c6ea8; }
+.cap-mesh { background: #ecf4f7; color: #4a6c7c; }
 .cap-sb   { background: #e8f5e8; color: #4a7c4a; }
 .cap-out  { background: var(--paper-border); color: var(--ink-muted); }
 .cap-drift { background: var(--bad-bg); color: var(--bad); }

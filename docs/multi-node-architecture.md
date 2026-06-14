@@ -18,7 +18,20 @@
 
 构建验证：`cargo build`（backend+agent）通过；前端 `vue-tsc` + `vite build` 通过。运行时冒烟：迁移/seed、per-host 配置渲染、ETag 304、按机出站分配、agent 鉴权（401/200）、状态上报、全局 token 向后兼容、`?host=` 路由解析、WG host-peer provision/deprovision 全生命周期（含 update 切换成员）、wg-config 下发，均无 panic。
 
-**阶段1 + 阶段2 全部落地。** 配置变更感知按用户决策用短间隔轮询（10s）解决，不做长连 push。后续阶段3 可选增强：下行命令通道（restart/测速）、配置漂移检测、多 hub/站点互联、Profile 可视化编辑。
+**阶段1 + 阶段2 全部落地。** 配置变更感知按用户决策用短间隔轮询（10s）解决，不做长连 push。
+
+### 阶段3（2026-06-14 全部完成）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| #1 下行命令通道 | ✅ | `host_commands` 队列（migration 004）；面板入队 reload/restart，agent 轮询拉取执行 + ack 回报（含跨主机 ack 守卫、self 拒绝、命令白名单）；UI Reload/Restart 按钮 |
+| #2 Profile 可视化编辑 | ✅ | `config_profiles` CRUD（模板 JSON 对象校验、default 保护、删除回退）；前端 Profiles 视图 + JSON 编辑器 |
+| #3 配置漂移检测 | ✅ | 抽出共享 `config_etag()`；对比 agent 上报的运行 etag 与服务器当前期望 etag，主机列表标 `config_drift` + UI 徽标 |
+| #4 多 hub / 站点互联 | ✅ | hub 中转的 site-to-site 本已可用；新增 **mesh 直连**：有公网 `wg_endpoint` 的 host 互相生成直接 `[Peer]`（/32 比 hub /24 更具体，WireGuard 自动选直连），对称配对（O 有 endpoint 或本机有 endpoint 才配），NAT 双方回退 hub；公网 host 自动加 `ListenPort`；UI 可填公网端点 + MESH 徽标 |
+
+阶段3 验证：命令通道全生命周期 + 守卫、Profile CRUD + 渲染、漂移三态（同步/改配置/重拉）、mesh 配置生成（公网+NAT 混合拓扑对称性），均 `cargo build`+前端构建通过、运行时无 panic。
+
+**至此阶段1+2+3 全部完成。** 仅 self 主机的进程内 sing-box 直管为内置 agent 的薄实现（当前 self 配置变更后未自动本地 reload，可后续补）；其余架构目标均落地。
 
 下方为原始设计。
 

@@ -397,14 +397,28 @@ pub async fn deprovision_host_peer(pool: &sqlx::SqlitePool, cfg: &Config, host_i
     }
 }
 
-/// Generate the WG config a managed host installs. Unlike a client config it
-/// routes only the intranet subnet (AllowedIPs = WG subnet), not all traffic.
+/// Generate the WG config a managed host installs.
+///
+/// Connectivity model:
+/// - Hub peer (the central server): `AllowedIPs = <subnet>`, so by default the
+///   whole intranet is reached through the hub (site-to-site via relay).
+/// - Mesh peers: every *other* host that advertises a public `wg_endpoint` is
+///   added as a direct `[Peer]` with `AllowedIPs = <that host>/32`. WireGuard
+///   prefers the most specific route, so traffic to a directly-reachable host
+///   goes peer-to-peer while everything else still falls back to the hub.
+/// A host that itself has a public endpoint also gets a `ListenPort` so others
+/// can dial it.
 pub async fn generate_host_wg_config(pool: &sqlx::SqlitePool, cfg: &Config, host_id: &str) -> Result<String> {
     let peer = sqlx::query_as::<_, WireGuardPeer>("SELECT * FROM wireguard_peers WHERE host_id = ?")
         .bind(host_id)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Host has no WireGuard peer".into()))?;
+
+    let this_host = sqlx::query_as::<_, crate::models::Host>("SELECT * FROM hosts WHERE id = ?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?;
 
     let server_pubkey = load_or_generate_server_key(pool)
         .await
@@ -420,7 +434,13 @@ pub async fn generate_host_wg_config(pool: &sqlx::SqlitePool, cfg: &Config, host
     if cfg.wg_mtu > 0 {
         c.push_str(&format!("MTU = {}\n", cfg.wg_mtu));
     }
-    c.push_str("\n[Peer]\n");
+    // If this host is directly reachable, listen so mesh peers can dial it.
+    if let Some(port) = this_host.as_ref().and_then(|h| endpoint_port(h.wg_endpoint.as_deref())) {
+        c.push_str(&format!("ListenPort = {}\n", port));
+    }
+
+    // Hub peer (the central server).
+    c.push_str("\n# Hub (central server)\n[Peer]\n");
     c.push_str(&format!("PublicKey = {}\n", server_pubkey));
     if let Some(ref psk) = peer.preshared_key {
         if !psk.is_empty() {
@@ -430,7 +450,47 @@ pub async fn generate_host_wg_config(pool: &sqlx::SqlitePool, cfg: &Config, host
     c.push_str(&format!("AllowedIPs = {}\n", subnet));
     c.push_str(&format!("Endpoint = {}:{}\n", cfg.external_hostname, cfg.wg_port));
     c.push_str("PersistentKeepalive = 25\n");
+
+    // Mesh peers. Include another host O as a direct peer when EITHER we can dial
+    // it (O has a public endpoint) OR it can dial us (this host has one) — so the
+    // pairing is symmetric and both ends accept the tunnel. Two NAT-bound hosts
+    // (neither has an endpoint) are simply omitted and fall back to the hub.
+    let this_has_endpoint = this_host
+        .as_ref()
+        .and_then(|h| endpoint_port(h.wg_endpoint.as_deref()))
+        .is_some();
+    let others = sqlx::query_as::<_, crate::models::Host>(
+        "SELECT * FROM hosts WHERE id != ? AND enabled = 1 AND wg_public_key IS NOT NULL AND wg_address IS NOT NULL",
+    )
+    .bind(host_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for o in others {
+        let (Some(pk), Some(addr)) = (o.wg_public_key.as_deref(), o.wg_address.as_deref()) else {
+            continue;
+        };
+        let o_endpoint = o.wg_endpoint.as_deref().filter(|e| endpoint_port(Some(e)).is_some());
+        if o_endpoint.is_none() && !this_has_endpoint {
+            continue; // neither side is dialable → relay via hub
+        }
+        let ip32 = format!("{}/32", addr.split('/').next().unwrap_or(addr));
+        c.push_str(&format!("\n# Mesh: {}\n[Peer]\n", o.name));
+        c.push_str(&format!("PublicKey = {}\n", pk));
+        c.push_str(&format!("AllowedIPs = {}\n", ip32));
+        if let Some(ep) = o_endpoint {
+            c.push_str(&format!("Endpoint = {}\n", ep));
+        }
+        c.push_str("PersistentKeepalive = 25\n");
+    }
+
     Ok(c)
+}
+
+/// Extract the port from a "host:port" endpoint, if present and valid.
+fn endpoint_port(endpoint: Option<&str>) -> Option<u16> {
+    endpoint?.rsplit_once(':').and_then(|(_, p)| p.trim().parse::<u16>().ok())
 }
 
 // ── IP pool ─────────────────────────────────────────────────

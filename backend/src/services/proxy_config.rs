@@ -251,6 +251,96 @@ pub fn controller_addr(api_url: &str) -> String {
         .to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::proxy_node::ProxyNode;
+
+    fn node(tag: &str, node_type: &str, cfg: serde_json::Value) -> ProxyNode {
+        ProxyNode {
+            id: format!("id-{tag}"),
+            tag: tag.into(),
+            node_type: node_type.into(),
+            enabled: true,
+            server: "1.2.3.4".into(),
+            server_port: 443,
+            protocol_config: cfg.to_string(),
+            subscription_id: None,
+            fingerprint: format!("fp-{tag}"),
+            latency: None,
+            last_latency_test: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn outbound_has_type_and_tag() {
+        let ss = generate_outbound(&node("hk", "shadowsocks", json!({"method":"aes-256-gcm","password":"p"})));
+        assert_eq!(ss["type"], "shadowsocks");
+        assert_eq!(ss["tag"], "hk");
+        assert_eq!(ss["method"], "aes-256-gcm");
+    }
+
+    #[test]
+    fn render_empty_falls_back_to_direct() {
+        let cfg = render_host_config(&default_profile_template(), &[]);
+        let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap()
+            .iter().filter_map(|o| o["tag"].as_str()).collect();
+        assert!(tags.contains(&"direct"));
+        assert!(!tags.contains(&"Proxy"));
+        // final must not dangle on a missing Proxy selector.
+        assert_eq!(cfg["route"]["final"], "direct");
+    }
+
+    #[test]
+    fn render_with_proxies_adds_auto_and_proxy() {
+        let nodes = vec![node("hk", "shadowsocks", json!({"method":"aes-256-gcm","password":"p"}))];
+        let cfg = render_host_config(&default_profile_template(), &nodes);
+        let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap()
+            .iter().filter_map(|o| o["tag"].as_str()).collect();
+        assert!(tags.contains(&"hk"));
+        assert!(tags.contains(&"Auto"));
+        assert!(tags.contains(&"Proxy"));
+        assert_eq!(cfg["route"]["final"], "Proxy");
+    }
+
+    #[test]
+    fn clash_api_injected_when_absent() {
+        let mut cfg = json!({"log": {"level": "info"}});
+        inject_clash_api(&mut cfg, "127.0.0.1:9090", "sec");
+        assert_eq!(cfg["experimental"]["clash_api"]["external_controller"], "127.0.0.1:9090");
+        assert_eq!(cfg["experimental"]["clash_api"]["secret"], "sec");
+    }
+
+    #[test]
+    fn clash_api_not_clobbered_when_present() {
+        let mut cfg = json!({"experimental": {"clash_api": {"external_controller": "0.0.0.0:9090", "secret": "mine"}}});
+        inject_clash_api(&mut cfg, "127.0.0.1:9090", "other");
+        // existing controller/secret preserved
+        assert_eq!(cfg["experimental"]["clash_api"]["external_controller"], "0.0.0.0:9090");
+        assert_eq!(cfg["experimental"]["clash_api"]["secret"], "mine");
+    }
+
+    #[test]
+    fn controller_addr_strips_scheme() {
+        assert_eq!(controller_addr("http://127.0.0.1:9090"), "127.0.0.1:9090");
+        assert_eq!(controller_addr("https://10.0.0.1:9090/"), "10.0.0.1:9090");
+        assert_eq!(controller_addr("127.0.0.1:9090"), "127.0.0.1:9090");
+    }
+
+    #[test]
+    fn etag_is_deterministic_and_host_scoped() {
+        let a = config_etag("self", "{\"x\":1}", "seed");
+        let b = config_etag("self", "{\"x\":1}", "seed");
+        let other_host = config_etag("edge", "{\"x\":1}", "seed");
+        let other_body = config_etag("self", "{\"x\":2}", "seed");
+        assert_eq!(a, b);
+        assert_ne!(a, other_host);
+        assert_ne!(a, other_body);
+    }
+}
+
 /// Inject `experimental.clash_api` so the running sing-box exposes the control
 /// API the panel talks to (live traffic/connections/logs, proxy switching).
 /// No-op if the config already declares a clash_api (full-mode profiles keep

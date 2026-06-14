@@ -122,3 +122,49 @@ pub async fn ensure_default_user(pool: &SqlitePool, cfg: &Config) -> Result<()> 
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_hash_roundtrip() {
+        let hash = hash_password("correct horse battery staple").unwrap();
+        assert!(verify_password("correct horse battery staple", &hash).unwrap());
+        assert!(!verify_password("wrong password", &hash).unwrap());
+    }
+
+    #[test]
+    fn password_hash_is_salted() {
+        // Same password hashes differently (random salt) but both verify.
+        let h1 = hash_password("pw").unwrap();
+        let h2 = hash_password("pw").unwrap();
+        assert_ne!(h1, h2);
+        assert!(verify_password("pw", &h1).unwrap());
+        assert!(verify_password("pw", &h2).unwrap());
+    }
+
+    #[test]
+    fn jwt_roundtrip() {
+        let secret = "test-secret";
+        let token = create_token("uid-1", "alice", "admin", secret).unwrap();
+        let claims = verify_token(&token, secret).unwrap();
+        assert_eq!(claims.sub, "uid-1");
+        assert_eq!(claims.username, "alice");
+        assert_eq!(claims.role, "admin");
+    }
+
+    #[test]
+    fn jwt_rejects_wrong_secret() {
+        let token = create_token("uid-1", "alice", "admin", "secret-a").unwrap();
+        assert!(verify_token(&token, "secret-b").is_err());
+    }
+
+    #[test]
+    fn jwt_rejects_tampered_token() {
+        let token = create_token("uid-1", "alice", "admin", "s").unwrap();
+        let mut t = token.clone();
+        t.push('x');
+        assert!(verify_token(&t, "s").is_err());
+    }
+}

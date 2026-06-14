@@ -631,3 +631,53 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subnet_derivation() {
+        assert_eq!(wg_subnet("10.59.32.1/24"), "10.59.32.0/24");
+        // non-/24 keeps the given host (we don't zero arbitrary prefixes)
+        assert_eq!(wg_subnet("10.0.0.5/16"), "10.0.0.5/16");
+        assert_eq!(wg_subnet("nonsense"), "nonsense");
+    }
+
+    #[test]
+    fn keypair_public_matches_derivation() {
+        let (private, public) = generate_keypair().unwrap();
+        assert_eq!(public_key_from_private(&private).unwrap(), public);
+    }
+
+    #[test]
+    fn endpoint_port_parsing() {
+        assert_eq!(endpoint_port(Some("1.2.3.4:51820")), Some(51820));
+        assert_eq!(endpoint_port(Some("host.example:443")), Some(443));
+        assert_eq!(endpoint_port(Some("no-colon")), None);
+        assert_eq!(endpoint_port(Some("host:notaport")), None);
+        assert_eq!(endpoint_port(None), None);
+    }
+
+    fn peer_with_expiry(expire_at: Option<&str>) -> WireGuardPeer {
+        WireGuardPeer {
+            id: "p".into(), name: "p".into(),
+            private_key: "k".into(), public_key: "k".into(), preshared_key: None,
+            address: "10.59.32.2/32".into(), dns: "".into(), enabled: true,
+            persistent_keepalive: 25, allowed_ips: "0.0.0.0/0".into(),
+            expire_at: expire_at.map(|s| s.to_string()), quota_bytes: 0,
+            created_at: "now".into(), updated_at: "now".into(), notes: None,
+        }
+    }
+
+    #[test]
+    fn expiry_check() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(peer_expired(&peer_with_expiry(Some(&past)), now));
+        assert!(!peer_expired(&peer_with_expiry(Some(&future)), now));
+        assert!(!peer_expired(&peer_with_expiry(None), now));
+        assert!(!peer_expired(&peer_with_expiry(Some("")), now));
+    }
+}

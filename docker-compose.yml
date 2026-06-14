@@ -24,9 +24,9 @@ services:
       - SYS_MODULE         # load the wireguard kernel module if absent
     devices:
       - /dev/net/tun:/dev/net/tun   # sing-box tun inbound
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
+    # NOTE: with host networking, sysctls must be set on the HOST (the container
+    # can't set host-namespace sysctls). Ensure on the host:
+    #   net.ipv4.ip_forward=1   (and src_valid_mark=1 if you enable WireGuard)
     volumes:
       - ./data:/app/data            # DB + generated sing-box config persist here
     environment:
@@ -34,6 +34,7 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
       - EXTERNAL_HOSTNAME=${EXTERNAL_HOSTNAME:-127.0.0.1}
       - SINGBOX_API_SECRET=${SINGBOX_API_SECRET:-}
+      - WG_ENABLED=${WG_ENABLED:-true}
       - WG_PORT=51820
       - WG_ADDRESS=10.59.32.1/24
       - WG_DNS=10.59.32.1

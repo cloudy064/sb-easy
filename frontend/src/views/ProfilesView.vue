@@ -30,13 +30,79 @@
       <div class="modal modal-wide">
         <h3>{{ editor.id ? t('profiles.edit') : t('profiles.add') }}</h3>
         <div class="form-group"><label>{{ t('profiles.name') }}</label><input v-model="editor.name" placeholder="e.g. Exit node (mixed only)" /></div>
-        <div class="form-group">
-          <label>{{ t('profiles.template') }}</label>
-          <textarea v-model="editor.text" class="json-editor" spellcheck="false" @input="editor.error = ''"></textarea>
+
+        <div class="tabs">
+          <button :class="['tab', { active: editor.mode === 'form' }]" @click="switchMode('form')">{{ t('profiles.tab.form') }}</button>
+          <button :class="['tab', { active: editor.mode === 'raw' }]" @click="switchMode('raw')">{{ t('profiles.tab.raw') }}</button>
         </div>
-        <p class="text-xs" :class="editor.error ? 'json-err' : 'text-muted'">
-          {{ editor.error || t('profiles.template.hint') }}
-        </p>
+
+        <!-- FORM MODE -->
+        <div v-if="editor.mode === 'form'" class="form-body">
+          <div class="form-group">
+            <label>{{ t('profiles.log') }}</label>
+            <select v-model="model.log.level">
+              <option v-for="lv in ['trace','debug','info','warn','error','fatal']" :key="lv" :value="lv">{{ lv }}</option>
+            </select>
+          </div>
+
+          <!-- Inbounds -->
+          <div class="section-block">
+            <div class="flex-between"><h4>{{ t('profiles.inbounds') }}</h4><button class="btn-ghost btn-xs" @click="addInbound">+ {{ t('profiles.inbound.add') }}</button></div>
+            <div v-for="(inb, i) in model.inbounds" :key="i" class="row-card">
+              <div class="row-grid">
+                <select v-model="inb.type">
+                  <option v-for="tp in ['tun','mixed','http','socks']" :key="tp" :value="tp">{{ tp }}</option>
+                </select>
+                <input v-model="inb.tag" placeholder="tag" />
+                <input v-if="inb.type !== 'tun'" v-model="inb.listen" placeholder="listen (0.0.0.0)" />
+                <input v-if="inb.type !== 'tun'" v-model.number="inb.listen_port" type="number" placeholder="port" />
+                <button class="btn-danger btn-xs" @click="model.inbounds.splice(i,1)">✕</button>
+              </div>
+              <div v-if="inb.type === 'tun'" class="row-grid-tun">
+                <input :value="(inb.address||[]).join(', ')" @input="inb.address = splitList($event)" placeholder="address (172.20.0.1/30)" />
+                <select v-model="inb.stack"><option value="mixed">mixed</option><option value="system">system</option><option value="gvisor">gvisor</option></select>
+                <label class="chk"><input type="checkbox" v-model="inb.auto_route" /> auto_route</label>
+                <label class="chk"><input type="checkbox" v-model="inb.strict_route" /> strict_route</label>
+              </div>
+            </div>
+            <p v-if="!model.inbounds.length" class="text-xs text-muted">No inbounds.</p>
+          </div>
+
+          <!-- DNS -->
+          <div class="section-block">
+            <div class="flex-between"><h4>{{ t('profiles.dns') }}</h4><button class="btn-ghost btn-xs" @click="addDnsServer">+ {{ t('profiles.dns.add') }}</button></div>
+            <div v-for="(s, i) in model.dns.servers" :key="i" class="row-grid">
+              <input v-model="s.tag" placeholder="tag" />
+              <select v-model="s.type"><option value="udp">udp</option><option value="tcp">tcp</option><option value="https">https</option><option value="tls">tls</option></select>
+              <input v-model="s.server" placeholder="223.5.5.5" />
+              <button class="btn-danger btn-xs" @click="model.dns.servers.splice(i,1)">✕</button>
+            </div>
+            <div class="row-grid" style="margin-top:.5rem">
+              <input v-model="model.dns.final" placeholder="final (server tag)" />
+              <select v-model="model.dns.strategy"><option value="prefer_ipv4">prefer_ipv4</option><option value="prefer_ipv6">prefer_ipv6</option><option value="ipv4_only">ipv4_only</option><option value="ipv6_only">ipv6_only</option></select>
+            </div>
+          </div>
+
+          <!-- Route -->
+          <div class="section-block">
+            <h4>{{ t('profiles.route') }}</h4>
+            <div class="row-grid">
+              <input v-model="model.route.final" placeholder="final (Proxy)" />
+              <label class="chk"><input type="checkbox" v-model="model.route.auto_detect_interface" /> auto_detect_interface</label>
+            </div>
+            <p class="text-xs text-muted" style="margin-top:.5rem">
+              {{ t('profiles.route.rules') }}: {{ (model.route.rules || []).length }} — {{ t('profiles.route.rules.hint') }}
+            </p>
+          </div>
+        </div>
+
+        <!-- RAW MODE -->
+        <div v-else class="form-group">
+          <label>{{ t('profiles.template') }}</label>
+          <textarea v-model="editor.rawText" class="json-editor" spellcheck="false" @input="editor.error = ''"></textarea>
+        </div>
+
+        <p class="text-xs" :class="editor.error ? 'json-err' : 'text-muted'">{{ editor.error || t('profiles.template.hint') }}</p>
         <div class="modal-actions">
           <button class="btn-secondary" @click="editor.open = false">{{ t('action.cancel') }}</button>
           <button class="btn-primary" @click="save">{{ t('action.save') }}</button>
@@ -59,7 +125,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import type { ConfigProfile } from '../types'
@@ -69,13 +135,46 @@ const store = useHostsStore()
 const loading = ref(true)
 const deleteTarget = ref<ConfigProfile | null>(null)
 
-const editor = ref({ open: false, id: '', name: '', text: '', error: '' })
+const editor = ref({ open: false, id: '', name: '', mode: 'form' as 'form' | 'raw', rawText: '', error: '' })
 
-const TEMPLATE_SKELETON = {
-  log: { level: 'info', timestamp: true },
-  dns: { servers: [], final: '', strategy: 'prefer_ipv4' },
-  inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '0.0.0.0', listen_port: 7890 }],
-  route: { rules: [], final: 'Proxy', auto_detect_interface: true },
+// Structured working copy used by the form. Normalised so the template always
+// has the sections the form binds to; the raw tab edits the same data as JSON.
+const model = reactive<any>(emptyModel())
+
+function emptyModel() {
+  return {
+    log: { level: 'info', timestamp: true },
+    dns: { servers: [] as any[], final: '', strategy: 'prefer_ipv4' },
+    inbounds: [] as any[],
+    route: { rules: [] as any[], final: 'Proxy', auto_detect_interface: true },
+  }
+}
+
+/** Ensure the parsed object has the sections the form expects, without dropping
+ * any unknown keys the user may have in raw mode. */
+function normalize(obj: any) {
+  const m: any = obj && typeof obj === 'object' && !Array.isArray(obj) ? { ...obj } : {}
+  m.log = m.log && typeof m.log === 'object' ? m.log : { level: 'info' }
+  if (!m.log.level) m.log.level = 'info'
+  m.dns = m.dns && typeof m.dns === 'object' ? m.dns : {}
+  if (!Array.isArray(m.dns.servers)) m.dns.servers = []
+  if (m.dns.final == null) m.dns.final = ''
+  if (m.dns.strategy == null) m.dns.strategy = 'prefer_ipv4'
+  if (!Array.isArray(m.inbounds)) m.inbounds = []
+  m.route = m.route && typeof m.route === 'object' ? m.route : {}
+  if (!Array.isArray(m.route.rules)) m.route.rules = []
+  if (m.route.final == null) m.route.final = 'Proxy'
+  if (m.route.auto_detect_interface == null) m.route.auto_detect_interface = true
+  return m
+}
+
+function setModel(obj: any) {
+  Object.keys(model).forEach((k) => delete (model as any)[k])
+  Object.assign(model, normalize(obj))
+}
+
+function splitList(e: Event): string[] {
+  return (e.target as HTMLInputElement).value.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
 onMounted(async () => {
@@ -95,33 +194,67 @@ function summarize(template: string): string {
 }
 
 function openCreate() {
-  editor.value = { open: true, id: '', name: '', text: JSON.stringify(TEMPLATE_SKELETON, null, 2), error: '' }
+  setModel(emptyModel())
+  model.inbounds.push({ type: 'mixed', tag: 'mixed-in', listen: '0.0.0.0', listen_port: 7890 })
+  editor.value = { open: true, id: '', name: '', mode: 'form', rawText: '', error: '' }
 }
 function openEdit(p: ConfigProfile) {
-  let text = p.template
-  try { text = JSON.stringify(JSON.parse(p.template), null, 2) } catch { /* keep raw */ }
-  editor.value = { open: true, id: p.id, name: p.name, text, error: '' }
+  let obj: any = {}
+  try { obj = JSON.parse(p.template) } catch { /* fall back to empty */ }
+  setModel(obj)
+  editor.value = { open: true, id: p.id, name: p.name, mode: 'form', rawText: '', error: '' }
+}
+
+function switchMode(mode: 'form' | 'raw') {
+  if (mode === editor.value.mode) return
+  if (mode === 'raw') {
+    editor.value.rawText = JSON.stringify(model, null, 2)
+    editor.value.error = ''
+    editor.value.mode = 'raw'
+  } else {
+    // Parse raw back into the form; stay on raw if it's invalid.
+    try {
+      const parsed = JSON.parse(editor.value.rawText)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object')
+      setModel(parsed)
+      editor.value.error = ''
+      editor.value.mode = 'form'
+    } catch (e: any) {
+      editor.value.error = t('profiles.template.invalid') + ': ' + e.message
+    }
+  }
 }
 
 async function save() {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(editor.value.text)
-  } catch (e: any) {
-    editor.value.error = t('profiles.template.invalid') + ': ' + e.message
-    return
+  let payload: any
+  if (editor.value.mode === 'raw') {
+    try {
+      payload = JSON.parse(editor.value.rawText)
+    } catch (e: any) {
+      editor.value.error = t('profiles.template.invalid') + ': ' + e.message
+      return
+    }
+  } else {
+    payload = JSON.parse(JSON.stringify(model)) // plain snapshot of the reactive model
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     editor.value.error = t('profiles.template.notobj')
     return
   }
   try {
-    if (editor.value.id) await store.updateProfile(editor.value.id, editor.value.name, parsed)
-    else await store.createProfile(editor.value.name, parsed)
+    if (editor.value.id) await store.updateProfile(editor.value.id, editor.value.name, payload)
+    else await store.createProfile(editor.value.name, payload)
     editor.value.open = false
   } catch (e: any) {
     editor.value.error = e?.response?.data?.error || 'Save failed'
   }
+}
+
+function addInbound() {
+  model.inbounds.push({ type: 'mixed', tag: 'in-' + (model.inbounds.length + 1), listen: '0.0.0.0', listen_port: 1080 })
+}
+function addDnsServer() {
+  model.dns.servers.push({ tag: 'dns-' + (model.dns.servers.length + 1), type: 'udp', server: '' })
 }
 
 async function doDelete() {
@@ -136,7 +269,26 @@ async function doDelete() {
 .profile-name { font-size: 0.95rem; font-weight: 640; color: var(--ink-primary); }
 .profile-id { font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink-muted); }
 .profile-summary { font-family: var(--font-mono); }
-.modal-wide { max-width: 720px; width: 92vw; }
+.modal-wide { max-width: 760px; width: 94vw; }
+
+.tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--paper-border); margin-bottom: 1rem; }
+.tab {
+  background: none; border: none; padding: 0.5rem 0.9rem; font-size: 0.82rem;
+  color: var(--ink-secondary); border-bottom: 2px solid transparent; cursor: pointer;
+}
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+.form-body { max-height: 56vh; overflow-y: auto; padding-right: 0.25rem; }
+.section-block { border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 0.9rem; margin-bottom: 1rem; }
+.section-block h4 { font-size: 0.8rem; font-weight: 650; color: var(--ink-primary); margin: 0 0 0.6rem; }
+.row-card { border: 1px dashed var(--paper-border); border-radius: var(--radius-sm); padding: 0.6rem; margin-bottom: 0.5rem; }
+.row-grid { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.row-grid > input, .row-grid > select { flex: 1; min-width: 90px; }
+.row-grid-tun { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
+.row-grid-tun > input, .row-grid-tun > select { flex: 1; min-width: 110px; }
+.chk { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--ink-secondary); white-space: nowrap; }
+.chk input { width: auto; }
+
 .json-editor {
   width: 100%; min-height: 360px; resize: vertical;
   font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.55;

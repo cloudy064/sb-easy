@@ -46,6 +46,7 @@
         <div class="host-bottom">
           <span class="host-sb-state">{{ singboxState(h) }}</span>
           <div class="flex-center gap-2">
+            <button v-if="!h.capabilities.is_self" class="btn-ghost btn-sm" @click="openEdit(h)">{{ t('hosts.edit') }}</button>
             <button v-if="!h.capabilities.is_self" class="btn-ghost btn-sm" @click="sendCmd(h, 'reload')">{{ t('hosts.reload') }}</button>
             <button v-if="!h.capabilities.is_self" class="btn-ghost btn-sm" @click="sendCmd(h, 'restart')">{{ t('hosts.restart') }}</button>
             <button class="btn-ghost btn-sm" @click="openOutbounds(h)">{{ t('hosts.proxies') }}</button>
@@ -82,6 +83,31 @@
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreate = false">{{ t('action.cancel') }}</button>
             <button type="submit" class="btn-primary">{{ t('hosts.create') }}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Edit host -->
+    <div v-if="editTarget" class="modal-overlay" @click.self="editTarget = null">
+      <div class="modal">
+        <h3>{{ t('hosts.edit') }} — {{ editTarget.name }}</h3>
+        <form @submit.prevent="doEdit">
+          <div class="form-group"><label>{{ t('hosts.name') }}</label><input v-model="editForm.name" required /></div>
+          <div class="form-group"><label>{{ t('hosts.profile') }}</label>
+            <select v-model="editForm.profile_id">
+              <option v-for="p in store.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+          </div>
+          <div class="cap-checks">
+            <label class="adv-check"><input type="checkbox" v-model="editForm.caps.runs_singbox" /> {{ t('hosts.cap.singbox') }}</label>
+            <label class="adv-check"><input type="checkbox" v-model="editForm.caps.is_wg_member" /> {{ t('hosts.cap.wg') }}</label>
+          </div>
+          <div class="form-group"><label>{{ t('hosts.endpoint') }}</label><input v-model="editForm.wg_endpoint" placeholder="203.0.113.10:51820" /></div>
+          <div class="form-group"><label>{{ t('hosts.clash') }}</label><input v-model="editForm.clash_api" placeholder="http://10.59.32.10:9090" /></div>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" @click="editTarget = null">{{ t('action.cancel') }}</button>
+            <button type="submit" class="btn-primary">{{ t('action.save') }}</button>
           </div>
         </form>
       </div>
@@ -154,6 +180,8 @@ const store = useHostsStore()
 const nodesStore = useProxyNodesStore()
 
 const showCreate = ref(false)
+const editTarget = ref<Host | null>(null)
+const editForm = ref({ name: '', profile_id: 'default', caps: { runs_singbox: true, is_wg_member: true }, wg_endpoint: '', clash_api: '' })
 const installTarget = ref<Host | null>(null)
 const outboundTarget = ref<Host | null>(null)
 const deleteTarget = ref<Host | null>(null)
@@ -203,6 +231,32 @@ async function doCreate() {
     clash_api: form.value.clash_api || undefined,
   })
   showCreate.value = false
+}
+
+function openEdit(h: Host) {
+  editTarget.value = h
+  editForm.value = {
+    name: h.name,
+    profile_id: h.profile_id || 'default',
+    caps: { runs_singbox: h.capabilities.runs_singbox, is_wg_member: h.capabilities.is_wg_member },
+    wg_endpoint: h.wg_endpoint || '',
+    clash_api: h.clash_api || '',
+  }
+}
+
+async function doEdit() {
+  if (!editTarget.value) return
+  // Preserve hub/self flags the form doesn't expose.
+  const caps = { ...editTarget.value.capabilities, ...editForm.value.caps }
+  await store.updateHost(editTarget.value.id, {
+    name: editForm.value.name,
+    profile_id: editForm.value.profile_id,
+    capabilities: caps,
+    wg_endpoint: editForm.value.wg_endpoint,
+    clash_api: editForm.value.clash_api,
+  } as any)
+  editTarget.value = null
+  await store.fetchHosts()
 }
 
 // ── Online status ────────────────────────────────────────────

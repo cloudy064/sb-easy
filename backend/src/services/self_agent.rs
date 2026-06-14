@@ -65,7 +65,10 @@ pub async fn render_self(state: &AppState) -> Option<(String, String)> {
     }
     let nodes = host_outbound_nodes(state, "self").await.ok()?;
     let template = host_profile_template(state, &host).await;
-    let config = proxy_config::render_host_config(&template, &nodes);
+    let mut config = proxy_config::render_host_config(&template, &nodes);
+    // Expose the Clash API so the panel can monitor/control this sing-box.
+    let controller = proxy_config::controller_addr(&state.cfg.singbox_api_url);
+    proxy_config::inject_clash_api(&mut config, &controller, &state.cfg.singbox_api_secret);
     let config_str = serde_json::to_string_pretty(&config).unwrap_or_default();
     let etag = proxy_config::config_etag("self", &config_str, &state.cfg.config_hash_seed);
     Some((etag, config_str))

@@ -240,3 +240,29 @@ pub fn render_host_config(template: &Value, nodes: &[ProxyNode]) -> Value {
 pub fn generate_full_config(nodes: &[ProxyNode]) -> Value {
     render_host_config(&default_profile_template(), nodes)
 }
+
+/// Strip the scheme from a Clash API URL → "host:port" for external_controller.
+pub fn controller_addr(api_url: &str) -> String {
+    api_url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Inject `experimental.clash_api` so the running sing-box exposes the control
+/// API the panel talks to (live traffic/connections/logs, proxy switching).
+pub fn inject_clash_api(config: &mut Value, controller: &str, secret: &str) {
+    if controller.is_empty() {
+        return;
+    }
+    let Some(obj) = config.as_object_mut() else { return };
+    let exp = obj.entry("experimental").or_insert_with(|| json!({}));
+    let Some(exp_obj) = exp.as_object_mut() else { return };
+    let mut api = json!({ "external_controller": controller });
+    if !secret.is_empty() {
+        api["secret"] = json!(secret);
+    }
+    exp_obj.insert("clash_api".into(), api);
+}

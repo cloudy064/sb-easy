@@ -7,7 +7,7 @@
       </div>
       <div class="flex-center gap-3">
         <button class="btn-secondary btn-sm" @click="syncConfig">Sync Config</button>
-        <button class="btn-secondary btn-sm" @click="router.push('/hosts')">{{ t('devices.add.host') }}</button>
+        <button class="btn-secondary btn-sm" @click="openManage(null)">{{ t('devices.add.host') }}</button>
         <button class="btn-primary" @click="showCreate = true">{{ t('devices.add.client') }}</button>
       </div>
     </div>
@@ -94,13 +94,13 @@
               <span class="device-stat-label">Status</span>
               <span class="device-stat-value text-sm">{{ hostStatus(d) }}</span>
             </div>
-            <div class="device-stat" v-if="d.singbox_state">
+            <div class="device-stat" v-if="singboxState(d)">
               <span class="device-stat-label">sing-box</span>
-              <span class="device-stat-value text-sm">{{ d.singbox_state }}</span>
+              <span class="device-stat-value text-sm" :title="d.singbox_state || ''">{{ singboxState(d) }}</span>
             </div>
-            <div class="device-stat" v-if="d.assigned_outbounds !== undefined">
-              <span class="device-stat-label">{{ t('hosts.proxies') }}</span>
-              <span class="device-stat-value text-sm">{{ d.assigned_outbounds || t('hosts.proxies.all') }}</span>
+            <div class="device-stat">
+              <span class="device-stat-label">{{ t('devices.host.proxies') }}</span>
+              <span class="device-stat-value text-sm">{{ d.assigned_outbounds ? d.assigned_outbounds + ' ' + t('devices.host.proxies.n') : t('devices.host.proxies.all') }}</span>
             </div>
           </template>
         </div>
@@ -116,7 +116,7 @@
           <template v-else>
             <button class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'reload')">{{ t('hosts.reload') }}</button>
             <button class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'restart')">{{ t('hosts.restart') }}</button>
-            <button class="btn-ghost btn-sm" @click="router.push('/hosts')" :title="t('devices.host.advanced.hint')">{{ t('devices.host.advanced') }}</button>
+            <button class="btn-ghost btn-sm" @click="openManage(d)">{{ t('hosts.edit') }}</button>
             <button class="btn-danger btn-sm" :disabled="d.is_self" @click="deleteTarget = d">Delete</button>
           </template>
         </div>
@@ -183,23 +183,50 @@
       </div>
     </div>
 
+    <!-- Host create / manage -->
+    <HostManageModal v-if="showManage" :host="manageHost" @close="showManage = false" @saved="onManageSaved" />
+
     <div v-if="toast" class="toast"><div class="toast-item" :class="toastClass">{{ toast }}</div></div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
+import HostManageModal from '../components/HostManageModal.vue'
 import client from '../api/client'
 import type { Host, WireGuardPeer } from '../types'
 
 const { t } = useI18n()
-const router = useRouter()
 const hostsStore = useHostsStore()
 const wgStore = useWireGuardStore()
+
+// Host create/manage modal (folds in everything the old /hosts page did).
+const showManage = ref(false)
+const manageHost = ref<Host | null>(null)
+function openManage(d: HostRow | null) {
+  manageHost.value = d // HostRow extends Host; null = create
+  showManage.value = true
+}
+async function onManageSaved() {
+  showManage.value = false
+  await hostsStore.fetchHosts()
+}
+
+// Short, friendly sing-box state from the agent's reported JSON (running + version),
+// instead of dumping the raw state blob (which includes the config etag).
+function singboxState(d: HostRow): string {
+  if (!d.singbox_state) return ''
+  try {
+    const st = JSON.parse(d.singbox_state)
+    const dot = st.running === true ? '● running' : st.running === false ? '○ stopped' : ''
+    return [dot, st.version].filter(Boolean).join(' ')
+  } catch {
+    return ''
+  }
+}
 
 // Unified row shapes. `_t` is the discriminant — note WireGuardPeer already has
 // its own `kind` ('agent' | 'wg') which we reuse for the sub-badge, so the

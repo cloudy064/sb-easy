@@ -32,7 +32,7 @@
 
         <!-- Proxy -->
         <div class="nav-section-label">{{ t('nav.section.proxy') }}</div>
-        <router-link to="/nodes" class="nav-item" active-class="active">
+        <router-link to="/proxies" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <circle cx="9" cy="9" r="7"/><circle cx="9" cy="9" r="2"/><path d="M9 2v14M2 9h14"/>
             <path d="M4 4c2 1.5 4 3 5 5 1-2 3-3.5 5-5M4 14c2-1.5 4-3 5-5 1 2 3 3.5 5 5"/>
@@ -45,7 +45,7 @@
           </svg>
           {{ t('nav.subscriptions') }}
         </router-link>
-        <router-link to="/proxies" class="nav-item" active-class="active">
+        <router-link to="/proxy-groups" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <rect x="1" y="2" width="16" height="4" rx="1"/><rect x="1" y="8" width="16" height="4" rx="1"/>
             <rect x="1" y="14" width="10" height="2.5" rx="1"/>

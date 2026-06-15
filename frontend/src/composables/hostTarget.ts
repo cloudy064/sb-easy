@@ -16,8 +16,12 @@ export function useHostTarget() {
     // reachable Clash API (over WG) to actually return anything.
     const list = Array.isArray(data) ? (data as Host[]) : []
     hosts.value = list.filter((h) => h.capabilities?.runs_singbox)
+    // Keep the current selection if it still runs sing-box; otherwise prefer the
+    // local host when *it* runs sing-box, else fall back to the first host that
+    // does (e.g. on a control-only server the agent is the live target).
     if (!hosts.value.some((h) => h.id === selectedHost.value)) {
-      selectedHost.value = 'self'
+      const selfRuns = hosts.value.some((h) => h.id === 'self' || h.capabilities?.is_self)
+      selectedHost.value = selfRuns ? 'self' : (hosts.value[0]?.id ?? 'self')
     }
   }
 

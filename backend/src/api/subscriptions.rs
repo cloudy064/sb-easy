@@ -33,8 +33,15 @@ async fn create_sub(
 ) -> Result<Json<Subscription>> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    // Default a friendly name from the URL host when blank, so every imported
+    // proxy can be attributed to a named source.
+    let name = if req.name.trim().is_empty() {
+        default_sub_name(&req.url)
+    } else {
+        req.name.trim().to_string()
+    };
     let sub = Subscription {
-        id, name: req.name, url: req.url,
+        id, name, url: req.url,
         enabled: true, refresh_interval: req.refresh_interval.unwrap_or(3600),
         last_fetched_at: None, last_fetch_result: None,
         created_at: now.clone(), updated_at: now,
@@ -46,6 +53,30 @@ async fn create_sub(
     .bind(&sub.last_fetched_at).bind(&sub.last_fetch_result).bind(&sub.created_at).bind(&sub.updated_at)
     .execute(&state.db).await?;
     Ok(Json(sub))
+}
+
+/// Derive a readable subscription name from its URL host (e.g. `sub.example.com`),
+/// falling back to a generic label.
+fn default_sub_name(url: &str) -> String {
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if host.is_empty() {
+        "Subscription".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 async fn get_sub(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Subscription>> {

@@ -6,14 +6,18 @@
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.nodes.desc') }}</p>
       </div>
       <div class="flex-center gap-3">
+        <HostSelect @change="load" />
+        <button class="btn-secondary" @click="testAllNodes" :disabled="testingAll" :title="'Delay-test all enabled nodes via the selected host'">
+          {{ testingAll ? 'Testing…' : 'Test all' }}
+        </button>
         <button class="btn-secondary" @click="openImport">Import</button>
         <button class="btn-primary" @click="showCreate = true">Add Node</button>
       </div>
     </div>
 
     <div class="flex-center gap-3 mb-5" style="flex-wrap:wrap">
-      <input v-model="search" placeholder="Filter by name or tag..." style="max-width:260px" />
-      <select v-model="filterType" style="max-width:150px">
+      <input v-model="search" placeholder="Filter by name or tag..." style="max-width:240px" />
+      <select v-model="filterType" style="max-width:140px">
         <option value="">All Protocols</option>
         <option value="shadowsocks">Shadowsocks</option>
         <option value="vmess">VMess</option>
@@ -21,6 +25,11 @@
         <option value="vless">VLESS</option>
         <option value="hysteria2">Hysteria2</option>
         <option value="tuic">TUIC</option>
+      </select>
+      <select v-model="filterSource" style="max-width:170px">
+        <option value="">All sources</option>
+        <option value="__manual__">Manual</option>
+        <option v-for="s in subs" :key="s.id" :value="s.id">{{ s.name }}</option>
       </select>
       <span class="text-xs text-muted" v-if="store.nodes.length">
         {{ filteredNodes.length }} of {{ store.nodes.length }} nodes
@@ -37,9 +46,10 @@
       <article v-for="node in filteredNodes" :key="node.id" class="card node-card">
         <div class="node-card-top">
           <div class="node-info">
-            <div class="flex-center gap-2">
+            <div class="flex-center gap-2" style="flex-wrap:wrap">
               <span :class="['protocol-badge', protocolBadge(node.node_type)]">{{ protocolLabel(node.node_type) }}</span>
-              <h3 class="node-tag truncate" style="max-width:200px">{{ node.tag }}</h3>
+              <h3 class="node-tag truncate" style="max-width:170px">{{ node.tag }}</h3>
+              <span class="source-badge" :class="node.subscription_id ? 'src-sub' : 'src-manual'">{{ sourceLabel(node) }}</span>
             </div>
             <span class="node-endpoint">{{ node.server }}<span class="text-muted">:{{ node.server_port }}</span></span>
           </div>
@@ -59,7 +69,7 @@
             </template>
           </div>
           <div class="flex-center gap-2">
-            <button class="btn-ghost btn-sm" @click="testLatency(node.id)">Test</button>
+            <button class="btn-ghost btn-sm" @click="testLatency(node.id)" :disabled="testingAll">Test</button>
             <button class="btn-ghost btn-sm" @click="editNode(node)">Edit</button>
             <button class="btn-danger btn-sm" @click="confirmDelete(node)">Delete</button>
           </div>
@@ -236,12 +246,18 @@ import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
 import { ref, computed, onMounted } from 'vue'
 import { useProxyNodesStore } from '../stores/proxyNodes'
+import HostSelect from '../components/HostSelect.vue'
+import { useHostTarget } from '../composables/hostTarget'
 import client from '../api/client'
-import type { ProxyNode, ConfigProfile } from '../types'
+import type { ProxyNode, ConfigProfile, Subscription } from '../types'
 
 const store = useProxyNodesStore()
+const { reqParams } = useHostTarget()
 const search = ref('')
 const filterType = ref('')
+const filterSource = ref('')
+const testingAll = ref(false)
+const subs = ref<Subscription[]>([])
 const showCreate = ref(false)
 
 // ── Import ──
@@ -340,15 +356,43 @@ function resetForm() {
   }
 }
 
-onMounted(() => store.fetchNodes())
+onMounted(load)
+async function load() {
+  await Promise.all([store.fetchNodes(), fetchSubs()])
+}
+async function fetchSubs() {
+  try {
+    const { data } = await client.get('/subscriptions')
+    subs.value = Array.isArray(data) ? data : []
+  } catch {
+    subs.value = []
+  }
+}
+
+// Map a node to its source label: subscription name, or "Manual" for hand-added.
+const subName = computed(() => Object.fromEntries(subs.value.map((s) => [s.id, s.name])))
+function sourceLabel(n: ProxyNode): string {
+  return n.subscription_id ? (subName.value[n.subscription_id] || 'Subscription') : 'Manual'
+}
 
 const filteredNodes = computed(() =>
   store.nodes.filter(n => {
     if (filterType.value && n.node_type !== filterType.value) return false
+    if (filterSource.value === '__manual__' && n.subscription_id) return false
+    if (filterSource.value && filterSource.value !== '__manual__' && n.subscription_id !== filterSource.value) return false
     if (search.value && !n.tag.toLowerCase().includes(search.value.toLowerCase()) && !n.server.includes(search.value)) return false
     return true
   })
 )
+
+async function testAllNodes() {
+  testingAll.value = true
+  try {
+    await store.testAll(reqParams.value as Record<string, string>)
+  } finally {
+    testingAll.value = false
+  }
+}
 
 function protocolLabel(t: string) {
   return { shadowsocks:'SS', vmess:'VMess', trojan:'Trojan', vless:'VLESS', hysteria2:'HY2', tuic:'TUIC' }[t] || t
@@ -400,7 +444,7 @@ async function doDelete() {
   deleteTarget.value = null
 }
 
-async function testLatency(id: string) { await store.testLatency(id) }
+async function testLatency(id: string) { await store.testLatency(id, reqParams.value as Record<string, string>) }
 async function toggleNode(node: ProxyNode) {
   await store.updateNode(node.id, { enabled: !node.enabled })
   node.enabled = !node.enabled
@@ -495,4 +539,12 @@ async function toggleNode(node: ProxyNode) {
 }
 .seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
 .import-result { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.25rem 0 0.5rem; }
+
+.source-badge {
+  font-size: 0.58rem; font-weight: 650; letter-spacing: 0.02em;
+  padding: 0.1rem 0.4rem; border-radius: 4px; max-width: 120px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.src-sub { background: #eef0fb; color: #5a5fa0; }
+.src-manual { background: var(--paper-border); color: var(--ink-muted); }
 </style>

@@ -18,12 +18,15 @@ const router = createRouter({
         { path: 'monitor', name: 'Monitor', component: () => import('../views/MonitorView.vue') },
         { path: 'logs', name: 'Logs', component: () => import('../views/LogsView.vue') },
         { path: 'devices', name: 'Devices', component: () => import('../views/DevicesView.vue') },
-        { path: 'hosts', name: 'Hosts', component: () => import('../views/HostsView.vue') },
         { path: 'profiles', name: 'Profiles', component: () => import('../views/ProfilesView.vue') },
-        // Clients are folded into the unified Devices view; keep the old path as a redirect.
+        // Hosts and Clients are both folded into the unified Devices view.
+        { path: 'hosts', redirect: '/devices' },
         { path: 'clients', redirect: '/devices' },
-        { path: 'nodes', name: 'Nodes', component: () => import('../views/NodesView.vue') },
-        { path: 'proxies', name: 'Proxies', component: () => import('../views/ProxiesView.vue') },
+        // The proxy node list is the primary "Proxies" page; the live Clash
+        // selector view becomes "Proxy Groups".
+        { path: 'proxies', name: 'Proxies', component: () => import('../views/NodesView.vue') },
+        { path: 'nodes', redirect: '/proxies' },
+        { path: 'proxy-groups', name: 'ProxyGroups', component: () => import('../views/ProxiesView.vue') },
         { path: 'subscriptions', name: 'Subscriptions', component: () => import('../views/SubscriptionsView.vue') },
         { path: 'config', name: 'Config', component: () => import('../views/ConfigView.vue') },
         { path: 'users', name: 'Users', component: () => import('../views/UsersView.vue') },

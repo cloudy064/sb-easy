@@ -61,7 +61,19 @@ let logSeq = 0
 function startLogs() {
   logSocket = openStream('logs', async (d) => {
     const atBottom = isScrolledToBottom()
-    logs.value.push({ id: logSeq++, type: d.type || 'info', payload: d.payload ?? String(d) })
+    // Normalise the frame: sing-box sends { type, payload }; the backend may send
+    // { error } when the upstream sing-box is unreachable; anything else gets
+    // stringified so we never render a bare "[object Object]".
+    let type = 'info'
+    let payload = ''
+    if (typeof d === 'string') payload = d
+    else if (d && typeof d === 'object') {
+      if (d.error) { type = 'error'; payload = String(d.error) }
+      else { type = d.type || 'info'; payload = typeof d.payload === 'string' ? d.payload : JSON.stringify(d.payload ?? d) }
+    } else {
+      payload = String(d)
+    }
+    logs.value.push({ id: logSeq++, type, payload })
     if (logs.value.length > 1000) logs.value.splice(0, logs.value.length - 1000)
     await nextTick()
     if (atBottom && logBox.value) {

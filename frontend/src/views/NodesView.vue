@@ -5,7 +5,10 @@
         <h2>{{ t('page.nodes.title') }}</h2>
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.nodes.desc') }}</p>
       </div>
-      <button class="btn-primary" @click="showCreate = true">Add Node</button>
+      <div class="flex-center gap-3">
+        <button class="btn-secondary" @click="openImport">Import</button>
+        <button class="btn-primary" @click="showCreate = true">Add Node</button>
+      </div>
     </div>
 
     <div class="flex-center gap-3 mb-5" style="flex-wrap:wrap">
@@ -151,6 +154,53 @@
       </div>
     </div>
 
+    <!-- Import Dialog -->
+    <div v-if="showImport" class="modal-overlay" @click.self="closeImport">
+      <div class="modal">
+        <h3>Import proxy nodes</h3>
+        <p class="text-sm text-muted" style="margin-top:-0.3rem;margin-bottom:1rem">
+          Pull nodes from an existing config profile or paste a sing-box config. This only fills the node list — it does <strong>not</strong> change any running config. Existing nodes are matched by fingerprint (no duplicates).
+        </p>
+
+        <div class="seg mb-4">
+          <button class="seg-btn" :class="{ active: importSource === 'profile' }" @click="importSource = 'profile'">From profile</button>
+          <button class="seg-btn" :class="{ active: importSource === 'paste' }" @click="importSource = 'paste'">Paste JSON</button>
+        </div>
+
+        <template v-if="importSource === 'profile'">
+          <div class="form-group">
+            <label>Config profile</label>
+            <select v-model="importProfileId">
+              <option value="" disabled>Select a profile…</option>
+              <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+          </div>
+        </template>
+        <template v-else>
+          <div class="form-group">
+            <label>sing-box config or outbounds array (JSON)</label>
+            <textarea v-model="importPaste" rows="8" placeholder='{ "outbounds": [ … ] }  or  [ { "type": "shadowsocks", … } ]' style="width:100%;font-family:var(--font-mono);font-size:0.72rem"></textarea>
+          </div>
+        </template>
+
+        <div v-if="importResult" class="import-result">
+          <span class="badge badge-green">+{{ importResult.added }} added</span>
+          <span class="badge badge-gray">{{ importResult.updated }} updated</span>
+          <span class="badge badge-gray">{{ importResult.found }} found</span>
+          <span v-if="importResult.skipped.length" class="badge badge-gray">{{ importResult.skipped.length }} skipped</span>
+          <span v-if="importResult.errors.length" class="badge badge-red">{{ importResult.errors.length }} errors</span>
+          <p v-if="importResult.errors.length" class="text-xs" style="margin-top:0.5rem;color:var(--bad)">{{ importResult.errors.join('; ') }}</p>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" @click="closeImport">Close</button>
+          <button type="button" class="btn-primary" :disabled="importing || (importSource === 'profile' ? !importProfileId : !importPaste.trim())" @click="doImport">
+            {{ importing ? 'Importing…' : 'Import' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Edit Dialog -->
     <div v-if="editTarget" class="modal-overlay" @click.self="editTarget = null">
       <div class="modal">
@@ -186,12 +236,51 @@ import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
 import { ref, computed, onMounted } from 'vue'
 import { useProxyNodesStore } from '../stores/proxyNodes'
-import type { ProxyNode } from '../types'
+import client from '../api/client'
+import type { ProxyNode, ConfigProfile } from '../types'
 
 const store = useProxyNodesStore()
 const search = ref('')
 const filterType = ref('')
 const showCreate = ref(false)
+
+// ── Import ──
+const showImport = ref(false)
+const importSource = ref<'profile' | 'paste'>('profile')
+const importProfileId = ref('')
+const importPaste = ref('')
+const importing = ref(false)
+const importResult = ref<{ found: number; added: number; updated: number; skipped: string[]; errors: string[] } | null>(null)
+const profiles = ref<ConfigProfile[]>([])
+
+async function openImport() {
+  showImport.value = true
+  importResult.value = null
+  try {
+    const { data } = await client.get('/hosts/profiles')
+    profiles.value = Array.isArray(data) ? data : []
+  } catch {
+    profiles.value = []
+  }
+}
+function closeImport() {
+  showImport.value = false
+  importPaste.value = ''
+  importResult.value = null
+}
+async function doImport() {
+  importing.value = true
+  try {
+    const body = importSource.value === 'profile'
+      ? { profile_id: importProfileId.value }
+      : { config: importPaste.value }
+    importResult.value = await store.importNodes(body)
+  } catch (e: any) {
+    importResult.value = { found: 0, added: 0, updated: 0, skipped: [], errors: [e?.response?.data?.error || 'Import failed'] }
+  } finally {
+    importing.value = false
+  }
+}
 const editTarget = ref<ProxyNode | null>(null)
 const deleteTarget = ref<ProxyNode | null>(null)
 
@@ -398,4 +487,12 @@ async function toggleNode(node: ProxyNode) {
   font-size: 0.82rem; color: var(--ink-secondary); margin-bottom: 0.85rem;
 }
 .adv-check input { width: auto; }
+
+.seg { display: inline-flex; gap: 2px; background: var(--paper-bg); border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 3px; }
+.seg-btn {
+  background: transparent; border: none; color: var(--ink-secondary);
+  font-size: 0.8rem; font-weight: 550; padding: 0.35rem 0.85rem; border-radius: calc(var(--radius-sm) - 2px); cursor: pointer;
+}
+.seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
+.import-result { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.25rem 0 0.5rem; }
 </style>

@@ -90,9 +90,10 @@
               <input v-model="model.route.final" placeholder="final (Proxy)" />
               <label class="chk"><input type="checkbox" v-model="model.route.auto_detect_interface" /> auto_detect_interface</label>
             </div>
-            <p class="text-xs text-muted" style="margin-top:.5rem">
-              {{ t('profiles.route.rules') }}: {{ (model.route.rules || []).length }} — {{ t('profiles.route.rules.hint') }}
-            </p>
+            <div style="margin-top:.75rem">
+              <span class="text-xs" style="font-weight:600;color:var(--ink-secondary)">{{ t('profiles.route.rules') }}</span>
+              <RulesEditor :rules="model.route.rules" :outbound-suggestions="outboundSuggestions" style="margin-top:.4rem" />
+            </div>
           </div>
         </div>
 
@@ -128,10 +129,15 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
+import RulesEditor from '../components/RulesEditor.vue'
 import type { ConfigProfile } from '../types'
 
 const { t } = useI18n()
 const store = useHostsStore()
+
+// Suggested outbound targets for rule rows. The per-host outbounds inject
+// "Proxy"/"Auto" selectors; direct/block are built-ins.
+const outboundSuggestions = ['Proxy', 'Auto', 'direct', 'block']
 const loading = ref(true)
 const deleteTarget = ref<ConfigProfile | null>(null)
 

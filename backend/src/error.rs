@@ -23,6 +23,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -52,6 +55,10 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            // Operational hint about reaching the upstream sing-box Clash API.
+            // The message is safe to surface (no internal secrets) and helps the
+            // operator fix connectivity/auth, so it is not masked like the 5xx below.
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             AppError::Internal(_)
             | AppError::Database(_)
             | AppError::Serde(_)

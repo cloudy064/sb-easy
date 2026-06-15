@@ -15,8 +15,62 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/nodes", get(list_nodes).post(create_node))
+        .route("/nodes/import", post(import_nodes))
         .route("/nodes/{id}", get(get_node).put(update_node).delete(delete_node))
         .route("/nodes/{id}/test-latency", post(test_latency_single))
+}
+
+#[derive(serde::Deserialize)]
+struct ImportRequest {
+    /// Import the `outbounds` of an existing config profile.
+    profile_id: Option<String>,
+    /// Or paste a raw sing-box config / outbounds array (JSON string).
+    config: Option<String>,
+}
+
+/// POST /api/proxy/nodes/import — populate the structured node list from an
+/// existing sing-box config (a stored profile's outbounds, or pasted JSON).
+///
+/// Purely additive: it inserts/updates `proxy_nodes` (deduplicated by
+/// fingerprint) and never touches a running config. Groups (selector/urltest)
+/// and built-in outbounds are skipped; the response reports exactly what was
+/// imported and what was skipped so the operator can verify before relying on it.
+async fn import_nodes(
+    State(state): State<AppState>,
+    Json(req): Json<ImportRequest>,
+) -> Result<Json<serde_json::Value>> {
+    use crate::models::host::ConfigProfile;
+
+    // Resolve the source config JSON.
+    let config: serde_json::Value = if let Some(pid) = req.profile_id.as_deref() {
+        let profile = sqlx::query_as::<_, ConfigProfile>("SELECT * FROM config_profiles WHERE id = ?")
+            .bind(pid)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Profile not found".into()))?;
+        serde_json::from_str(&profile.template)
+            .map_err(|e| AppError::BadRequest(format!("Profile template is not valid JSON: {e}")))?
+    } else if let Some(raw) = req.config.as_deref() {
+        serde_json::from_str(raw.trim())
+            .map_err(|e| AppError::BadRequest(format!("Pasted config is not valid JSON: {e}")))?
+    } else {
+        return Err(AppError::BadRequest(
+            "Provide either profile_id or config".into(),
+        ));
+    };
+
+    let parse = crate::services::outbound_parser::parse_config(&config);
+    let found = parse.nodes.len();
+    let (added, updated, errors) =
+        crate::services::subscription::upsert_nodes(&state.db, &parse.nodes, None).await;
+
+    Ok(Json(json!({
+        "found": found,
+        "added": added,
+        "updated": updated,
+        "skipped": parse.skipped,
+        "errors": errors,
+    })))
 }
 
 /// GET /api/proxy/nodes

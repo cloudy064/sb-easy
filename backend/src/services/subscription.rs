@@ -41,68 +41,8 @@ pub async fn fetch_subscription(
     info!("Subscription fetch: {total} nodes found");
 
     // Insert/update nodes in database
-    let mut added = 0usize;
-    let mut updated = 0usize;
-    let mut skipped = 0usize;
-    let mut errors = Vec::new();
-
-    for node in nodes {
-        let fingerprint = node.fingerprint();
-
-        // Check if node already exists by fingerprint
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM proxy_nodes WHERE fingerprint = ?"
-        )
-        .bind(&fingerprint)
-        .fetch_optional(pool)
-        .await?;
-
-        if let Some((existing_id,)) = existing {
-            // Update existing node
-            let now = Utc::now().to_rfc3339();
-            let result = sqlx::query(
-                "UPDATE proxy_nodes SET tag = ?, server = ?, server_port = ?, protocol_config = ?, subscription_id = ?, updated_at = ? WHERE id = ?"
-            )
-            .bind(&node.tag)
-            .bind(&node.server)
-            .bind(node.server_port)
-            .bind(serde_json::to_string(&node.protocol_config).unwrap_or_default())
-            .bind(sub_id)
-            .bind(&now)
-            .bind(&existing_id)
-            .execute(pool)
-            .await;
-
-            match result {
-                Ok(_) => updated += 1,
-                Err(e) => errors.push(format!("Failed to update {}: {e}", node.tag)),
-            }
-        } else {
-            // Insert new node
-            let id = Uuid::new_v4().to_string();
-            let now = Utc::now().to_rfc3339();
-            let result = sqlx::query(
-                "INSERT INTO proxy_nodes (id, tag, node_type, enabled, server, server_port, protocol_config, subscription_id, fingerprint, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            .bind(&id)
-            .bind(&node.tag)
-            .bind(&node.node_type)
-            .bind(&node.server)
-            .bind(node.server_port)
-            .bind(serde_json::to_string(&node.protocol_config).unwrap_or_default())
-            .bind(sub_id)
-            .bind(&fingerprint)
-            .bind(&now)
-            .bind(&now)
-            .execute(pool)
-            .await;
-
-            match result {
-                Ok(_) => added += 1,
-                Err(e) => errors.push(format!("Failed to insert {}: {e}", node.tag)),
-            }
-        }
-    }
+    let skipped = 0usize;
+    let (added, updated, errors) = upsert_nodes(pool, &nodes, Some(sub_id)).await;
 
     // Update subscription metadata
     let result_json = serde_json::json!({
@@ -134,6 +74,81 @@ pub async fn fetch_subscription(
         skipped,
         errors,
     })
+}
+
+/// Insert or update a batch of parsed nodes, deduplicated by fingerprint.
+/// Returns `(added, updated, errors)`. Shared by subscription fetch and the
+/// config importer. `sub_id` tags nodes with their source subscription (or
+/// `None` for a manual/import source).
+pub async fn upsert_nodes(
+    pool: &SqlitePool,
+    nodes: &[ParsedNode],
+    sub_id: Option<&str>,
+) -> (usize, usize, Vec<String>) {
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    let mut errors = Vec::new();
+
+    for node in nodes {
+        let fingerprint = node.fingerprint();
+        let cfg = serde_json::to_string(&node.protocol_config).unwrap_or_default();
+        let now = Utc::now().to_rfc3339();
+
+        let existing: Option<(String,)> =
+            match sqlx::query_as("SELECT id FROM proxy_nodes WHERE fingerprint = ?")
+                .bind(&fingerprint)
+                .fetch_optional(pool)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    errors.push(format!("Lookup failed for {}: {e}", node.tag));
+                    continue;
+                }
+            };
+
+        if let Some((existing_id,)) = existing {
+            let result = sqlx::query(
+                "UPDATE proxy_nodes SET tag = ?, server = ?, server_port = ?, protocol_config = ?, subscription_id = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&node.tag)
+            .bind(&node.server)
+            .bind(node.server_port)
+            .bind(&cfg)
+            .bind(sub_id)
+            .bind(&now)
+            .bind(&existing_id)
+            .execute(pool)
+            .await;
+            match result {
+                Ok(_) => updated += 1,
+                Err(e) => errors.push(format!("Failed to update {}: {e}", node.tag)),
+            }
+        } else {
+            let id = Uuid::new_v4().to_string();
+            let result = sqlx::query(
+                "INSERT INTO proxy_nodes (id, tag, node_type, enabled, server, server_port, protocol_config, subscription_id, fingerprint, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&node.tag)
+            .bind(&node.node_type)
+            .bind(&node.server)
+            .bind(node.server_port)
+            .bind(&cfg)
+            .bind(sub_id)
+            .bind(&fingerprint)
+            .bind(&now)
+            .bind(&now)
+            .execute(pool)
+            .await;
+            match result {
+                Ok(_) => added += 1,
+                Err(e) => errors.push(format!("Failed to insert {}: {e}", node.tag)),
+            }
+        }
+    }
+
+    (added, updated, errors)
 }
 
 /// Parse a subscription response body into a list of ParsedNodes.

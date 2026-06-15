@@ -42,5 +42,13 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     return data
   }
 
-  return { nodes, loading, fetchNodes, createNode, updateNode, deleteNode, testLatency }
+  // Import proxy nodes from an existing config profile or pasted sing-box JSON.
+  // Additive (dedupes by fingerprint); does not change any running config.
+  async function importNodes(body: { profile_id?: string; config?: string }) {
+    const { data } = await client.post('/proxy/nodes/import', body)
+    await fetchNodes()
+    return data as { found: number; added: number; updated: number; skipped: string[]; errors: string[] }
+  }
+
+  return { nodes, loading, fetchNodes, createNode, updateNode, deleteNode, testLatency, importNodes }
 })

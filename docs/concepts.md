@@ -93,43 +93,36 @@ $ curl -H "Authorization: Bearer <secret>" http://127.0.0.1:9090/version
 
 ---
 
-## 5. 待重构清单（与本文对应）
+## 5. 重构进度（2026-06-15，分支 feat/ui-reorg-devices）
 
-1. **合并 Hosts + Clients** → 一个统一的"设备/端点"视图（WG 终端 vs sing-box 节点用类型区分）。
-2. **代理配置 Clash 化** → Nodes（手动）+ Subscriptions（订阅拉取）+ Rules（规则）三段式，面板为事实来源并生成配置。
-3. **每个端点可引入代理** → 端点级选择用哪些节点/组/规则（per-device profile）。
-4. **修 Clash API 报错** → 可操作错误 + 缺省回落 self。
-5. **左侧菜单按功能分组** → 见下。
+| 项 | 状态 | 说明 |
+|----|------|------|
+| 合并 Hosts + Clients | ✅ | 统一 **Devices** 视图，一个列表显示 WG 终端 + sing-box 主机，类型徽章区分；`/clients`→`/devices`。底层仍两张表。|
+| 菜单按功能分组 | ✅ | 概览 / 设备 / 代理 / 观测 / 系统（见下）。|
+| Clash 报错可操作化 | ✅ | 503 + 具体消息（未配置 / 不可达 `<url>` / 401 密钥错），不再笼统一句。|
+| 代理结构化（导入） | ✅ | **Nodes → Import**：从画像或粘贴 JSON 把 sing-box outbounds 解析进 `proxy_nodes`（按指纹去重，纯增量、不动运行配置）。实测真库 46 节点可导入。|
+| 可视化规则编辑 | ✅ | **Profiles** 编辑器 Route 段内置规则编辑器：匹配器(domain/ip_cidr/rule_set/…) → 出站/动作；无法结构化的规则以原始 JSON 行保留（无损）。|
+| 每端点各自选代理 | ⚙️ 已具备 | 每台 Host 在「主机详情」选 Profile + 分配出站（`host_outbounds`）= 端点级代理/规则集。|
+| 订阅拉取 → Nodes | ✅ | 订阅 fetch 与导入共用 `upsert_nodes` 指纹去重写入 `proxy_nodes`。|
 
 ---
 
-## 6. 建议的菜单重组（按功能分组）
-
-当前 12 个平铺项 → 3 组：
+## 6. 当前菜单（按功能分组）
 
 ```
-概览
-  · Dashboard
-
-网络 / 设备
-  · Devices        (合并 Hosts + Clients)
-
-代理
-  · Nodes          (手动节点 + 订阅，合并 Subscriptions)
-  · Rules          (规则，新增)
-  · Proxy Groups   (原 Proxies，实时切换)
-  · Config         (生成的配置)
-  · Profiles       (高级：配置画像)
-
-观测
-  · Monitor
-  · Logs
-
-系统
-  · Users
-  · Settings
+概览   · Dashboard
+设备   · Devices          (Hosts + Clients 合并)
+代理   · 代理(Nodes)       (手动节点 + Import 导入)
+       · 订阅(Subscriptions)
+       · 代理组(Proxy Groups, 实时切换)
+       · 配置(Config, 生成结果)
+       · 配置画像(Profiles, 含可视化规则编辑器)
+观测   · 实时监控(Monitor)
+       · 日志(Logs)
+系统   · 用户(Users)  · 设置(Settings)
 ```
 
-> 具体分组与命名在重构定稿后会回填到本文与 `deployment.md`。
+> 规则不是独立菜单项——它是一份配置画像(Profile)的一部分（sing-box 的 `route.rules`），
+> 在 Profiles 编辑器的 Route 段可视化编辑。Host 选哪个 Profile + 分配哪些节点 = 该端点的代理画像。
 </content>
 </invoke>

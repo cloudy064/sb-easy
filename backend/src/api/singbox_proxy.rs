@@ -47,18 +47,45 @@ impl Target {
         }
     }
 
+    /// Turn a transport-level failure into an actionable, client-visible error
+    /// naming the resolved target and the likely fixes. Distinct from a masked
+    /// 5xx because the operator needs to see *which* endpoint is unreachable.
+    fn unreachable(&self, e: &reqwest::Error) -> AppError {
+        if self.base.trim().is_empty() {
+            return AppError::ServiceUnavailable(
+                "未配置 sing-box Clash API 地址。请在 Settings 中填写，或确认所选主机的 Clash API（经 WG 内网）可达。".into(),
+            );
+        }
+        AppError::ServiceUnavailable(format!(
+            "无法连接 sing-box Clash API（{}）：{}。请检查 ① sing-box 是否在运行并开启了 experimental.clash_api ② Settings 中的地址是否正确 ③ 若为远程主机，WG 内网是否可达。",
+            self.base, e
+        ))
+    }
+
+    /// Map an authenticated response's status to a clear error (401 → 密钥不匹配),
+    /// returning the parsed JSON body on success.
+    async fn finish(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AppError::ServiceUnavailable(format!(
+                "sing-box Clash API（{}）鉴权失败：密钥（secret）不匹配。请在 Settings 核对 SINGBOX_API_SECRET 或该主机的 Clash secret。",
+                self.base
+            )));
+        }
+        Ok(resp.json().await.unwrap_or_default())
+    }
+
     async fn get(&self, path: &str) -> Result<serde_json::Value> {
         let client = reqwest::Client::new();
         let req = self.auth(client.get(format!("{}{path}", self.base)));
-        let resp = req.send().await.map_err(|e| AppError::Internal(format!("sing-box API: {e}")))?;
-        Ok(resp.json().await.unwrap_or_default())
+        let resp = req.send().await.map_err(|e| self.unreachable(&e))?;
+        self.finish(resp).await
     }
 
     async fn delete(&self, path: &str) -> Result<serde_json::Value> {
         let client = reqwest::Client::new();
         let req = self.auth(client.delete(format!("{}{path}", self.base)));
-        let resp = req.send().await.map_err(|e| AppError::Internal(format!("sing-box API: {e}")))?;
-        Ok(resp.json().await.unwrap_or_default())
+        let resp = req.send().await.map_err(|e| self.unreachable(&e))?;
+        self.finish(resp).await
     }
 }
 
@@ -85,7 +112,7 @@ async fn select_proxy(
             .put(format!("{}/proxies/{}", target.base, encode_query_component(&name)))
             .json(&body),
     );
-    let resp = req.send().await.map_err(|e| AppError::Internal(format!("sing-box API: {e}")))?;
+    let resp = req.send().await.map_err(|e| target.unreachable(&e))?;
     if resp.status().is_success() {
         Ok(Json(serde_json::json!({"success": true})))
     } else {

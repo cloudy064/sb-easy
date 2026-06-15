@@ -112,7 +112,7 @@ async function load() {
     }
     groups.value = result
   } catch (e: any) {
-    error.value = 'Could not reach the sing-box Clash API.'
+    error.value = e?.response?.data?.error || 'Could not reach the sing-box Clash API.'
   } finally {
     loading.value = false
   }

@@ -10,6 +10,8 @@
       </div>
 
       <nav class="sidebar-nav">
+        <!-- Overview -->
+        <div class="nav-section-label">{{ t('nav.section.overview') }}</div>
         <router-link to="/" class="nav-item" exact-active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <rect x="1" y="1" width="6" height="6" rx="1"/><rect x="11" y="1" width="6" height="6" rx="1"/>
@@ -17,6 +19,54 @@
           </svg>
           {{ t('nav.dashboard') }}
         </router-link>
+
+        <!-- Network / devices -->
+        <div class="nav-section-label">{{ t('nav.section.network') }}</div>
+        <router-link to="/devices" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="1" y="2" width="16" height="6" rx="1"/><rect x="1" y="10" width="16" height="6" rx="1"/>
+            <circle cx="4" cy="5" r="0.8" fill="currentColor"/><circle cx="4" cy="13" r="0.8" fill="currentColor"/>
+          </svg>
+          {{ t('nav.devices') }}
+        </router-link>
+
+        <!-- Proxy -->
+        <div class="nav-section-label">{{ t('nav.section.proxy') }}</div>
+        <router-link to="/nodes" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <circle cx="9" cy="9" r="7"/><circle cx="9" cy="9" r="2"/><path d="M9 2v14M2 9h14"/>
+            <path d="M4 4c2 1.5 4 3 5 5 1-2 3-3.5 5-5M4 14c2-1.5 4-3 5-5 1 2 3 3.5 5 5"/>
+          </svg>
+          {{ t('nav.nodes') }}
+        </router-link>
+        <router-link to="/subscriptions" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M1 7l4-4 3 3 9-5"/><path d="M1 13l4-4 3 3 9-5"/>
+          </svg>
+          {{ t('nav.subscriptions') }}
+        </router-link>
+        <router-link to="/proxies" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="1" y="2" width="16" height="4" rx="1"/><rect x="1" y="8" width="16" height="4" rx="1"/>
+            <rect x="1" y="14" width="10" height="2.5" rx="1"/>
+          </svg>
+          {{ t('nav.proxies') }}
+        </router-link>
+        <router-link to="/config" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M6 4L2 9l4 5M12 4l4 5-4 5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {{ t('nav.config') }}
+        </router-link>
+        <router-link to="/profiles" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h3"/><path d="M12 2v3h3"/>
+          </svg>
+          {{ t('nav.profiles') }}
+        </router-link>
+
+        <!-- Observe -->
+        <div class="nav-section-label">{{ t('nav.section.observe') }}</div>
         <router-link to="/monitor" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M1 12l4-5 3 3 4-6 4 8" stroke-linecap="round" stroke-linejoin="round"/><path d="M1 16h16"/>
@@ -29,52 +79,9 @@
           </svg>
           {{ t('nav.logs') }}
         </router-link>
-        <router-link to="/hosts" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <rect x="1" y="2" width="16" height="6" rx="1"/><rect x="1" y="10" width="16" height="6" rx="1"/>
-            <circle cx="4" cy="5" r="0.8" fill="currentColor"/><circle cx="4" cy="13" r="0.8" fill="currentColor"/>
-          </svg>
-          {{ t('nav.hosts') }}
-        </router-link>
-        <router-link to="/profiles" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h3"/><path d="M12 2v3h3"/>
-          </svg>
-          {{ t('nav.profiles') }}
-        </router-link>
-        <router-link to="/clients" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M9 1v16M1 9h16"/><circle cx="9" cy="9" r="2"/><circle cx="9" cy="1" r="1.5"/>
-            <circle cx="9" cy="17" r="1.5"/><circle cx="1" cy="9" r="1.5"/><circle cx="17" cy="9" r="1.5"/>
-          </svg>
-          {{ t('nav.clients') }}
-        </router-link>
-        <router-link to="/nodes" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <circle cx="9" cy="9" r="7"/><circle cx="9" cy="9" r="2"/><path d="M9 2v14M2 9h14"/>
-            <path d="M4 4c2 1.5 4 3 5 5 1-2 3-3.5 5-5M4 14c2-1.5 4-3 5-5 1 2 3 3.5 5 5"/>
-          </svg>
-          {{ t('nav.nodes') }}
-        </router-link>
-        <router-link to="/proxies" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <rect x="1" y="2" width="16" height="4" rx="1"/><rect x="1" y="8" width="16" height="4" rx="1"/>
-            <rect x="1" y="14" width="10" height="2.5" rx="1"/>
-          </svg>
-          {{ t('nav.proxies') }}
-        </router-link>
-        <router-link to="/subscriptions" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M1 7l4-4 3 3 9-5"/><path d="M1 13l4-4 3 3 9-5"/>
-          </svg>
-          {{ t('nav.subscriptions') }}
-        </router-link>
-        <router-link to="/config" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <path d="M6 4L2 9l4 5M12 4l4 5-4 5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          {{ t('nav.config') }}
-        </router-link>
+
+        <!-- System -->
+        <div class="nav-section-label">{{ t('nav.section.system') }}</div>
         <router-link v-if="isAdmin" to="/users" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <circle cx="6.5" cy="6" r="2.5"/><path d="M2 16c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/>
@@ -187,6 +194,17 @@ function logout() {
   gap: 3px;
   overflow-y: auto;
 }
+
+.nav-section-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+  padding: 0.85rem 0.85rem 0.3rem;
+  user-select: none;
+}
+.nav-section-label:first-child { padding-top: 0.2rem; }
 
 .nav-item {
   display: flex;

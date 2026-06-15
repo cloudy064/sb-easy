@@ -17,9 +17,11 @@ const router = createRouter({
         { path: '', name: 'Dashboard', component: () => import('../views/DashboardView.vue') },
         { path: 'monitor', name: 'Monitor', component: () => import('../views/MonitorView.vue') },
         { path: 'logs', name: 'Logs', component: () => import('../views/LogsView.vue') },
+        { path: 'devices', name: 'Devices', component: () => import('../views/DevicesView.vue') },
         { path: 'hosts', name: 'Hosts', component: () => import('../views/HostsView.vue') },
         { path: 'profiles', name: 'Profiles', component: () => import('../views/ProfilesView.vue') },
-        { path: 'clients', name: 'Clients', component: () => import('../views/ClientsView.vue') },
+        // Clients are folded into the unified Devices view; keep the old path as a redirect.
+        { path: 'clients', redirect: '/devices' },
         { path: 'nodes', name: 'Nodes', component: () => import('../views/NodesView.vue') },
         { path: 'proxies', name: 'Proxies', component: () => import('../views/ProxiesView.vue') },
         { path: 'subscriptions', name: 'Subscriptions', component: () => import('../views/SubscriptionsView.vue') },

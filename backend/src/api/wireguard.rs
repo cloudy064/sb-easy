@@ -26,11 +26,12 @@ pub fn router() -> Router<AppState> {
         .route("/sync", post(sync_config))
 }
 
-/// GET /api/wireguard/peers — list end-user peers with live stats merged.
-/// Managed-host peers (host_id set) are excluded; they live in the Hosts view.
+/// GET /api/wireguard/peers — list ALL WireGuard members with live stats merged.
+/// Each is tagged `kind`: "agent" (belongs to a managed host) or "wg" (plain
+/// client), so a single list shows everyone, distinguished by a badge.
 async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<serde_json::Value>>> {
     let peers = sqlx::query_as::<_, WireGuardPeer>(
-        "SELECT * FROM wireguard_peers WHERE host_id IS NULL ORDER BY address",
+        "SELECT * FROM wireguard_peers ORDER BY address",
     )
     .fetch_all(&state.db)
     .await?;
@@ -38,21 +39,27 @@ async fn list_peers(State(state): State<AppState>) -> Result<Json<Vec<serde_json
     let stats = wg::get_peer_stats(&state.cfg.wg_interface).unwrap_or_default();
 
     let now = Utc::now();
-    let result: Vec<serde_json::Value> = peers
-        .into_iter()
-        .map(|peer| {
-            let stat = stats.iter().find(|s| s.public_key == peer.public_key);
-            let mut v = serde_json::to_value(&peer).unwrap_or(json!({}));
-            v["expired"] = json!(wg::peer_expired(&peer, now));
-            if let Some(s) = stat {
-                v["endpoint"] = json!(s.endpoint);
-                v["latest_handshake"] = json!(s.latest_handshake);
-                v["transfer_rx"] = json!(s.transfer_rx);
-                v["transfer_tx"] = json!(s.transfer_tx);
-            }
-            v
-        })
-        .collect();
+    let mut result = Vec::with_capacity(peers.len());
+    for peer in peers {
+        let stat = stats.iter().find(|s| s.public_key == peer.public_key);
+        let mut v = serde_json::to_value(&peer).unwrap_or(json!({}));
+        v["expired"] = json!(wg::peer_expired(&peer, now));
+        // Tag the type so the UI can show one merged list with an Agent/WG badge.
+        let is_agent = peer.host_id.is_some();
+        v["kind"] = json!(if is_agent { "agent" } else { "wg" });
+        if let Some(hid) = &peer.host_id {
+            let host_name: Option<(String,)> =
+                sqlx::query_as("SELECT name FROM hosts WHERE id = ?").bind(hid).fetch_optional(&state.db).await.ok().flatten();
+            v["host_name"] = json!(host_name.map(|(n,)| n));
+        }
+        if let Some(s) = stat {
+            v["endpoint"] = json!(s.endpoint);
+            v["latest_handshake"] = json!(s.latest_handshake);
+            v["transfer_rx"] = json!(s.transfer_rx);
+            v["transfer_tx"] = json!(s.transfer_tx);
+        }
+        result.push(v);
+    }
 
     Ok(Json(result))
 }
@@ -89,6 +96,7 @@ async fn create_peer(
         created_at: now.clone(),
         updated_at: now,
         notes: req.notes,
+        host_id: None,
     };
 
     sqlx::query(

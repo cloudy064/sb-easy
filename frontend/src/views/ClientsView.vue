@@ -28,6 +28,10 @@
             <h3 class="peer-name">
               <span class="online-dot" :class="isOnline(peer) ? 'on' : 'off'" :title="isOnline(peer) ? 'Online' : 'Offline'"></span>
               {{ peer.name }}
+              <span class="kind-badge" :class="peer.kind === 'agent' ? 'kind-agent' : 'kind-wg'"
+                    :title="peer.kind === 'agent' ? 'Managed sb-easy agent' : 'Plain WireGuard client'">
+                {{ peer.kind === 'agent' ? 'AGENT' : 'WG' }}
+              </span>
               <span v-if="peer.expired" class="badge badge-red" style="margin-left:0.4rem">Expired</span>
             </h3>
             <span class="peer-addr">{{ peer.address }}</span>
@@ -254,6 +258,13 @@ function formatBytes(b: number) {
   font-weight: 650;
   color: var(--ink-primary);
 }
+.kind-badge {
+  font-family: var(--font-mono);
+  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.05em;
+  padding: 0.12rem 0.4rem; border-radius: 4px; margin-left: 0.4rem; vertical-align: middle;
+}
+.kind-agent { background: var(--accent-subtle); color: var(--accent); }
+.kind-wg { background: #e8f0fe; color: #3c6ea8; }
 .online-dot {
   display: inline-block;
   width: 8px; height: 8px;

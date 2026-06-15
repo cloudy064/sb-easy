@@ -21,6 +21,9 @@ pub struct WireGuardPeer {
     pub created_at: String,
     pub updated_at: String,
     pub notes: Option<String>,
+    /// Set when this peer belongs to a managed host (an agent); NULL = plain WG client.
+    #[serde(default)]
+    pub host_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

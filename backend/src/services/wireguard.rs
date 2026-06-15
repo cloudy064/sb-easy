@@ -666,7 +666,7 @@ mod tests {
             address: "10.59.32.2/32".into(), dns: "".into(), enabled: true,
             persistent_keepalive: 25, allowed_ips: "0.0.0.0/0".into(),
             expire_at: expire_at.map(|s| s.to_string()), quota_bytes: 0,
-            created_at: "now".into(), updated_at: "now".into(), notes: None,
+            created_at: "now".into(), updated_at: "now".into(), notes: None, host_id: None,
         }
     }
 

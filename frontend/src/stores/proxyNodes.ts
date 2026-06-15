@@ -35,10 +35,21 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     nodes.value = nodes.value.filter(n => n.id !== id)
   }
 
-  async function testLatency(id: string) {
-    const { data } = await client.post(`/proxy/nodes/${id}/test-latency`)
+  async function testLatency(id: string, params: Record<string, string> = {}) {
+    const { data } = await client.post(`/proxy/nodes/${id}/test-latency`, null, { params })
     const node = nodes.value.find(n => n.id === id)
     if (node) node.latency = data.latency
+    return data
+  }
+
+  // One-click: delay-test every enabled node against the selected host, then
+  // patch the in-memory latencies from the returned { tag: latency } map.
+  async function testAll(params: Record<string, string> = {}) {
+    const { data } = await client.post('/proxy/nodes/test-all', null, { params })
+    const results: Record<string, number | null> = data.results || {}
+    for (const node of nodes.value) {
+      if (node.tag in results) node.latency = results[node.tag]
+    }
     return data
   }
 
@@ -50,5 +61,5 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     return data as { found: number; added: number; updated: number; skipped: string[]; errors: string[] }
   }
 
-  return { nodes, loading, fetchNodes, createNode, updateNode, deleteNode, testLatency, importNodes }
+  return { nodes, loading, fetchNodes, createNode, updateNode, deleteNode, testLatency, testAll, importNodes }
 })

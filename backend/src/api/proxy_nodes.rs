@@ -1,13 +1,15 @@
 //! Proxy node management API.
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json, Router,
 };
 use axum::routing::{delete, get, post, put};
 use chrono::Utc;
 use serde_json::json;
+use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::api::hosts::resolve_clash_target;
 use crate::error::{AppError, Result};
 use crate::models::proxy_node::{CreateNodeRequest, ProxyNode, UpdateNodeRequest};
 use crate::AppState;
@@ -16,6 +18,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/nodes", get(list_nodes).post(create_node))
         .route("/nodes/import", post(import_nodes))
+        .route("/nodes/test-all", post(test_all))
         .route("/nodes/{id}", get(get_node).put(update_node).delete(delete_node))
         .route("/nodes/{id}/test-latency", post(test_latency_single))
 }
@@ -171,16 +174,21 @@ async fn delete_node(State(state): State<AppState>, Path(id): Path<String>) -> R
     Ok(Json(json!({"success": true})))
 }
 
-/// POST /api/proxy/nodes/{id}/test-latency
+/// POST /api/proxy/nodes/{id}/test-latency[?host=<id>]
+/// The delay test runs on a host that actually runs sing-box (the local one, or a
+/// managed host's Clash API over WG). A control-only panel has no sing-box, so the
+/// caller selects which host to test from.
 async fn test_latency_single(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(p): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>> {
     let node = sqlx::query_as::<_, ProxyNode>("SELECT * FROM proxy_nodes WHERE id = ?")
         .bind(&id).fetch_optional(&state.db).await?
         .ok_or_else(|| AppError::NotFound("Node not found".into()))?;
 
-    let latency = test_node_latency(&state, &node).await?;
+    let (base, secret) = resolve_clash_target(&state, p.get("host").map(|s| s.as_str())).await;
+    let latency = test_node_latency(&base, &secret, &node.tag).await;
     let now = Utc::now().to_rfc3339();
 
     sqlx::query("UPDATE proxy_nodes SET latency = ?, last_latency_test = ? WHERE id = ?")
@@ -189,40 +197,80 @@ async fn test_latency_single(
     Ok(Json(json!({"node_id": id, "latency": latency, "tested_at": now})))
 }
 
-/// Test latency of a single node via sing-box Clash API.
-async fn test_node_latency(state: &AppState, node: &ProxyNode) -> Result<Option<f64>> {
+/// POST /api/proxy/nodes/test-all[?host=<id>]
+/// One-click: delay-test every enabled node concurrently against the selected
+/// host's sing-box and persist the results. Returns `{ tag: latency|null }`.
+async fn test_all(
+    State(state): State<AppState>,
+    Query(p): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>> {
+    use futures::stream::{self, StreamExt};
+
+    let nodes = sqlx::query_as::<_, ProxyNode>(
+        "SELECT * FROM proxy_nodes WHERE enabled = 1 ORDER BY node_type, tag",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let (base, secret) = resolve_clash_target(&state, p.get("host").map(|s| s.as_str())).await;
+    let now = Utc::now().to_rfc3339();
+
+    // Bounded concurrency so we don't hammer the Clash API with 50+ parallel dials.
+    let results: Vec<(String, String, Option<f64>)> = stream::iter(nodes.into_iter())
+        .map(|n| {
+            let base = base.clone();
+            let secret = secret.clone();
+            async move {
+                let latency = test_node_latency(&base, &secret, &n.tag).await;
+                (n.id, n.tag, latency)
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    let mut out = serde_json::Map::new();
+    for (id, tag, latency) in &results {
+        let _ = sqlx::query("UPDATE proxy_nodes SET latency = ?, last_latency_test = ? WHERE id = ?")
+            .bind(latency)
+            .bind(&now)
+            .bind(id)
+            .execute(&state.db)
+            .await;
+        out.insert(tag.clone(), json!(latency));
+    }
+
+    Ok(Json(json!({ "tested": out.len(), "results": out, "tested_at": now })))
+}
+
+/// Delay-test a single proxy tag via a sing-box Clash API. Returns ms, or None
+/// if unreachable. Never errors — a dead node just yields None.
+async fn test_node_latency(base: &str, secret: &str, tag: &str) -> Option<f64> {
     use std::time::Duration;
 
-    let timeout = 5000;
     let url = format!(
-        "{}/proxies/{}/delay?url={}&timeout={}",
-        state.cfg.singbox_api_url.trim_end_matches('/'),
-        crate::util::encode_query_component(&node.tag),
+        "{}/proxies/{}/delay?url={}&timeout=5000",
+        base.trim_end_matches('/'),
+        crate::util::encode_query_component(tag),
         crate::util::encode_query_component("https://www.gstatic.com/generate_204"),
-        timeout,
     );
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .ok()?;
 
     let mut req = client.get(&url);
-    if !state.cfg.singbox_api_secret.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", state.cfg.singbox_api_secret));
+    if !secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {secret}"));
     }
 
-    let response = req.send().await;
-    match response {
+    match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or(json!({}));
-            Ok(body["delay"].as_f64())
+            body["delay"].as_f64()
         }
-        Ok(_) => {
-            // Node might be unreachable
-            Ok(None)
-        }
-        Err(_) => Ok(None),
+        _ => None,
     }
 }
 

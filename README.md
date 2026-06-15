@@ -35,6 +35,10 @@ docker compose up -d --build
 
 Open `http://<host>:51821` and log in as `admin`.
 
+For the full production topology (server = panel + WG hub + config sync; each
+endpoint = `sb-easy agent`) and how to add agent nodes, see
+**[docs/deployment.md](docs/deployment.md)**.
+
 > Do **not** run this on a box that already runs sing-box on `:9090`/a tun — the
 > managed instance would conflict. Stop the old one first.
 

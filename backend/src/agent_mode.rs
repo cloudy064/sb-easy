@@ -113,31 +113,26 @@ async fn run_commands(
             continue;
         }
         info!("running command: {command}");
-        let (status, result) = match command.as_str() {
-            "reload" => {
-                sb.reload_now();
-                ("done", "reloaded".to_string())
-            }
-            "restart" => {
-                sb.restart().await;
-                ("done", "restarted".to_string())
-            }
-            "test-proxies" => match test_proxies(client, config_path).await {
-                Ok(results) => {
-                    let n = results.len();
-                    let url = format!("{}/api/agent/proxy-latency", server.trim_end_matches('/'));
-                    let _ = client
-                        .post(&url)
-                        .bearer_auth(token)
-                        .json(&serde_json::json!({ "results": results }))
-                        .timeout(Duration::from_secs(20))
-                        .send()
-                        .await;
-                    ("done", format!("tested {n} proxies"))
-                }
+        // `test-proxies` may carry an optional JSON array of tags to test a
+        // subset (e.g. a single node's re-test); bare = test every proxy.
+        let (status, result): (&str, String) = if command == "reload" {
+            sb.reload_now();
+            ("done", "reloaded".to_string())
+        } else if command == "restart" {
+            sb.restart().await;
+            ("done", "restarted".to_string())
+        } else if command == "test-proxies" || command.starts_with("test-proxies ") {
+            let tags: Option<Vec<String>> = command
+                .strip_prefix("test-proxies")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(s).ok());
+            match test_proxies(client, server, token, config_path, tags.as_deref()).await {
+                Ok(n) => ("done", format!("tested {n} proxies")),
                 Err(e) => ("failed", format!("test-proxies: {e}")),
-            },
-            other => ("failed", format!("unknown command: {other}")),
+            }
+        } else {
+            ("failed", format!("unknown command: {command}"))
         };
         let ack = format!("{}/api/agent/commands/{}/ack", server.trim_end_matches('/'), id);
         let _ = client
@@ -175,15 +170,18 @@ async fn report_status(
     Ok(())
 }
 
-/// Delay-test every real proxy in the locally-running sing-box and return a
-/// `{ tag: latency_ms|null }` map. The Clash controller address + secret are read
-/// from the running config file (so we always match what sing-box actually serves).
+/// Delay-test the locally-running sing-box's proxies, one at a time, reporting
+/// each result to the panel as it completes so the UI fills in progressively.
+/// `tags` limits the test to a subset (a single node's re-test); `None` = all.
+/// Returns the number of proxies tested. Clash controller/secret are read from
+/// the running config so we always match what sing-box actually serves.
 async fn test_proxies(
     client: &reqwest::Client,
+    server: &str,
+    token: &str,
     config_path: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>> {
-    use futures::stream::{self, StreamExt};
-
+    tags: Option<&[String]>,
+) -> Result<usize> {
     let cfg_str = tokio::fs::read_to_string(config_path)
         .await
         .with_context(|| format!("read config {config_path}"))?;
@@ -214,35 +212,39 @@ async fn test_proxies(
     ];
     let names: Vec<String> = map
         .iter()
-        .filter(|(_, p)| {
+        .filter(|(name, p)| {
             let ty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            !SKIP.contains(&ty) && p.get("all").is_none()
+            let is_proxy = !SKIP.contains(&ty) && p.get("all").is_none();
+            let wanted = tags.map(|t| t.iter().any(|x| x == *name)).unwrap_or(true);
+            is_proxy && wanted
         })
         .map(|(name, _)| name.clone())
         .collect();
 
-    let results: Vec<(String, serde_json::Value)> = stream::iter(names.into_iter())
-        .map(|name| {
-            let base = base.clone();
-            let secret = secret.clone();
-            async move {
-                let path = format!(
-                    "/proxies/{}/delay?url={}&timeout=5000",
-                    crate::util::encode_query_component(&name),
-                    crate::util::encode_query_component("https://www.gstatic.com/generate_204"),
-                );
-                let delay = clash_get(client, &base, &secret, &path)
-                    .await
-                    .ok()
-                    .and_then(|v| v.get("delay").and_then(|d| d.as_f64()));
-                (name, delay.map(|d| serde_json::json!(d)).unwrap_or(serde_json::Value::Null))
-            }
-        })
-        .buffer_unordered(8)
-        .collect()
-        .await;
-
-    Ok(results.into_iter().collect())
+    let url = format!("{}/api/agent/proxy-latency", server.trim_end_matches('/'));
+    let mut tested = 0usize;
+    for name in &names {
+        let path = format!(
+            "/proxies/{}/delay?url={}&timeout=5000",
+            crate::util::encode_query_component(name),
+            crate::util::encode_query_component("https://www.gstatic.com/generate_204"),
+        );
+        let delay = clash_get(client, &base, &secret, &path)
+            .await
+            .ok()
+            .and_then(|v| v.get("delay").and_then(|d| d.as_f64()));
+        let value = delay.map(|d| serde_json::json!(d)).unwrap_or(serde_json::Value::Null);
+        // Report this node's result immediately (progressive UI fill-in).
+        let _ = client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "results": { name: value } }))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+        tested += 1;
+    }
+    Ok(tested)
 }
 
 /// GET a Clash API path with the optional bearer secret, parsing JSON (or `{}`).

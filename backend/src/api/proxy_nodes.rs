@@ -183,16 +183,16 @@ async fn test_latency_single(
     Path(id): Path<String>,
     Query(p): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>> {
-    // A remote host has no inbound path from the panel — its agent runs the test
-    // locally and reports back. Enqueue the test and return; results arrive async.
-    if let Some(host_id) = remote_host(&p) {
-        enqueue_test(&state, host_id).await?;
-        return Ok(Json(json!({ "queued": true, "host": host_id })));
-    }
-
     let node = sqlx::query_as::<_, ProxyNode>("SELECT * FROM proxy_nodes WHERE id = ?")
         .bind(&id).fetch_optional(&state.db).await?
         .ok_or_else(|| AppError::NotFound("Node not found".into()))?;
+
+    // A remote host has no inbound path from the panel — its agent runs the test
+    // locally and reports back. Enqueue just this node's tag; result arrives async.
+    if let Some(host_id) = remote_host(&p) {
+        enqueue_test(&state, host_id, Some(&[node.tag.clone()])).await?;
+        return Ok(Json(json!({ "queued": true, "host": host_id })));
+    }
 
     let (base, secret) = resolve_clash_target(&state, p.get("host").map(|s| s.as_str())).await;
     let latency = test_node_latency(&base, &secret, &node.tag).await;
@@ -215,7 +215,7 @@ async fn test_all(
 
     // Remote host → its agent runs the delay tests locally and reports back.
     if let Some(host_id) = remote_host(&p) {
-        enqueue_test(&state, host_id).await?;
+        enqueue_test(&state, host_id, None).await?;
         return Ok(Json(json!({ "queued": true, "host": host_id })));
     }
 
@@ -264,7 +264,9 @@ fn remote_host(p: &HashMap<String, String>) -> Option<&str> {
 }
 
 /// Enqueue a `test-proxies` command for a host's agent to run on its next poll.
-async fn enqueue_test(state: &AppState, host_id: &str) -> Result<()> {
+/// `tags` (when set) limits the test to those proxy tags — encoded in the command
+/// string so no extra schema is needed; bare `test-proxies` tests everything.
+async fn enqueue_test(state: &AppState, host_id: &str, tags: Option<&[String]>) -> Result<()> {
     let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE id = ?")
         .bind(host_id)
         .fetch_optional(&state.db)
@@ -272,11 +274,16 @@ async fn enqueue_test(state: &AppState, host_id: &str) -> Result<()> {
     if exists.is_none() {
         return Err(AppError::NotFound("Host not found".into()));
     }
+    let command = match tags {
+        Some(t) if !t.is_empty() => format!("test-proxies {}", serde_json::to_string(t)?),
+        _ => "test-proxies".to_string(),
+    };
     sqlx::query(
-        "INSERT INTO host_commands (id, host_id, command, status, created_at) VALUES (?, ?, 'test-proxies', 'pending', ?)",
+        "INSERT INTO host_commands (id, host_id, command, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(host_id)
+    .bind(command)
     .bind(Utc::now().to_rfc3339())
     .execute(&state.db)
     .await?;

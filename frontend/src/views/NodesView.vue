@@ -61,12 +61,9 @@
 
         <div class="node-card-bottom">
           <div class="latency-display">
-            <template v-if="node.latency !== null">
-              <span class="latency-value" :class="latencyColor(node.latency)">{{ node.latency }}<span class="latency-unit">ms</span></span>
-            </template>
-            <template v-else>
-              <span class="latency-untested">Not tested</span>
-            </template>
+            <span v-if="node.latency !== null" class="latency-value" :class="latencyColor(node.latency)">{{ node.latency }}<span class="latency-unit">ms</span></span>
+            <span v-else-if="node.last_latency_test" class="latency-dead" title="Tested but unreachable — kept (it may come from a subscription)">✕ dead</span>
+            <span v-else class="latency-untested">Not tested</span>
           </div>
           <div class="flex-center gap-2">
             <button class="btn-ghost btn-sm" @click="testLatency(node.id)" :disabled="testingAll">Test</button>
@@ -522,6 +519,7 @@ async function toggleNode(node: ProxyNode) {
 .latency-ok   { color: var(--warn); }
 .latency-slow { color: var(--bad); }
 .latency-untested { color: var(--ink-muted); font-size: 0.78rem; font-style: italic; }
+.latency-dead { color: var(--bad); font-size: 0.82rem; font-weight: 600; }
 
 /* Protocol badges */
 .protocol-badge {

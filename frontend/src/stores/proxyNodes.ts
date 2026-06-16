@@ -37,20 +37,25 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
 
   async function testLatency(id: string, params: Record<string, string> = {}) {
     const { data } = await client.post(`/proxy/nodes/${id}/test-latency`, null, { params })
-    const node = nodes.value.find(n => n.id === id)
-    if (node) node.latency = data.latency
-    return data
+    if (!data.queued) {
+      const node = nodes.value.find(n => n.id === id)
+      if (node) node.latency = data.latency
+    }
+    return data as { queued?: boolean; latency?: number | null }
   }
 
-  // One-click: delay-test every enabled node against the selected host, then
-  // patch the in-memory latencies from the returned { tag: latency } map.
+  // One-click delay test. For the local host it returns results synchronously
+  // ({ results }); for a remote host it enqueues the test on that host's agent
+  // ({ queued: true }) and the latencies arrive later (poll fetchNodes()).
   async function testAll(params: Record<string, string> = {}) {
     const { data } = await client.post('/proxy/nodes/test-all', null, { params })
-    const results: Record<string, number | null> = data.results || {}
-    for (const node of nodes.value) {
-      if (node.tag in results) node.latency = results[node.tag]
+    if (!data.queued) {
+      const results: Record<string, number | null> = data.results || {}
+      for (const node of nodes.value) {
+        if (node.tag in results) node.latency = results[node.tag]
+      }
     }
-    return data
+    return data as { queued?: boolean; tested?: number }
   }
 
   // Import proxy nodes from an existing config profile or pasted sing-box JSON.

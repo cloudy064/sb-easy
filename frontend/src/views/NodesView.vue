@@ -238,6 +238,8 @@
         </div>
       </div>
     </div>
+
+    <div v-if="toast" class="toast"><div class="toast-item toast-success">{{ toast }}</div></div>
   </div>
 </template>
 
@@ -388,10 +390,28 @@ const filteredNodes = computed(() =>
 async function testAllNodes() {
   testingAll.value = true
   try {
-    await store.testAll(reqParams.value as Record<string, string>)
+    const r = await store.testAll(reqParams.value as Record<string, string>)
+    if (r.queued) afterQueuedTest()
   } finally {
     testingAll.value = false
   }
+}
+
+// A remote host runs the test on its agent and reports back; poll for results.
+function afterQueuedTest() {
+  notify('Test dispatched to the agent — results will refresh shortly.')
+  let n = 0
+  const timer = setInterval(async () => {
+    n++
+    await store.fetchNodes()
+    if (n >= 8) clearInterval(timer)
+  }, 2500)
+}
+
+const toast = ref('')
+function notify(msg: string) {
+  toast.value = msg
+  setTimeout(() => (toast.value = ''), 4000)
 }
 
 function protocolLabel(t: string) {
@@ -444,7 +464,10 @@ async function doDelete() {
   deleteTarget.value = null
 }
 
-async function testLatency(id: string) { await store.testLatency(id, reqParams.value as Record<string, string>) }
+async function testLatency(id: string) {
+  const r = await store.testLatency(id, reqParams.value as Record<string, string>)
+  if (r.queued) afterQueuedTest()
+}
 async function toggleNode(node: ProxyNode) {
   await store.updateNode(node.id, { enabled: !node.enabled })
   node.enabled = !node.enabled

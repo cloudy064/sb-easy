@@ -11,6 +11,14 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/migrate/wg-easy", post(migrate_wg_easy))
+        .route("/logs", get(server_logs))
+}
+
+/// GET /api/system/logs — the panel's *own* recent log lines (distinct from a
+/// device's sing-box logs).
+async fn server_logs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let lines = crate::services::server_log::lines(&state.server_logs);
+    Json(json!({ "lines": lines }))
 }
 
 pub async fn status_handler(State(state): State<AppState>) -> Json<serde_json::Value> {

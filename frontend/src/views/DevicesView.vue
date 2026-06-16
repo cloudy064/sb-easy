@@ -34,7 +34,8 @@
           <div class="device-info">
             <h3 class="device-name">
               <span class="online-dot" :class="online(d) ? 'on' : 'off'" :title="online(d) ? 'Online' : 'Offline'"></span>
-              {{ d.name }}
+              <router-link v-if="d._t === 'host'" :to="`/devices/${d.id}`" class="device-name-link">{{ d.name }}</router-link>
+              <template v-else>{{ d.name }}</template>
               <span class="type-badge" :class="d._t === 'host' ? 'type-host' : 'type-client'">
                 {{ d._t === 'host' ? t('devices.type.host') : t('devices.type.client') }}
               </span>
@@ -388,6 +389,8 @@ function formatBytes(b: number) {
 .device-card { padding: 1.75rem; display: flex; flex-direction: column; gap: 1rem; }
 .device-top { display: flex; justify-content: space-between; align-items: flex-start; }
 .device-name { font-size: 0.95rem; font-weight: 650; color: var(--ink-primary); display: flex; align-items: center; flex-wrap: wrap; gap: 0.1rem; }
+.device-name-link { color: var(--ink-primary); text-decoration: none; }
+.device-name-link:hover { color: var(--accent); text-decoration: underline; }
 
 .type-badge {
   font-size: 0.58rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;

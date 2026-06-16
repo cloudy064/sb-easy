@@ -7,12 +7,20 @@
       </div>
       <div class="flex-center gap-3">
         <HostSelect @change="load" />
-        <button class="btn-secondary" @click="testAllNodes" :disabled="testingAll" :title="'Delay-test all enabled nodes via the selected host'">
-          {{ testingAll ? 'Testing…' : 'Test all' }}
+        <button class="btn-secondary" @click="testAllNodes" :disabled="anyTesting" :title="'Delay-test all enabled nodes via the selected host'">
+          {{ anyTesting ? 'Testing…' : 'Test all' }}
         </button>
         <button class="btn-secondary" @click="openImport">Import</button>
         <button class="btn-primary" @click="showCreate = true">Add Node</button>
       </div>
+    </div>
+
+    <!-- Latency-tier stats — click a chip to filter -->
+    <div class="stat-bar">
+      <button v-for="s in statChips" :key="s.key" class="stat-chip" :class="[s.cls, { active: tierFilter === s.key }]" @click="toggleTier(s.key)">
+        <span class="stat-count">{{ s.count }}</span>
+        <span class="stat-label">{{ s.label }}</span>
+      </button>
     </div>
 
     <div class="flex-center gap-3 mb-5" style="flex-wrap:wrap">
@@ -60,13 +68,18 @@
         </div>
 
         <div class="node-card-bottom">
-          <div class="latency-display">
+          <div class="latency-group">
             <span v-if="node.latency !== null" class="latency-value" :class="latencyColor(node.latency)">{{ node.latency }}<span class="latency-unit">ms</span></span>
             <span v-else-if="node.last_latency_test" class="latency-dead" title="Tested but unreachable — kept (it may come from a subscription)">✕ dead</span>
             <span v-else class="latency-untested">Not tested</span>
+            <button class="latency-test-btn" :disabled="isTesting(node.id)" :title="isTesting(node.id) ? 'Testing…' : 'Test latency'" @click="testOne(node)">
+              <span v-if="isTesting(node.id)" class="spinner-sm"></span>
+              <svg v-else width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M15.5 9a6.5 6.5 0 1 1-2-4.7" stroke-linecap="round"/><path d="M15.5 3v3h-3"/>
+              </svg>
+            </button>
           </div>
           <div class="flex-center gap-2">
-            <button class="btn-ghost btn-sm" @click="testLatency(node.id)" :disabled="testingAll">Test</button>
             <button class="btn-ghost btn-sm" @click="editNode(node)">Edit</button>
             <button class="btn-danger btn-sm" @click="confirmDelete(node)">Delete</button>
           </div>
@@ -243,7 +256,7 @@
 <script setup lang="ts">
 import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useProxyNodesStore } from '../stores/proxyNodes'
 import HostSelect from '../components/HostSelect.vue'
 import { useHostTarget } from '../composables/hostTarget'
@@ -255,7 +268,6 @@ const { reqParams } = useHostTarget()
 const search = ref('')
 const filterType = ref('')
 const filterSource = ref('')
-const testingAll = ref(false)
 const subs = ref<Subscription[]>([])
 const showCreate = ref(false)
 
@@ -374,36 +386,88 @@ function sourceLabel(n: ProxyNode): string {
   return n.subscription_id ? (subName.value[n.subscription_id] || 'Subscription') : 'Manual'
 }
 
+// ── Latency tiers ──
+type Tier = 'fast' | 'normal' | 'high' | 'dead' | 'untested'
+const tierFilter = ref<'' | Tier>('')
+function tierOf(n: ProxyNode): Tier {
+  if (n.latency != null) return n.latency < 200 ? 'fast' : n.latency < 500 ? 'normal' : 'high'
+  return n.last_latency_test ? 'dead' : 'untested'
+}
+const stats = computed(() => {
+  const s: Record<Tier, number> = { fast: 0, normal: 0, high: 0, dead: 0, untested: 0 }
+  for (const n of store.nodes) s[tierOf(n)]++
+  return s
+})
+const statChips = computed(() => [
+  { key: '', label: t('proxies.tier.all'), cls: 'tier-all', count: store.nodes.length },
+  { key: 'fast', label: t('proxies.tier.fast'), cls: 'tier-fast', count: stats.value.fast },
+  { key: 'normal', label: t('proxies.tier.normal'), cls: 'tier-normal', count: stats.value.normal },
+  { key: 'high', label: t('proxies.tier.high'), cls: 'tier-high', count: stats.value.high },
+  { key: 'dead', label: t('proxies.tier.dead'), cls: 'tier-dead', count: stats.value.dead },
+  { key: 'untested', label: t('proxies.tier.untested'), cls: 'tier-untested', count: stats.value.untested },
+])
+function toggleTier(k: string) { tierFilter.value = (tierFilter.value === k ? '' : k) as '' | Tier }
+
 const filteredNodes = computed(() =>
   store.nodes.filter(n => {
     if (filterType.value && n.node_type !== filterType.value) return false
     if (filterSource.value === '__manual__' && n.subscription_id) return false
     if (filterSource.value && filterSource.value !== '__manual__' && n.subscription_id !== filterSource.value) return false
+    if (tierFilter.value && tierOf(n) !== tierFilter.value) return false
     if (search.value && !n.tag.toLowerCase().includes(search.value.toLowerCase()) && !n.server.includes(search.value)) return false
     return true
   })
 )
 
-async function testAllNodes() {
-  testingAll.value = true
-  try {
-    const r = await store.testAll(reqParams.value as Record<string, string>)
-    if (r.queued) afterQueuedTest()
-  } finally {
-    testingAll.value = false
+// ── Progressive per-node testing ──
+// `testing[id]` drives the per-node spinner. A node clears when its
+// last_latency_test changes from the snapshot taken when testing started — so
+// results from the agent fill in one-by-one as it reports them.
+const testing = reactive<Record<string, boolean>>({})
+const anyTesting = computed(() => Object.keys(testing).length > 0)
+function isTesting(id: string): boolean { return !!testing[id] }
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function startTesting(ids: string[]): Record<string, string | null> {
+  const snap: Record<string, string | null> = {}
+  for (const id of ids) {
+    testing[id] = true
+    snap[id] = store.nodes.find(n => n.id === id)?.last_latency_test ?? null
   }
+  return snap
+}
+function clearTesting() { for (const k of Object.keys(testing)) delete testing[k] }
+function pollResults(snap: Record<string, string | null>) {
+  if (pollTimer) clearInterval(pollTimer)
+  let elapsed = 0
+  pollTimer = setInterval(async () => {
+    elapsed += 1.5
+    await store.fetchNodes()
+    for (const n of store.nodes) {
+      if (testing[n.id] && (n.last_latency_test ?? null) !== (snap[n.id] ?? null)) delete testing[n.id]
+    }
+    if (!anyTesting.value || elapsed > 180) {
+      clearInterval(pollTimer!); pollTimer = null; clearTesting()
+    }
+  }, 1500)
 }
 
-// A remote host runs the test on its agent and reports back; poll for results.
-function afterQueuedTest() {
-  notify('Test dispatched to the agent — results will refresh shortly.')
-  let n = 0
-  const timer = setInterval(async () => {
-    n++
-    await store.fetchNodes()
-    if (n >= 8) clearInterval(timer)
-  }, 2500)
+async function testAllNodes() {
+  const ids = store.nodes.filter(n => n.enabled).map(n => n.id)
+  if (!ids.length) return
+  const snap = startTesting(ids)
+  const r = await store.testAll(reqParams.value as Record<string, string>)
+  if (r.queued) { notify('Test dispatched — results fill in as each node completes.'); pollResults(snap) }
+  else clearTesting() // local host: synchronous, latencies already patched
 }
+async function testOne(node: ProxyNode) {
+  const snap = startTesting([node.id])
+  const r = await store.testLatency(node.id, reqParams.value as Record<string, string>)
+  if (r.queued) pollResults(snap)
+  else delete testing[node.id]
+}
+
+onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
 
 const toast = ref('')
 function notify(msg: string) {
@@ -461,10 +525,6 @@ async function doDelete() {
   deleteTarget.value = null
 }
 
-async function testLatency(id: string) {
-  const r = await store.testLatency(id, reqParams.value as Record<string, string>)
-  if (r.queued) afterQueuedTest()
-}
 async function toggleNode(node: ProxyNode) {
   await store.updateNode(node.id, { enabled: !node.enabled })
   node.enabled = !node.enabled
@@ -568,4 +628,41 @@ async function toggleNode(node: ProxyNode) {
 }
 .src-sub { background: #eef0fb; color: #5a5fa0; }
 .src-manual { background: var(--paper-border); color: var(--ink-muted); }
+
+/* Latency-tier stats bar */
+.stat-bar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+.stat-chip {
+  display: flex; align-items: baseline; gap: 0.4rem;
+  background: var(--paper-surface); border: 1px solid var(--paper-border);
+  border-radius: var(--radius-sm); padding: 0.4rem 0.75rem; cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.stat-chip:hover { border-color: var(--accent-dim); }
+.stat-chip.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-subtle); }
+.stat-count { font-size: 1.05rem; font-weight: 680; font-family: var(--font-mono); }
+.stat-label { font-size: 0.72rem; font-weight: 600; color: var(--ink-secondary); }
+.tier-fast .stat-count { color: var(--ok); }
+.tier-normal .stat-count { color: var(--warn); }
+.tier-high .stat-count { color: #d08a3c; }
+.tier-dead .stat-count { color: var(--bad); }
+.tier-untested .stat-count { color: var(--ink-muted); }
+.tier-all .stat-count { color: var(--ink-primary); }
+
+/* Inline per-node test button + spinner */
+.latency-group { display: flex; align-items: baseline; gap: 0.5rem; }
+.latency-test-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border-radius: 6px;
+  background: var(--paper-bg); border: 1px solid var(--paper-border);
+  color: var(--ink-secondary); cursor: pointer; align-self: center; flex-shrink: 0;
+  transition: all 0.15s;
+}
+.latency-test-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.latency-test-btn:disabled { cursor: default; }
+.spinner-sm {
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid var(--accent-subtle); border-top-color: var(--accent);
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>

@@ -87,7 +87,7 @@
           <div class="section-block">
             <h4>{{ t('profiles.route') }}</h4>
             <div class="row-grid">
-              <input v-model="model.route.final" placeholder="final (Proxy)" />
+              <input v-model="model.route.final" placeholder="final (auto)" list="re-ob-suggest" />
               <label class="chk"><input type="checkbox" v-model="model.route.auto_detect_interface" /> auto_detect_interface</label>
             </div>
             <div style="margin-top:.75rem">
@@ -126,18 +126,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
+import { useProxyNodesStore } from '../stores/proxyNodes'
 import RulesEditor from '../components/RulesEditor.vue'
 import type { ConfigProfile } from '../types'
 
 const { t } = useI18n()
 const store = useHostsStore()
+const nodesStore = useProxyNodesStore()
 
-// Suggested outbound targets for rule rows. The per-host outbounds inject
-// "Proxy"/"Auto" selectors; direct/block are built-ins.
-const outboundSuggestions = ['Proxy', 'Auto', 'direct', 'block']
+// Outbound targets a rule can point at: the built-in `auto` (fastest at
+// startup), `direct`/`block`, and every individual proxy node by tag.
+const outboundSuggestions = computed(() => [
+  'auto', 'direct', 'block', ...nodesStore.nodes.map((n) => n.tag),
+])
 const loading = ref(true)
 const deleteTarget = ref<ConfigProfile | null>(null)
 
@@ -184,7 +188,7 @@ function splitList(e: Event): string[] {
 }
 
 onMounted(async () => {
-  await store.fetchProfiles()
+  await Promise.all([store.fetchProfiles(), nodesStore.fetchNodes()])
   loading.value = false
 })
 

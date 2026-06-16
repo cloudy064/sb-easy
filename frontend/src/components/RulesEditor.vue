@@ -43,7 +43,7 @@
           v-model="row.outbound"
           @input="commit"
           list="re-ob-suggest"
-          placeholder="Proxy"
+          placeholder="auto"
           style="max-width:120px"
         />
 
@@ -176,7 +176,7 @@ function rowToRule(row: Row): any {
     else if (kind === 'str') rule[row.matcher] = row.value.trim()
     else rule[row.matcher] = splitList(row.value)
   }
-  if (row.target === 'outbound') rule.outbound = row.outbound || 'Proxy'
+  if (row.target === 'outbound') rule.outbound = row.outbound || 'auto'
   else rule.action = row.target
   return rule
 }
@@ -197,7 +197,7 @@ function commit() {
 function addRule() {
   rows.value.push({
     id: seq++, mode: 'form', matcher: 'domain_suffix', value: '', bool: false,
-    target: 'outbound', outbound: 'Proxy', rawText: '', rawErr: false,
+    target: 'outbound', outbound: 'auto', rawText: '', rawErr: false,
   })
   commit()
 }

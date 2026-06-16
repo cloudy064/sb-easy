@@ -39,6 +39,7 @@ pub fn build(state: AppState) -> Router {
         .nest("/api/settings", settings::router())
         .nest("/api/users", users::router())
         .nest("/api/hosts", hosts::router())
+        .route("/api/system/logs", axum::routing::get(system::server_logs))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,

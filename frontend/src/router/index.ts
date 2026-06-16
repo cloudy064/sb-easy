@@ -26,7 +26,9 @@ const router = createRouter({
         // selector view becomes "Proxy Groups".
         { path: 'proxies', name: 'Proxies', component: () => import('../views/NodesView.vue') },
         { path: 'nodes', redirect: '/proxies' },
-        { path: 'proxy-groups', name: 'ProxyGroups', component: () => import('../views/ProxiesView.vue') },
+        // Proxy Groups (live manual node-switching) is obsolete under the
+        // simplified node+rules model — redirect any old links to the node list.
+        { path: 'proxy-groups', redirect: '/proxies' },
         { path: 'subscriptions', name: 'Subscriptions', component: () => import('../views/SubscriptionsView.vue') },
         { path: 'config', name: 'Config', component: () => import('../views/ConfigView.vue') },
         { path: 'users', name: 'Users', component: () => import('../views/UsersView.vue') },

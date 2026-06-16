@@ -45,13 +45,6 @@
           </svg>
           {{ t('nav.subscriptions') }}
         </router-link>
-        <router-link to="/proxy-groups" class="nav-item" active-class="active">
-          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <rect x="1" y="2" width="16" height="4" rx="1"/><rect x="1" y="8" width="16" height="4" rx="1"/>
-            <rect x="1" y="14" width="10" height="2.5" rx="1"/>
-          </svg>
-          {{ t('nav.proxies') }}
-        </router-link>
         <router-link to="/config" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M6 4L2 9l4 5M12 4l4 5-4 5" stroke-linecap="round" stroke-linejoin="round"/>

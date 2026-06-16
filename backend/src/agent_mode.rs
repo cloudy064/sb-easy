@@ -35,6 +35,12 @@ pub async fn run() -> Result<()> {
     let mut sb = Singbox::new(bin, path.clone());
     let mut last_etag: Option<String> = None;
 
+    // Telemetry relay: a background task streams sing-box logs into a ring buffer;
+    // each cycle we sample traffic/connections and POST a snapshot to the panel.
+    let logs_buf: LogRing = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    tokio::spawn(logs_collector(path.clone(), logs_buf.clone()));
+    let mut last_totals: Option<(i64, i64, std::time::Instant)> = None;
+
     loop {
         match poll_config(&client, &server, &token, last_etag.as_deref()).await {
             Ok(Some((etag, body))) => {
@@ -57,6 +63,10 @@ pub async fn run() -> Result<()> {
         let running = sb.is_alive();
         if let Err(e) = report_status(&client, &server, &token, last_etag.as_deref(), running).await {
             warn!("status report: {e}");
+        }
+
+        if let Err(e) = report_telemetry(&client, &server, &token, &path, &logs_buf, &mut last_totals).await {
+            warn!("telemetry: {e}");
         }
 
         tokio::time::sleep(Duration::from_secs(interval)).await;
@@ -260,4 +270,107 @@ async fn clash_get(
     }
     let resp = req.send().await.context("reach clash api")?;
     Ok(resp.json().await.unwrap_or(serde_json::json!({})))
+}
+
+type LogRing = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+
+/// Read the Clash controller (`host:port`, wildcard binds normalised to loopback)
+/// and secret from the running config file.
+async fn read_clash(config_path: &str) -> Option<(String, String)> {
+    let s = tokio::fs::read_to_string(config_path).await.ok()?;
+    let cfg: serde_json::Value = serde_json::from_str(&s).ok()?;
+    let ctrl = cfg
+        .pointer("/experimental/clash_api/external_controller")?
+        .as_str()?
+        .replace("0.0.0.0", "127.0.0.1")
+        .replace("[::]", "127.0.0.1");
+    let secret = cfg
+        .pointer("/experimental/clash_api/secret")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((ctrl, secret))
+}
+
+/// Stream sing-box logs from the local Clash API into a ring buffer (reconnecting
+/// on drop). The latest lines are sent to the panel by `report_telemetry`.
+async fn logs_collector(config_path: String, buf: LogRing) {
+    use futures::StreamExt;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    loop {
+        let (controller, secret) = match read_clash(&config_path).await {
+            Some(x) => x,
+            None => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        let mut qs = String::from("level=info");
+        if !secret.is_empty() {
+            qs = format!("token={}&{qs}", crate::util::encode_query_component(&secret));
+        }
+        let url = format!("ws://{controller}/logs?{qs}");
+        if let Ok((mut ws, _)) = connect_async(&url).await {
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(t) = msg {
+                    let line = serde_json::from_str::<serde_json::Value>(&t)
+                        .ok()
+                        .and_then(|v| v.get("payload").and_then(|p| p.as_str()).map(str::to_string))
+                        .unwrap_or_else(|| t.to_string());
+                    if let Ok(mut q) = buf.lock() {
+                        if q.len() >= 500 {
+                            q.pop_front();
+                        }
+                        q.push_back(line);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await; // reconnect
+    }
+}
+
+/// Sample current traffic/connections from the local sing-box and POST a snapshot
+/// (with the recent log buffer) to the panel.
+async fn report_telemetry(
+    client: &reqwest::Client,
+    server: &str,
+    token: &str,
+    config_path: &str,
+    logs_buf: &LogRing,
+    last: &mut Option<(i64, i64, std::time::Instant)>,
+) -> Result<()> {
+    let (controller, secret) = match read_clash(config_path).await {
+        Some(x) => x,
+        None => return Ok(()),
+    };
+    let base = format!("http://{controller}");
+    let conns = clash_get(client, &base, &secret, "/connections").await.unwrap_or(serde_json::json!({}));
+    let up_total = conns.get("uploadTotal").and_then(|v| v.as_i64()).unwrap_or(0);
+    let down_total = conns.get("downloadTotal").and_then(|v| v.as_i64()).unwrap_or(0);
+    let connections = conns.get("connections").cloned().unwrap_or(serde_json::json!([]));
+    let conn_count = connections.as_array().map(|a| a.len()).unwrap_or(0);
+
+    let now = std::time::Instant::now();
+    let (up, down) = match *last {
+        Some((lu, ld, lt)) => {
+            let dt = now.duration_since(lt).as_secs_f64().max(0.001);
+            (
+                ((up_total - lu).max(0) as f64 / dt) as i64,
+                ((down_total - ld).max(0) as f64 / dt) as i64,
+            )
+        }
+        None => (0, 0),
+    };
+    *last = Some((up_total, down_total, now));
+
+    let logs: Vec<String> = logs_buf.lock().map(|q| q.iter().cloned().collect()).unwrap_or_default();
+    let body = serde_json::json!({
+        "up": up, "down": down,
+        "up_total": up_total, "down_total": down_total,
+        "conn_count": conn_count, "connections": connections, "logs": logs,
+    });
+    let url = format!("{}/api/agent/telemetry", server.trim_end_matches('/'));
+    let _ = client.post(&url).bearer_auth(token).json(&body).timeout(Duration::from_secs(10)).send().await;
+    Ok(())
 }

@@ -31,7 +31,27 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/rotate-token", post(rotate_token))
         .route("/{id}/outbounds", put(set_outbounds).get(get_outbounds))
         .route("/{id}/wg-config", get(download_wg_config))
+        .route("/{id}/config", get(host_config))
+        .route("/{id}/telemetry", get(host_telemetry))
         .route("/{id}/commands", get(list_commands).post(enqueue_command))
+}
+
+/// GET /api/hosts/{id}/config — the sing-box config this device runs (rendered
+/// from its profile + assigned nodes). Per-device, not a global server config.
+async fn host_config(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
+    let host = sqlx::query_as::<_, Host>("SELECT * FROM hosts WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Host not found".into()))?;
+    Ok(Json(render_host_served(&state, &host).await))
+}
+
+/// GET /api/hosts/{id}/telemetry — latest traffic/connections/logs snapshot the
+/// device's agent relayed (empty until the agent reports).
+async fn host_telemetry(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
+    let t = crate::services::telemetry::get(&state.telemetry, &id).unwrap_or_default();
+    Ok(Json(serde_json::to_value(t).unwrap_or_default()))
 }
 
 /// Generate a fresh per-host agent token (64 hex chars).

@@ -24,7 +24,23 @@ pub fn router() -> Router<AppState> {
         .route("/commands", get(agent_commands))
         .route("/commands/{cmd_id}/ack", post(agent_command_ack))
         .route("/proxy-latency", post(agent_proxy_latency))
+        .route("/telemetry", post(agent_telemetry))
         .route("/health", get(agent_health))
+}
+
+/// POST /api/agent/telemetry — an agent relays its sing-box's current
+/// traffic/connections/recent-logs snapshot. We store the latest per host so the
+/// device's Monitor/Logs tabs can read it (the panel can't reach the agent's
+/// Clash API directly).
+async fn agent_telemetry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut t): Json<crate::services::telemetry::HostTelemetry>,
+) -> Result<Json<serde_json::Value>> {
+    let host = resolve_host(&state, &headers).await?;
+    t.at = Utc::now().to_rfc3339();
+    crate::services::telemetry::put(&state.telemetry, &host.id, t);
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// POST /api/agent/proxy-latency — an agent reports delay-test results from its

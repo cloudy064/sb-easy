@@ -60,12 +60,19 @@ fn build_cors(origins: &str) -> CorsLayer {
 pub struct AppState {
     pub db: sqlx::SqlitePool,
     pub cfg: config::Config,
+    /// Latest per-host telemetry relayed by agents (traffic/connections/logs).
+    pub telemetry: services::telemetry::TelemetryStore,
+    /// Ring buffer of the panel's own recent log lines (server logs).
+    pub server_logs: services::server_log::LogBuffer,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let server_logs = services::server_log::new_buffer();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_ansi(false)
+        .with_writer(services::server_log::MakeTee { buf: server_logs.clone() })
         .init();
 
     let _ = dotenvy::dotenv();
@@ -100,7 +107,12 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Build state and start HTTP server ─────────────────
     let shutdown_pool = pool.clone();
-    let state = AppState { db: pool, cfg: cfg.clone() };
+    let state = AppState {
+        db: pool,
+        cfg: cfg.clone(),
+        telemetry: services::telemetry::new_store(),
+        server_logs,
+    };
 
     // Built-in `self` host's sing-box management (opt-in):
     // - SINGBOX_MANAGED=true → sb-easy supervises sing-box as a child process.

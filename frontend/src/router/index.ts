@@ -15,9 +15,14 @@ const router = createRouter({
       meta: { requiresAuth: true },
       children: [
         { path: '', name: 'Dashboard', component: () => import('../views/DashboardView.vue') },
-        { path: 'monitor', name: 'Monitor', component: () => import('../views/MonitorView.vue') },
-        { path: 'logs', name: 'Logs', component: () => import('../views/LogsView.vue') },
         { path: 'devices', name: 'Devices', component: () => import('../views/DevicesView.vue') },
+        // Config / Monitor / Logs are per-device — viewed inside a device's detail.
+        { path: 'devices/:id', name: 'DeviceDetail', component: () => import('../views/DeviceDetailView.vue') },
+        { path: 'server-logs', name: 'ServerLogs', component: () => import('../views/ServerLogsView.vue') },
+        // Old top-level realtime/config pages now live per-device.
+        { path: 'monitor', redirect: '/devices' },
+        { path: 'logs', redirect: '/devices' },
+        { path: 'config', redirect: '/devices' },
         { path: 'profiles', name: 'Profiles', component: () => import('../views/ProfilesView.vue') },
         // Hosts and Clients are both folded into the unified Devices view.
         { path: 'hosts', redirect: '/devices' },
@@ -30,7 +35,6 @@ const router = createRouter({
         // simplified node+rules model — redirect any old links to the node list.
         { path: 'proxy-groups', redirect: '/proxies' },
         { path: 'subscriptions', name: 'Subscriptions', component: () => import('../views/SubscriptionsView.vue') },
-        { path: 'config', name: 'Config', component: () => import('../views/ConfigView.vue') },
         { path: 'users', name: 'Users', component: () => import('../views/UsersView.vue') },
         { path: 'settings', name: 'Settings', component: () => import('../views/SettingsView.vue') },
       ],

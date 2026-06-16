@@ -361,3 +361,18 @@ pub fn inject_clash_api(config: &mut Value, controller: &str, secret: &str) {
     }
     exp_obj.insert("clash_api".into(), api);
 }
+
+/// Strip the bundled Clash dashboard UI from a config's `clash_api`. The panel
+/// *is* the dashboard, so the embedded UI is never used — and downloading it on
+/// startup (often via a proxy that isn't up yet) blocks the controller from
+/// binding for minutes. Removes `external_ui` and its download settings.
+pub fn disable_clash_dashboard(config: &mut Value) {
+    if let Some(api) = config
+        .pointer_mut("/experimental/clash_api")
+        .and_then(|v| v.as_object_mut())
+    {
+        api.remove("external_ui");
+        api.remove("external_ui_download_url");
+        api.remove("external_ui_download_detour");
+    }
+}

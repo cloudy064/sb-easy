@@ -425,6 +425,9 @@ pub async fn render_config_for(
     };
 
     proxy_config::inject_clash_api(&mut config, controller, secret);
+    // The panel is the dashboard; never ship the embedded Clash UI (its startup
+    // download blocks the controller from binding).
+    proxy_config::disable_clash_dashboard(&mut config);
     config
 }
 

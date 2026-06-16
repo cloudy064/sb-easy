@@ -125,7 +125,9 @@ pub fn generate_outbounds_array(nodes: &[ProxyNode]) -> Vec<Value> {
         .map(generate_outbound)
         .collect();
 
-    // Add urltest Auto selector
+    // One "auto" group: sing-box delay-tests the members at startup and uses the
+    // fastest. A long interval keeps it from continuously re-testing/switching —
+    // effectively "pick the fastest once at start". No selector / manual switching.
     let auto_tags: Vec<String> = nodes
         .iter()
         .filter(|n| n.enabled)
@@ -135,20 +137,10 @@ pub fn generate_outbounds_array(nodes: &[ProxyNode]) -> Vec<Value> {
     if !auto_tags.is_empty() {
         outbounds.push(json!({
             "type": "urltest",
-            "tag": "Auto",
+            "tag": "auto",
             "outbounds": auto_tags,
-            "url": "https://www.google.com/generate_204",
-            "interval": "3m",
-            "tolerance": 50,
-            "idle_timeout": "10m"
-        }));
-
-        // Selector with Auto as default
-        outbounds.push(json!({
-            "type": "selector",
-            "tag": "Proxy",
-            "outbounds": ["Auto"],
-            "default": "Auto"
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": "24h"
         }));
     }
 
@@ -196,7 +188,7 @@ pub fn default_profile_template() -> Value {
                 { "ip_cidr": ["10.168.1.0/24"], "outbound": "direct" },
                 { "ip_is_private": true, "outbound": "direct" }
             ],
-            "final": "Proxy",
+            "final": "auto",
             "auto_detect_interface": true,
             "default_domain_resolver": { "server": "cn-dns" }
         }
@@ -205,29 +197,35 @@ pub fn default_profile_template() -> Value {
 
 /// Render a per-host sing-box config by injecting this host's assigned outbounds
 /// into its profile template. The template carries log/dns/inbounds/route; the
-/// outbounds array (proxies + Auto/Proxy selectors) is built from `nodes`.
+/// outbounds array (the proxy nodes + one `auto` urltest) is built from `nodes`.
 ///
-/// If `nodes` is empty there is no `Proxy` selector, so any `route.final` that
-/// points at `Proxy` is rewritten to `direct` to keep the config valid.
+/// `route.final` is normalised: legacy `Proxy`/`Auto` tags map to `auto`; and if
+/// `nodes` is empty there is no `auto` group, so `final` falls back to `direct`.
 pub fn render_host_config(template: &Value, nodes: &[ProxyNode]) -> Value {
     let mut config = template.clone();
     let mut outbounds = generate_outbounds_array(nodes);
-    let has_proxy = outbounds.iter().any(|o| o["tag"] == "Proxy");
+    let has_auto = outbounds.iter().any(|o| o["tag"] == "auto");
 
-    // Empty case only: no proxies → no Proxy selector. Add a direct outbound and
-    // repoint route.final at it so the config stays valid. (When proxies exist
-    // the output is byte-for-byte the same as the previous global config.)
-    if !has_proxy {
+    // No proxies → no `auto` group. Add a direct outbound so the config is valid.
+    if !has_auto {
         outbounds.push(json!({ "type": "direct", "tag": "direct" }));
     }
 
     let obj = config.as_object_mut().expect("profile template must be a JSON object");
     obj.insert("outbounds".into(), Value::Array(outbounds));
 
-    if !has_proxy {
-        if let Some(route) = obj.get_mut("route").and_then(|v| v.as_object_mut()) {
-            if route.get("final").map(|f| f == "Proxy").unwrap_or(false) {
-                route.insert("final".into(), Value::String("direct".into()));
+    if let Some(route) = obj.get_mut("route").and_then(|v| v.as_object_mut()) {
+        let cur = route.get("final").and_then(|v| v.as_str()).map(str::to_string);
+        if let Some(f) = cur {
+            let nf = if !has_auto {
+                "direct"
+            } else if f == "Proxy" || f == "Auto" {
+                "auto"
+            } else {
+                &f
+            };
+            if nf != f {
+                route.insert("final".into(), Value::String(nf.to_string()));
             }
         }
     }
@@ -288,21 +286,22 @@ mod tests {
         let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap()
             .iter().filter_map(|o| o["tag"].as_str()).collect();
         assert!(tags.contains(&"direct"));
-        assert!(!tags.contains(&"Proxy"));
-        // final must not dangle on a missing Proxy selector.
+        assert!(!tags.contains(&"auto"));
+        // final must not dangle on a missing auto group.
         assert_eq!(cfg["route"]["final"], "direct");
     }
 
     #[test]
-    fn render_with_proxies_adds_auto_and_proxy() {
+    fn render_with_proxies_adds_auto() {
         let nodes = vec![node("hk", "shadowsocks", json!({"method":"aes-256-gcm","password":"p"}))];
         let cfg = render_host_config(&default_profile_template(), &nodes);
         let tags: Vec<&str> = cfg["outbounds"].as_array().unwrap()
             .iter().filter_map(|o| o["tag"].as_str()).collect();
         assert!(tags.contains(&"hk"));
-        assert!(tags.contains(&"Auto"));
-        assert!(tags.contains(&"Proxy"));
-        assert_eq!(cfg["route"]["final"], "Proxy");
+        assert!(tags.contains(&"auto"));
+        // simplified model: no selector / manual-switch group
+        assert!(!tags.contains(&"Proxy"));
+        assert_eq!(cfg["route"]["final"], "auto");
     }
 
     #[test]

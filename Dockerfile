@@ -6,6 +6,9 @@ ARG DEBIAN_IMAGE=debian:bookworm-slim
 
 # ===== Stage 1: Build Rust Backend =====
 FROM ${RUST_IMAGE} AS backend-builder
+# Resilient crate fetches over a flaky proxy: retry transient failures and use
+# HTTP/1.1 (proxied connections handle multiplexing poorly).
+ENV CARGO_NET_RETRY=10 CARGO_HTTP_MULTIPLEXING=false
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 

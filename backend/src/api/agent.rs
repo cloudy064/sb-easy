@@ -23,7 +23,38 @@ pub fn router() -> Router<AppState> {
         .route("/status", post(agent_status))
         .route("/commands", get(agent_commands))
         .route("/commands/{cmd_id}/ack", post(agent_command_ack))
+        .route("/proxy-latency", post(agent_proxy_latency))
         .route("/health", get(agent_health))
+}
+
+/// POST /api/agent/proxy-latency — an agent reports delay-test results from its
+/// local sing-box (`{ "results": { "<tag>": <ms|null> } }`). We patch the
+/// matching `proxy_nodes` rows by tag. Auth ties the report to a known host.
+async fn agent_proxy_latency(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>> {
+    let _host = resolve_host(&state, &headers).await?;
+    let now = Utc::now().to_rfc3339();
+    let mut updated = 0u64;
+    if let Some(results) = body.get("results").and_then(|v| v.as_object()) {
+        for (tag, delay) in results {
+            let latency = delay.as_f64();
+            if let Ok(r) = sqlx::query(
+                "UPDATE proxy_nodes SET latency = ?, last_latency_test = ? WHERE tag = ?",
+            )
+            .bind(latency)
+            .bind(&now)
+            .bind(tag)
+            .execute(&state.db)
+            .await
+            {
+                updated += r.rows_affected();
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "updated": updated })))
 }
 
 /// GET /api/agent/config

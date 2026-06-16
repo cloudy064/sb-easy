@@ -183,6 +183,13 @@ async fn test_latency_single(
     Path(id): Path<String>,
     Query(p): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>> {
+    // A remote host has no inbound path from the panel — its agent runs the test
+    // locally and reports back. Enqueue the test and return; results arrive async.
+    if let Some(host_id) = remote_host(&p) {
+        enqueue_test(&state, host_id).await?;
+        return Ok(Json(json!({ "queued": true, "host": host_id })));
+    }
+
     let node = sqlx::query_as::<_, ProxyNode>("SELECT * FROM proxy_nodes WHERE id = ?")
         .bind(&id).fetch_optional(&state.db).await?
         .ok_or_else(|| AppError::NotFound("Node not found".into()))?;
@@ -205,6 +212,12 @@ async fn test_all(
     Query(p): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>> {
     use futures::stream::{self, StreamExt};
+
+    // Remote host → its agent runs the delay tests locally and reports back.
+    if let Some(host_id) = remote_host(&p) {
+        enqueue_test(&state, host_id).await?;
+        return Ok(Json(json!({ "queued": true, "host": host_id })));
+    }
 
     let nodes = sqlx::query_as::<_, ProxyNode>(
         "SELECT * FROM proxy_nodes WHERE enabled = 1 ORDER BY node_type, tag",
@@ -241,6 +254,33 @@ async fn test_all(
     }
 
     Ok(Json(json!({ "tested": out.len(), "results": out, "tested_at": now })))
+}
+
+/// The `host` query param when it names a *remote* managed host (not local/self).
+/// Remote hosts are tested by their agent, since the panel can't reach their
+/// Clash API directly.
+fn remote_host(p: &HashMap<String, String>) -> Option<&str> {
+    p.get("host").map(|s| s.as_str()).filter(|h| !h.is_empty() && *h != "self")
+}
+
+/// Enqueue a `test-proxies` command for a host's agent to run on its next poll.
+async fn enqueue_test(state: &AppState, host_id: &str) -> Result<()> {
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE id = ?")
+        .bind(host_id)
+        .fetch_optional(&state.db)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Host not found".into()));
+    }
+    sqlx::query(
+        "INSERT INTO host_commands (id, host_id, command, status, created_at) VALUES (?, ?, 'test-proxies', 'pending', ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(host_id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
 
 /// Delay-test a single proxy tag via a sing-box Clash API. Returns ms, or None

@@ -58,6 +58,22 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     return data as { queued?: boolean; tested?: number }
   }
 
+  // Refresh latency / last_latency_test in place — no `loading` flash and the
+  // existing node objects keep their identity, so the live test poller doesn't
+  // flicker the whole list every cycle.
+  async function refreshLatencies() {
+    const { data } = await client.get('/proxy/nodes')
+    const fresh: ProxyNode[] = Array.isArray(data) ? data : []
+    const byId = new Map(fresh.map((f) => [f.id, f]))
+    for (const n of nodes.value) {
+      const f = byId.get(n.id)
+      if (f) {
+        n.latency = f.latency
+        n.last_latency_test = f.last_latency_test
+      }
+    }
+  }
+
   // Import proxy nodes from an existing config profile or pasted sing-box JSON.
   // Additive (dedupes by fingerprint); does not change any running config.
   async function importNodes(body: { profile_id?: string; config?: string }) {
@@ -66,5 +82,5 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     return data as { found: number; added: number; updated: number; skipped: string[]; errors: string[] }
   }
 
-  return { nodes, loading, fetchNodes, createNode, updateNode, deleteNode, testLatency, testAll, importNodes }
+  return { nodes, loading, fetchNodes, refreshLatencies, createNode, updateNode, deleteNode, testLatency, testAll, importNodes }
 })

@@ -442,7 +442,7 @@ function pollResults(snap: Record<string, string | null>) {
   let elapsed = 0
   pollTimer = setInterval(async () => {
     elapsed += 1.5
-    await store.fetchNodes()
+    await store.refreshLatencies() // in-place: no loading flash, no list flicker
     for (const n of store.nodes) {
       if (testing[n.id] && (n.last_latency_test ?? null) !== (snap[n.id] ?? null)) delete testing[n.id]
     }

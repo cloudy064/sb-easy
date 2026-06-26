@@ -97,7 +97,11 @@
           <path d="M3 5h14M3 10h14M3 15h14" stroke-linecap="round"/>
         </svg>
       </button>
-      <router-view />
+      <router-view v-slot="{ Component }">
+        <Transition name="page-fade" mode="out-in">
+          <component :is="Component" />
+        </Transition>
+      </router-view>
     </main>
   </div>
 </template>
@@ -221,12 +225,23 @@ function logout() {
 }
 
 .sidebar-footer {
-  padding: 0.85rem 1.25rem;
+  padding: 0.7rem 0.85rem;
   border-top: 1px solid var(--paper-border);
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-shrink: 0;
+  gap: 0.4rem;
+}
+
+.sidebar-footer .btn-ghost {
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8rem;
+  min-width: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .sidebar-user {
@@ -253,6 +268,16 @@ function logout() {
 }
 
 .sidebar-scrim { display: none; }
+
+/* Page transition */
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity 0.12s ease;
+}
+.page-fade-enter-from,
+.page-fade-leave-to {
+  opacity: 0;
+}
 
 /* ── Responsive: sidebar becomes a slide-over drawer ── */
 @media (max-width: 768px) {

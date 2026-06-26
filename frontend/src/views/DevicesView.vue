@@ -393,8 +393,9 @@ function formatBytes(b: number) {
 .seg-btn {
   background: transparent; border: none; color: var(--ink-secondary);
   font-size: 0.8rem; font-weight: 550; padding: 0.35rem 0.85rem; border-radius: calc(var(--radius-sm) - 2px);
-  cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
+  cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem; transition: transform 0.1s;
 }
+.seg-btn:active { transform: scale(0.95); }
 .seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
 .seg-count { font-family: var(--font-mono); font-size: 0.66rem; opacity: 0.7; }
 
@@ -427,7 +428,9 @@ function formatBytes(b: number) {
 
 .device-stats {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem;
-  padding: 0.75rem; background: var(--paper-bg); border-radius: var(--radius-sm); border: 1px solid var(--paper-border);
+  padding: 0.75rem; background: var(--paper-bg); border-radius: var(--radius-sm);
+  border: 1px solid var(--paper-border);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.04);
 }
 .device-stat { display: flex; flex-direction: column; gap: 0.1rem; }
 .device-stat-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); }

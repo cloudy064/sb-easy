@@ -617,7 +617,9 @@ async function toggleNode(node: ProxyNode) {
 .seg-btn {
   background: transparent; border: none; color: var(--ink-secondary);
   font-size: 0.8rem; font-weight: 550; padding: 0.35rem 0.85rem; border-radius: calc(var(--radius-sm) - 2px); cursor: pointer;
+  transition: transform 0.1s;
 }
+.seg-btn:active { transform: scale(0.95); }
 .seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
 .import-result { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0.25rem 0 0.5rem; }
 

@@ -307,6 +307,7 @@ input:focus, select:focus, textarea:focus {
 }
 .toggle input:checked + .slider { background: var(--ok); }
 .toggle input:checked + .slider::before { transform: translateX(20px); }
+.toggle input:disabled + .slider { opacity: 0.35; cursor: not-allowed; }
 
 /* ── Modal ─────────────────────────────────────────── */
 

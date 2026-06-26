@@ -301,6 +301,7 @@ function formatBytes(b: number) {
   background: var(--paper-bg);
   border-radius: var(--radius-sm);
   border: 1px solid var(--paper-border);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.04);
 }
 
 .peer-stat {

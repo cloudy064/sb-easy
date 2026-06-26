@@ -237,7 +237,7 @@ type ClientRow = WireGuardPeer & { _t: 'client' }
 type HostRow = Host & { _t: 'host'; address: string | null; is_self: boolean }
 type DeviceRow = ClientRow | HostRow
 
-const filter = ref<'all' | 'clients' | 'hosts'>('all')
+const filter = ref<'all' | 'clients' | 'hosts' | 'online' | 'offline'>('all')
 const loading = ref(false)
 const showCreate = ref(false)
 const editTarget = ref<WireGuardPeer | null>(null)
@@ -275,13 +275,20 @@ const hostRows = computed<HostRow[]>(() =>
 )
 
 const devices = computed<DeviceRow[]>(() => {
-  if (filter.value === 'clients') return clientRows.value
-  if (filter.value === 'hosts') return hostRows.value
-  return [...hostRows.value, ...clientRows.value]
+  let list: DeviceRow[]
+  if (filter.value === 'clients') list = clientRows.value
+  else if (filter.value === 'hosts') list = hostRows.value
+  else list = [...hostRows.value, ...clientRows.value]
+
+  if (filter.value === 'online') return list.filter(d => online(d))
+  if (filter.value === 'offline') return list.filter(d => !online(d))
+  return list
 })
 
 const filters = [
   { key: 'all' as const, label: 'devices.filter.all', count: () => clientRows.value.length + hostRows.value.length },
+  { key: 'online' as const, label: 'devices.filter.online', count: () => [...hostRows.value, ...clientRows.value].filter(d => online(d)).length },
+  { key: 'offline' as const, label: 'devices.filter.offline', count: () => [...hostRows.value, ...clientRows.value].filter(d => !online(d)).length },
   { key: 'clients' as const, label: 'devices.filter.clients', count: () => clientRows.value.length },
   { key: 'hosts' as const, label: 'devices.filter.hosts', count: () => hostRows.value.length },
 ]
@@ -404,13 +411,12 @@ function formatBytes(b: number) {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  max-width: 460px;
 }
 
-/* Replace grid-2 auto-fill with constrained columns so cards don't stretch */
+/* Fill full width, auto-fit columns */
 .device-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 460px));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 1.75rem;
 }
 .device-top { display: flex; justify-content: space-between; align-items: flex-start; }

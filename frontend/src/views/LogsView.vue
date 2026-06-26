@@ -16,12 +16,7 @@
     <div class="card">
       <div class="flex-between mb-4">
         <div class="flex-center gap-3">
-          <select v-model="logLevel" @change="restartLogs" style="max-width:140px" class="text-sm">
-            <option value="info">info</option>
-            <option value="warning">warning</option>
-            <option value="error">error</option>
-            <option value="debug">debug</option>
-          </select>
+          <NmSelect v-model="logLevel" :options="logLevelOptions" @change="restartLogs" width="140px" />
           <button class="btn-ghost btn-sm" @click="clearLogs">Clear</button>
         </div>
         <span class="text-xs text-muted">{{ logs.length }} lines</span>
@@ -53,6 +48,12 @@ interface LogEntry { id: number; type: string; payload: string }
 
 const logs = ref<LogEntry[]>([])
 const logLevel = ref('info')
+const logLevelOptions = [
+  { value: 'info', label: 'info' },
+  { value: 'warning', label: 'warning' },
+  { value: 'error', label: 'error' },
+  { value: 'debug', label: 'debug' },
+]
 const logBox = ref<HTMLElement | null>(null)
 const connected = ref(false)
 let logSocket: WebSocket | null = null

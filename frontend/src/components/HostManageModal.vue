@@ -9,9 +9,7 @@
           <h4>{{ t('hosts.name') }}</h4>
           <div class="form-group"><input v-model="f.name" required placeholder="e.g. edge-hk-01" /></div>
           <div class="form-group"><label>{{ t('hosts.profile') }}</label>
-            <select v-model="f.profile_id">
-              <option v-for="p in store.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
+            <NmSelect v-model="f.profile_id" :options="profileOptions" />
           </div>
           <div class="cap-checks">
             <label class="chk"><input type="checkbox" v-model="f.caps.runs_singbox" /> {{ t('hosts.cap.singbox') }}</label>
@@ -85,6 +83,7 @@ const store = useHostsStore()
 const nodesStore = useProxyNodesStore()
 
 const isCreate = computed(() => !props.host)
+const profileOptions = computed(() => store.profiles.map(p => ({ value: p.id, label: p.name })))
 const selectedNodes = ref<string[]>([])
 const installCommand = ref('')
 const copied = ref(false)

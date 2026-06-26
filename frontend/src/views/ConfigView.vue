@@ -6,10 +6,7 @@
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.config.desc') }}</p>
       </div>
       <div class="flex-center gap-3">
-        <select v-model="view" class="text-sm" style="max-width:160px">
-          <option value="full">Full config</option>
-          <option value="outbounds">Outbounds only</option>
-        </select>
+        <NmSelect v-model="view" :options="viewOptions" width="160px" />
         <button class="btn-secondary btn-sm" @click="copy">{{ copied ? 'Copied' : 'Copy' }}</button>
         <button class="btn-primary btn-sm" @click="download">Download</button>
       </div>
@@ -34,6 +31,10 @@ import { ref, computed, watch, onMounted } from 'vue'
 import client from '../api/client'
 
 const view = ref<'full' | 'outbounds'>('full')
+const viewOptions = [
+  { value: 'full', label: 'Full config' },
+  { value: 'outbounds', label: 'Outbounds only' },
+]
 const data = ref<any>(null)
 const loading = ref(true)
 const copied = ref(false)

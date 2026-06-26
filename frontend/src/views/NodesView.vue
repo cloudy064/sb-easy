@@ -25,20 +25,8 @@
 
     <div class="flex-center gap-3 mb-5" style="flex-wrap:wrap">
       <input v-model="search" placeholder="Filter by name or tag..." style="max-width:240px" />
-      <select v-model="filterType" style="max-width:140px">
-        <option value="">All Protocols</option>
-        <option value="shadowsocks">Shadowsocks</option>
-        <option value="vmess">VMess</option>
-        <option value="trojan">Trojan</option>
-        <option value="vless">VLESS</option>
-        <option value="hysteria2">Hysteria2</option>
-        <option value="tuic">TUIC</option>
-      </select>
-      <select v-model="filterSource" style="max-width:170px">
-        <option value="">All sources</option>
-        <option value="__manual__">Manual</option>
-        <option v-for="s in subs" :key="s.id" :value="s.id">{{ s.name }}</option>
-      </select>
+      <NmSelect v-model="filterType" :options="protocolOptions" width="140px" />
+      <NmSelect v-model="filterSource" :options="sourceOptions" width="170px" />
       <span class="text-xs text-muted" v-if="store.nodes.length">
         {{ filteredNodes.length }} of {{ store.nodes.length }} nodes
       </span>
@@ -94,14 +82,7 @@
         <form @submit.prevent="doCreate">
           <div class="form-group"><label>Tag (display name)</label><input v-model="createForm.tag" required placeholder="e.g. HK 01 | IEPL" /></div>
           <div class="form-group"><label>Protocol</label>
-            <select v-model="createForm.node_type" required>
-              <option value="shadowsocks">Shadowsocks</option>
-              <option value="vmess">VMess</option>
-              <option value="trojan">Trojan</option>
-              <option value="vless">VLESS</option>
-              <option value="hysteria2">Hysteria2</option>
-              <option value="tuic">TUIC</option>
-            </select>
+            <NmSelect v-model="createForm.node_type" :options="nodeTypeOptions" required />
           </div>
           <div style="display:grid;grid-template-columns:2fr 1fr;gap:1rem">
             <div class="form-group"><label>Server</label><input v-model="createForm.server" required placeholder="hostname or IP" /></div>
@@ -147,12 +128,7 @@
                 </div>
               </template>
               <div class="form-group"><label>Transport</label>
-                <select v-model="adv.transport">
-                  <option value="">None (TCP)</option>
-                  <option value="ws">WebSocket</option>
-                  <option value="grpc">gRPC</option>
-                  <option value="http">HTTP</option>
-                </select>
+                <NmSelect v-model="adv.transport" :options="transportOptions" />
               </div>
               <template v-if="adv.transport === 'ws' || adv.transport === 'http'">
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
@@ -190,10 +166,7 @@
         <template v-if="importSource === 'profile'">
           <div class="form-group">
             <label>Config profile</label>
-            <select v-model="importProfileId">
-              <option value="" disabled>Select a profile…</option>
-              <option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
+            <NmSelect v-model="importProfileId" :options="profileOptions" placeholder="Select a profile…" />
           </div>
         </template>
         <template v-else>
@@ -270,6 +243,37 @@ const filterType = ref('')
 const filterSource = ref('')
 const subs = ref<Subscription[]>([])
 const showCreate = ref(false)
+
+const protocolOptions = [
+  { value: '', label: 'All Protocols' },
+  { value: 'shadowsocks', label: 'Shadowsocks' },
+  { value: 'vmess', label: 'VMess' },
+  { value: 'trojan', label: 'Trojan' },
+  { value: 'vless', label: 'VLESS' },
+  { value: 'hysteria2', label: 'Hysteria2' },
+  { value: 'tuic', label: 'TUIC' },
+]
+const sourceOptions = computed(() => [
+  { value: '', label: 'All sources' },
+  { value: '__manual__', label: 'Manual' },
+  ...subs.value.map(s => ({ value: s.id, label: s.name })),
+])
+
+const nodeTypeOptions = [
+  { value: 'shadowsocks', label: 'Shadowsocks' },
+  { value: 'vmess', label: 'VMess' },
+  { value: 'trojan', label: 'Trojan' },
+  { value: 'vless', label: 'VLESS' },
+  { value: 'hysteria2', label: 'Hysteria2' },
+  { value: 'tuic', label: 'TUIC' },
+]
+const transportOptions = [
+  { value: '', label: 'None (TCP)' },
+  { value: 'ws', label: 'WebSocket' },
+  { value: 'grpc', label: 'gRPC' },
+  { value: 'http', label: 'HTTP' },
+]
+const profileOptions = computed(() => profiles.value.map(p => ({ value: p.id, label: p.name })))
 
 // ── Import ──
 const showImport = ref(false)

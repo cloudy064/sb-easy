@@ -52,10 +52,7 @@
           <div class="form-group"><label>Username</label><input v-model="form.username" required /></div>
           <div class="form-group"><label>Password</label><input v-model="form.password" type="password" required placeholder="≥ 4 characters" /></div>
           <div class="form-group"><label>Role</label>
-            <select v-model="form.role">
-              <option value="viewer">viewer (read-only)</option>
-              <option value="admin">admin (full access)</option>
-            </select>
+            <NmSelect v-model="form.role" :options="roleOptions" />
           </div>
           <p v-if="createErr" class="text-sm" style="color:var(--bad)">{{ createErr }}</p>
           <div class="modal-actions">
@@ -99,6 +96,10 @@ const users = ref<User[]>([])
 const audit = ref<Audit[]>([])
 const showCreate = ref(false)
 const form = ref({ username: '', password: '', role: 'viewer' })
+const roleOptions = [
+  { value: 'viewer', label: 'viewer (read-only)' },
+  { value: 'admin', label: 'admin (full access)' },
+]
 const createErr = ref('')
 const pwTarget = ref<User | null>(null)
 const newPw = ref('')

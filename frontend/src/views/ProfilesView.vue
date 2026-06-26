@@ -40,9 +40,7 @@
         <div v-if="editor.mode === 'form'" class="form-body">
           <div class="form-group">
             <label>{{ t('profiles.log') }}</label>
-            <select v-model="model.log.level">
-              <option v-for="lv in ['trace','debug','info','warn','error','fatal']" :key="lv" :value="lv">{{ lv }}</option>
-            </select>
+            <NmSelect v-model="model.log.level" :options="logLevelOptions" />
           </div>
 
           <!-- Inbounds -->
@@ -50,9 +48,7 @@
             <div class="flex-between"><h4>{{ t('profiles.inbounds') }}</h4><button class="btn-ghost btn-xs" @click="addInbound">+ {{ t('profiles.inbound.add') }}</button></div>
             <div v-for="(inb, i) in model.inbounds" :key="i" class="row-card">
               <div class="row-grid">
-                <select v-model="inb.type">
-                  <option v-for="tp in ['tun','mixed','http','socks']" :key="tp" :value="tp">{{ tp }}</option>
-                </select>
+                <NmSelect v-model="inb.type" :options="inboundTypeOptions" />
                 <input v-model="inb.tag" placeholder="tag" />
                 <input v-if="inb.type !== 'tun'" v-model="inb.listen" placeholder="listen (0.0.0.0)" />
                 <input v-if="inb.type !== 'tun'" v-model.number="inb.listen_port" type="number" placeholder="port" />
@@ -60,7 +56,7 @@
               </div>
               <div v-if="inb.type === 'tun'" class="row-grid-tun">
                 <input :value="(inb.address||[]).join(', ')" @input="inb.address = splitList($event)" placeholder="address (172.20.0.1/30)" />
-                <select v-model="inb.stack"><option value="mixed">mixed</option><option value="system">system</option><option value="gvisor">gvisor</option></select>
+                <NmSelect v-model="inb.stack" :options="stackOptions" width="120px" />
                 <label class="chk"><input type="checkbox" v-model="inb.auto_route" /> auto_route</label>
                 <label class="chk"><input type="checkbox" v-model="inb.strict_route" /> strict_route</label>
               </div>
@@ -73,13 +69,13 @@
             <div class="flex-between"><h4>{{ t('profiles.dns') }}</h4><button class="btn-ghost btn-xs" @click="addDnsServer">+ {{ t('profiles.dns.add') }}</button></div>
             <div v-for="(s, i) in model.dns.servers" :key="i" class="row-grid">
               <input v-model="s.tag" placeholder="tag" />
-              <select v-model="s.type"><option value="udp">udp</option><option value="tcp">tcp</option><option value="https">https</option><option value="tls">tls</option></select>
+              <NmSelect v-model="s.type" :options="dnsTypeOptions" width="110px" />
               <input v-model="s.server" placeholder="223.5.5.5" />
               <button class="btn-danger btn-xs" @click="model.dns.servers.splice(i,1)">✕</button>
             </div>
             <div class="row-grid" style="margin-top:.5rem">
               <input v-model="model.dns.final" placeholder="final (server tag)" />
-              <select v-model="model.dns.strategy"><option value="prefer_ipv4">prefer_ipv4</option><option value="prefer_ipv6">prefer_ipv6</option><option value="ipv4_only">ipv4_only</option><option value="ipv6_only">ipv6_only</option></select>
+              <NmSelect v-model="model.dns.strategy" :options="strategyOptions" width="140px" />
             </div>
           </div>
 
@@ -150,6 +146,12 @@ const editor = ref({ open: false, id: '', name: '', mode: 'form' as 'form' | 'ra
 // Structured working copy used by the form. Normalised so the template always
 // has the sections the form binds to; the raw tab edits the same data as JSON.
 const model = reactive<any>(emptyModel())
+
+const logLevelOptions = ['trace','debug','info','warn','error','fatal'].map(v => ({ value: v, label: v }))
+const inboundTypeOptions = ['tun','mixed','http','socks'].map(v => ({ value: v, label: v }))
+const stackOptions = ['mixed','system','gvisor'].map(v => ({ value: v, label: v }))
+const dnsTypeOptions = ['udp','tcp','https','tls'].map(v => ({ value: v, label: v }))
+const strategyOptions = ['prefer_ipv4','prefer_ipv6','ipv4_only','ipv6_only'].map(v => ({ value: v, label: v }))
 
 function emptyModel() {
   return {

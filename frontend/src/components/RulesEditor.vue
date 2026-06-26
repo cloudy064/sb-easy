@@ -14,10 +14,7 @@
 
       <!-- Structured row -->
       <div v-if="row.mode === 'form'" class="rule-fields">
-        <select v-model="row.matcher" @change="commit">
-          <option value="">(any)</option>
-          <option v-for="m in MATCHERS" :key="m.key" :value="m.key">{{ m.label }}</option>
-        </select>
+        <NmSelect v-model="row.matcher" :options="matcherOptions" @change="commit" />
 
         <label v-if="matcherKind(row.matcher) === 'bool'" class="chk">
           <input type="checkbox" v-model="row.bool" @change="commit" /> true
@@ -31,13 +28,7 @@
 
         <span class="rule-arrow">→</span>
 
-        <select v-model="row.target" @change="commit">
-          <option value="outbound">outbound</option>
-          <option value="sniff">sniff</option>
-          <option value="resolve">resolve</option>
-          <option value="hijack-dns">hijack-dns</option>
-          <option value="reject">reject</option>
-        </select>
+        <NmSelect v-model="row.target" :options="targetOptions" @change="commit" />
         <input
           v-if="row.target === 'outbound'"
           v-model="row.outbound"
@@ -74,7 +65,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
 // The parent passes its reactive `route.rules` array; we mutate it in place on
 // every change (splice) so the parent's profile model — and its Save snapshot —
@@ -99,6 +90,17 @@ const MATCHERS = [
 ] as const
 
 const MATCHER_KEYS = MATCHERS.map((m) => m.key)
+const matcherOptions = computed(() => [
+  { value: '', label: '(any)' },
+  ...MATCHERS.map(m => ({ value: m.key, label: m.label })),
+])
+const targetOptions = [
+  { value: 'outbound', label: 'outbound' },
+  { value: 'sniff', label: 'sniff' },
+  { value: 'resolve', label: 'resolve' },
+  { value: 'hijack-dns', label: 'hijack-dns' },
+  { value: 'reject', label: 'reject' },
+]
 const ACTION_TARGETS = ['sniff', 'resolve', 'hijack-dns', 'reject']
 
 function matcherKind(key: string): string {

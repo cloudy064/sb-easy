@@ -65,9 +65,7 @@
         <form @submit.prevent="doCreate">
           <div class="form-group"><label>{{ t('hosts.name') }}</label><input v-model="form.name" required placeholder="e.g. edge-hk-01" /></div>
           <div class="form-group"><label>{{ t('hosts.profile') }}</label>
-            <select v-model="form.profile_id">
-              <option v-for="p in store.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
+            <NmSelect v-model="form.profile_id" :options="profileOptions" />
           </div>
           <div class="cap-checks">
             <label class="adv-check"><input type="checkbox" v-model="form.caps.runs_singbox" /> {{ t('hosts.cap.singbox') }}</label>
@@ -95,9 +93,7 @@
         <form @submit.prevent="doEdit">
           <div class="form-group"><label>{{ t('hosts.name') }}</label><input v-model="editForm.name" required /></div>
           <div class="form-group"><label>{{ t('hosts.profile') }}</label>
-            <select v-model="editForm.profile_id">
-              <option v-for="p in store.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
+            <NmSelect v-model="editForm.profile_id" :options="profileOptions" />
           </div>
           <div class="cap-checks">
             <label class="adv-check"><input type="checkbox" v-model="editForm.caps.runs_singbox" /> {{ t('hosts.cap.singbox') }}</label>
@@ -169,7 +165,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useProxyNodesStore } from '../stores/proxyNodes'
@@ -177,6 +173,7 @@ import type { Host } from '../types'
 
 const { t } = useI18n()
 const store = useHostsStore()
+const profileOptions = computed(() => store.profiles.map(p => ({ value: p.id, label: p.name })))
 const nodesStore = useProxyNodesStore()
 
 const showCreate = ref(false)

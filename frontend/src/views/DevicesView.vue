@@ -27,7 +27,7 @@
       <p>{{ t('devices.empty') }}</p>
     </div>
 
-    <div v-else class="grid-2">
+    <div v-else class="device-grid">
       <article v-for="d in devices" :key="d._t + ':' + d.id" class="card device-card">
         <!-- Header -->
         <div class="device-top">
@@ -399,7 +399,20 @@ function formatBytes(b: number) {
 .seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
 .seg-count { font-family: var(--font-mono); font-size: 0.66rem; opacity: 0.7; }
 
-.device-card { padding: 1.75rem; display: flex; flex-direction: column; gap: 1rem; }
+.device-card {
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 460px;
+}
+
+/* Replace grid-2 auto-fill with constrained columns so cards don't stretch */
+.device-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 460px));
+  gap: 1.75rem;
+}
 .device-top { display: flex; justify-content: space-between; align-items: flex-start; }
 .device-name { font-size: 0.95rem; font-weight: 650; color: var(--ink-primary); display: flex; align-items: center; flex-wrap: wrap; gap: 0.1rem; }
 .device-name-link { color: var(--ink-primary); text-decoration: none; }
@@ -431,10 +444,11 @@ function formatBytes(b: number) {
   padding: 0.75rem; background: var(--paper-bg); border-radius: var(--radius-sm);
   border: 1px solid var(--paper-border);
   box-shadow: inset 0 1px 3px rgba(0,0,0,.04);
+  flex: 1;
 }
 .device-stat { display: flex; flex-direction: column; gap: 0.1rem; }
 .device-stat-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); }
-.device-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.device-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: auto; padding-top: 0.25rem; }
 
 .quota-bar { width: 100%; height: 5px; background: var(--paper-border); border-radius: 3px; margin-top: 0.3rem; overflow: hidden; }
 .quota-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }

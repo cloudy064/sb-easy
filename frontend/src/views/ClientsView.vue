@@ -21,7 +21,7 @@
       <p>No clients configured yet. Create your first client to begin building your private network.</p>
     </div>
 
-    <div v-else class="grid-2">
+    <div v-else class="peer-grid">
       <article v-for="peer in store.peers" :key="peer.id" class="card peer-card">
         <div class="peer-card-top">
           <div class="peer-info">
@@ -255,6 +255,7 @@ function formatBytes(b: number) {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  max-width: 460px;
 }
 
 .peer-card-top {
@@ -302,6 +303,7 @@ function formatBytes(b: number) {
   border-radius: var(--radius-sm);
   border: 1px solid var(--paper-border);
   box-shadow: inset 0 1px 3px rgba(0,0,0,.04);
+  flex: 1;
 }
 
 .peer-stat {
@@ -320,8 +322,16 @@ function formatBytes(b: number) {
 
 .peer-actions {
   display: flex;
-  gap: 0.3rem;
+  gap: 0.35rem;
   flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 0.25rem;
+}
+
+.peer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 460px));
+  gap: 1.75rem;
 }
 
 .quota-bar {

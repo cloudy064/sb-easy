@@ -281,15 +281,16 @@ async function doDelete() {
 .profile-summary { font-family: var(--font-mono); }
 .modal-wide { max-width: 760px; width: 94vw; }
 
-.tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--paper-border); margin-bottom: 1rem; }
+.tabs { display: flex; gap: 0.25rem; border-bottom: 2px solid transparent; border-image: linear-gradient(to right, transparent, var(--nm-dark), transparent) 1; margin-bottom: 1rem; }
 .tab {
   background: none; border: none; padding: 0.5rem 0.9rem; font-size: 0.82rem;
-  color: var(--ink-secondary); border-bottom: 2px solid transparent; cursor: pointer;
+  color: var(--ink-secondary); cursor: pointer; box-shadow: none; position: relative;
 }
-.tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab.active { color: var(--accent); font-weight: 600; }
+.tab.active::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; }
 
 .form-body { max-height: 56vh; overflow-y: auto; padding-right: 0.25rem; }
-.section-block { border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 0.9rem; margin-bottom: 1rem; }
+.section-block { border: none; border-radius: var(--radius-sm); padding: 0.9rem; margin-bottom: 1rem; box-shadow: var(--nm-shadow-sm-in); }
 .section-block h4 { font-size: 0.8rem; font-weight: 650; color: var(--ink-primary); margin: 0 0 0.6rem; }
 .row-card { border: 1px dashed var(--paper-border); border-radius: var(--radius-sm); padding: 0.6rem; margin-bottom: 0.5rem; }
 .row-grid { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }

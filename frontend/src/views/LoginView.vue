@@ -79,13 +79,11 @@ async function doLogin() {
 }
 
 .login-card {
-  background: var(--paper-surface);
-  border: 1px solid var(--paper-border);
+  background: var(--nm-card-bg);
+  border: none;
   border-radius: var(--radius-xl);
-  box-shadow:
-    0 0 0 1px rgba(0,0,0,.02),
-    0 2px 8px rgba(0,0,0,.03),
-    0 16px 48px rgba(0,0,0,.06);
+  box-shadow: 8px 8px 24px rgba(0,0,0,.08), -8px -8px 24px var(--nm-light),
+              0 0 0 1px rgba(0,0,0,.02);
   padding: 2.75rem 2.5rem;
   width: 100%;
   max-width: 400px;
@@ -135,6 +133,7 @@ async function doLogin() {
   color: var(--bad);
   font-size: 0.82rem;
   text-align: center;
-  border: 1px solid #f0c8c4;
+  border: none;
+  box-shadow: var(--nm-shadow-sm-in);
 }
 </style>

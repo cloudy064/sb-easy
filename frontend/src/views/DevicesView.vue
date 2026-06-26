@@ -389,13 +389,13 @@ function formatBytes(b: number) {
 </script>
 
 <style scoped>
-.seg { display: inline-flex; gap: 2px; background: var(--paper-bg); border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 3px; }
+.seg { display: inline-flex; gap: 2px; background: var(--paper-bg); border: none; border-radius: var(--radius-sm); padding: 4px; box-shadow: var(--nm-shadow-sm-in); }
 .seg-btn {
   background: transparent; border: none; color: var(--ink-secondary);
-  font-size: 0.8rem; font-weight: 550; padding: 0.35rem 0.85rem; border-radius: calc(var(--radius-sm) - 2px);
+  font-size: 0.8rem; font-weight: 550; padding: 0.35rem 0.85rem; border-radius: calc(var(--radius-sm) - 3px);
   cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
 }
-.seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
+.seg-btn.active { background: var(--paper-bg); color: var(--accent); box-shadow: var(--nm-shadow-sm-out); }
 .seg-count { font-family: var(--font-mono); font-size: 0.66rem; opacity: 0.7; }
 
 .device-card { padding: 1.75rem; display: flex; flex-direction: column; gap: 1rem; }

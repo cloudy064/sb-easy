@@ -298,12 +298,11 @@ async function doDelete() {
 .row-grid-tun { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
 .row-grid-tun > input, .row-grid-tun > select { flex: 1; min-width: 110px; }
 .chk { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--ink-secondary); white-space: nowrap; }
-.chk input { width: auto; }
 
 .json-editor {
   width: 100%; min-height: 360px; resize: vertical;
   font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.55;
-  background: var(--paper-bg); border: 1px solid var(--paper-border);
+  background: var(--paper-bg); border: none; box-shadow: var(--nm-shadow-sm-in);
   border-radius: var(--radius-sm); padding: 0.75rem; color: var(--ink-primary);
 }
 .json-err { color: var(--bad); }

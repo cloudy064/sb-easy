@@ -111,11 +111,11 @@ function latencyClass(ms: number | null) {
 
 <style scoped>
 .stat-card {
-  background: var(--paper-surface);
-  border: 1px solid var(--paper-border);
+  background: var(--nm-card-bg);
+  border: none;
   border-radius: var(--radius-lg);
   padding: 1.65rem 1.75rem;
-  box-shadow: var(--paper-shadow-card);
+  box-shadow: var(--nm-card-shadow);
 }
 .stat-label {
   font-size: 0.72rem;
@@ -149,7 +149,8 @@ function latencyClass(ms: number | null) {
   color: var(--ink-primary);
   margin-bottom: 0.85rem;
   padding-bottom: 0.65rem;
-  border-bottom: 1px solid var(--paper-border);
+  border-bottom: 2px solid transparent;
+  border-image: linear-gradient(to right, transparent, var(--nm-dark), transparent) 1;
 }
 
 .list-row {

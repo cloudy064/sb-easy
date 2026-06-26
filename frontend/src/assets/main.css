@@ -293,6 +293,38 @@ input:focus, select:focus, textarea:focus {
               0 0 0 3px rgba(192,122,64,.15);
 }
 
+/* ── Checkbox — neumorphic custom ──────────────────── */
+
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px !important;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--paper-bg);
+  box-shadow: var(--nm-shadow-sm-in);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  box-shadow: 2px 2px 4px var(--nm-accent-dark), -2px -2px 4px var(--nm-accent-light);
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
 .form-group { margin-bottom: 1.1rem; }
 .form-group label {
   display: block;
@@ -375,7 +407,7 @@ input:focus, select:focus, textarea:focus {
 }
 .toggle input:checked + .slider::before {
   transform: translateX(22px);
-  box-shadow: 2px 2px 5px rgba(0,0,0,.15), -2px -2px 5px rgba(255,255,255,.08);
+  box-shadow: var(--nm-shadow-sm-out);
 }
 
 /* ── Modal — extruded panel + soft backdrop ────────── */

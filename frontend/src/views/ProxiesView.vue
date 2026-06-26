@@ -171,21 +171,22 @@ onMounted(load)
   gap: 0.5rem;
   padding: 0.55rem 0.75rem;
   background: var(--paper-bg);
-  border: 1px solid var(--paper-border);
+  border: none;
   border-radius: var(--radius-sm);
   font-size: 0.8rem;
   color: var(--ink-secondary);
   text-align: left;
-  transition: all 0.15s;
+  box-shadow: var(--nm-shadow-sm-out);
+  transition: all 0.2s;
 }
-.proxy-chip:hover:not(:disabled) { border-color: var(--accent-dim); }
+.proxy-chip:hover:not(:disabled) { box-shadow: var(--nm-shadow-sm-in); }
 .proxy-chip.active {
-  border-color: var(--accent);
-  background: var(--accent-subtle);
-  color: var(--accent);
+  background: var(--accent);
+  color: #fff;
   font-weight: 600;
+  box-shadow: var(--nm-accent-out);
 }
-.proxy-chip:disabled { cursor: default; }
+.proxy-chip:disabled { cursor: default; opacity: 0.6; }
 .proxy-chip-name { min-width: 0; }
 .proxy-chip-delay { font-family: var(--font-mono); font-size: 0.7rem; flex-shrink: 0; }
 .delay-good { color: var(--ok); }

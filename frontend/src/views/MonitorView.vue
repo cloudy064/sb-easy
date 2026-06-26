@@ -233,11 +233,11 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .stat-card {
-  background: var(--paper-surface);
-  border: 1px solid var(--paper-border);
+  background: var(--nm-card-bg);
+  border: none;
   border-radius: var(--radius-lg);
   padding: 1.25rem 1.5rem;
-  box-shadow: var(--paper-shadow-card);
+  box-shadow: var(--nm-card-shadow);
 }
 .stat-label {
   font-size: 0.72rem; font-weight: 600; color: var(--ink-muted);
@@ -246,7 +246,9 @@ onBeforeUnmount(() => {
 .stat-value { font-size: 1.4rem; font-weight: 680; color: var(--ink-primary); font-variant-numeric: tabular-nums; }
 .card-title {
   font-size: 0.88rem; font-weight: 650; color: var(--ink-primary);
-  margin-bottom: 0.85rem; padding-bottom: 0.65rem; border-bottom: 1px solid var(--paper-border);
+  margin-bottom: 0.85rem; padding-bottom: 0.65rem;
+  border-bottom: 2px solid transparent;
+  border-image: linear-gradient(to right, transparent, var(--nm-dark), transparent) 1;
 }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.3rem; }
 
@@ -256,7 +258,9 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 2fr 1.2fr 2fr 0.9fr 0.9fr 32px;
   gap: 0.75rem; align-items: center;
-  padding: 0.4rem 0; border-bottom: 1px solid var(--paper-border);
+  padding: 0.4rem 0;
+  border-bottom: 1px solid transparent;
+  border-image: linear-gradient(to right, transparent, var(--nm-dark), transparent) 1;
 }
 .conn-row .font-mono { font-variant-numeric: tabular-nums; }
 .conn-head { font-weight: 600; color: var(--ink-muted); text-transform: uppercase; font-size: 0.65rem; letter-spacing: 0.04em; }

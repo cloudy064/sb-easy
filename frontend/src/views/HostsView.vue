@@ -345,7 +345,7 @@ async function doDelete() {
 .host-wg { font-family: var(--font-mono); color: var(--ink-secondary); }
 
 .status-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
-.dot-online { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.dot-online { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .dot-offline { background: var(--bad); }
 .dot-self { background: var(--accent); }
 
@@ -367,10 +367,9 @@ async function doDelete() {
 
 .cap-checks { display: flex; gap: 1.25rem; margin-bottom: 1rem; }
 .adv-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; color: var(--ink-secondary); }
-.adv-check input { width: auto; }
 
 .cmd-box {
-  background: var(--paper-bg); border: 1px solid var(--paper-border);
+  background: var(--paper-bg); border: none; box-shadow: var(--nm-shadow-sm-in);
   border-radius: var(--radius-sm); padding: 0.85rem; margin-top: 0.75rem;
   font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all; color: var(--ink-primary);
 }
@@ -381,5 +380,4 @@ async function doDelete() {
   border-radius: var(--radius-sm); font-size: 0.84rem;
 }
 .proxy-pick-item:hover { background: var(--paper-bg); }
-.proxy-pick-item input { width: auto; }
 </style>

@@ -193,7 +193,7 @@ async function fetchSub(id: string) {
   margin-top: 0.85rem;
   padding: 0.75rem 0.85rem;
   background: var(--paper-bg);
-  border: 1px solid var(--paper-border);
+  border: none; box-shadow: var(--nm-shadow-sm-in);
   border-radius: var(--radius-sm);
 }
 

@@ -115,7 +115,7 @@ function area(data: number[]): string {
   display: block;
   background: var(--paper-bg);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--paper-border);
+  border: none; box-shadow: var(--nm-shadow-sm-in);
   margin-bottom: 0.6rem;
 }
 </style>

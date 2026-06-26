@@ -427,7 +427,8 @@ function formatBytes(b: number) {
 
 .device-stats {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem;
-  padding: 0.75rem; background: var(--paper-bg); border-radius: var(--radius-sm); border: 1px solid var(--paper-border);
+  padding: 0.75rem; background: var(--paper-bg); border-radius: var(--radius-sm);
+  border: none; box-shadow: var(--nm-shadow-sm-in);
 }
 .device-stat { display: flex; flex-direction: column; gap: 0.1rem; }
 .device-stat-label { font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); }

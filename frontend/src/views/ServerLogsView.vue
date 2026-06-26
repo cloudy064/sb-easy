@@ -48,7 +48,6 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 
 <style scoped>
 .chk { display: flex; align-items: center; gap: 0.4rem; color: var(--ink-secondary); }
-.chk input { width: auto; }
 .card { padding: 1rem 1.25rem; }
 .log-box { height: 70vh; min-height: 360px; overflow-y: auto; background: #1c1a17; border-radius: var(--radius-sm); padding: 0.85rem 1.1rem; font-family: var(--font-mono); font-size: 0.73rem; line-height: 1.65; }
 .log-line { color: #d8d0c4; white-space: pre-wrap; word-break: break-all; }

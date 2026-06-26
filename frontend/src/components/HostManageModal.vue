@@ -167,16 +167,14 @@ async function doDelete() {
 <style scoped>
 .modal-wide { max-width: 640px; width: 94vw; }
 .hm-body { max-height: 60vh; overflow-y: auto; padding-right: 0.25rem; }
-.section-block { border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 0.9rem; margin-bottom: 1rem; }
+.section-block { border: none; box-shadow: var(--nm-shadow-sm-in); border-radius: var(--radius-sm); padding: 0.9rem; margin-bottom: 1rem; }
 .section-block h4 { font-size: 0.8rem; font-weight: 650; color: var(--ink-primary); margin: 0 0 0.6rem; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .cap-checks { display: flex; gap: 1.25rem; margin-bottom: 0.85rem; }
 .chk { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; color: var(--ink-secondary); }
-.chk input { width: auto; }
-.cmd-box { background: var(--paper-bg); border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 0.75rem; margin-top: 0.5rem; font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all; color: var(--ink-primary); }
+.cmd-box { background: var(--paper-bg); border: none; box-shadow: var(--nm-shadow-sm-in); border-radius: var(--radius-sm); padding: 0.75rem; margin-top: 0.5rem; font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all; color: var(--ink-primary); }
 .proxy-pick { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0.5rem 0; }
 .proxy-pick-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.5rem; border-radius: var(--radius-sm); font-size: 0.84rem; }
 .proxy-pick-item:hover { background: var(--paper-bg); }
-.proxy-pick-item input { width: auto; }
 .hm-actions { display: flex; justify-content: space-between; align-items: center; }
 </style>

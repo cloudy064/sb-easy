@@ -82,8 +82,7 @@ async function doLogin() {
   background: var(--nm-card-bg);
   border: none;
   border-radius: var(--radius-xl);
-  box-shadow: 8px 8px 24px rgba(0,0,0,.08), -8px -8px 24px var(--nm-light),
-              0 0 0 1px rgba(0,0,0,.02);
+  box-shadow: 8px 8px 24px var(--nm-dark), -8px -8px 24px var(--nm-light);
   padding: 2.75rem 2.5rem;
   width: 100%;
   max-width: 400px;

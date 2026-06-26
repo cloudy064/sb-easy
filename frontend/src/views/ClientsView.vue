@@ -300,7 +300,8 @@ function formatBytes(b: number) {
   padding: 0.75rem;
   background: var(--paper-bg);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--paper-border);
+  border: none;
+  box-shadow: var(--nm-shadow-sm-in);
 }
 
 .peer-stat {

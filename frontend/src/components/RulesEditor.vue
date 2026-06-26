@@ -236,10 +236,9 @@ function toRaw(i: number) {
 .rule-raw { display: flex; gap: 0.4rem; flex: 1; align-items: flex-start; }
 .rule-raw textarea {
   flex: 1; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5;
-  background: var(--paper-bg); border: 1px solid var(--paper-border);
+  background: var(--paper-bg); border: none; box-shadow: var(--nm-shadow-sm-in);
   border-radius: var(--radius-sm); padding: 0.4rem 0.55rem; color: var(--ink-primary); resize: vertical;
 }
-.rule-raw textarea.raw-err { border-color: var(--bad); }
+.rule-raw textarea.raw-err { box-shadow: inset 3px 3px 6px var(--bad), inset -3px -3px 6px rgba(0,0,0,.05); }
 .chk { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: var(--ink-secondary); white-space: nowrap; }
-.chk input { width: auto; }
 </style>

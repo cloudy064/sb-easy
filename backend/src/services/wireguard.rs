@@ -594,7 +594,8 @@ async fn build_wg_conf(pool: &sqlx::SqlitePool, _cfg: &Config, private_key: &str
         if let Some(ref psk) = peer.preshared_key {
             if !psk.is_empty() { conf.push_str(&format!("PresharedKey = {}\n", psk)); }
         }
-        conf.push_str(&format!("AllowedIPs = {}\n", peer.address));
+        let ip32 = format!("{}/32", peer.address.split('/').next().unwrap_or(&peer.address));
+        conf.push_str(&format!("AllowedIPs = {}\n", ip32));
         if peer.persistent_keepalive > 0 {
             conf.push_str(&format!("PersistentKeepalive = {}\n", peer.persistent_keepalive));
         }

@@ -43,34 +43,26 @@
         </div>
 
         <div class="peer-stats">
-          <div class="peer-stat" v-if="peer.endpoint">
+          <div class="peer-stat">
             <span class="peer-stat-label">Endpoint</span>
-            <span class="peer-stat-value text-sm truncate" style="max-width:180px">{{ peer.endpoint }}</span>
+            <span class="peer-stat-value text-sm truncate" style="max-width:180px">{{ peer.endpoint || '—' }}</span>
           </div>
-          <div class="peer-stat" v-if="peer.latest_handshake">
+          <div class="peer-stat">
             <span class="peer-stat-label">Last Handshake</span>
-            <span class="peer-stat-value text-sm">{{ formatTime(peer.latest_handshake) }}</span>
+            <span class="peer-stat-value text-sm">{{ peer.latest_handshake ? formatTime(peer.latest_handshake) : '—' }}</span>
           </div>
-          <div class="peer-stat" v-if="peer.transfer_rx !== undefined">
+          <div class="peer-stat">
             <span class="peer-stat-label">Transfer</span>
             <span class="peer-stat-value text-sm">
-              <span style="color:var(--ok)">↓ {{ formatBytes(peer.transfer_rx) }}</span>
+              <span style="color:var(--ok)">↓ {{ formatBytes(peer.transfer_rx ?? 0) }}</span>
               <span style="margin-left:0.5rem;color:var(--info)">↑ {{ formatBytes(peer.transfer_tx || 0) }}</span>
             </span>
-          </div>
-          <div class="peer-stat" v-if="peer.expire_at">
-            <span class="peer-stat-label">Expires</span>
-            <span class="peer-stat-value text-sm">{{ peer.expire_at }}</span>
           </div>
           <div class="peer-stat" v-if="peer.quota_bytes && peer.quota_bytes > 0" style="grid-column:1/-1">
             <span class="peer-stat-label">Quota</span>
             <span class="peer-stat-value text-sm">{{ formatBytes(usedBytes(peer)) }} / {{ formatBytes(peer.quota_bytes) }}</span>
             <div class="quota-bar"><div class="quota-fill" :class="quotaClass(peer)" :style="{ width: quotaPct(peer) + '%' }"></div></div>
           </div>
-        </div>
-
-        <div class="peer-actions" v-if="peer.enabled || peer.latest_handshake">
-          <!-- stats renders even when disabled if there's history -->
         </div>
 
         <div class="peer-actions">

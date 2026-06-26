@@ -64,18 +64,18 @@
         <div class="device-stats">
           <!-- CLIENT stats -->
           <template v-if="d._t === 'client'">
-            <div class="device-stat" v-if="d.endpoint">
+            <div class="device-stat">
               <span class="device-stat-label">Endpoint</span>
-              <span class="device-stat-value text-sm truncate" style="max-width:180px">{{ d.endpoint }}</span>
+              <span class="device-stat-value text-sm truncate" style="max-width:180px">{{ d.endpoint || '—' }}</span>
             </div>
-            <div class="device-stat" v-if="d.latest_handshake">
+            <div class="device-stat">
               <span class="device-stat-label">Last Handshake</span>
-              <span class="device-stat-value text-sm">{{ formatTime(d.latest_handshake) }}</span>
+              <span class="device-stat-value text-sm">{{ d.latest_handshake ? formatTime(d.latest_handshake) : '—' }}</span>
             </div>
-            <div class="device-stat" v-if="d.transfer_rx !== undefined">
+            <div class="device-stat">
               <span class="device-stat-label">Transfer</span>
               <span class="device-stat-value text-sm">
-                <span style="color:var(--ok)">↓ {{ formatBytes(d.transfer_rx) }}</span>
+                <span style="color:var(--ok)">↓ {{ formatBytes(d.transfer_rx ?? 0) }}</span>
                 <span style="margin-left:0.5rem;color:var(--info)">↑ {{ formatBytes(d.transfer_tx || 0) }}</span>
               </span>
             </div>
@@ -87,17 +87,17 @@
           </template>
           <!-- HOST stats -->
           <template v-else>
-            <div class="device-stat" v-if="d.clash_api">
+            <div class="device-stat">
               <span class="device-stat-label">Clash API</span>
-              <span class="device-stat-value text-sm truncate" style="max-width:180px">{{ d.clash_api }}</span>
+              <span class="device-stat-value text-sm truncate" style="max-width:180px">{{ d.clash_api || '—' }}</span>
             </div>
             <div class="device-stat">
               <span class="device-stat-label">Status</span>
               <span class="device-stat-value text-sm">{{ hostStatus(d) }}</span>
             </div>
-            <div class="device-stat" v-if="singboxState(d)">
+            <div class="device-stat">
               <span class="device-stat-label">sing-box</span>
-              <span class="device-stat-value text-sm" :title="d.singbox_state || ''">{{ singboxState(d) }}</span>
+              <span class="device-stat-value text-sm" :title="d.singbox_state || ''">{{ singboxState(d) || '—' }}</span>
             </div>
             <div class="device-stat">
               <span class="device-stat-label">{{ t('devices.host.proxies') }}</span>

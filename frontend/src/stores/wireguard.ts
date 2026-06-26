@@ -42,9 +42,28 @@ export const useWireGuardStore = defineStore('wireguard', () => {
     if (peer) peer.enabled = enable
   }
 
-  function getConfigUrl(id: string) {
-    return `/api/wireguard/peers/${id}/config`
+  async function downloadConfig(id: string) {
+    const response = await client.get(`/wireguard/peers/${id}/config`, { responseType: 'blob' })
+    const url = window.URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    const disposition = response.headers['content-disposition']
+    let filename = 'client.conf'
+    if (disposition) {
+      const match = disposition.match(/filename="?([^"]+)"?/)
+      if (match) filename = match[1]
+    }
+    link.setAttribute('download', filename)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
   }
 
-  return { peers, loading, fetchPeers, createPeer, updatePeer, deletePeer, togglePeer, getConfigUrl }
+  async function fetchQR(id: string): Promise<string> {
+    const response = await client.get(`/wireguard/peers/${id}/qr`, { responseType: 'blob' })
+    return window.URL.createObjectURL(response.data)
+  }
+
+  return { peers, loading, fetchPeers, createPeer, updatePeer, deletePeer, togglePeer, downloadConfig, fetchQR }
 })

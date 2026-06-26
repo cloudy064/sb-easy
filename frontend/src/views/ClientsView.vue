@@ -75,7 +75,7 @@
 
         <div class="peer-actions">
           <button class="btn-ghost btn-sm" @click="editPeer(peer)">Edit</button>
-          <a :href="`/api/wireguard/peers/${peer.id}/config`" class="btn-ghost btn-sm" style="text-decoration:none;display:inline-flex;align-items:center">Download .conf</a>
+          <button class="btn-ghost btn-sm" @click="store.downloadConfig(peer.id)">Download .conf</button>
           <button class="btn-ghost btn-sm" @click="showQr(peer)">QR Code</button>
           <button class="btn-danger btn-sm" @click="confirmDelete(peer)">Delete</button>
         </div>
@@ -120,11 +120,12 @@
     </div>
 
     <!-- QR Dialog -->
-    <div v-if="qrPeer" class="modal-overlay" @click.self="qrPeer = null">
+    <div v-if="qrPeer" class="modal-overlay" @click.self="closeQr">
       <div class="modal" style="text-align:center">
         <h3>QR Code &mdash; {{ qrPeer.name }}</h3>
-        <img :src="`/api/wireguard/peers/${qrPeer.id}/qr`" alt="QR Code" style="max-width:280px;margin:1rem auto;display:block" />
-        <button class="btn-secondary btn-sm" @click="qrPeer = null">Close</button>
+        <img v-if="qrSrc" :src="qrSrc" alt="QR Code" style="max-width:280px;margin:1rem auto;display:block" />
+        <div v-else class="spinner" style="margin:2rem auto"></div>
+        <button class="btn-secondary btn-sm" @click="closeQr">Close</button>
       </div>
     </div>
 
@@ -155,6 +156,7 @@ const showCreate = ref(false)
 const editTarget = ref<WireGuardPeer | null>(null)
 const deleteTarget = ref<WireGuardPeer | null>(null)
 const qrPeer = ref<WireGuardPeer | null>(null)
+const qrSrc = ref('')
 
 const GB = 1024 * 1024 * 1024
 const form = ref({ name: '', address: '', dns: '10.59.32.1', persistent_keepalive: 25, quota_gb: 0 })
@@ -214,7 +216,15 @@ async function doDelete() {
   deleteTarget.value = null
 }
 
-function showQr(peer: WireGuardPeer) { qrPeer.value = peer }
+function showQr(peer: WireGuardPeer) {
+  qrPeer.value = peer
+  qrSrc.value = ''
+  store.fetchQR(peer.id).then(url => { qrSrc.value = url })
+}
+function closeQr() {
+  if (qrSrc.value) { window.URL.revokeObjectURL(qrSrc.value); qrSrc.value = '' }
+  qrPeer.value = null
+}
 
 async function syncConfig() {
   await client.post('/wireguard/sync')

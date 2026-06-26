@@ -110,8 +110,8 @@
         <div class="device-actions">
           <template v-if="d._t === 'client'">
             <button class="btn-ghost btn-sm" @click="editClient(d)">Edit</button>
-            <a :href="`/api/wireguard/peers/${d.id}/config`" class="btn-ghost btn-sm" style="text-decoration:none;display:inline-flex;align-items:center">Download .conf</a>
-            <button class="btn-ghost btn-sm" @click="qrPeer = d">QR Code</button>
+            <button class="btn-ghost btn-sm" @click="wgStore.downloadConfig(d.id)">Download .conf</button>
+            <button class="btn-ghost btn-sm" @click="showQr(d)">QR Code</button>
             <button class="btn-danger btn-sm" @click="deleteTarget = d">Delete</button>
           </template>
           <template v-else>
@@ -162,11 +162,12 @@
     </div>
 
     <!-- QR -->
-    <div v-if="qrPeer" class="modal-overlay" @click.self="qrPeer = null">
+    <div v-if="qrPeer" class="modal-overlay" @click.self="closeQr">
       <div class="modal" style="text-align:center">
         <h3>QR Code &mdash; {{ qrPeer.name }}</h3>
-        <img :src="`/api/wireguard/peers/${qrPeer.id}/qr`" alt="QR Code" style="max-width:280px;margin:1rem auto;display:block" />
-        <button class="btn-secondary btn-sm" @click="qrPeer = null">Close</button>
+        <img v-if="qrSrc" :src="qrSrc" alt="QR Code" style="max-width:280px;margin:1rem auto;display:block" />
+        <div v-else class="spinner" style="margin:2rem auto"></div>
+        <button class="btn-secondary btn-sm" @click="closeQr">Close</button>
       </div>
     </div>
 
@@ -192,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
@@ -242,6 +243,17 @@ const showCreate = ref(false)
 const editTarget = ref<WireGuardPeer | null>(null)
 const deleteTarget = ref<DeviceRow | null>(null)
 const qrPeer = ref<WireGuardPeer | null>(null)
+const qrSrc = ref('')
+
+function showQr(d: WireGuardPeer) {
+  qrPeer.value = d
+  qrSrc.value = ''
+  wgStore.fetchQR(d.id).then(url => { qrSrc.value = url })
+}
+function closeQr() {
+  if (qrSrc.value) { window.URL.revokeObjectURL(qrSrc.value); qrSrc.value = '' }
+  qrPeer.value = null
+}
 const toast = ref('')
 const toastClass = ref('toast-success')
 

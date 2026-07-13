@@ -108,6 +108,8 @@ const messages: Record<Locale, Record<string, string>> = {
 
     'page.devices.title': 'Devices',
     'page.devices.desc': 'Everything on your network in one place — WireGuard clients (phones/laptops) and managed hosts that run sing-box.',
+    'devices.filter.type': 'Type',
+    'devices.filter.status': 'Status',
     'devices.filter.all': 'All',
     'devices.filter.online': 'Online',
     'devices.filter.offline': 'Offline',
@@ -257,6 +259,8 @@ const messages: Record<Locale, Record<string, string>> = {
 
     'page.devices.title': '设备',
     'page.devices.desc': '把你网络里的一切放在一处 —— WireGuard 客户端（手机/笔记本）和运行 sing-box 的受管主机。',
+    'devices.filter.type': '类型',
+    'devices.filter.status': '状态',
     'devices.filter.all': '全部',
     'devices.filter.online': '在线',
     'devices.filter.offline': '离线',

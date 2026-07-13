@@ -18,6 +18,7 @@ export interface WireGuardPeer {
   transfer_tx?: number
   expired?: boolean
   kind?: 'agent' | 'wg'
+  host_id?: string | null
   host_name?: string | null
 }
 

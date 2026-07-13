@@ -12,12 +12,24 @@
       </div>
     </div>
 
-    <!-- Type filter -->
-    <div class="seg mb-5">
-      <button v-for="f in filters" :key="f.key" class="seg-btn" :class="{ active: filter === f.key }" @click="filter = f.key">
-        {{ t(f.label) }}
-        <span class="seg-count">{{ f.count() }}</span>
-      </button>
+    <!-- Two orthogonal facets: Type × Status (combined with AND) -->
+    <div class="filters mb-5">
+      <div class="filter-row">
+        <span class="filter-label">{{ t('devices.filter.type') }}</span>
+        <div class="seg">
+          <button class="seg-btn" :class="{ active: typeFilter === 'all' }" @click="typeFilter = 'all'">{{ t('devices.filter.all') }}<span class="seg-count">{{ typeCounts.all }}</span></button>
+          <button class="seg-btn" :class="{ active: typeFilter === 'hosts' }" @click="typeFilter = 'hosts'">{{ t('devices.filter.hosts') }}<span class="seg-count">{{ typeCounts.hosts }}</span></button>
+          <button class="seg-btn" :class="{ active: typeFilter === 'clients' }" @click="typeFilter = 'clients'">{{ t('devices.filter.clients') }}<span class="seg-count">{{ typeCounts.clients }}</span></button>
+        </div>
+      </div>
+      <div class="filter-row">
+        <span class="filter-label">{{ t('devices.filter.status') }}</span>
+        <div class="seg">
+          <button class="seg-btn" :class="{ active: statusFilter === 'all' }" @click="statusFilter = 'all'">{{ t('devices.filter.all') }}<span class="seg-count">{{ statusCounts.all }}</span></button>
+          <button class="seg-btn" :class="{ active: statusFilter === 'online' }" @click="statusFilter = 'online'">{{ t('devices.filter.online') }}<span class="seg-count">{{ statusCounts.online }}</span></button>
+          <button class="seg-btn" :class="{ active: statusFilter === 'offline' }" @click="statusFilter = 'offline'">{{ t('devices.filter.offline') }}<span class="seg-count">{{ statusCounts.offline }}</span></button>
+        </div>
+      </div>
     </div>
 
     <div v-if="loading" class="loading-center"><div class="spinner"></div></div>
@@ -103,6 +115,21 @@
               <span class="device-stat-label">{{ t('devices.host.proxies') }}</span>
               <span class="device-stat-value text-sm">{{ d.assigned_outbounds ? d.assigned_outbounds + ' ' + t('devices.host.proxies.n') : t('devices.host.proxies.all') }}</span>
             </div>
+            <!-- WG membership of this host (its auto-provisioned host-peer), folded in
+                 so the machine shows as a single card instead of host + duplicate client. -->
+            <template v-if="d.wg">
+              <div class="device-stat">
+                <span class="device-stat-label">WG Handshake</span>
+                <span class="device-stat-value text-sm">{{ d.wg.latest_handshake ? formatTime(d.wg.latest_handshake) : '—' }}</span>
+              </div>
+              <div class="device-stat">
+                <span class="device-stat-label">WG Transfer</span>
+                <span class="device-stat-value text-sm">
+                  <span style="color:var(--ok)">↓ {{ formatBytes(d.wg.transfer_rx ?? 0) }}</span>
+                  <span style="margin-left:0.5rem;color:var(--info)">↑ {{ formatBytes(d.wg.transfer_tx || 0) }}</span>
+                </span>
+              </div>
+            </template>
           </template>
         </div>
 
@@ -234,10 +261,11 @@ function singboxState(d: HostRow): string {
 // its own `kind` ('agent' | 'wg') which we reuse for the sub-badge, so the
 // discriminant must be a distinct name to avoid collapsing the union to never.
 type ClientRow = WireGuardPeer & { _t: 'client' }
-type HostRow = Host & { _t: 'host'; address: string | null; is_self: boolean }
+type HostRow = Host & { _t: 'host'; address: string | null; is_self: boolean; wg: WireGuardPeer | null }
 type DeviceRow = ClientRow | HostRow
 
-const filter = ref<'all' | 'clients' | 'hosts' | 'online' | 'offline'>('all')
+const typeFilter = ref<'all' | 'hosts' | 'clients'>('all')
+const statusFilter = ref<'all' | 'online' | 'offline'>('all')
 const loading = ref(false)
 const showCreate = ref(false)
 const editTarget = ref<WireGuardPeer | null>(null)
@@ -267,31 +295,57 @@ function notify(msg: string, ok = true) {
   setTimeout(() => (toast.value = ''), 2200)
 }
 
+// Host-peers (a managed host's auto-provisioned WG membership) carry a host_id and
+// are tagged kind:'agent' by the backend. Such a peer is the SAME machine as its
+// Host card, so we drop it from the client list and instead fold its live WG stats
+// into the matching Host card below — one card per real device, no duplicates.
 const clientRows = computed<ClientRow[]>(() =>
-  wgStore.peers.map((p) => ({ ...p, _t: 'client' as const })),
+  wgStore.peers
+    .filter((p) => p.kind !== 'agent')
+    .map((p) => ({ ...p, _t: 'client' as const })),
 )
-const hostRows = computed<HostRow[]>(() =>
-  hostsStore.hosts.map((h) => ({ ...h, _t: 'host' as const, address: h.wg_address, is_self: !!h.capabilities?.is_self })),
-)
-
-const devices = computed<DeviceRow[]>(() => {
-  let list: DeviceRow[]
-  if (filter.value === 'clients') list = clientRows.value
-  else if (filter.value === 'hosts') list = hostRows.value
-  else list = [...hostRows.value, ...clientRows.value]
-
-  if (filter.value === 'online') return list.filter(d => online(d))
-  if (filter.value === 'offline') return list.filter(d => !online(d))
-  return list
+const hostPeerByHostId = computed<Record<string, WireGuardPeer>>(() => {
+  const m: Record<string, WireGuardPeer> = {}
+  for (const p of wgStore.peers) {
+    if (p.kind === 'agent' && p.host_id) m[p.host_id] = p
+  }
+  return m
 })
+const hostRows = computed<HostRow[]>(() =>
+  hostsStore.hosts.map((h) => ({
+    ...h,
+    _t: 'host' as const,
+    address: h.wg_address,
+    is_self: !!h.capabilities?.is_self,
+    wg: hostPeerByHostId.value[h.id] ?? null,
+  })),
+)
 
-const filters = [
-  { key: 'all' as const, label: 'devices.filter.all', count: () => clientRows.value.length + hostRows.value.length },
-  { key: 'online' as const, label: 'devices.filter.online', count: () => [...hostRows.value, ...clientRows.value].filter(d => online(d)).length },
-  { key: 'offline' as const, label: 'devices.filter.offline', count: () => [...hostRows.value, ...clientRows.value].filter(d => !online(d)).length },
-  { key: 'clients' as const, label: 'devices.filter.clients', count: () => clientRows.value.length },
-  { key: 'hosts' as const, label: 'devices.filter.hosts', count: () => hostRows.value.length },
-]
+// Two orthogonal facets, combined with AND: Type (all/hosts/clients) × Status
+// (all/online/offline). Each facet's counts reflect the OTHER facet's selection.
+function byStatus(list: DeviceRow[]): DeviceRow[] {
+  if (statusFilter.value === 'online') return list.filter((d) => online(d))
+  if (statusFilter.value === 'offline') return list.filter((d) => !online(d))
+  return list
+}
+function byType(): DeviceRow[] {
+  if (typeFilter.value === 'hosts') return hostRows.value
+  if (typeFilter.value === 'clients') return clientRows.value
+  return [...hostRows.value, ...clientRows.value]
+}
+
+const devices = computed<DeviceRow[]>(() => byStatus(byType()))
+
+const typeCounts = computed(() => {
+  const h = byStatus(hostRows.value)
+  const c = byStatus(clientRows.value)
+  return { all: h.length + c.length, hosts: h.length, clients: c.length }
+})
+const statusCounts = computed(() => {
+  const base = byType()
+  const on = base.filter((d) => online(d)).length
+  return { all: base.length, online: on, offline: base.length - on }
+})
 
 onMounted(load)
 async function load() {
@@ -405,6 +459,10 @@ function formatBytes(b: number) {
 .seg-btn:active { transform: scale(0.95); }
 .seg-btn.active { background: var(--paper-surface); color: var(--accent); box-shadow: var(--paper-shadow); }
 .seg-count { font-family: var(--font-mono); font-size: 0.66rem; opacity: 0.7; }
+
+.filters { display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-start; }
+.filter-row { display: flex; align-items: center; gap: 0.6rem; }
+.filter-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); min-width: 3.4rem; }
 
 .device-card {
   padding: 1.75rem;

@@ -89,6 +89,7 @@ export interface FetchResult {
   added: number
   updated: number
   skipped: number
+  found?: number
   errors: string[]
 }
 

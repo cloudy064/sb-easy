@@ -30,5 +30,8 @@ pub struct FetchResult {
     pub added: usize,
     pub updated: usize,
     pub skipped: usize,
+    /// Total proxies parsed from the subscription (before dedup). Lets the UI
+    /// distinguish "imported 0 of 46" (dedup) from "parsed 0" (bad URL/format).
+    pub found: usize,
     pub errors: Vec<String>,
 }

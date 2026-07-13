@@ -56,6 +56,9 @@ pub fn generate_outbound(node: &ProxyNode) -> Value {
                 "server_port": node.server_port,
                 "password": protocol_config["password"],
             });
+            if let Some(transport) = protocol_config.get("transport") {
+                ob["transport"] = transport.clone();
+            }
             if let Some(tls) = protocol_config.get("tls") {
                 ob["tls"] = tls.clone();
             }
@@ -119,21 +122,29 @@ pub fn generate_outbound(node: &ProxyNode) -> Value {
 
 /// Generate just the outbounds array from all enabled nodes.
 pub fn generate_outbounds_array(nodes: &[ProxyNode]) -> Vec<Value> {
-    let mut outbounds: Vec<Value> = nodes
-        .iter()
-        .filter(|n| n.enabled)
-        .map(generate_outbound)
-        .collect();
+    // Outbound tags must be unique — sing-box rejects a config with duplicate
+    // tags, so two proxies sharing a display name would otherwise break EVERY
+    // node on the host. On collision, suffix " #2", " #3", … so each is distinct.
+    let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut outbounds: Vec<Value> = Vec::new();
+    let mut auto_tags: Vec<String> = Vec::new();
+    for node in nodes.iter().filter(|n| n.enabled) {
+        let mut ob = generate_outbound(node);
+        let count = seen.entry(node.tag.clone()).or_insert(0);
+        *count += 1;
+        let tag = if *count == 1 {
+            node.tag.clone()
+        } else {
+            format!("{} #{}", node.tag, count)
+        };
+        ob["tag"] = json!(tag);
+        auto_tags.push(tag);
+        outbounds.push(ob);
+    }
 
     // One "auto" group: sing-box delay-tests the members at startup and uses the
     // fastest. A long interval keeps it from continuously re-testing/switching —
     // effectively "pick the fastest once at start". No selector / manual switching.
-    let auto_tags: Vec<String> = nodes
-        .iter()
-        .filter(|n| n.enabled)
-        .map(|n| n.tag.clone())
-        .collect();
-
     if !auto_tags.is_empty() {
         outbounds.push(json!({
             "type": "urltest",

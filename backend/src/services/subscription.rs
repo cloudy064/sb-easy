@@ -96,27 +96,32 @@ pub async fn upsert_nodes(
         let cfg = serde_json::to_string(&node.protocol_config).unwrap_or_default();
         let now = Utc::now().to_rfc3339();
 
-        let existing: Option<(String,)> =
-            match sqlx::query_as("SELECT id FROM proxy_nodes WHERE fingerprint = ?")
-                .bind(&fingerprint)
-                .fetch_optional(pool)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    errors.push(format!("Lookup failed for {}: {e}", node.tag));
-                    continue;
-                }
-            };
+        // Identity: match an existing node by fingerprint first (stable-server
+        // providers, manual re-imports), then by display tag. The tag fallback is
+        // essential for providers that ROTATE server hostnames every fetch (same
+        // node name, new address): without it the new fingerprint never matches
+        // and the INSERT hits the UNIQUE(tag) constraint, so nothing imports.
+        let existing: Option<(String,)> = match find_existing(pool, &fingerprint, &node.tag).await {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("Lookup failed for {}: {e}", node.tag));
+                continue;
+            }
+        };
 
         if let Some((existing_id,)) = existing {
+            // Update every identifying field (tag, type, server/port, config,
+            // fingerprint) so a rotated address / renamed node is reconciled onto
+            // the same row.
             let result = sqlx::query(
-                "UPDATE proxy_nodes SET tag = ?, server = ?, server_port = ?, protocol_config = ?, subscription_id = ?, updated_at = ? WHERE id = ?",
+                "UPDATE proxy_nodes SET tag = ?, node_type = ?, server = ?, server_port = ?, protocol_config = ?, fingerprint = ?, subscription_id = ?, updated_at = ? WHERE id = ?",
             )
             .bind(&node.tag)
+            .bind(&node.node_type)
             .bind(&node.server)
             .bind(node.server_port)
             .bind(&cfg)
+            .bind(&fingerprint)
             .bind(sub_id)
             .bind(&now)
             .bind(&existing_id)
@@ -151,6 +156,26 @@ pub async fn upsert_nodes(
     }
 
     (added, updated, errors)
+}
+
+/// Find an existing proxy_nodes row that this parsed node should reconcile onto:
+/// by fingerprint first, then by (globally-unique) tag. Returns the row id.
+async fn find_existing(
+    pool: &SqlitePool,
+    fingerprint: &str,
+    tag: &str,
+) -> std::result::Result<Option<(String,)>, sqlx::Error> {
+    if let Some(row) = sqlx::query_as::<_, (String,)>("SELECT id FROM proxy_nodes WHERE fingerprint = ?")
+        .bind(fingerprint)
+        .fetch_optional(pool)
+        .await?
+    {
+        return Ok(Some(row));
+    }
+    sqlx::query_as::<_, (String,)>("SELECT id FROM proxy_nodes WHERE tag = ?")
+        .bind(tag)
+        .fetch_optional(pool)
+        .await
 }
 
 /// A minimal view of a Clash config: we only care about the `proxies` list.

@@ -122,11 +122,10 @@ SB_EASY_TEST("profile CRUD uses the existing config_profiles schema") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
-    sbeasy::ConfigProfile profile{
-        .name = "Full profile",
-        .profile = {{"log", {{"level", "warn"}}}},
-        .mode = sbeasy::ProfileMode::full,
-    };
+    sbeasy::ConfigProfile profile;
+    profile.name = "Full profile";
+    profile.profile = {{"log", {{"level", "warn"}}}};
+    profile.mode = sbeasy::ProfileMode::full;
     const auto created = store.create_profile(std::move(profile));
     sbeasy::test::require(!created.id.empty(), "created profile should receive an id");
     sbeasy::test::require(created.mode == sbeasy::ProfileMode::full,
@@ -148,4 +147,93 @@ SB_EASY_TEST("profile CRUD uses the existing config_profiles schema") {
     const auto saved = store.update_profile(std::move(updated));
     sbeasy::test::require(saved.name == "Renamed profile",
                           "updated profile should be returned");
+}
+
+SB_EASY_TEST("host CRUD hides secrets and manages outbound assignments") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::Host host;
+    host.name = "Remote node";
+    host.capabilities = {
+        {"runs_singbox", true},
+        {"is_wg_member", false},
+    };
+    host.clash_secret = "do-not-serialize";
+    const auto created = store.create_host(std::move(host));
+    sbeasy::test::require(!created.id.empty(), "created host should receive an id");
+    sbeasy::test::require(created.agent_token.size() == 64,
+                          "created host should receive a 64-character token");
+    sbeasy::test::require(created.profile_id == "default",
+                          "created host should use the default profile");
+
+    const nlohmann::json public_host = created;
+    sbeasy::test::require(!public_host.contains("agent_token"),
+                          "public host JSON must hide the agent token");
+    sbeasy::test::require(!public_host.contains("clash_secret"),
+                          "public host JSON must hide the Clash secret");
+    sbeasy::test::require(public_host.at("has_token") == true,
+                          "public host JSON should expose token presence");
+
+    store.database().execute(
+        "INSERT INTO proxy_nodes "
+        "(id, tag, node_type, enabled, server, server_port, "
+        "protocol_config, fingerprint) VALUES "
+        "('node-a', 'a', 'shadowsocks', TRUE, '127.0.0.1', 1001, "
+        "'{\"method\":\"aes-128-gcm\",\"password\":\"a\"}', 'node-a'),"
+        "('node-b', 'b', 'trojan', TRUE, '127.0.0.1', 1002, "
+        "'{\"password\":\"b\"}', 'node-b')");
+    store.set_host_outbounds(created.id, {"node-b", "node-a", "node-a"});
+    const auto assignments = store.host_outbounds(created.id);
+    sbeasy::test::require(assignments == std::vector<std::string>{"node-a", "node-b"},
+                          "outbound assignments should be replaced and deduplicated");
+
+    auto found = store.find_host(created.id);
+    sbeasy::test::require(found.has_value() && found->assigned_outbounds == 2,
+                          "host reads should include the assigned count");
+    const auto old_token = found->agent_token;
+    const auto new_token = store.rotate_agent_token(created.id);
+    sbeasy::test::require(new_token.size() == 64 && new_token != old_token,
+                          "token rotation should replace the token");
+
+    found = store.find_host(created.id);
+    found->name = "Renamed remote";
+    found->enabled = false;
+    const auto updated = store.update_host(*found);
+    sbeasy::test::require(updated.name == "Renamed remote" && !updated.enabled,
+                          "host updates should round-trip");
+
+    store.delete_host(created.id);
+    sbeasy::test::require(!store.find_host(created.id).has_value(),
+                          "deleted host should disappear");
+    sbeasy::test::require_throws<sbeasy::NotFoundError>(
+        [&] { static_cast<void>(store.host_outbounds(created.id)); },
+        "outbound reads for a deleted host should fail");
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] { store.delete_host("self"); }, "the self host must be protected");
+}
+
+SB_EASY_TEST("profile deletion resets assigned hosts to default") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::ConfigProfile profile;
+    profile.name = "Temporary profile";
+    profile.profile = nlohmann::json::object();
+    const auto created_profile = store.create_profile(std::move(profile));
+    sbeasy::Host host;
+    host.name = "Profile consumer";
+    host.capabilities = nlohmann::json::object();
+    host.profile_id = created_profile.id;
+    const auto created_host = store.create_host(std::move(host));
+
+    store.delete_profile(created_profile.id);
+    const auto reloaded = store.find_host(created_host.id);
+    sbeasy::test::require(reloaded.has_value() && reloaded->profile_id == "default",
+                          "profile consumers should fall back to default");
+    sbeasy::test::require(!store.find_profile(created_profile.id).has_value(),
+                          "deleted profile should disappear");
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] { store.delete_profile("default"); },
+        "the default profile must be protected");
 }

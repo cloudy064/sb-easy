@@ -1,16 +1,17 @@
 #include "sbeasy/store.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iomanip>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <openssl/rand.h>
 #include <sqlite3.h>
 
 #include "sqlite_utils.hpp"
@@ -37,6 +38,11 @@ using nlohmann::json;
     return parsed;
 }
 
+[[nodiscard]] json parse_object_or_empty(const std::string& value) {
+    auto parsed = json::parse(value, nullptr, false);
+    return parsed.is_object() ? std::move(parsed) : json::object();
+}
+
 [[nodiscard]] ConfigProfile read_profile(sqlite::Statement& statement) {
     return ConfigProfile{
         .id = statement.text(0),
@@ -50,11 +56,31 @@ using nlohmann::json;
     };
 }
 
+[[nodiscard]] Host read_host(sqlite::Statement& statement) {
+    return Host{
+        .id = statement.text(0),
+        .name = statement.text(1),
+        .agent_token = statement.text(2),
+        .capabilities = parse_object_or_empty(statement.text(3)),
+        .profile_id = statement.optional_text(4),
+        .wg_address = statement.optional_text(5),
+        .wg_public_key = statement.optional_text(6),
+        .wg_endpoint = statement.optional_text(7),
+        .clash_api = statement.optional_text(8),
+        .clash_secret = statement.text(9),
+        .last_seen = statement.optional_text(10),
+        .singbox_state = statement.optional_text(11),
+        .enabled = statement.integer(12) != 0,
+        .created_at = statement.text(13),
+        .updated_at = statement.text(14),
+        .assigned_outbounds = static_cast<std::size_t>(statement.integer(15)),
+    };
+}
+
 [[nodiscard]] std::string uuid_v4() {
     std::array<unsigned char, 16> bytes{};
-    std::random_device random;
-    for (auto& byte : bytes) {
-        byte = static_cast<unsigned char>(random());
+    if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
+        throw std::runtime_error("secure random generation failed");
     }
     bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0fU) | 0x40U);
     bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3fU) | 0x80U);
@@ -69,6 +95,23 @@ using nlohmann::json;
     }
     return value.str();
 }
+
+[[nodiscard]] std::string new_agent_token() {
+    auto first = uuid_v4();
+    auto second = uuid_v4();
+    std::erase(first, '-');
+    std::erase(second, '-');
+    return first + second;
+}
+
+constexpr auto host_select = R"SQL(
+SELECT h.id, h.name, h.agent_token, h.capabilities, h.profile_id,
+       h.wg_address, h.wg_public_key, h.wg_endpoint, h.clash_api,
+       h.clash_secret, h.last_seen, h.singbox_state, h.enabled,
+       h.created_at, h.updated_at,
+       (SELECT COUNT(*) FROM host_outbounds o WHERE o.host_id = h.id)
+FROM hosts h
+)SQL";
 
 [[nodiscard]] std::string controller_address(std::optional<std::string> address) {
     if (!address.has_value() || address->empty()) {
@@ -120,12 +163,32 @@ void to_json(nlohmann::json& value, const ConfigProfile& profile) {
     value = nlohmann::json{
         {"id", profile.id},
         {"name", profile.name},
-        {"template", profile.profile},
+        {"template", profile.profile.dump()},
         {"mode", profile_mode_name(profile.mode)},
         {"rule_script", profile.rule_script},
         {"rule_script_enabled", profile.rule_script_enabled},
         {"created_at", profile.created_at},
         {"updated_at", profile.updated_at},
+    };
+}
+
+void to_json(nlohmann::json& value, const Host& host) {
+    value = nlohmann::json{
+        {"id", host.id},
+        {"name", host.name},
+        {"capabilities", host.capabilities},
+        {"profile_id", host.profile_id},
+        {"wg_address", host.wg_address},
+        {"wg_public_key", host.wg_public_key},
+        {"wg_endpoint", host.wg_endpoint},
+        {"clash_api", host.clash_api},
+        {"last_seen", host.last_seen},
+        {"singbox_state", host.singbox_state},
+        {"enabled", host.enabled},
+        {"created_at", host.created_at},
+        {"updated_at", host.updated_at},
+        {"assigned_outbounds", host.assigned_outbounds},
+        {"has_token", !host.agent_token.empty()},
     };
 }
 
@@ -164,7 +227,7 @@ std::optional<ConfigProfile> Store::find_profile(const std::string& id) const {
 
 ConfigProfile Store::create_profile(ConfigProfile profile) {
     if (profile.name.empty() || !profile.profile.is_object()) {
-        throw std::invalid_argument("profile name and object template are required");
+        throw ValidationError("Profile name and object template are required");
     }
     if (profile.id.empty()) {
         profile.id = uuid_v4();
@@ -192,8 +255,7 @@ ConfigProfile Store::create_profile(ConfigProfile profile) {
 
 ConfigProfile Store::update_profile(ConfigProfile profile) {
     if (profile.id.empty() || profile.name.empty() || !profile.profile.is_object()) {
-        throw std::invalid_argument(
-            "profile id, name, and object template are required");
+        throw ValidationError("Profile id, name, and object template are required");
     }
 
     {
@@ -210,11 +272,214 @@ ConfigProfile Store::update_profile(ConfigProfile profile) {
         statement.bind(6, profile.id);
         statement.step_done();
         if (sqlite3_changes(database_.handle_) == 0) {
-            throw std::runtime_error("profile not found: " + profile.id);
+            throw NotFoundError("Profile not found");
         }
     }
 
     return *find_profile(profile.id);
+}
+
+void Store::delete_profile(const std::string& id) {
+    if (id == "default") {
+        throw ValidationError("Cannot delete the default profile");
+    }
+
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement reset_hosts{
+        database_.handle_,
+        "UPDATE hosts SET profile_id = 'default', updated_at = datetime('now') "
+        "WHERE profile_id = ?1"};
+    reset_hosts.bind(1, id);
+    reset_hosts.step_done();
+
+    sqlite::Statement remove{database_.handle_,
+                             "DELETE FROM config_profiles WHERE id = ?1"};
+    remove.bind(1, id);
+    remove.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Profile not found");
+    }
+    transaction.commit();
+}
+
+std::vector<Host> Store::list_hosts() const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                std::string{host_select} + " ORDER BY h.created_at"};
+    std::vector<Host> hosts;
+    while (statement.step_row()) {
+        hosts.push_back(read_host(statement));
+    }
+    return hosts;
+}
+
+std::optional<Host> Store::find_host(const std::string& id) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                std::string{host_select} + " WHERE h.id = ?1"};
+    statement.bind(1, id);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    return read_host(statement);
+}
+
+Host Store::create_host(Host host) {
+    if (host.name.empty() || !host.capabilities.is_object()) {
+        throw ValidationError("Host name and object capabilities are required");
+    }
+    if (host.id.empty()) {
+        host.id = uuid_v4();
+    }
+    if (host.agent_token.empty()) {
+        host.agent_token = new_agent_token();
+    }
+    if (!host.profile_id.has_value()) {
+        host.profile_id = "default";
+    }
+
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement statement{
+            database_.handle_,
+            "INSERT INTO hosts "
+            "(id, name, agent_token, capabilities, profile_id, wg_address, "
+            "wg_public_key, wg_endpoint, clash_api, clash_secret, last_seen, "
+            "singbox_state, enabled, created_at, updated_at) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
+            "?13, datetime('now'), datetime('now'))"};
+        statement.bind(1, host.id);
+        statement.bind(2, host.name);
+        statement.bind(3, host.agent_token);
+        statement.bind(4, host.capabilities.dump());
+        statement.bind(5, host.profile_id);
+        statement.bind(6, host.wg_address);
+        statement.bind(7, host.wg_public_key);
+        statement.bind(8, host.wg_endpoint);
+        statement.bind(9, host.clash_api);
+        statement.bind(10, host.clash_secret);
+        statement.bind(11, host.last_seen);
+        statement.bind(12, host.singbox_state);
+        statement.bind(13, host.enabled);
+        statement.step_done();
+    }
+    return *find_host(host.id);
+}
+
+Host Store::update_host(Host host) {
+    if (host.id.empty() || host.name.empty() || !host.capabilities.is_object()) {
+        throw ValidationError("Host id, name, and object capabilities are required");
+    }
+
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement statement{
+            database_.handle_,
+            "UPDATE hosts SET name = ?1, capabilities = ?2, profile_id = ?3, "
+            "wg_address = ?4, wg_public_key = ?5, wg_endpoint = ?6, "
+            "clash_api = ?7, clash_secret = ?8, enabled = ?9, "
+            "updated_at = datetime('now') WHERE id = ?10"};
+        statement.bind(1, host.name);
+        statement.bind(2, host.capabilities.dump());
+        statement.bind(3, host.profile_id);
+        statement.bind(4, host.wg_address);
+        statement.bind(5, host.wg_public_key);
+        statement.bind(6, host.wg_endpoint);
+        statement.bind(7, host.clash_api);
+        statement.bind(8, host.clash_secret);
+        statement.bind(9, host.enabled);
+        statement.bind(10, host.id);
+        statement.step_done();
+        if (sqlite3_changes(database_.handle_) == 0) {
+            throw NotFoundError("Host not found");
+        }
+    }
+    return *find_host(host.id);
+}
+
+void Store::delete_host(const std::string& id) {
+    if (id == "self") {
+        throw ValidationError("Cannot delete the built-in self host");
+    }
+
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement remove_outbounds{database_.handle_,
+                                       "DELETE FROM host_outbounds WHERE host_id = ?1"};
+    remove_outbounds.bind(1, id);
+    remove_outbounds.step_done();
+
+    sqlite::Statement remove_host{database_.handle_, "DELETE FROM hosts WHERE id = ?1"};
+    remove_host.bind(1, id);
+    remove_host.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Host not found");
+    }
+    transaction.commit();
+}
+
+std::vector<std::string> Store::host_outbounds(const std::string& host_id) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement host{database_.handle_, "SELECT 1 FROM hosts WHERE id = ?1"};
+    host.bind(1, host_id);
+    if (!host.step_row()) {
+        throw NotFoundError("Host not found");
+    }
+
+    sqlite::Statement statement{database_.handle_,
+                                "SELECT node_id FROM host_outbounds WHERE host_id = ?1 "
+                                "ORDER BY node_id"};
+    statement.bind(1, host_id);
+    std::vector<std::string> ids;
+    while (statement.step_row()) {
+        ids.push_back(statement.text(0));
+    }
+    return ids;
+}
+
+void Store::set_host_outbounds(const std::string& host_id,
+                               const std::vector<std::string>& node_ids) {
+    const std::scoped_lock lock{database_.mutex_};
+    {
+        sqlite::Statement host{database_.handle_, "SELECT 1 FROM hosts WHERE id = ?1"};
+        host.bind(1, host_id);
+        if (!host.step_row()) {
+            throw NotFoundError("Host not found");
+        }
+    }
+
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement remove{database_.handle_,
+                             "DELETE FROM host_outbounds WHERE host_id = ?1"};
+    remove.bind(1, host_id);
+    remove.step_done();
+    for (const auto& node_id : node_ids) {
+        sqlite::Statement insert{
+            database_.handle_,
+            "INSERT OR IGNORE INTO host_outbounds (host_id, node_id) "
+            "VALUES (?1, ?2)"};
+        insert.bind(1, host_id);
+        insert.bind(2, node_id);
+        insert.step_done();
+    }
+    transaction.commit();
+}
+
+std::string Store::rotate_agent_token(const std::string& host_id) {
+    const auto token = new_agent_token();
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement update{
+        database_.handle_,
+        "UPDATE hosts SET agent_token = ?1, updated_at = datetime('now') "
+        "WHERE id = ?2"};
+    update.bind(1, token);
+    update.bind(2, host_id);
+    update.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Host not found");
+    }
+    return token;
 }
 
 RenderRequest Store::render_request_for_host(const std::string& host_id) const {
@@ -222,10 +487,10 @@ RenderRequest Store::render_request_for_host(const std::string& host_id) const {
 
     sqlite::Statement host{database_.handle_,
                            "SELECT id, name, capabilities, profile_id, clash_api, "
-                           "clash_secret FROM hosts WHERE id = ?1 AND enabled = 1"};
+                           "clash_secret FROM hosts WHERE id = ?1"};
     host.bind(1, host_id);
     if (!host.step_row()) {
-        throw std::runtime_error("host not found: " + host_id);
+        throw NotFoundError("Host not found");
     }
 
     const auto profile_id = host.optional_text(3).value_or("default");

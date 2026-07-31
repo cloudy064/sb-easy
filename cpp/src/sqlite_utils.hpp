@@ -46,6 +46,17 @@ class Statement final {
         bind(index, std::string{value});
     }
 
+    void bind(int index, const std::optional<std::string>& value) {
+        if (!value.has_value()) {
+            const int code = sqlite3_bind_null(statement_, index);
+            if (code != SQLITE_OK) {
+                fail(database_, "bind null", code);
+            }
+            return;
+        }
+        bind(index, *value);
+    }
+
     void bind(int index, std::int64_t value) {
         const int code = sqlite3_bind_int64(statement_, index, value);
         if (code != SQLITE_OK) {

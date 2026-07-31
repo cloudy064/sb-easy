@@ -17,6 +17,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(SB_EASY_WARNINGS_AS_ERRORS "Treat sb-easy C++ warnings as errors" OFF)
+option(SB_EASY_BUILD_HTTP "Build the Drogon HTTP server" ON)
+
+function(sb_easy_enable_warnings target)
+    target_compile_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>
+    )
+    if(SB_EASY_WARNINGS_AS_ERRORS)
+        target_compile_options(${target} PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror>
+        )
+    endif()
+endfunction()
 
 FetchContent_Declare(
     nlohmann_json
@@ -39,6 +51,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(quickjs_ng)
 
+if(SB_EASY_BUILD_HTTP)
+    set(SB_EASY_PROJECT_BUILD_TESTING ${BUILD_TESTING})
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_CTL OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_ORM OFF CACHE BOOL "" FORCE)
+    set(BUILD_BROTLI OFF CACHE BOOL "" FORCE)
+    set(BUILD_C-ARES OFF CACHE BOOL "" FORCE)
+    set(BUILD_YAML_CONFIG OFF CACHE BOOL "" FORCE)
+    set(USE_SUBMODULE ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        drogon
+        GIT_REPOSITORY https://github.com/drogonframework/drogon.git
+        GIT_TAG v1.9.13
+        GIT_SHALLOW TRUE
+        GIT_SUBMODULES_RECURSE TRUE
+    )
+    FetchContent_MakeAvailable(drogon)
+    set(BUILD_TESTING ${SB_EASY_PROJECT_BUILD_TESTING} CACHE BOOL "" FORCE)
+endif()
+
 add_library(sb_easy_core
     src/config_renderer.cpp
     src/database.cpp
@@ -58,16 +91,29 @@ target_link_libraries(sb_easy_core
         ${SB_EASY_SQLITE_TARGET}
         qjs
 )
-target_compile_options(sb_easy_core PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>
-)
-if(SB_EASY_WARNINGS_AS_ERRORS)
-    target_compile_options(sb_easy_core PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror>
-    )
-endif()
+sb_easy_enable_warnings(sb_easy_core)
+
 add_executable(sb-easy-cpp src/main.cpp)
 target_link_libraries(sb-easy-cpp PRIVATE sb-easy::core)
+sb_easy_enable_warnings(sb-easy-cpp)
+
+if(SB_EASY_BUILD_HTTP)
+    add_library(sb_easy_http src/http_server.cpp)
+    add_library(sb-easy::http ALIAS sb_easy_http)
+    target_include_directories(sb_easy_http
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+    target_link_libraries(sb_easy_http
+        PUBLIC sb-easy::core
+        PRIVATE drogon
+    )
+    sb_easy_enable_warnings(sb_easy_http)
+
+    add_executable(sb-easy-cpp-server src/server_main.cpp)
+    target_link_libraries(sb-easy-cpp-server PRIVATE sb-easy::http)
+    sb_easy_enable_warnings(sb-easy-cpp-server)
+endif()
 
 if(BUILD_TESTING)
     add_executable(sb-easy-core-tests
@@ -80,6 +126,18 @@ if(BUILD_TESTING)
     target_compile_definitions(sb-easy-core-tests PRIVATE
         SB_EASY_MIGRATIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../migrations"
     )
+    sb_easy_enable_warnings(sb-easy-core-tests)
     add_test(NAME sb-easy-core-tests COMMAND sb-easy-core-tests)
     set_tests_properties(sb-easy-core-tests PROPERTIES TIMEOUT 15)
+
+    if(SB_EASY_BUILD_HTTP)
+        add_executable(sb-easy-http-tests tests/http_server_test.cpp)
+        target_link_libraries(sb-easy-http-tests PRIVATE sb-easy::http drogon)
+        target_compile_definitions(sb-easy-http-tests PRIVATE
+            SB_EASY_MIGRATIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../migrations"
+        )
+        sb_easy_enable_warnings(sb-easy-http-tests)
+        add_test(NAME sb-easy-http-tests COMMAND sb-easy-http-tests)
+        set_tests_properties(sb-easy-http-tests PROPERTIES TIMEOUT 15)
+    endif()
 endif()

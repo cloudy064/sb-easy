@@ -11,24 +11,29 @@ The current foundation contains:
 - a constrained QuickJS-NG `buildRules(context)` execution engine;
 - a SQLite migration runner compatible with the existing SQLx metadata and
   checksums, plus a profile/host repository;
+- a Drogon HTTP server for host/profile CRUD, outbound assignment, token
+  rotation, and per-host config preview;
 - a CLI renderer for parity fixtures and migration testing;
-- focused tests for rendering, scripting limits, migrations, and persistence.
+- focused tests for rendering, scripting limits, migrations, persistence, and
+  live HTTP contracts.
 
-The HTTP server is introduced in the next milestone after the core has fixture
-parity with the Rust implementation. Drogon is the selected transport framework;
-it does not leak into the core library.
+Drogon remains confined to the HTTP adapter; configuration and database code do
+not depend on framework types.
 
 ## Build
 
 ```sh
 cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cpp --target sb-easy-cpp sb-easy-core-tests -j
+cmake --build build/cpp \
+  --target sb-easy-cpp sb-easy-cpp-server \
+           sb-easy-core-tests sb-easy-http-tests -j
 ctest --test-dir build/cpp --output-on-failure
 ```
 
 Dependencies are pinned and fetched by CMake:
 
 - QuickJS-NG `v0.15.1`;
+- Drogon `v1.9.13`;
 - JSON for Modern C++ `v3.12.0`.
 
 QuickJS is linked statically. The std/os libraries and module loader are not
@@ -48,6 +53,25 @@ build/cpp/sb-easy-cpp migrate data/sb-easy.db migrations
 build/cpp/sb-easy-cpp render-host data/sb-easy.db self migrations
 ```
 
+Start the incremental HTTP server:
+
+```sh
+build/cpp/sb-easy-cpp-server \
+  data/sb-easy.db migrations 127.0.0.1 51821 https://panel.example.com
+curl http://127.0.0.1:51821/api/health
+```
+
+Implemented HTTP routes include:
+
+- `/api/hosts` and `/api/hosts/{id}`;
+- `/api/hosts/profiles` and `/api/hosts/profiles/{id}`;
+- `/api/hosts/{id}/outbounds`;
+- `/api/hosts/{id}/config`;
+- token reveal and rotation routes used by the existing frontend.
+
+The server defaults to loopback because authentication has not been migrated
+yet. Binding it to a public interface is not safe at this stage.
+
 The core/database test image can be built independently:
 
 ```sh
@@ -56,7 +80,7 @@ docker run --rm sb-easy-cpp-core
 ```
 
 This image is intentionally not a replacement for the production container
-until the HTTP and agent control-plane milestones are complete.
+until authentication and the agent control-plane milestones are complete.
 
 The script contract is deliberately narrow:
 

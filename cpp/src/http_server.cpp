@@ -35,6 +35,7 @@
 
 #include "sbeasy/auth.hpp"
 #include "sbeasy/clash_client.hpp"
+#include "sbeasy/clash_websocket.hpp"
 #include "sbeasy/config_etag.hpp"
 #include "sbeasy/config_renderer.hpp"
 #include "sbeasy/proxy_parser.hpp"
@@ -225,8 +226,17 @@ void assign_optional_string(const json& body, const char* field,
 
 [[nodiscard]] bool public_api_path(std::string_view path) {
     return path == "/api/health" || path == "/api/system/status" ||
-           path.starts_with("/api/auth/") || path.starts_with("/api/agent/") ||
-           path.starts_with("/api/sing-box/ws/");
+           path.starts_with("/api/auth/") || path.starts_with("/api/agent/");
+}
+
+[[nodiscard]] bool clash_websocket_path(std::string_view path) {
+    constexpr std::string_view prefix{"/api/sing-box/ws/"};
+    if (!path.starts_with(prefix)) {
+        return false;
+    }
+    const auto kind = path.substr(prefix.size());
+    return kind == "traffic" || kind == "logs" || kind == "connections" ||
+           kind == "memory";
 }
 
 [[nodiscard]] std::optional<std::string>
@@ -787,6 +797,19 @@ void register_http_routes(const std::shared_ptr<Store>& store,
     application.registerPreRoutingAdvice([auth](const drogon::HttpRequestPtr& request,
                                                 drogon::AdviceCallback&& reject,
                                                 drogon::AdviceChainCallback&& proceed) {
+        if (clash_websocket_path(request->path())) {
+            const auto token = trim(request->getParameter("token"));
+            const auto claims =
+                token.empty() ? std::nullopt : auth->verify_token(token);
+            if (!claims.has_value()) {
+                reject(json_response({{"error", "Invalid or expired token"}},
+                                     drogon::k401Unauthorized));
+                return;
+            }
+            request->attributes()->insert(std::string{claims_attribute}, *claims);
+            proceed();
+            return;
+        }
         if (!request->path().starts_with("/api/") || public_api_path(request->path())) {
             proceed();
             return;
@@ -825,6 +848,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                 LOG_ERROR << "audit write failed: " << error.what();
             }
         });
+    register_clash_websocket_routes(store, local_clash_api, local_clash_secret);
     application.registerHandler(
         "/api/health",
         [](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {

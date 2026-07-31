@@ -62,15 +62,14 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 - [x] Local and remote-agent proxy latency tests with persisted results.
 - [x] Agent-side connection/traffic telemetry sampling from the installed
   sing-box config.
-- [ ] Authenticated Clash WebSocket proxying for live traffic, logs,
+- [x] Authenticated Clash WebSocket proxying for live traffic, logs,
   connections, and memory.
 - [ ] Local sing-box supervisor.
 
-The WebSocket proxy is intentionally a separate slice. Administrative
-authentication has not yet moved to the C++ server, so exposing an unauthenticated
-streaming bridge would leak runtime traffic and logs. Until that boundary is
-implemented, the polling agent reports bounded connection snapshots and leaves
-the log list empty.
+The WebSocket bridge rejects invalid query JWTs before protocol upgrade, limits
+the route to the four supported stream kinds, and resolves local or per-host
+Clash URL/secret pairs independently. The polling agent remains the bounded
+fallback for hosts whose Clash endpoint cannot be reached by the panel.
 
 ### M4 — WireGuard and administrative APIs (in progress)
 

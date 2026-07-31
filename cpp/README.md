@@ -133,9 +133,12 @@ telemetry on every poll. Use `--once` for provisioning checks.
 `SINGBOX_VALIDATE_CONFIG=false` is available for isolated development
 environments without a sing-box binary.
 
-Authenticated Clash WebSocket forwarding and log collection remain pending.
-The administrative routes are still loopback-only, so the rewrite deliberately
-does not expose an unauthenticated live traffic/log stream.
+The authenticated Clash WebSocket bridge exposes the Rust-compatible
+`/api/sing-box/ws/{traffic,logs,connections,memory}` routes. Browser handshakes
+use the session JWT in the `token` query parameter; after verification, the
+bridge resolves the selected `host` and uses only that target's Clash secret for
+the upstream connection. The optional `level` query parameter is forwarded to
+the log stream.
 
 The core/database test image can be built independently:
 

@@ -159,6 +159,7 @@ if(SB_EASY_BUILD_HTTP)
     sb_easy_enable_warnings(sb_easy_clash)
 
     add_library(sb_easy_http
+        src/clash_websocket.cpp
         src/http_server.cpp
         src/subscription_fetcher.cpp
     )

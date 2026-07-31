@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -31,10 +32,13 @@
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #endif
 #include <drogon/drogon.h>
+#include <drogon/WebSocketClient.h>
+#include <drogon/utils/Utilities.h>
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include "sbeasy/http_server.hpp"
 #include "sbeasy/store.hpp"
@@ -197,6 +201,66 @@ class ClashFixture final {
     }
 
   private:
+    static void send_all(int client, std::string_view data) {
+        std::size_t sent{};
+        while (sent < data.size()) {
+            const auto count = ::send(client, data.data() + sent, data.size() - sent,
+                                      MSG_NOSIGNAL);
+            if (count <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(count);
+        }
+    }
+
+    static std::string header_value(const std::string& request,
+                                    const std::string& lower,
+                                    std::string_view header) {
+        if (const auto start = lower.find(header); start != std::string::npos) {
+            const auto value_start = start + header.size();
+            const auto end = lower.find("\r\n", value_start);
+            auto value = request.substr(value_start, end - value_start);
+            while (!value.empty() &&
+                   std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+                value.erase(value.begin());
+            }
+            while (!value.empty() &&
+                   std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+                value.pop_back();
+            }
+            return value;
+        }
+        return {};
+    }
+
+    static std::string websocket_accept(std::string key) {
+        key += "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int digest_size{};
+        if (EVP_Digest(key.data(), key.size(), digest.data(), &digest_size,
+                       EVP_sha1(), nullptr) != 1) {
+            throw std::runtime_error("could not calculate WebSocket accept key");
+        }
+        return drogon::utils::base64Encode(digest.data(), digest_size);
+    }
+
+    static std::string websocket_frame(std::string_view payload) {
+        std::string frame;
+        frame.push_back(static_cast<char>(0x81));
+        if (payload.size() <= 125U) {
+            frame.push_back(static_cast<char>(payload.size()));
+        } else {
+            frame.push_back(static_cast<char>(126));
+            frame.push_back(
+                static_cast<char>((static_cast<unsigned int>(payload.size()) >> 8U) &
+                                  0xffU));
+            frame.push_back(
+                static_cast<char>(static_cast<unsigned int>(payload.size()) & 0xffU));
+        }
+        frame.append(payload);
+        return frame;
+    }
+
     static void send_response(int client, const std::string& request) {
         std::istringstream first_line{request.substr(0, request.find("\r\n"))};
         std::string method;
@@ -207,17 +271,23 @@ class ClashFixture final {
         std::ranges::transform(lower, lower.begin(), [](unsigned char character) {
             return static_cast<char>(std::tolower(character));
         });
-        std::string authorization;
-        constexpr std::string_view header{"authorization:"};
-        if (const auto start = lower.find(header); start != std::string::npos) {
-            const auto value_start = start + header.size();
-            const auto end = lower.find("\r\n", value_start);
-            authorization = request.substr(value_start, end - value_start);
-            while (!authorization.empty() && std::isspace(static_cast<unsigned char>(
-                                                 authorization.front())) != 0) {
-                authorization.erase(authorization.begin());
-            }
+        if (lower.find("upgrade: websocket") != std::string::npos) {
+            const auto key =
+                header_value(request, lower, "sec-websocket-key:");
+            const auto response =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " +
+                websocket_accept(key) + "\r\n\r\n";
+            send_all(client, response);
+            send_all(client, websocket_frame(
+                                 json{{"stream", "fixture"}, {"target", target}}.dump()));
+            std::this_thread::sleep_for(std::chrono::milliseconds{200});
+            return;
         }
+        const auto authorization =
+            header_value(request, lower, "authorization:");
 
         json response_body{
             {"method", method},
@@ -245,15 +315,7 @@ class ClashFixture final {
                               "Content-Length: " +
                               std::to_string(body.size()) +
                               "\r\nConnection: close\r\n\r\n" + body;
-        std::size_t sent{};
-        while (sent < response.size()) {
-            const auto count = ::send(client, response.data() + sent,
-                                      response.size() - sent, MSG_NOSIGNAL);
-            if (count <= 0) {
-                break;
-            }
-            sent += static_cast<std::size_t>(count);
-        }
+        send_all(client, response);
     }
 
     void serve() const {
@@ -321,6 +383,13 @@ struct ApiResponse {
     std::string etag;
 };
 
+struct WebSocketResult {
+    drogon::ReqResult result;
+    drogon::HttpStatusCode status;
+    std::string message;
+    drogon::WebSocketMessageType type;
+};
+
 std::string default_bearer_token;
 
 void require(bool condition, const char* message) {
@@ -377,6 +446,77 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
     };
 }
 
+[[nodiscard]] WebSocketResult
+websocket_request(std::uint16_t port, std::string kind, std::string token,
+                  std::string host = {}, std::string level = {}) {
+    auto result = std::make_shared<std::promise<WebSocketResult>>();
+    auto completed = std::make_shared<std::atomic_bool>(false);
+    auto complete = [result, completed](WebSocketResult value) {
+        bool expected = false;
+        if (completed->compare_exchange_strong(expected, true)) {
+            result->set_value(std::move(value));
+        }
+    };
+
+    auto client = drogon::WebSocketClient::newWebSocketClient(
+        "ws://127.0.0.1:" + std::to_string(port));
+    client->setMessageHandler(
+        [complete](std::string&& message,
+                   const drogon::WebSocketClientPtr& websocket,
+                   const drogon::WebSocketMessageType& type) {
+            complete({
+                .result = drogon::ReqResult::Ok,
+                .status = drogon::k101SwitchingProtocols,
+                .message = std::move(message),
+                .type = type,
+            });
+            websocket->stop();
+        });
+    client->setConnectionClosedHandler(
+        [complete](const drogon::WebSocketClientPtr&) {
+            complete({
+                .result = drogon::ReqResult::NetworkFailure,
+                .status = drogon::k500InternalServerError,
+                .message = "connection closed before a message",
+                .type = drogon::WebSocketMessageType::Close,
+            });
+        });
+
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setPath("/api/sing-box/ws/" + std::move(kind));
+    request->setParameter("token", std::move(token));
+    if (!host.empty()) {
+        request->setParameter("host", std::move(host));
+    }
+    if (!level.empty()) {
+        request->setParameter("level", std::move(level));
+    }
+    client->connectToServer(
+        request,
+        [complete](drogon::ReqResult request_result,
+                   const drogon::HttpResponsePtr& response,
+                   const drogon::WebSocketClientPtr& websocket) {
+            if (request_result != drogon::ReqResult::Ok) {
+                complete({
+                    .result = request_result,
+                    .status = response ? response->statusCode() :
+                                         drogon::k500InternalServerError,
+                    .message = response ? std::string{response->body()} :
+                                          std::string{},
+                    .type = drogon::WebSocketMessageType::Unknown,
+                });
+                websocket->stop();
+            }
+        });
+
+    auto future = result->get_future();
+    if (future.wait_for(std::chrono::seconds{3}) != std::future_status::ready) {
+        client->stop();
+        throw std::runtime_error("WebSocket request timed out");
+    }
+    return future.get();
+}
+
 void run_contract() {
     const TemporaryDatabase database;
     const SubscriptionFixture subscription_fixture;
@@ -428,6 +568,43 @@ void run_contract() {
                 login.body.at("token").is_string(),
             "the seeded administrator must be able to log in");
     default_bearer_token = login.body.at("token").get<std::string>();
+    require(
+        request(client, drogon::Get,
+                "/api/sing-box/ws/traffic?token=invalid-token")
+                .status == drogon::k401Unauthorized,
+        "Clash WebSocket routes must return 401 for invalid query JWTs");
+    const auto rejected_websocket =
+        websocket_request(port, "traffic", "invalid-token");
+    require(rejected_websocket.result == drogon::ReqResult::BadResponse,
+            "Clash WebSocket handshakes must reject invalid JWTs before upgrade");
+    const auto local_websocket =
+        websocket_request(port, "logs", default_bearer_token, {}, "debug");
+    if (local_websocket.message.empty()) {
+        throw std::runtime_error(
+            "local Clash WebSocket returned no payload: " +
+            std::string{drogon::to_string_view(local_websocket.result)} + " / " +
+            std::to_string(static_cast<int>(local_websocket.type)));
+    }
+    const auto local_stream = json::parse(local_websocket.message);
+    require(local_websocket.result == drogon::ReqResult::Ok &&
+                local_websocket.type == drogon::WebSocketMessageType::Text &&
+                local_stream.at("target") ==
+                    "/local/logs?level=debug&token=local-secret",
+            "local Clash WebSockets must bridge JWT-authenticated log streams");
+    const auto remote_websocket =
+        websocket_request(port, "traffic", default_bearer_token,
+                          remote_clash_host.id);
+    if (remote_websocket.message.empty()) {
+        throw std::runtime_error(
+            "remote Clash WebSocket returned no payload: " +
+            std::string{drogon::to_string_view(remote_websocket.result)} + " / " +
+            std::to_string(static_cast<int>(remote_websocket.type)));
+    }
+    const auto remote_stream = json::parse(remote_websocket.message);
+    require(remote_websocket.result == drogon::ReqResult::Ok &&
+                remote_stream.at("target") ==
+                    "/remote/traffic?token=remote-secret",
+            "remote Clash WebSockets must select the host target and secret");
     const auto session = request(client, drogon::Get, "/api/auth/session");
     require(session.status == drogon::k200OK &&
                 session.body.at("authenticated") == true &&

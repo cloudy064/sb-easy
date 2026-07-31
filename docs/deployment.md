@@ -81,16 +81,23 @@ cd /root/workspace/sb-easy && docker compose up -d
 2. **拿 token**：主机卡片 → 安装命令，复制 `AGENT_TOKEN`。
 3. **端点上跑 agent**（Docker，同一镜像）：
    ```sh
+   AGENT_UI_PASSWORD=$(openssl rand -hex 24)
    docker run -d --name sb-easy-agent --restart unless-stopped \
      --network host --cap-add NET_ADMIN --device /dev/net/tun \
      -e SB_EASY_SERVER=http://SERVER:51821 \
      -e AGENT_TOKEN=<该主机 token> \
+     -e AGENT_UI_PASSWORD="$AGENT_UI_PASSWORD" \
      -v "$PWD/agent-data:/app/data" \
      sb-easy:latest sb-easy agent
    ```
    注意命令是 `sb-easy agent`（容器 CMD 整体替换，需带上 `sb-easy`）。
 4. agent 启动后从服务器拉配置、跑 sing-box；sing-box 的配置里含一条连服务器的 WireGuard
    `endpoint` → 自动进内网。面板 Hosts 页该主机变在线。
+
+Agent 本地管理页默认监听 `0.0.0.0:51822`，访问
+`http://AGENT_IP:51822`，用户名默认 `admin`，密码为上面的
+`AGENT_UI_PASSWORD`。可通过 `AGENT_UI_BIND`/`AGENT_UI_USERNAME` 调整。
+该端口是明文 HTTP，只应通过可信 LAN/VPN 访问或放到 TLS 反向代理后，并用防火墙限制来源。
 
 ### agent 的 sing-box 如何连内网（WireGuard endpoint）
 在该主机的 Profile（full 模式）配置里放一条 sing-box endpoint：

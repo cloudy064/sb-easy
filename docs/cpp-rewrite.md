@@ -62,6 +62,8 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 - [x] Local and remote-agent proxy latency tests with persisted results.
 - [x] Agent-side connection/traffic telemetry sampling from the installed
   sing-box config.
+- [x] Password-protected Agent-local management UI on `0.0.0.0:51822`, with
+  durable node-local settings and queued refresh/reload/restart controls.
 - [x] Authenticated Clash WebSocket proxying for live traffic, logs,
   connections, and memory.
 - [x] Local sing-box supervisor with validated atomic config, SIGHUP reload,

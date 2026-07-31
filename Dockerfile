@@ -52,12 +52,23 @@ RUN --mount=type=cache,target=/var/cache/sb-easy-download set -eux; \
       arm) A=armv7 ;; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl --http1.1 --retry 5 --retry-all-errors --retry-delay 2 \
-      --retry-max-time 600 --connect-timeout 15 --max-time 180 \
-      --speed-time 30 --speed-limit 1024 --continue-at - -fsSL \
-      "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${A}.tar.gz" \
-      -o /var/cache/sb-easy-download/sb.tgz; \
-    tar -xzf /var/cache/sb-easy-download/sb.tgz -C /tmp; \
+    ARCHIVE="/var/cache/sb-easy-download/sing-box-${SINGBOX_VERSION}-${A}.tgz"; \
+    if ! tar -tzf "${ARCHIVE}" >/dev/null 2>&1 \
+        && tar -tzf /var/cache/sb-easy-download/sb.tgz >/dev/null 2>&1; then \
+      cp /var/cache/sb-easy-download/sb.tgz "${ARCHIVE}"; \
+    fi; \
+    if ! tar -tzf "${ARCHIVE}" >/dev/null 2>&1; then \
+      if ! tar -tzf "${ARCHIVE}.part" >/dev/null 2>&1; then \
+        curl --http1.1 --retry 5 --retry-all-errors --retry-delay 2 \
+          --retry-max-time 600 --connect-timeout 15 --max-time 180 \
+          --speed-time 30 --speed-limit 1024 --continue-at - -fsSL \
+          "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${A}.tar.gz" \
+          -o "${ARCHIVE}.part"; \
+      fi; \
+      tar -tzf "${ARCHIVE}.part" >/dev/null; \
+      mv "${ARCHIVE}.part" "${ARCHIVE}"; \
+    fi; \
+    tar -xzf "${ARCHIVE}" -C /tmp; \
     install -m 0755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-${A}/sing-box" /usr/local/bin/sing-box; \
     /usr/local/bin/sing-box version
 

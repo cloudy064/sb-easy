@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
@@ -24,5 +25,24 @@ struct AgentConfigTransformOptions {
 /// for OpenAI domains.
 [[nodiscard]] std::string
 prepare_agent_config(std::string_view body, const AgentConfigTransformOptions& options);
+
+/// Serializes the node-local transform settings used by the Agent UI.
+[[nodiscard]] nlohmann::json
+agent_config_transform_options_to_json(const AgentConfigTransformOptions& options);
+
+/// Applies a JSON settings object over the supplied defaults and validates every
+/// supported value.
+[[nodiscard]] AgentConfigTransformOptions agent_config_transform_options_from_json(
+    const nlohmann::json& value, const AgentConfigTransformOptions& defaults = {});
+
+/// Loads persisted settings, returning the supplied defaults when the file does
+/// not exist.
+[[nodiscard]] AgentConfigTransformOptions
+load_agent_config_transform_options(const std::filesystem::path& path,
+                                    const AgentConfigTransformOptions& defaults = {});
+
+/// Persists a complete settings object using an atomic replacement.
+void save_agent_config_transform_options(const std::filesystem::path& path,
+                                         const AgentConfigTransformOptions& options);
 
 } // namespace sbeasy

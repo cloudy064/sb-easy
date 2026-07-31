@@ -45,7 +45,8 @@ do not depend on framework types.
 cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cpp \
   --target sb-easy-cpp sb-easy-cpp-server sb-easy-cpp-agent \
-           sb-easy-core-tests sb-easy-http-tests sb-easy-agent-tests -j
+           sb-easy-core-tests sb-easy-http-tests sb-easy-agent-tests \
+           sb-easy-agent-ui-tests -j
 ctest --test-dir build/cpp --output-on-failure
 ```
 
@@ -136,6 +137,7 @@ export AGENT_TOKEN='<token returned when the host was created>'
 export SINGBOX_CONFIG_PATH='/etc/sing-box/config.d/90-generated.json'
 export SINGBOX_BIN='sing-box'
 export SINGBOX_MANAGED=true
+export AGENT_UI_PASSWORD='<independent strong local password>'
 build/cpp/sb-easy-cpp-agent
 ```
 
@@ -145,6 +147,17 @@ panel commands, and respawns it after unexpected exits. Set
 `SINGBOX_MANAGED=false` plus `RELOAD_CMD`/`RESTART_CMD` only when an external
 service manager owns sing-box; those commands are parsed into argument vectors
 and executed directly without a shell.
+
+With a non-empty `AGENT_UI_PASSWORD`, the Agent also starts a lightweight local
+management page on `0.0.0.0:51822`. Log in with HTTP Basic authentication
+(`AGENT_UI_USERNAME=admin` by default). `AGENT_UI_BIND` changes the listener,
+and `AGENT_UI_ENABLED=false` disables it explicitly. The authenticated page
+provides status, the current config/proxy summary, durable node-local outbound
+settings, and queued refresh/reload/restart actions. Settings default to
+`agent-ui-settings.json` next to the generated sing-box config and can be moved
+with `AGENT_UI_SETTINGS_PATH`. The Agent token is never returned by the UI.
+Because the listener is plain HTTP on every interface, restrict port 51822 to a
+trusted LAN/VPN or terminate TLS in a reverse proxy.
 
 Node-local compatibility settings match the Rust agent:
 `SINGBOX_LOCAL_PROXY_EGRESS`, `SINGBOX_OUTBOUND_SERVER_OVERRIDES`,

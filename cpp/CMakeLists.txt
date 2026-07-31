@@ -199,6 +199,7 @@ if(SB_EASY_BUILD_HTTP)
         src/agent_clash.cpp
         src/agent_client.cpp
         src/agent_config.cpp
+        src/agent_ui.cpp
     )
     add_library(sb-easy::agent ALIAS sb_easy_agent)
     target_include_directories(sb_easy_agent
@@ -207,7 +208,7 @@ if(SB_EASY_BUILD_HTTP)
     )
     target_link_libraries(sb_easy_agent
         PUBLIC sb-easy::core
-        PRIVATE drogon sb-easy::clash
+        PRIVATE drogon sb-easy::clash OpenSSL::Crypto
     )
     sb_easy_enable_warnings(sb_easy_agent)
 
@@ -256,5 +257,13 @@ if(BUILD_TESTING)
         sb_easy_enable_warnings(sb-easy-agent-tests)
         add_test(NAME sb-easy-agent-tests COMMAND sb-easy-agent-tests)
         set_tests_properties(sb-easy-agent-tests PROPERTIES TIMEOUT 15)
+
+        add_executable(sb-easy-agent-ui-tests tests/agent_ui_test.cpp)
+        target_link_libraries(sb-easy-agent-ui-tests
+            PRIVATE sb-easy::agent drogon
+        )
+        sb_easy_enable_warnings(sb-easy-agent-ui-tests)
+        add_test(NAME sb-easy-agent-ui-tests COMMAND sb-easy-agent-ui-tests)
+        set_tests_properties(sb-easy-agent-ui-tests PROPERTIES TIMEOUT 15)
     endif()
 endif()

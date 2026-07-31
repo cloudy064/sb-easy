@@ -1,8 +1,12 @@
 #include "sbeasy/agent_config.hpp"
 
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
+
+#include "sbeasy/atomic_file.hpp"
 
 namespace sbeasy {
 namespace {
@@ -34,6 +38,39 @@ void rewrite_tag_references(json& value,
 
 [[nodiscard]] bool is_builtin_route(std::string_view tag) {
     return tag == "direct" || tag == "block" || tag == "wg-internal";
+}
+
+[[nodiscard]] std::map<std::string, std::string>
+server_overrides_from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("outbound_server_overrides must be a JSON object");
+    }
+    std::map<std::string, std::string> overrides;
+    for (const auto& [tag, server] : value.items()) {
+        if (tag.empty() || !server.is_string() ||
+            server.get_ref<const std::string&>().empty()) {
+            throw std::invalid_argument(
+                "outbound_server_overrides values must be non-empty strings");
+        }
+        overrides.emplace(tag, server.get<std::string>());
+    }
+    return overrides;
+}
+
+[[nodiscard]] std::map<std::string, json>
+outbound_overrides_from_json(const json& value) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("outbound_overrides must be a JSON object");
+    }
+    std::map<std::string, json> overrides;
+    for (const auto& [tag, outbound] : value.items()) {
+        if (tag.empty() || !outbound.is_object()) {
+            throw std::invalid_argument(
+                "outbound_overrides values must be JSON objects");
+        }
+        overrides.emplace(tag, outbound);
+    }
+    return overrides;
 }
 
 } // namespace
@@ -213,6 +250,88 @@ std::string prepare_agent_config(std::string_view body,
     }
 
     return changes == 0U ? std::string{body} : config.dump(2);
+}
+
+nlohmann::json
+agent_config_transform_options_to_json(const AgentConfigTransformOptions& options) {
+    json server_overrides = json::object();
+    for (const auto& [tag, server] : options.outbound_server_overrides) {
+        server_overrides[tag] = server;
+    }
+    json outbound_overrides = json::object();
+    for (const auto& [tag, outbound] : options.outbound_overrides) {
+        outbound_overrides[tag] = outbound;
+    }
+    return {
+        {"local_proxy_egress", options.local_proxy_egress},
+        {"default_proxy_outbound", options.default_proxy_outbound.has_value()
+                                       ? json(*options.default_proxy_outbound)
+                                       : json(nullptr)},
+        {"outbound_server_overrides", std::move(server_overrides)},
+        {"outbound_overrides", std::move(outbound_overrides)},
+    };
+}
+
+AgentConfigTransformOptions
+agent_config_transform_options_from_json(const nlohmann::json& value,
+                                         const AgentConfigTransformOptions& defaults) {
+    if (!value.is_object()) {
+        throw std::invalid_argument("agent settings must be a JSON object");
+    }
+    auto options = defaults;
+    if (const auto found = value.find("local_proxy_egress"); found != value.end()) {
+        if (!found->is_boolean()) {
+            throw std::invalid_argument("local_proxy_egress must be a boolean");
+        }
+        options.local_proxy_egress = found->get<bool>();
+    }
+    if (const auto found = value.find("default_proxy_outbound"); found != value.end()) {
+        if (found->is_null()) {
+            options.default_proxy_outbound.reset();
+        } else if (found->is_string()) {
+            auto selected = found->get<std::string>();
+            if (selected.empty()) {
+                options.default_proxy_outbound.reset();
+            } else {
+                options.default_proxy_outbound = std::move(selected);
+            }
+        } else {
+            throw std::invalid_argument(
+                "default_proxy_outbound must be a string or null");
+        }
+    }
+    if (const auto found = value.find("outbound_server_overrides");
+        found != value.end()) {
+        options.outbound_server_overrides = server_overrides_from_json(*found);
+    }
+    if (const auto found = value.find("outbound_overrides"); found != value.end()) {
+        options.outbound_overrides = outbound_overrides_from_json(*found);
+    }
+    return options;
+}
+
+AgentConfigTransformOptions
+load_agent_config_transform_options(const std::filesystem::path& path,
+                                    const AgentConfigTransformOptions& defaults) {
+    std::ifstream input{path, std::ios::binary};
+    if (!input) {
+        if (!std::filesystem::exists(path)) {
+            return defaults;
+        }
+        throw std::runtime_error("cannot read agent settings: " + path.string());
+    }
+    try {
+        return agent_config_transform_options_from_json(json::parse(input), defaults);
+    } catch (const std::exception& error) {
+        throw std::invalid_argument("invalid agent settings " + path.string() + ": " +
+                                    error.what());
+    }
+}
+
+void save_agent_config_transform_options(const std::filesystem::path& path,
+                                         const AgentConfigTransformOptions& options) {
+    atomic_replace_file(path,
+                        agent_config_transform_options_to_json(options).dump(2) + '\n');
 }
 
 } // namespace sbeasy

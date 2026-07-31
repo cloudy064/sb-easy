@@ -79,7 +79,11 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 Node mode in the production image remains `sb-easy agent`; it dispatches to the
 dedicated C++ agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
 `agent/.env.example`). The agent supervises the bundled sing-box process and
-preserves the Rust node-local egress/override environment variables.
+preserves the Rust node-local egress/override environment variables. Set a
+separate `AGENT_UI_PASSWORD` to enable its local management page on
+`0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
+The page shows runtime/config status, persists node-local outbound settings, and
+queues refresh/reload/restart operations without exposing the Agent token.
 
 ## Backup & restore
 - DB lives at `./data/sb-easy.db`. Online backup with rotation:

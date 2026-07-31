@@ -298,6 +298,30 @@ void run_config_transform_contract() {
         rejected = true;
     }
     require(rejected, "agent transform should reject a default outside the selector");
+
+    const TemporaryDirectory directory;
+    const auto settings_path = directory.path() / "agent-settings.json";
+    sbeasy::save_agent_config_transform_options(settings_path, options);
+    const auto loaded = sbeasy::load_agent_config_transform_options(settings_path);
+    require(sbeasy::agent_config_transform_options_to_json(loaded) ==
+                sbeasy::agent_config_transform_options_to_json(options),
+            "agent transform settings should survive an atomic persistence roundtrip");
+
+    const auto partial = sbeasy::agent_config_transform_options_from_json(
+        {{"default_proxy_outbound", nullptr}}, loaded);
+    require(!partial.default_proxy_outbound.has_value() &&
+                partial.outbound_server_overrides == options.outbound_server_overrides,
+            "partial Agent UI settings should preserve omitted values");
+
+    bool invalid_settings_rejected = false;
+    try {
+        static_cast<void>(sbeasy::agent_config_transform_options_from_json(
+            {{"outbound_server_overrides", {{"node-a", 42}}}}));
+    } catch (const std::invalid_argument&) {
+        invalid_settings_rejected = true;
+    }
+    require(invalid_settings_rejected,
+            "Agent UI settings should reject non-string server overrides");
 }
 
 void run_contract() {

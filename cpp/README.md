@@ -170,6 +170,18 @@ keeps unknown `/api/*` routes as JSON 404 responses. `CORS_ORIGINS` accepts a
 comma-separated exact-origin allowlist; empty or `*` is intended for local
 development only.
 
+After building both implementations, run the cross-backend shadow check:
+
+```sh
+scripts/check-cpp-parity.sh
+```
+
+It seeds the Rust server through its public API, stops it, opens the exact same
+temporary SQLite database with the C++ server, and compares the normalized
+per-host sing-box configuration. Binary paths and ports can be overridden with
+`SB_EASY_RUST_BIN`, `SB_EASY_CPP_BIN`, `SB_EASY_RUST_PARITY_PORT`, and
+`SB_EASY_CPP_PARITY_PORT`.
+
 The core/database test image can be built independently:
 
 ```sh

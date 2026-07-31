@@ -4,6 +4,13 @@ project(sb_easy_cpp VERSION 0.1.0 LANGUAGES C CXX)
 
 include(FetchContent)
 include(CTest)
+find_package(OpenSSL REQUIRED)
+find_package(SQLite3 REQUIRED)
+if(TARGET SQLite3::SQLite3)
+    set(SB_EASY_SQLITE_TARGET SQLite3::SQLite3)
+else()
+    set(SB_EASY_SQLITE_TARGET SQLite::SQLite3)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +41,9 @@ FetchContent_MakeAvailable(quickjs_ng)
 
 add_library(sb_easy_core
     src/config_renderer.cpp
+    src/database.cpp
     src/script_engine.cpp
+    src/store.cpp
 )
 add_library(sb-easy::core ALIAS sb_easy_core)
 
@@ -44,7 +53,10 @@ target_include_directories(sb_easy_core
 )
 target_link_libraries(sb_easy_core
     PUBLIC nlohmann_json::nlohmann_json
-    PRIVATE qjs
+    PRIVATE
+        OpenSSL::Crypto
+        ${SB_EASY_SQLITE_TARGET}
+        qjs
 )
 target_compile_options(sb_easy_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Wconversion;-Wshadow>
@@ -61,9 +73,13 @@ if(BUILD_TESTING)
     add_executable(sb-easy-core-tests
         tests/config_renderer_test.cpp
         tests/script_engine_test.cpp
+        tests/store_test.cpp
         tests/test_main.cpp
     )
     target_link_libraries(sb-easy-core-tests PRIVATE sb-easy::core)
+    target_compile_definitions(sb-easy-core-tests PRIVATE
+        SB_EASY_MIGRATIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../migrations"
+    )
     add_test(NAME sb-easy-core-tests COMMAND sb-easy-core-tests)
     set_tests_properties(sb-easy-core-tests PROPERTIES TIMEOUT 15)
 endif()

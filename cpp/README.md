@@ -4,13 +4,15 @@ This directory is the incremental C++20 replacement for the Rust backend and
 agent. The Vue frontend, SQLite database format, HTTP API contract, and sing-box
 configuration format stay compatible during the migration.
 
-The first milestone contains:
+The current foundation contains:
 
 - a framework-independent sing-box configuration renderer;
 - managed/full profile behavior compatible with the Rust renderer;
 - a constrained QuickJS-NG `buildRules(context)` execution engine;
+- a SQLite migration runner compatible with the existing SQLx metadata and
+  checksums, plus a profile/host repository;
 - a CLI renderer for parity fixtures and migration testing;
-- focused tests for rendering, script timeout, determinism, and tag validation.
+- focused tests for rendering, scripting limits, migrations, and persistence.
 
 The HTTP server is introduced in the next milestone after the core has fixture
 parity with the Rust implementation. Drogon is the selected transport framework;
@@ -30,7 +32,8 @@ Dependencies are pinned and fetched by CMake:
 - JSON for Modern C++ `v3.12.0`.
 
 QuickJS is linked statically. The std/os libraries and module loader are not
-linked into the rule engine.
+linked into the rule engine. SQLite and OpenSSL are system build dependencies;
+OpenSSL SHA-384 is used to produce the same migration checksums as SQLx.
 
 ## Try the renderer
 
@@ -38,7 +41,14 @@ linked into the rule engine.
 build/cpp/sb-easy-cpp render cpp/examples/render-request.json
 ```
 
-The M0 renderer/test image can also be built independently:
+The CLI can also migrate the shared database and render an existing host:
+
+```sh
+build/cpp/sb-easy-cpp migrate data/sb-easy.db migrations
+build/cpp/sb-easy-cpp render-host data/sb-easy.db self migrations
+```
+
+The core/database test image can be built independently:
 
 ```sh
 docker build -f cpp/Dockerfile -t sb-easy-cpp-core .

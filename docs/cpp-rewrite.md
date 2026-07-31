@@ -38,13 +38,14 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 - Constrained `buildRules(context)` QuickJS engine.
 - CLI fixture runner and unit tests.
 
-### M1 — database and profile API
+### M1 — database and profile API (in progress)
 
-- SQLite connection/transaction RAII.
-- Migration runner compatible with the existing SQL files.
-- Hosts, profiles, host-outbounds, and proxy-node repositories.
-- `/api/hosts`, `/api/hosts/profiles`, and config preview endpoints.
-- Persist `rule_script` and `rule_script_enabled` on profiles.
+- [x] SQLite connection/transaction RAII.
+- [x] Migration runner compatible with SQLx metadata and checksums.
+- [x] Profile persistence and host render queries over the existing schema.
+- [ ] Host CRUD and host-outbound assignment repositories.
+- [ ] `/api/hosts`, `/api/hosts/profiles`, and config preview endpoints.
+- [x] Persist `rule_script` and `rule_script_enabled` on profiles.
 
 ### M2 — agent control plane
 

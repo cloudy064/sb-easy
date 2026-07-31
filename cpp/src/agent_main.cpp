@@ -19,8 +19,11 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include <sys/wait.h>
 
+#include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
 #include "sbeasy/atomic_file.hpp"
 
@@ -165,6 +168,36 @@ read_existing(const std::filesystem::path& path) {
                        std::istreambuf_iterator<char>{}};
 }
 
+[[nodiscard]] std::optional<std::vector<std::string>>
+proxy_test_tags(std::string_view command) {
+    constexpr std::string_view prefix{"test-proxies"};
+    if (command == prefix) {
+        return std::nullopt;
+    }
+    if (!command.starts_with(prefix) || command.size() <= prefix.size() ||
+        std::isspace(static_cast<unsigned char>(command[prefix.size()])) == 0) {
+        throw std::invalid_argument("not a test-proxies command");
+    }
+    auto suffix = command.substr(prefix.size());
+    while (!suffix.empty() &&
+           std::isspace(static_cast<unsigned char>(suffix.front())) != 0) {
+        suffix.remove_prefix(1U);
+    }
+    auto parsed = nlohmann::json::parse(suffix, nullptr, false);
+    if (!parsed.is_array()) {
+        return std::nullopt;
+    }
+    std::vector<std::string> tags;
+    tags.reserve(parsed.size());
+    for (const auto& value : parsed) {
+        if (!value.is_string()) {
+            return std::nullopt;
+        }
+        tags.push_back(value.get<std::string>());
+    }
+    return tags;
+}
+
 class AgentRuntime final {
   public:
     AgentRuntime()
@@ -176,7 +209,7 @@ class AgentRuntime final {
           restart_command_(split_command_line(
               environment("RESTART_CMD", "systemctl restart sing-box"))),
           validate_config_(environment_flag("SINGBOX_VALIDATE_CONFIG", true)),
-          client_({.server = server_, .token = token_}) {
+          client_({.server = server_, .token = token_}), clash_(config_path_) {
         if (server_.empty()) {
             throw std::invalid_argument("SB_EASY_SERVER is required");
         }
@@ -203,6 +236,16 @@ class AgentRuntime final {
         } catch (const std::exception& error) {
             healthy = false;
             std::cerr << "command poll failed: " << error.what() << '\n';
+        }
+
+        try {
+            if (auto telemetry = clash_.sample_telemetry(); telemetry.has_value()) {
+                client_.report_telemetry(*telemetry);
+            }
+        } catch (const std::exception& error) {
+            // Telemetry is best effort and must not make an otherwise healthy
+            // config/status cycle fail when the local Clash API is disabled.
+            std::cerr << "telemetry sample failed: " << error.what() << '\n';
         }
 
         try {
@@ -246,14 +289,36 @@ class AgentRuntime final {
     void run_commands() {
         for (const auto& command : client_.pending_commands()) {
             ProcessResult result;
+            bool changes_running_state = false;
             if (command.command == "reload") {
                 result = run_program(reload_command_);
+                changes_running_state = true;
             } else if (command.command == "restart") {
                 result = run_program(restart_command_);
+                changes_running_state = true;
+            } else if (command.command == "test-proxies" ||
+                       command.command.starts_with("test-proxies ")) {
+                try {
+                    const auto tested = clash_.test_proxies(
+                        proxy_test_tags(command.command), [this](const auto& latency) {
+                            static_cast<void>(client_.report_proxy_latencies(latency));
+                        });
+                    result = {
+                        .success = true,
+                        .detail = "tested " + std::to_string(tested) + " proxies",
+                    };
+                } catch (const std::exception& error) {
+                    result = {
+                        .success = false,
+                        .detail = "test-proxies: " + std::string{error.what()},
+                    };
+                }
             } else {
                 result.detail = "unknown command: " + command.command;
             }
-            running_ = result.success;
+            if (changes_running_state) {
+                running_ = result.success;
+            }
             client_.acknowledge_command(command.id, result.success, result.detail);
         }
     }
@@ -266,6 +331,7 @@ class AgentRuntime final {
     std::vector<std::string> restart_command_;
     bool validate_config_{true};
     sbeasy::AgentClient client_;
+    sbeasy::AgentClashService clash_;
     std::optional<std::string> last_etag_;
     std::optional<bool> running_;
 };

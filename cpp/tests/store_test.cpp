@@ -288,6 +288,15 @@ SB_EASY_TEST("agent repository isolates tokens, status, commands, and latency") 
                               {{"latency-node", 12.5}, {"missing-node", nullptr}}) ==
                               1U,
                           "latency reports should count only matching nodes");
+    store.update_proxy_latency("latency-node", 7.25);
+    const auto measured = store.find_proxy_node("latency-node");
+    sbeasy::test::require(
+        measured.has_value() && measured->latency == 7.25 &&
+            measured->last_latency_test.has_value(),
+        "panel latency tests should update a node by id and record the test time");
+    sbeasy::test::require_throws<sbeasy::NotFoundError>(
+        [&] { store.update_proxy_latency("missing-node", std::nullopt); },
+        "panel latency updates should reject an unknown node id");
 
     auto disabled = *store.find_host(created.id);
     disabled.enabled = false;

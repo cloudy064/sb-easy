@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -7,8 +9,11 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <ranges>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -141,6 +146,141 @@ class SubscriptionFixture final {
     std::thread thread_;
 };
 
+class ClashFixture final {
+  public:
+    ClashFixture() {
+        listener_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (listener_ < 0) {
+            throw std::runtime_error("could not create Clash fixture socket");
+        }
+        const int reuse = 1;
+        if (::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                         static_cast<socklen_t>(sizeof(reuse))) != 0) {
+            ::close(listener_);
+            throw std::runtime_error("could not configure Clash fixture socket");
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        if (::bind(listener_, reinterpret_cast<const sockaddr*>(&address),
+                   static_cast<socklen_t>(sizeof(address))) != 0 ||
+            ::listen(listener_, 8) != 0) {
+            ::close(listener_);
+            throw std::runtime_error("could not listen for Clash fixture");
+        }
+        socklen_t size = sizeof(address);
+        if (::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) !=
+            0) {
+            ::close(listener_);
+            throw std::runtime_error("could not resolve Clash fixture port");
+        }
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { serve(); });
+    }
+
+    ~ClashFixture() {
+        if (listener_ >= 0) {
+            ::shutdown(listener_, SHUT_RDWR);
+            ::close(listener_);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ClashFixture(const ClashFixture&) = delete;
+    ClashFixture& operator=(const ClashFixture&) = delete;
+
+    [[nodiscard]] std::uint16_t port() const noexcept {
+        return port_;
+    }
+
+  private:
+    static void send_response(int client, const std::string& request) {
+        std::istringstream first_line{request.substr(0, request.find("\r\n"))};
+        std::string method;
+        std::string target;
+        first_line >> method >> target;
+
+        auto lower = request;
+        std::ranges::transform(lower, lower.begin(), [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+        std::string authorization;
+        constexpr std::string_view header{"authorization:"};
+        if (const auto start = lower.find(header); start != std::string::npos) {
+            const auto value_start = start + header.size();
+            const auto end = lower.find("\r\n", value_start);
+            authorization = request.substr(value_start, end - value_start);
+            while (!authorization.empty() && std::isspace(static_cast<unsigned char>(
+                                                 authorization.front())) != 0) {
+                authorization.erase(authorization.begin());
+            }
+        }
+
+        json response_body{
+            {"method", method},
+            {"target", target},
+            {"authorization", authorization},
+        };
+        if (target.ends_with("/proxies")) {
+            response_body["proxies"] = {
+                {"Fixture Node", {{"type", "Shadowsocks"}}},
+                {"Fixture Group",
+                 {{"type", "Selector"}, {"all", json::array({"Fixture Node"})}}},
+            };
+        }
+        if (target.find("/delay?") != std::string::npos) {
+            response_body["delay"] = 42;
+        }
+        if (target.ends_with("/connections")) {
+            response_body["uploadTotal"] = 1'024;
+            response_body["downloadTotal"] = 2'048;
+            response_body["connections"] =
+                json::array({json{{"id", "fixture-connection"}}});
+        }
+        const auto body = response_body.dump();
+        const auto response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                              "Content-Length: " +
+                              std::to_string(body.size()) +
+                              "\r\nConnection: close\r\n\r\n" + body;
+        std::size_t sent{};
+        while (sent < response.size()) {
+            const auto count = ::send(client, response.data() + sent,
+                                      response.size() - sent, MSG_NOSIGNAL);
+            if (count <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(count);
+        }
+    }
+
+    void serve() const {
+        while (true) {
+            const auto client = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) {
+                return;
+            }
+            std::string request;
+            std::array<char, 4'096> buffer{};
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                const auto count = ::recv(client, buffer.data(), buffer.size(), 0);
+                if (count <= 0) {
+                    break;
+                }
+                request.append(buffer.data(), static_cast<std::size_t>(count));
+            }
+            send_response(client, request);
+            ::close(client);
+        }
+    }
+
+    int listener_{-1};
+    std::uint16_t port_{};
+    std::thread thread_;
+};
+
 class RunningServer final {
   public:
     RunningServer() : thread_([] { drogon::app().run(); }) {}
@@ -191,9 +331,11 @@ void require(bool condition, const char* message) {
 request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
         std::string path, std::optional<json> body = std::nullopt,
         const std::vector<std::pair<std::string, std::string>>& headers = {}) {
+    const auto request_path = path;
     auto http_request = drogon::HttpRequest::newHttpRequest();
     http_request->setMethod(method);
     http_request->setPath(std::move(path));
+    http_request->setPathEncode(false);
     if (body.has_value()) {
         http_request->setContentTypeString("application/json");
         http_request->setBody(body->dump());
@@ -212,7 +354,8 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
     auto parsed =
         raw_body.empty() ? json{nullptr} : json::parse(raw_body, nullptr, false);
     if (parsed.is_discarded()) {
-        throw std::runtime_error("HTTP response is not JSON");
+        throw std::runtime_error("HTTP response is not JSON for " + request_path +
+                                 ": " + raw_body);
     }
     return {
         .status = response->statusCode(),
@@ -225,13 +368,24 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
 void run_contract() {
     const TemporaryDatabase database;
     const SubscriptionFixture subscription_fixture;
+    const ClashFixture clash_fixture;
     auto store = std::make_shared<sbeasy::Store>(
         database.path(), std::filesystem::path{SB_EASY_MIGRATIONS_DIR});
+    sbeasy::Host clash_host;
+    clash_host.name = "Remote Clash target";
+    clash_host.capabilities = nlohmann::json::object();
+    clash_host.clash_api =
+        "http://127.0.0.1:" + std::to_string(clash_fixture.port()) + "/remote";
+    clash_host.clash_secret = "remote-secret";
+    const auto remote_clash_host = store->create_host(std::move(clash_host));
 
     sbeasy::HttpServerOptions options;
     options.public_server = "https://panel.example.com";
     options.config_hash_seed = "contract-seed";
     options.legacy_agent_token = "legacy-self-token";
+    options.clash_api_url =
+        "http://127.0.0.1:" + std::to_string(clash_fixture.port()) + "/local";
+    options.clash_api_secret = "local-secret";
     sbeasy::register_http_routes(store, options);
     drogon::app()
         .setLogLevel(trantor::Logger::kWarn)
@@ -246,6 +400,49 @@ void run_contract() {
     require(health.status == drogon::k200OK &&
                 health.body.at("service") == "sb-easy-cpp",
             "health endpoint should identify the C++ service");
+
+    const auto clash_proxies = request(client, drogon::Get, "/api/sing-box/proxies");
+    require(clash_proxies.status == drogon::k200OK &&
+                clash_proxies.body.at("method") == "GET" &&
+                clash_proxies.body.at("target") == "/local/proxies" &&
+                clash_proxies.body.at("authorization") == "Bearer local-secret",
+            "Clash proxy list should use the local target and bearer secret");
+    const auto clash_detail =
+        request(client, drogon::Get, "/api/sing-box/proxies/Group%20A");
+    if (clash_detail.status != drogon::k200OK ||
+        clash_detail.body.at("target") != "/local/proxies/Group%20A") {
+        throw std::runtime_error(
+            "Clash path parameters should be encoded exactly once: " +
+            clash_detail.body.dump());
+    }
+    const auto clash_switch =
+        request(client, drogon::Put, "/api/sing-box/proxies/Group%20A",
+                json{{"name", "Node A"}});
+    require(clash_switch.status == drogon::k200OK &&
+                clash_switch.body.at("success") == true,
+            "Clash selector updates should forward successful PUT requests");
+    const auto clash_delay =
+        request(client, drogon::Get,
+                "/api/sing-box/group/Auto/delay?"
+                "url=https%3A%2F%2Fexample.com%2F204&timeout=3000");
+    require(clash_delay.status == drogon::k200OK &&
+                clash_delay.body.at("target") ==
+                    "/local/group/Auto/delay?"
+                    "url=https%3A%2F%2Fexample.com%2F204&timeout=3000",
+            "Clash delay parameters should be normalized and encoded");
+    const auto remote_version = request(
+        client, drogon::Get, "/api/sing-box/version?host=" + remote_clash_host.id);
+    require(remote_version.status == drogon::k200OK &&
+                remote_version.body.at("target") == "/remote/version" &&
+                remote_version.body.at("authorization") == "Bearer remote-secret",
+            "remote hosts should select their own Clash target and secret");
+    const auto close_connection =
+        request(client, drogon::Delete, "/api/sing-box/connections/connection%201");
+    require(close_connection.status == drogon::k200OK &&
+                close_connection.body.at("method") == "DELETE" &&
+                close_connection.body.at("target") ==
+                    "/local/connections/connection%201",
+            "connection close should forward DELETE with an encoded id");
 
     const auto created_node = request(client, drogon::Post, "/api/proxy/nodes",
                                       json{
@@ -271,6 +468,23 @@ void run_contract() {
                 updated_node.body.at("tag") == "HTTP SS renamed" &&
                 updated_node.body.at("enabled") == false,
             "proxy partial updates should preserve omitted fields");
+    const auto measured_node =
+        request(client, drogon::Post, "/api/proxy/nodes/" + node_id + "/test-latency");
+    if (measured_node.status != drogon::k200OK ||
+        measured_node.body.at("node_id") != node_id ||
+        measured_node.body.at("latency") != 42) {
+        throw std::runtime_error(
+            "single-node latency tests should persist a Clash delay result: " +
+            measured_node.body.dump());
+    }
+    const auto queued_measurement = request(
+        client, drogon::Post,
+        "/api/proxy/nodes/" + node_id + "/test-latency?host=" + remote_clash_host.id);
+    require(queued_measurement.status == drogon::k200OK &&
+                queued_measurement.body.at("queued") == true &&
+                store->list_host_commands(remote_clash_host.id, true).front().command ==
+                    R"(test-proxies ["HTTP SS renamed"])",
+            "remote latency tests should enqueue a targeted agent command");
 
     const auto imported = request(
         client, drogon::Post, "/api/proxy/nodes/import",
@@ -305,6 +519,16 @@ void run_contract() {
     const auto all_nodes = request(client, drogon::Get, "/api/proxy/nodes");
     require(all_nodes.status == drogon::k200OK && all_nodes.body.size() == 3U,
             "proxy list should include manual, imported, and subscribed nodes");
+    const auto measured_all =
+        request(client, drogon::Post, "/api/proxy/nodes/test-all");
+    require(measured_all.status == drogon::k200OK &&
+                measured_all.body.at("tested") == 2 &&
+                measured_all.body.at("results").size() == 2U,
+            "bulk latency tests should measure every enabled node");
+    const auto queued_all = request(
+        client, drogon::Post, "/api/proxy/nodes/test-all?host=" + remote_clash_host.id);
+    require(queued_all.status == drogon::k200OK && queued_all.body.at("queued") == true,
+            "remote bulk latency tests should enqueue an agent command");
 
     const auto profiles = request(client, drogon::Get, "/api/hosts/profiles");
     require(profiles.status == drogon::k200OK && profiles.body.is_array() &&

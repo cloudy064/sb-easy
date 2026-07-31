@@ -170,6 +170,8 @@ class Store final {
                              const std::optional<std::string>& result);
 
     [[nodiscard]] std::size_t update_proxy_latencies(const nlohmann::json& results);
+    void update_proxy_latency(const std::string& id,
+                              const std::optional<double>& latency);
 
     [[nodiscard]] std::vector<ProxyRecord> list_proxy_nodes() const;
     [[nodiscard]] std::optional<ProxyRecord>

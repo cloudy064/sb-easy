@@ -58,8 +58,19 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 
 - [x] Proxy CRUD and URI/base64/Clash YAML/outbound parsers.
 - [x] Bounded HTTPS subscription fetch and fingerprint/tag reconciliation.
-- sing-box supervisor, Clash telemetry sampling, and Clash API HTTP/WebSocket
-  proxying.
+- [x] Clash API HTTP control proxy with per-host target and secret resolution.
+- [x] Local and remote-agent proxy latency tests with persisted results.
+- [x] Agent-side connection/traffic telemetry sampling from the installed
+  sing-box config.
+- [ ] Authenticated Clash WebSocket proxying for live traffic, logs,
+  connections, and memory.
+- [ ] Local sing-box supervisor.
+
+The WebSocket proxy is intentionally a separate slice. Administrative
+authentication has not yet moved to the C++ server, so exposing an unauthenticated
+streaming bridge would leak runtime traffic and logs. Until that boundary is
+implemented, the polling agent reports bounded connection snapshots and leaves
+the log list empty.
 
 ### M4 — WireGuard and administrative APIs
 

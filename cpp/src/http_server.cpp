@@ -1,11 +1,13 @@
 #include "sbeasy/http_server.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -31,6 +33,7 @@
 #endif
 #include <nlohmann/json.hpp>
 
+#include "sbeasy/clash_client.hpp"
 #include "sbeasy/config_etag.hpp"
 #include "sbeasy/config_renderer.hpp"
 #include "sbeasy/proxy_parser.hpp"
@@ -44,6 +47,11 @@ using nlohmann::json;
 using ResponseCallback = std::function<void(const drogon::HttpResponsePtr&)>;
 
 class UnauthorizedError final : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+class ServiceUnavailableError final : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
 };
@@ -63,6 +71,9 @@ void handle_response(ResponseCallback&& callback, Function&& function) {
         callback(std::forward<Function>(function)());
     } catch (const UnauthorizedError& error) {
         callback(json_response({{"error", error.what()}}, drogon::k401Unauthorized));
+    } catch (const ServiceUnavailableError& error) {
+        callback(
+            json_response({{"error", error.what()}}, drogon::k503ServiceUnavailable));
     } catch (const NotFoundError& error) {
         callback(json_response({{"error", error.what()}}, drogon::k404NotFound));
     } catch (const ValidationError& error) {
@@ -159,6 +170,32 @@ void assign_optional_string(const json& body, const char* field,
         return {};
     }
     return {first, last};
+}
+
+[[nodiscard]] std::string trim_trailing_slashes(std::string value) {
+    value = trim(std::move(value));
+    while (value.ends_with('/')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+[[nodiscard]] std::string encode_component(std::string_view value) {
+    static constexpr std::string_view hexadecimal{"0123456789ABCDEF"};
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (const auto character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) != 0 || character == '-' || character == '_' ||
+            character == '.' || character == '~') {
+            encoded.push_back(character);
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(hexadecimal[byte >> 4U]);
+            encoded.push_back(hexadecimal[byte & 0x0fU]);
+        }
+    }
+    return encoded;
 }
 
 [[nodiscard]] std::string normalized_command(const json& body) {
@@ -524,6 +561,78 @@ fetch_subscription(Store& store, SubscriptionFetcher& fetcher,
     return result;
 }
 
+[[nodiscard]] ClashTarget resolve_clash_target(Store& store,
+                                               const drogon::HttpRequestPtr& request,
+                                               const std::string& local_url,
+                                               const std::string& local_secret) {
+    const auto host_id = trim(request->getParameter("host"));
+    if (!host_id.empty() && host_id != "self") {
+        if (const auto host = store.find_host(host_id);
+            host.has_value() && host->clash_api.has_value()) {
+            auto url = trim_trailing_slashes(*host->clash_api);
+            if (!url.empty()) {
+                return {
+                    .base_url = std::move(url),
+                    .secret = host->clash_secret,
+                };
+            }
+        }
+    }
+    return {
+        .base_url = trim_trailing_slashes(local_url),
+        .secret = local_secret,
+    };
+}
+
+template <typename Function>
+[[nodiscard]] ClashResponse request_clash(const ClashTarget& target,
+                                          Function&& function) {
+    if (target.base_url.empty()) {
+        throw ServiceUnavailableError("No sing-box Clash API URL is configured");
+    }
+    try {
+        auto response = std::forward<Function>(function)();
+        if (response.status == 401) {
+            throw ServiceUnavailableError(
+                "sing-box Clash API authentication failed for " + target.base_url +
+                "; check the configured secret");
+        }
+        return response;
+    } catch (const ClashRequestError& error) {
+        throw ServiceUnavailableError("Could not reach sing-box Clash API (" +
+                                      target.base_url + "): " + error.what());
+    }
+}
+
+template <typename Function>
+[[nodiscard]] json call_clash(const ClashTarget& target, Function&& function) {
+    return request_clash(target, std::forward<Function>(function)).body;
+}
+
+[[nodiscard]] std::optional<double> test_proxy_latency(ClashClient& client,
+                                                       const ClashTarget& target,
+                                                       const std::string& tag) {
+    if (target.base_url.empty()) {
+        return std::nullopt;
+    }
+    try {
+        const auto path = "/proxies/" + encode_component(tag) + "/delay?url=" +
+                          encode_component("https://www.gstatic.com/generate_204") +
+                          "&timeout=5000";
+        const auto response = client.get(target, path);
+        if (response.status < 200 || response.status >= 300) {
+            return std::nullopt;
+        }
+        const auto delay = response.body.find("delay");
+        if (delay != response.body.end() && delay->is_number()) {
+            return delay->get<double>();
+        }
+    } catch (const ClashRequestError&) {
+        // A failed dial is represented as a null latency, matching the Rust API.
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] Host require_host(Store& store, const std::string& id) {
     auto host = store.find_host(id);
     if (!host.has_value()) {
@@ -603,9 +712,12 @@ void register_http_routes(const std::shared_ptr<Store>& store,
 
     const auto telemetry = std::make_shared<TelemetryStore>();
     const auto subscription_fetcher = std::make_shared<SubscriptionFetcher>();
+    const auto clash_client = std::make_shared<ClashClient>();
     const auto public_server = options.public_server;
     const auto config_hash_seed = options.config_hash_seed;
     const auto legacy_agent_token = trim(options.legacy_agent_token);
+    const auto local_clash_api = options.clash_api_url;
+    const auto local_clash_secret = options.clash_api_secret;
     auto& application = drogon::app();
     application.registerHandler(
         "/api/health",
@@ -613,6 +725,150 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             callback(json_response({{"status", "ok"}, {"service", "sb-easy-cpp"}}));
         },
         {drogon::Get});
+
+    application.registerHandler(
+        "/api/sing-box/proxies",
+        [store, clash_client, local_clash_api, local_clash_secret](
+            const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                return call_clash(
+                    target, [&] { return clash_client->get(target, "/proxies"); });
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/sing-box/proxies/{name}",
+        [store, clash_client, local_clash_api,
+         local_clash_secret](const drogon::HttpRequestPtr& request,
+                             ResponseCallback&& callback, const std::string& name) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                return call_clash(target, [&] {
+                    return clash_client->get(target,
+                                             "/proxies/" + encode_component(name));
+                });
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/sing-box/proxies/{name}",
+        [store, clash_client, local_clash_api,
+         local_clash_secret](const drogon::HttpRequestPtr& request,
+                             ResponseCallback&& callback, const std::string& name) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                const auto response = request_clash(target, [&] {
+                    return clash_client->put(target,
+                                             "/proxies/" + encode_component(name),
+                                             request_object(request));
+                });
+                if (response.status < 200 || response.status >= 300) {
+                    throw ValidationError("sing-box returned HTTP " +
+                                          std::to_string(response.status));
+                }
+                return json{{"success", true}};
+            });
+        },
+        {drogon::Put});
+    application.registerHandler(
+        "/api/sing-box/proxies/{name}/delay",
+        [store, clash_client, local_clash_api,
+         local_clash_secret](const drogon::HttpRequestPtr& request,
+                             ResponseCallback&& callback, const std::string& name) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                auto url = request->getParameter("url");
+                auto timeout = request->getParameter("timeout");
+                if (url.empty()) {
+                    url = "https://www.gstatic.com/generate_204";
+                }
+                if (timeout.empty()) {
+                    timeout = "5000";
+                }
+                const auto path = "/proxies/" + encode_component(name) +
+                                  "/delay?url=" + encode_component(url) +
+                                  "&timeout=" + encode_component(timeout);
+                return call_clash(target,
+                                  [&] { return clash_client->get(target, path); });
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/sing-box/group/{name}/delay",
+        [store, clash_client, local_clash_api,
+         local_clash_secret](const drogon::HttpRequestPtr& request,
+                             ResponseCallback&& callback, const std::string& name) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                auto url = request->getParameter("url");
+                auto timeout = request->getParameter("timeout");
+                if (url.empty()) {
+                    url = "https://www.gstatic.com/generate_204";
+                }
+                if (timeout.empty()) {
+                    timeout = "5000";
+                }
+                const auto path = "/group/" + encode_component(name) +
+                                  "/delay?url=" + encode_component(url) +
+                                  "&timeout=" + encode_component(timeout);
+                return call_clash(target,
+                                  [&] { return clash_client->get(target, path); });
+            });
+        },
+        {drogon::Get});
+    for (const auto& [route, upstream] :
+         std::array<std::pair<std::string, std::string>, 3>{
+             std::pair{"/api/sing-box/rules", "/rules"},
+             std::pair{"/api/sing-box/connections", "/connections"},
+             std::pair{"/api/sing-box/version", "/version"},
+         }) {
+        application.registerHandler(
+            route,
+            [store, clash_client, local_clash_api, local_clash_secret, upstream](
+                const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+                handle(std::move(callback), [&] {
+                    const auto target = resolve_clash_target(
+                        *store, request, local_clash_api, local_clash_secret);
+                    return call_clash(
+                        target, [&] { return clash_client->get(target, upstream); });
+                });
+            },
+            {drogon::Get});
+    }
+    application.registerHandler(
+        "/api/sing-box/connections",
+        [store, clash_client, local_clash_api, local_clash_secret](
+            const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                return call_clash(target, [&] {
+                    return clash_client->remove(target, "/connections");
+                });
+            });
+        },
+        {drogon::Delete});
+    application.registerHandler(
+        "/api/sing-box/connections/{id}",
+        [store, clash_client, local_clash_api,
+         local_clash_secret](const drogon::HttpRequestPtr& request,
+                             ResponseCallback&& callback, const std::string& id) {
+            handle(std::move(callback), [&] {
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                return call_clash(target, [&] {
+                    return clash_client->remove(target,
+                                                "/connections/" + encode_component(id));
+                });
+            });
+        },
+        {drogon::Delete});
 
     application.registerHandler(
         "/api/proxy/nodes",
@@ -658,6 +914,91 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                     {"found", parsed.nodes.size()}, {"added", result.added},
                     {"updated", result.updated},    {"skipped", parsed.skipped},
                     {"errors", result.errors},
+                };
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/proxy/nodes/test-all",
+        [store, clash_client, local_clash_api, local_clash_secret](
+            const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto host_id = trim(request->getParameter("host"));
+                if (!host_id.empty() && host_id != "self") {
+                    static_cast<void>(require_host(*store, host_id));
+                    static_cast<void>(
+                        store->enqueue_host_command(host_id, "test-proxies"));
+                    return json{{"queued", true}, {"host", host_id}};
+                }
+
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                json results = json::object();
+                std::size_t tested{};
+                std::vector<ProxyRecord> nodes;
+                for (const auto& node : store->list_proxy_nodes()) {
+                    if (node.enabled) {
+                        nodes.push_back(node);
+                    }
+                }
+                constexpr std::size_t concurrency{8U};
+                for (std::size_t offset = 0U; offset < nodes.size();
+                     offset += concurrency) {
+                    using Measurement = std::pair<ProxyRecord, std::optional<double>>;
+                    std::vector<std::future<Measurement>> pending;
+                    const auto end = std::min(nodes.size(), offset + concurrency);
+                    pending.reserve(end - offset);
+                    for (auto index = offset; index < end; ++index) {
+                        pending.push_back(
+                            std::async(std::launch::async, [clash_client, target,
+                                                            node = nodes[index]] {
+                                return Measurement{
+                                    node,
+                                    test_proxy_latency(*clash_client, target, node.tag),
+                                };
+                            }));
+                    }
+                    for (auto& future : pending) {
+                        auto [node, latency] = future.get();
+                        store->update_proxy_latency(node.id, latency);
+                        results[node.tag] =
+                            latency.has_value() ? json(*latency) : json(nullptr);
+                        ++tested;
+                    }
+                }
+                return json{
+                    {"tested", tested},
+                    {"results", std::move(results)},
+                    {"tested_at", utc_now()},
+                };
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/proxy/nodes/{id}/test-latency",
+        [store, clash_client, local_clash_api,
+         local_clash_secret](const drogon::HttpRequestPtr& request,
+                             ResponseCallback&& callback, const std::string& id) {
+            handle(std::move(callback), [&] {
+                const auto node = require_proxy(*store, id);
+                const auto host_id = trim(request->getParameter("host"));
+                if (!host_id.empty() && host_id != "self") {
+                    static_cast<void>(require_host(*store, host_id));
+                    const auto command =
+                        "test-proxies " + json::array({node.tag}).dump();
+                    static_cast<void>(store->enqueue_host_command(host_id, command));
+                    return json{{"queued", true}, {"host", host_id}};
+                }
+
+                const auto target = resolve_clash_target(
+                    *store, request, local_clash_api, local_clash_secret);
+                const auto latency =
+                    test_proxy_latency(*clash_client, target, node.tag);
+                store->update_proxy_latency(node.id, latency);
+                return json{
+                    {"node_id", node.id},
+                    {"latency", latency.has_value() ? json(*latency) : json(nullptr)},
+                    {"tested_at", utc_now()},
                 };
             });
         },

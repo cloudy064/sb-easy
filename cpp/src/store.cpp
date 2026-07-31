@@ -752,6 +752,20 @@ std::size_t Store::update_proxy_latencies(const nlohmann::json& results) {
     return updated;
 }
 
+void Store::update_proxy_latency(const std::string& id,
+                                 const std::optional<double>& latency) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                "UPDATE proxy_nodes SET latency = ?1, "
+                                "last_latency_test = datetime('now') WHERE id = ?2"};
+    statement.bind(1, latency);
+    statement.bind(2, id);
+    statement.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Node not found");
+    }
+}
+
 std::vector<ProxyRecord> Store::list_proxy_nodes() const {
     const std::scoped_lock lock{database_.mutex_};
     sqlite::Statement statement{

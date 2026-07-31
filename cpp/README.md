@@ -20,12 +20,16 @@ The current foundation contains:
 - proxy CRUD and sing-box outbound import, including URI/base64/Clash YAML
   subscription parsing with fingerprint reconciliation;
 - subscription CRUD and bounded HTTP(S) fetches on an isolated event loop;
+- Clash API HTTP control for proxies, groups, rules, connections, and version,
+  with local/per-host target resolution and bearer secrets;
+- local and remote-agent proxy latency tests, plus agent-side connection and
+  traffic telemetry sampling;
 - a CLI renderer for parity fixtures and migration testing;
 - focused tests for rendering, scripting limits, migrations, persistence, and
   live HTTP contracts.
 
-Drogon remains confined to the HTTP adapter; configuration and database code do
-not depend on framework types.
+Drogon remains confined to transport adapters; configuration and database code
+do not depend on framework types.
 
 ## Build
 
@@ -66,6 +70,8 @@ Start the incremental HTTP server:
 
 ```sh
 export CONFIG_HASH_SEED='persistent-deployment-seed'
+export SINGBOX_API_URL='http://127.0.0.1:9090'
+export SINGBOX_API_SECRET='<matching experimental.clash_api.secret>'
 build/cpp/sb-easy-cpp-server \
   data/sb-easy.db migrations 127.0.0.1 51821 https://panel.example.com
 curl http://127.0.0.1:51821/api/health
@@ -81,6 +87,9 @@ Implemented HTTP routes include:
 - token reveal and rotation routes used by the existing frontend.
 - `/api/proxy/nodes`, node detail CRUD, and outbound import;
 - `/api/subscriptions`, subscription detail CRUD, fetch, and fetch-all;
+- `/api/sing-box/proxies`, group delay, rules, connections, and version
+  forwarding, with optional `?host=<id>`;
+- `/api/proxy/nodes/{id}/test-latency` and `/api/proxy/nodes/test-all`;
 - bearer-authenticated `/api/agent/config`, status, commands, latency, and
   telemetry routes.
 
@@ -111,9 +120,16 @@ build/cpp/sb-easy-cpp-agent
 The agent runs `sing-box check -c <temporary-file>` before replacement,
 preserves the last good file when validation fails, fsyncs the new file and its
 directory, then renames it atomically. Reload and restart commands are parsed
-into an argument vector and executed directly without a shell. Use `--once` for
-provisioning checks. `SINGBOX_VALIDATE_CONFIG=false` is available for isolated
-development environments without a sing-box binary.
+into an argument vector and executed directly without a shell. It reads
+`experimental.clash_api` from that installed config, handles `test-proxies`
+commands, reports each delay progressively, and samples connection/traffic
+telemetry on every poll. Use `--once` for provisioning checks.
+`SINGBOX_VALIDATE_CONFIG=false` is available for isolated development
+environments without a sing-box binary.
+
+Authenticated Clash WebSocket forwarding and log collection remain pending.
+The administrative routes are still loopback-only, so the rewrite deliberately
+does not expose an unauthenticated live traffic/log stream.
 
 The core/database test image can be built independently:
 

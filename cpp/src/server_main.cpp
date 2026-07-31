@@ -43,6 +43,12 @@ int main(int argc, char** argv) {
         if (const auto* token = std::getenv("AGENT_TOKEN"); token != nullptr) {
             options.legacy_agent_token = token;
         }
+        if (const auto* url = std::getenv("SINGBOX_API_URL"); url != nullptr) {
+            options.clash_api_url = url;
+        }
+        if (const auto* secret = std::getenv("SINGBOX_API_SECRET"); secret != nullptr) {
+            options.clash_api_secret = secret;
+        }
         auto store = std::make_shared<sbeasy::Store>(std::filesystem::path{argv[1]},
                                                      std::filesystem::path{argv[2]});
         sbeasy::run_http_server(store, options);

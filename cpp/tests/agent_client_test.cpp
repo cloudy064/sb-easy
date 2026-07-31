@@ -1,12 +1,21 @@
+#include <array>
+#include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -19,6 +28,7 @@
 #pragma GCC diagnostic pop
 #endif
 
+#include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
 #include "sbeasy/atomic_file.hpp"
 #include "sbeasy/http_server.hpp"
@@ -77,6 +87,123 @@ class RunningServer final {
     std::thread thread_;
 };
 
+class ClashFixture final {
+  public:
+    ClashFixture() {
+        listener_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (listener_ < 0) {
+            throw std::runtime_error("could not create agent Clash fixture");
+        }
+        const int reuse = 1;
+        if (::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                         static_cast<socklen_t>(sizeof(reuse))) != 0) {
+            ::close(listener_);
+            throw std::runtime_error("could not configure agent Clash fixture");
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        if (::bind(listener_, reinterpret_cast<const sockaddr*>(&address),
+                   static_cast<socklen_t>(sizeof(address))) != 0 ||
+            ::listen(listener_, 8) != 0) {
+            ::close(listener_);
+            throw std::runtime_error("could not listen for agent Clash fixture");
+        }
+        socklen_t size = sizeof(address);
+        if (::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) !=
+            0) {
+            ::close(listener_);
+            throw std::runtime_error("could not resolve agent Clash fixture port");
+        }
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { serve(); });
+    }
+
+    ~ClashFixture() {
+        if (listener_ >= 0) {
+            ::shutdown(listener_, SHUT_RDWR);
+            ::close(listener_);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ClashFixture(const ClashFixture&) = delete;
+    ClashFixture& operator=(const ClashFixture&) = delete;
+
+    [[nodiscard]] std::uint16_t port() const noexcept {
+        return port_;
+    }
+
+  private:
+    static void respond(int client, const std::string& request) {
+        std::istringstream line{request.substr(0, request.find("\r\n"))};
+        std::string method;
+        std::string target;
+        line >> method >> target;
+
+        nlohmann::json body = nlohmann::json::object();
+        if (target == "/proxies") {
+            body["proxies"] = {
+                {"Agent Node", {{"type", "Shadowsocks"}}},
+                {"Agent Group",
+                 {{"type", "Selector"},
+                  {"all", nlohmann::json::array({"Agent Node"})}}},
+                {"direct", {{"type", "Direct"}}},
+            };
+        } else if (target.find("/delay?") != std::string::npos) {
+            body["delay"] = 33;
+        } else if (target == "/connections") {
+            body = {
+                {"uploadTotal", 4'096},
+                {"downloadTotal", 8'192},
+                {"connections",
+                 nlohmann::json::array({nlohmann::json{{"id", "agent-connection"}}})},
+            };
+        }
+        const auto serialized = body.dump();
+        const auto response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                              "Content-Length: " +
+                              std::to_string(serialized.size()) +
+                              "\r\nConnection: close\r\n\r\n" + serialized;
+        std::size_t sent{};
+        while (sent < response.size()) {
+            const auto count = ::send(client, response.data() + sent,
+                                      response.size() - sent, MSG_NOSIGNAL);
+            if (count <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(count);
+        }
+    }
+
+    void serve() const {
+        while (true) {
+            const auto client = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+            if (client < 0) {
+                return;
+            }
+            std::string request;
+            std::array<char, 4'096> buffer{};
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                const auto count = ::recv(client, buffer.data(), buffer.size(), 0);
+                if (count <= 0) {
+                    break;
+                }
+                request.append(buffer.data(), static_cast<std::size_t>(count));
+            }
+            respond(client, request);
+            ::close(client);
+        }
+    }
+
+    int listener_{-1};
+    std::uint16_t port_{};
+    std::thread thread_;
+};
+
 void require(bool condition, const char* message) {
     if (!condition) {
         throw std::runtime_error(message);
@@ -97,6 +224,7 @@ void run_contract() {
     require(rejected_url, "agent client should reject unsupported server URL schemes");
 
     const TemporaryDirectory directory;
+    const ClashFixture clash_fixture;
     auto store = std::make_shared<sbeasy::Store>(
         directory.path() / "agent.db", std::filesystem::path{SB_EASY_MIGRATIONS_DIR});
 
@@ -131,6 +259,33 @@ void run_contract() {
         });
     require(std::filesystem::exists(config_path),
             "agent config should be atomically installed");
+
+    const auto clash_config_path = directory.path() / "config" / "clash.json";
+    sbeasy::atomic_replace_file(
+        clash_config_path,
+        nlohmann::json{
+            {"experimental",
+             {{"clash_api",
+               {{"external_controller",
+                 "0.0.0.0:" + std::to_string(clash_fixture.port())},
+                {"secret", "fixture-secret"}}}}},
+        }
+            .dump());
+    sbeasy::AgentClashService clash{clash_config_path};
+    std::vector<nlohmann::json> latency_reports;
+    const auto tested =
+        clash.test_proxies(std::nullopt, [&](const nlohmann::json& report) {
+            latency_reports.push_back(report);
+        });
+    require(tested == 1U && latency_reports.size() == 1U &&
+                latency_reports.front().at("Agent Node") == 33,
+            "agent Clash tests should skip groups/built-ins and report each delay");
+    const auto telemetry = clash.sample_telemetry();
+    require(telemetry.has_value() && telemetry->at("up_total") == 4'096 &&
+                telemetry->at("down_total") == 8'192 &&
+                telemetry->at("conn_count") == 1 && telemetry->at("up") == 0 &&
+                telemetry->at("down") == 0,
+            "agent Clash telemetry should expose totals and an initial zero rate");
 
     const auto unchanged = client.poll_config(config.etag);
     require(!unchanged.modified && unchanged.etag == config.etag,

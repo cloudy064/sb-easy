@@ -122,6 +122,18 @@ target_link_libraries(sb-easy-cpp PRIVATE sb-easy::core)
 sb_easy_enable_warnings(sb-easy-cpp)
 
 if(SB_EASY_BUILD_HTTP)
+    add_library(sb_easy_clash src/clash_client.cpp)
+    add_library(sb-easy::clash ALIAS sb_easy_clash)
+    target_include_directories(sb_easy_clash
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+    target_link_libraries(sb_easy_clash
+        PUBLIC nlohmann_json::nlohmann_json
+        PRIVATE drogon
+    )
+    sb_easy_enable_warnings(sb_easy_clash)
+
     add_library(sb_easy_http
         src/http_server.cpp
         src/subscription_fetcher.cpp
@@ -133,7 +145,7 @@ if(SB_EASY_BUILD_HTTP)
     )
     target_link_libraries(sb_easy_http
         PUBLIC sb-easy::core
-        PRIVATE drogon
+        PRIVATE drogon sb-easy::clash
     )
     sb_easy_enable_warnings(sb_easy_http)
 
@@ -141,7 +153,10 @@ if(SB_EASY_BUILD_HTTP)
     target_link_libraries(sb-easy-cpp-server PRIVATE sb-easy::http)
     sb_easy_enable_warnings(sb-easy-cpp-server)
 
-    add_library(sb_easy_agent src/agent_client.cpp)
+    add_library(sb_easy_agent
+        src/agent_clash.cpp
+        src/agent_client.cpp
+    )
     add_library(sb-easy::agent ALIAS sb_easy_agent)
     target_include_directories(sb_easy_agent
         PUBLIC
@@ -149,7 +164,7 @@ if(SB_EASY_BUILD_HTTP)
     )
     target_link_libraries(sb_easy_agent
         PUBLIC sb-easy::core
-        PRIVATE drogon
+        PRIVATE drogon sb-easy::clash
     )
     sb_easy_enable_warnings(sb_easy_agent)
 

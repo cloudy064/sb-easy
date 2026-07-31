@@ -65,6 +65,18 @@ struct Host {
 /// deliberately omitted.
 void to_json(nlohmann::json& value, const Host& host);
 
+struct HostCommand {
+    std::string id;
+    std::string host_id;
+    std::string command;
+    std::string status;
+    std::optional<std::string> result;
+    std::string created_at;
+    std::optional<std::string> acked_at;
+};
+
+void to_json(nlohmann::json& value, const HostCommand& command);
+
 /// Repository facade for the first C++ parity slice.
 ///
 /// It deliberately uses the existing schema and query semantics instead of
@@ -92,6 +104,22 @@ class Store final {
     void set_host_outbounds(const std::string& host_id,
                             const std::vector<std::string>& node_ids);
     [[nodiscard]] std::string rotate_agent_token(const std::string& host_id);
+
+    [[nodiscard]] std::optional<Host>
+    find_enabled_host_by_token(const std::string& token) const;
+    void touch_host(const std::string& host_id);
+    void update_agent_status(const std::string& host_id, const nlohmann::json& state);
+
+    [[nodiscard]] HostCommand enqueue_host_command(const std::string& host_id,
+                                                   const std::string& command);
+    [[nodiscard]] std::vector<HostCommand>
+    list_host_commands(const std::string& host_id, bool pending_only = false) const;
+    [[nodiscard]] bool
+    acknowledge_host_command(const std::string& host_id, const std::string& command_id,
+                             const std::string& status,
+                             const std::optional<std::string>& result);
+
+    [[nodiscard]] std::size_t update_proxy_latencies(const nlohmann::json& results);
 
     [[nodiscard]] RenderRequest
     render_request_for_host(const std::string& host_id) const;

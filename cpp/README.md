@@ -13,6 +13,10 @@ The current foundation contains:
   checksums, plus a profile/host repository;
 - a Drogon HTTP server for host/profile CRUD, outbound assignment, token
   rotation, and per-host config preview;
+- bearer-authenticated Agent APIs with stable ETags, heartbeats, command
+  acknowledgement, latency reports, and bounded telemetry snapshots;
+- a C++ polling agent with validated, durable atomic config replacement and
+  shell-free reload/restart command execution;
 - a CLI renderer for parity fixtures and migration testing;
 - focused tests for rendering, scripting limits, migrations, persistence, and
   live HTTP contracts.
@@ -25,8 +29,8 @@ not depend on framework types.
 ```sh
 cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cpp \
-  --target sb-easy-cpp sb-easy-cpp-server \
-           sb-easy-core-tests sb-easy-http-tests -j
+  --target sb-easy-cpp sb-easy-cpp-server sb-easy-cpp-agent \
+           sb-easy-core-tests sb-easy-http-tests sb-easy-agent-tests -j
 ctest --test-dir build/cpp --output-on-failure
 ```
 
@@ -56,6 +60,7 @@ build/cpp/sb-easy-cpp render-host data/sb-easy.db self migrations
 Start the incremental HTTP server:
 
 ```sh
+export CONFIG_HASH_SEED='persistent-deployment-seed'
 build/cpp/sb-easy-cpp-server \
   data/sb-easy.db migrations 127.0.0.1 51821 https://panel.example.com
 curl http://127.0.0.1:51821/api/health
@@ -67,10 +72,34 @@ Implemented HTTP routes include:
 - `/api/hosts/profiles` and `/api/hosts/profiles/{id}`;
 - `/api/hosts/{id}/outbounds`;
 - `/api/hosts/{id}/config`;
+- `/api/hosts/{id}/commands` and `/api/hosts/{id}/telemetry`;
 - token reveal and rotation routes used by the existing frontend.
+- bearer-authenticated `/api/agent/config`, status, commands, latency, and
+  telemetry routes.
 
 The server defaults to loopback because authentication has not been migrated
-yet. Binding it to a public interface is not safe at this stage.
+for the administrative routes yet. Agent routes require a non-empty per-host
+bearer token, but binding the whole service to a public interface is not safe at
+this stage. `AGENT_TOKEN` remains an optional legacy token for the `self` host.
+
+Run the C++ polling agent on a managed host:
+
+```sh
+export SB_EASY_SERVER='https://panel.example.com'
+export AGENT_TOKEN='<token returned when the host was created>'
+export SINGBOX_CONFIG_PATH='/etc/sing-box/config.d/90-generated.json'
+export SINGBOX_BIN='sing-box'
+export RELOAD_CMD='systemctl reload sing-box'
+export RESTART_CMD='systemctl restart sing-box'
+build/cpp/sb-easy-cpp-agent
+```
+
+The agent runs `sing-box check -c <temporary-file>` before replacement,
+preserves the last good file when validation fails, fsyncs the new file and its
+directory, then renames it atomically. Reload and restart commands are parsed
+into an argument vector and executed directly without a shell. Use `--once` for
+provisioning checks. `SINGBOX_VALIDATE_CONFIG=false` is available for isolated
+development environments without a sing-box binary.
 
 The core/database test image can be built independently:
 
@@ -80,7 +109,8 @@ docker run --rm sb-easy-cpp-core
 ```
 
 This image is intentionally not a replacement for the production container
-until authentication and the agent control-plane milestones are complete.
+until administrative authentication and the remaining control APIs are
+complete.
 
 The script contract is deliberately narrow:
 

@@ -9,6 +9,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -86,6 +87,8 @@ class RunningServer final {
 struct ApiResponse {
     drogon::HttpStatusCode status;
     json body;
+    std::string raw_body;
+    std::string etag;
 };
 
 void require(bool condition, const char* message) {
@@ -94,15 +97,19 @@ void require(bool condition, const char* message) {
     }
 }
 
-[[nodiscard]] ApiResponse request(const drogon::HttpClientPtr& client,
-                                  drogon::HttpMethod method, std::string path,
-                                  std::optional<json> body = std::nullopt) {
+[[nodiscard]] ApiResponse
+request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
+        std::string path, std::optional<json> body = std::nullopt,
+        const std::vector<std::pair<std::string, std::string>>& headers = {}) {
     auto http_request = drogon::HttpRequest::newHttpRequest();
     http_request->setMethod(method);
     http_request->setPath(std::move(path));
     if (body.has_value()) {
         http_request->setContentTypeString("application/json");
         http_request->setBody(body->dump());
+    }
+    for (const auto& [name, value] : headers) {
+        http_request->addHeader(name, value);
     }
 
     auto [result, response] = client->sendRequest(http_request, 2.0);
@@ -111,13 +118,17 @@ void require(bool condition, const char* message) {
                                  std::string{drogon::to_string_view(result)});
     }
 
-    auto parsed = json::parse(response->body(), nullptr, false);
+    const std::string raw_body{response->body()};
+    auto parsed =
+        raw_body.empty() ? json{nullptr} : json::parse(raw_body, nullptr, false);
     if (parsed.is_discarded()) {
         throw std::runtime_error("HTTP response is not JSON");
     }
     return {
         .status = response->statusCode(),
         .body = std::move(parsed),
+        .raw_body = raw_body,
+        .etag = response->getHeader("etag"),
     };
 }
 
@@ -126,7 +137,11 @@ void run_contract() {
     auto store = std::make_shared<sbeasy::Store>(
         database.path(), std::filesystem::path{SB_EASY_MIGRATIONS_DIR});
 
-    sbeasy::register_http_routes(store, "https://panel.example.com");
+    sbeasy::HttpServerOptions options;
+    options.public_server = "https://panel.example.com";
+    options.config_hash_seed = "contract-seed";
+    options.legacy_agent_token = "legacy-self-token";
+    sbeasy::register_http_routes(store, options);
     drogon::app()
         .setLogLevel(trantor::Logger::kWarn)
         .addListener("127.0.0.1", 0)
@@ -252,6 +267,110 @@ function buildRules(context) {
                 config.body.at("route").at("rules").at(0).at("outbound") == "direct",
             "config preview should execute the profile rule script");
 
+    const auto agent_health = request(client, drogon::Get, "/api/agent/health");
+    require(agent_health.status == drogon::k200OK,
+            "agent health should remain unauthenticated");
+    require(request(client, drogon::Get, "/api/agent/config").status ==
+                drogon::k401Unauthorized,
+            "agent config should reject missing bearer credentials");
+    const std::vector<std::pair<std::string, std::string>> agent_auth{
+        {"Authorization", "Bearer " + original_token},
+    };
+    const auto agent_config =
+        request(client, drogon::Get, "/api/agent/config", std::nullopt, agent_auth);
+    require(agent_config.status == drogon::k200OK && !agent_config.etag.empty() &&
+                agent_config.body.at("route").at("rules").at(0).at("outbound") ==
+                    "direct",
+            "authenticated agents should receive their rendered config and ETag");
+    auto cached_headers = agent_auth;
+    cached_headers.emplace_back("If-None-Match", agent_config.etag);
+    const auto cached_config =
+        request(client, drogon::Get, "/api/agent/config", std::nullopt, cached_headers);
+    require(cached_config.status == drogon::k304NotModified &&
+                cached_config.raw_body.empty() &&
+                cached_config.etag == agent_config.etag,
+            "matching agent ETags should produce an empty 304 response");
+    const auto touched_host = store->find_host(host_id);
+    require(touched_host.has_value() && touched_host->last_seen.has_value(),
+            "config polls should update host liveness");
+
+    const auto status_report = request(client, drogon::Post, "/api/agent/status",
+                                       json{{"singbox_version", "1.12.0"},
+                                            {"singbox_running", true},
+                                            {"config_etag", agent_config.etag}},
+                                       agent_auth);
+    require(status_report.status == drogon::k200OK &&
+                status_report.body.at("ok") == true,
+            "agent status reports should succeed");
+    const auto status_host = store->find_host(host_id);
+    require(status_host.has_value() && status_host->singbox_state.has_value() &&
+                json::parse(*status_host->singbox_state).at("etag") ==
+                    agent_config.etag,
+            "agent status should persist the reported ETag");
+
+    const auto enqueued =
+        request(client, drogon::Post, "/api/hosts/" + host_id + "/commands",
+                json{{"command", " RELOAD "}});
+    require(enqueued.status == drogon::k200OK &&
+                enqueued.body.at("status") == "pending",
+            "administrators should enqueue normalized agent commands");
+    const auto command_id = enqueued.body.at("id").get<std::string>();
+    const auto pending =
+        request(client, drogon::Get, "/api/agent/commands", std::nullopt, agent_auth);
+    require(pending.status == drogon::k200OK && pending.body.size() == 1U &&
+                pending.body.at(0).at("id") == command_id,
+            "agents should only pull their pending commands");
+    const std::vector<std::pair<std::string, std::string>> legacy_auth{
+        {"Authorization", "Bearer legacy-self-token"},
+    };
+    require(request(client, drogon::Post, "/api/agent/commands/" + command_id + "/ack",
+                    json{{"status", "done"}, {"result", "wrong host"}}, legacy_auth)
+                    .status == drogon::k200OK,
+            "cross-host command acknowledgements should not leak existence");
+    require(store->list_host_commands(host_id, true).size() == 1U,
+            "a different host token must not acknowledge the command");
+    require(request(client, drogon::Post, "/api/agent/commands/" + command_id + "/ack",
+                    json{{"status", "done"}, {"result", "reloaded"}}, agent_auth)
+                    .status == drogon::k200OK,
+            "the owning agent should acknowledge its command");
+    const auto command_history =
+        request(client, drogon::Get, "/api/hosts/" + host_id + "/commands");
+    require(command_history.body.at(0).at("status") == "done" &&
+                command_history.body.at(0).at("result") == "reloaded",
+            "administrators should see acknowledged command history");
+    require(request(client, drogon::Post, "/api/hosts/self/commands",
+                    json{{"command", "reload"}})
+                    .status == drogon::k400BadRequest,
+            "the built-in self host must reject remote commands");
+
+    json logs = json::array();
+    for (int index = 0; index < 502; ++index) {
+        logs.push_back(std::to_string(index));
+    }
+    require(request(client, drogon::Post, "/api/agent/telemetry",
+                    json{{"up", 10},
+                         {"down", 20},
+                         {"up_total", 100},
+                         {"down_total", 200},
+                         {"conn_count", 1},
+                         {"connections", json::array({json{{"id", "connection"}}})},
+                         {"logs", std::move(logs)}},
+                    agent_auth)
+                    .status == drogon::k200OK,
+            "agents should relay telemetry");
+    const auto telemetry =
+        request(client, drogon::Get, "/api/hosts/" + host_id + "/telemetry");
+    require(telemetry.body.at("up") == 10 && telemetry.body.at("logs").size() == 500U &&
+                telemetry.body.at("logs").at(0) == "2",
+            "telemetry should retain the latest snapshot and cap logs");
+
+    const auto latency =
+        request(client, drogon::Post, "/api/agent/proxy-latency",
+                json{{"results", {{"http-node", 42.5}, {"missing-node", nullptr}}}},
+                agent_auth);
+    require(latency.status == drogon::k200OK && latency.body.at("updated") == 1,
+            "agent latency reports should update matching proxy tags");
+
     const auto revealed =
         request(client, drogon::Get, "/api/hosts/" + host_id + "/token");
     require(revealed.body.at("agent_token") == original_token &&
@@ -261,6 +380,9 @@ function buildRules(context) {
         request(client, drogon::Post, "/api/hosts/" + host_id + "/rotate-token");
     require(rotated.body.at("agent_token") != original_token,
             "token rotation should return a replacement");
+    require(request(client, drogon::Get, "/api/agent/config", std::nullopt, agent_auth)
+                    .status == drogon::k401Unauthorized,
+            "rotating a token should immediately revoke the old credential");
 
     const auto updated_host =
         request(client, drogon::Put, "/api/hosts/" + host_id,

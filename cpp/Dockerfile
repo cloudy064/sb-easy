@@ -23,8 +23,8 @@ RUN cmake -S cpp -B build \
         -DBUILD_TESTING=ON \
         -DSB_EASY_WARNINGS_AS_ERRORS=ON \
     && cmake --build build \
-        --target sb-easy-cpp sb-easy-cpp-server \
-                 sb-easy-core-tests sb-easy-http-tests \
+        --target sb-easy-cpp sb-easy-cpp-server sb-easy-cpp-agent \
+                 sb-easy-core-tests sb-easy-http-tests sb-easy-agent-tests \
         --parallel 2 \
     && ctest --test-dir build --output-on-failure
 
@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/build/sb-easy-cpp /usr/local/bin/sb-easy-cpp
 COPY --from=builder /src/build/sb-easy-cpp-server /usr/local/bin/sb-easy-cpp-server
+COPY --from=builder /src/build/sb-easy-cpp-agent /usr/local/bin/sb-easy-cpp-agent
 COPY --from=builder /src/migrations /usr/share/sb-easy/migrations
 
 # Incremental parity image; the production entrypoint remains Rust for now.

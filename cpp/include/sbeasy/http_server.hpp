@@ -14,10 +14,12 @@ struct HttpServerOptions {
     std::uint16_t port{51821};
     std::size_t threads{1};
     std::string public_server;
+    std::string config_hash_seed;
+    std::string legacy_agent_token;
 };
 
 void register_http_routes(const std::shared_ptr<Store>& store,
-                          std::string public_server = {});
+                          const HttpServerOptions& options = {});
 void run_http_server(const std::shared_ptr<Store>& store,
                      const HttpServerOptions& options);
 

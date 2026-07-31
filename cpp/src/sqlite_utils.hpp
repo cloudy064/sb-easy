@@ -68,6 +68,24 @@ class Statement final {
         bind(index, static_cast<std::int64_t>(value ? 1 : 0));
     }
 
+    void bind(int index, double value) {
+        const int code = sqlite3_bind_double(statement_, index, value);
+        if (code != SQLITE_OK) {
+            fail(database_, "bind real", code);
+        }
+    }
+
+    void bind(int index, const std::optional<double>& value) {
+        if (!value.has_value()) {
+            const int code = sqlite3_bind_null(statement_, index);
+            if (code != SQLITE_OK) {
+                fail(database_, "bind null", code);
+            }
+            return;
+        }
+        bind(index, *value);
+    }
+
     void bind_blob(int index, const std::vector<unsigned char>& value) {
         const int code =
             sqlite3_bind_blob(statement_, index, value.data(),

@@ -47,18 +47,19 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 - [x] `/api/hosts`, `/api/hosts/profiles`, and config preview endpoints.
 - [x] Persist `rule_script` and `rule_script_enabled` on profiles.
 
-### M2 — agent control plane
+### M2 — agent control plane (implemented)
 
-- Agent bearer authentication.
-- Config endpoint with byte-for-byte stable serialization and ETags.
-- Status, command, latency, and telemetry endpoints.
-- C++ agent mode and atomic config replacement.
+- [x] Agent bearer authentication with per-host isolation.
+- [x] Config endpoint with byte-for-byte stable serialization and ETags.
+- [x] Status, command, latency, and bounded telemetry transport endpoints.
+- [x] C++ polling agent and validated atomic config replacement.
 
 ### M3 — proxy sources and sing-box control
 
 - Proxy CRUD and URI/outbound parsers.
 - Subscription fetch/reconciliation.
-- sing-box supervisor and Clash API HTTP/WebSocket proxying.
+- sing-box supervisor, Clash telemetry sampling, and Clash API HTTP/WebSocket
+  proxying.
 
 ### M4 — WireGuard and administrative APIs
 

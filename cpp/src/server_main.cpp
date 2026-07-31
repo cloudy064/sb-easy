@@ -1,5 +1,6 @@
 #include <charconv>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -35,6 +36,12 @@ int main(int argc, char** argv) {
         }
         if (argc >= 6) {
             options.public_server = argv[5];
+        }
+        if (const auto* seed = std::getenv("CONFIG_HASH_SEED"); seed != nullptr) {
+            options.config_hash_seed = seed;
+        }
+        if (const auto* token = std::getenv("AGENT_TOKEN"); token != nullptr) {
+            options.legacy_agent_token = token;
         }
         auto store = std::make_shared<sbeasy::Store>(std::filesystem::path{argv[1]},
                                                      std::filesystem::path{argv[2]});

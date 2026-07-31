@@ -77,6 +77,18 @@ using nlohmann::json;
     };
 }
 
+[[nodiscard]] HostCommand read_host_command(sqlite::Statement& statement) {
+    return HostCommand{
+        .id = statement.text(0),
+        .host_id = statement.text(1),
+        .command = statement.text(2),
+        .status = statement.text(3),
+        .result = statement.optional_text(4),
+        .created_at = statement.text(5),
+        .acked_at = statement.optional_text(6),
+    };
+}
+
 [[nodiscard]] std::string uuid_v4() {
     std::array<unsigned char, 16> bytes{};
     if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
@@ -189,6 +201,18 @@ void to_json(nlohmann::json& value, const Host& host) {
         {"updated_at", host.updated_at},
         {"assigned_outbounds", host.assigned_outbounds},
         {"has_token", !host.agent_token.empty()},
+    };
+}
+
+void to_json(nlohmann::json& value, const HostCommand& command) {
+    value = nlohmann::json{
+        {"id", command.id},
+        {"host_id", command.host_id},
+        {"command", command.command},
+        {"status", command.status},
+        {"result", command.result},
+        {"created_at", command.created_at},
+        {"acked_at", command.acked_at},
     };
 }
 
@@ -480,6 +504,156 @@ std::string Store::rotate_agent_token(const std::string& host_id) {
         throw NotFoundError("Host not found");
     }
     return token;
+}
+
+std::optional<Host> Store::find_enabled_host_by_token(const std::string& token) const {
+    if (token.empty()) {
+        return std::nullopt;
+    }
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                std::string{host_select} +
+                                    " WHERE h.agent_token = ?1 "
+                                    "AND h.agent_token != '' AND h.enabled = 1"};
+    statement.bind(1, token);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    return read_host(statement);
+}
+
+void Store::touch_host(const std::string& host_id) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_,
+        "UPDATE hosts SET last_seen = datetime('now') WHERE id = ?1"};
+    statement.bind(1, host_id);
+    statement.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Host not found");
+    }
+}
+
+void Store::update_agent_status(const std::string& host_id,
+                                const nlohmann::json& state) {
+    if (!state.is_object()) {
+        throw ValidationError("Agent state must be a JSON object");
+    }
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_,
+        "UPDATE hosts SET last_seen = datetime('now'), singbox_state = ?1 "
+        "WHERE id = ?2"};
+    statement.bind(1, state.dump());
+    statement.bind(2, host_id);
+    statement.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Host not found");
+    }
+}
+
+HostCommand Store::enqueue_host_command(const std::string& host_id,
+                                        const std::string& command) {
+    if (command.empty()) {
+        throw ValidationError("Command is required");
+    }
+
+    const auto id = uuid_v4();
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement host{database_.handle_, "SELECT 1 FROM hosts WHERE id = ?1"};
+    host.bind(1, host_id);
+    if (!host.step_row()) {
+        throw NotFoundError("Host not found");
+    }
+
+    sqlite::Statement insert{database_.handle_,
+                             "INSERT INTO host_commands "
+                             "(id, host_id, command, status, created_at) "
+                             "VALUES (?1, ?2, ?3, 'pending', datetime('now'))"};
+    insert.bind(1, id);
+    insert.bind(2, host_id);
+    insert.bind(3, command);
+    insert.step_done();
+
+    sqlite::Statement select{
+        database_.handle_,
+        "SELECT id, host_id, command, status, result, created_at, acked_at "
+        "FROM host_commands WHERE id = ?1"};
+    select.bind(1, id);
+    if (!select.step_row()) {
+        throw std::runtime_error("created host command could not be reloaded");
+    }
+    return read_host_command(select);
+}
+
+std::vector<HostCommand> Store::list_host_commands(const std::string& host_id,
+                                                   bool pending_only) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement host{database_.handle_, "SELECT 1 FROM hosts WHERE id = ?1"};
+    host.bind(1, host_id);
+    if (!host.step_row()) {
+        throw NotFoundError("Host not found");
+    }
+
+    const std::string sql =
+        pending_only
+            ? "SELECT id, host_id, command, status, result, created_at, acked_at "
+              "FROM host_commands WHERE host_id = ?1 AND status = 'pending' "
+              "ORDER BY created_at"
+            : "SELECT id, host_id, command, status, result, created_at, acked_at "
+              "FROM host_commands WHERE host_id = ?1 "
+              "ORDER BY created_at DESC LIMIT 20";
+    sqlite::Statement statement{database_.handle_, sql};
+    statement.bind(1, host_id);
+    std::vector<HostCommand> commands;
+    while (statement.step_row()) {
+        commands.push_back(read_host_command(statement));
+    }
+    return commands;
+}
+
+bool Store::acknowledge_host_command(const std::string& host_id,
+                                     const std::string& command_id,
+                                     const std::string& status,
+                                     const std::optional<std::string>& result) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_, "UPDATE host_commands SET status = ?1, result = ?2, "
+                           "acked_at = datetime('now') WHERE id = ?3 AND host_id = ?4"};
+    statement.bind(1, status);
+    statement.bind(2, result);
+    statement.bind(3, command_id);
+    statement.bind(4, host_id);
+    statement.step_done();
+    return sqlite3_changes(database_.handle_) != 0;
+}
+
+std::size_t Store::update_proxy_latencies(const nlohmann::json& results) {
+    if (!results.is_object()) {
+        throw ValidationError("results must be a JSON object");
+    }
+
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    std::size_t updated{};
+    for (const auto& [tag, value] : results.items()) {
+        std::optional<double> latency;
+        if (!value.is_null()) {
+            if (!value.is_number()) {
+                throw ValidationError("proxy latency values must be numbers or null");
+            }
+            latency = value.get<double>();
+        }
+        sqlite::Statement statement{
+            database_.handle_, "UPDATE proxy_nodes SET latency = ?1, "
+                               "last_latency_test = datetime('now') WHERE tag = ?2"};
+        statement.bind(1, latency);
+        statement.bind(2, tag);
+        statement.step_done();
+        updated += static_cast<std::size_t>(sqlite3_changes(database_.handle_));
+    }
+    transaction.commit();
+    return updated;
 }
 
 RenderRequest Store::render_request_for_host(const std::string& host_id) const {

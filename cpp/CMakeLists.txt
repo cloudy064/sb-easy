@@ -73,6 +73,8 @@ if(SB_EASY_BUILD_HTTP)
 endif()
 
 add_library(sb_easy_core
+    src/atomic_file.cpp
+    src/config_etag.cpp
     src/config_renderer.cpp
     src/database.cpp
     src/script_engine.cpp
@@ -113,10 +115,27 @@ if(SB_EASY_BUILD_HTTP)
     add_executable(sb-easy-cpp-server src/server_main.cpp)
     target_link_libraries(sb-easy-cpp-server PRIVATE sb-easy::http)
     sb_easy_enable_warnings(sb-easy-cpp-server)
+
+    add_library(sb_easy_agent src/agent_client.cpp)
+    add_library(sb-easy::agent ALIAS sb_easy_agent)
+    target_include_directories(sb_easy_agent
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+    target_link_libraries(sb_easy_agent
+        PUBLIC sb-easy::core
+        PRIVATE drogon
+    )
+    sb_easy_enable_warnings(sb_easy_agent)
+
+    add_executable(sb-easy-cpp-agent src/agent_main.cpp)
+    target_link_libraries(sb-easy-cpp-agent PRIVATE sb-easy::agent)
+    sb_easy_enable_warnings(sb-easy-cpp-agent)
 endif()
 
 if(BUILD_TESTING)
     add_executable(sb-easy-core-tests
+        tests/agent_core_test.cpp
         tests/config_renderer_test.cpp
         tests/script_engine_test.cpp
         tests/store_test.cpp
@@ -139,5 +158,16 @@ if(BUILD_TESTING)
         sb_easy_enable_warnings(sb-easy-http-tests)
         add_test(NAME sb-easy-http-tests COMMAND sb-easy-http-tests)
         set_tests_properties(sb-easy-http-tests PROPERTIES TIMEOUT 15)
+
+        add_executable(sb-easy-agent-tests tests/agent_client_test.cpp)
+        target_link_libraries(sb-easy-agent-tests
+            PRIVATE sb-easy::agent sb-easy::http drogon
+        )
+        target_compile_definitions(sb-easy-agent-tests PRIVATE
+            SB_EASY_MIGRATIONS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../migrations"
+        )
+        sb_easy_enable_warnings(sb-easy-agent-tests)
+        add_test(NAME sb-easy-agent-tests COMMAND sb-easy-agent-tests)
+        set_tests_properties(sb-easy-agent-tests PROPERTIES TIMEOUT 15)
     endif()
 endif()

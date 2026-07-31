@@ -237,3 +237,61 @@ SB_EASY_TEST("profile deletion resets assigned hosts to default") {
         [&] { store.delete_profile("default"); },
         "the default profile must be protected");
 }
+
+SB_EASY_TEST("agent repository isolates tokens, status, commands, and latency") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::Host host;
+    host.name = "Agent repository host";
+    host.capabilities = nlohmann::json::object();
+    const auto created = store.create_host(std::move(host));
+    const auto authenticated = store.find_enabled_host_by_token(created.agent_token);
+    sbeasy::test::require(authenticated.has_value() && authenticated->id == created.id,
+                          "an enabled host token should resolve its owner");
+    sbeasy::test::require(!store.find_enabled_host_by_token("").has_value() &&
+                              !store.find_enabled_host_by_token("wrong").has_value(),
+                          "empty and invalid tokens must not resolve");
+
+    store.update_agent_status(
+        created.id, {{"version", "1.12.0"}, {"running", true}, {"etag", "\"etag\""}});
+    const auto reported = store.find_host(created.id);
+    sbeasy::test::require(reported.has_value() && reported->last_seen.has_value() &&
+                              reported->singbox_state.has_value(),
+                          "status reports should persist state and liveness");
+
+    const auto command = store.enqueue_host_command(created.id, "reload");
+    sbeasy::test::require(store.list_host_commands(created.id, true).size() == 1U,
+                          "pending command queries should return queued work");
+    sbeasy::test::require(!store.acknowledge_host_command("self", command.id, "done",
+                                                          std::string{"wrong host"}),
+                          "command acknowledgements must be scoped to their host");
+    sbeasy::test::require(store.acknowledge_host_command(created.id, command.id, "done",
+                                                         std::string{"reloaded"}),
+                          "the owning host should acknowledge its command");
+    const auto history = store.list_host_commands(created.id);
+    sbeasy::test::require(
+        history.size() == 1U && history.front().status == "done" &&
+            history.front().result == "reloaded" &&
+            history.front().acked_at.has_value(),
+        "command history should retain result and acknowledgement time");
+
+    store.database().execute("INSERT INTO proxy_nodes "
+                             "(id, tag, node_type, enabled, server, server_port, "
+                             "protocol_config, fingerprint) VALUES "
+                             "('latency-node', 'latency-node', 'shadowsocks', TRUE, "
+                             "'127.0.0.1', 8388, "
+                             "'{\"method\":\"aes-128-gcm\",\"password\":\"secret\"}', "
+                             "'latency-node')");
+    sbeasy::test::require(store.update_proxy_latencies(
+                              {{"latency-node", 12.5}, {"missing-node", nullptr}}) ==
+                              1U,
+                          "latency reports should count only matching nodes");
+
+    auto disabled = *store.find_host(created.id);
+    disabled.enabled = false;
+    static_cast<void>(store.update_host(std::move(disabled)));
+    sbeasy::test::require(
+        !store.find_enabled_host_by_token(created.agent_token).has_value(),
+        "disabled hosts must lose agent API access immediately");
+}

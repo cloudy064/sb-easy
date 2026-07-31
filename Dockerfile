@@ -90,6 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libstdc++6 \
     libuuid1 \
     libzstd1 \
+    procps \
     zlib1g \
     && rm -rf /var/lib/apt/lists/*
 

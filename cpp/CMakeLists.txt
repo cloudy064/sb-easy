@@ -122,6 +122,7 @@ add_library(sb_easy_core
     src/database.cpp
     src/proxy_parser.cpp
     src/script_engine.cpp
+    src/singbox_supervisor.cpp
     src/store.cpp
 )
 add_library(sb-easy::core ALIAS sb_easy_core)
@@ -205,6 +206,7 @@ if(BUILD_TESTING)
         tests/config_renderer_test.cpp
         tests/proxy_parser_test.cpp
         tests/script_engine_test.cpp
+        tests/singbox_supervisor_test.cpp
         tests/store_test.cpp
         tests/test_main.cpp
     )

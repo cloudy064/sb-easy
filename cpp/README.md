@@ -27,6 +27,8 @@ The current foundation contains:
 - Argon2id/HS256 administrator sessions, viewer read-only RBAC, user management,
   and mutation audit logging compatible with the existing database;
 - settings and rendered sing-box config download APIs;
+- an opt-in local sing-box supervisor with pre-install validation, atomic
+  config replacement, SIGHUP reload, crash recovery, and graceful shutdown;
 - a CLI renderer for parity fixtures and migration testing;
 - focused tests for rendering, scripting limits, migrations, persistence, and
   live HTTP contracts.
@@ -73,9 +75,15 @@ build/cpp/sb-easy-cpp render-host data/sb-easy.db self migrations
 Start the incremental HTTP server:
 
 ```sh
+export JWT_SECRET='replace-with-a-long-random-secret'
+export ADMIN_PASSWORD='replace-before-first-start'
 export CONFIG_HASH_SEED='persistent-deployment-seed'
 export SINGBOX_API_URL='http://127.0.0.1:9090'
 export SINGBOX_API_SECRET='<matching experimental.clash_api.secret>'
+export SINGBOX_MANAGED=true
+export SINGBOX_BIN='sing-box'
+export SELF_SINGBOX_CONFIG_PATH='data/sing-box.gen.json'
+export SELF_SINGBOX_INTERVAL=10
 build/cpp/sb-easy-cpp-server \
   data/sb-easy.db migrations 127.0.0.1 51821 https://panel.example.com
 curl http://127.0.0.1:51821/api/health
@@ -148,7 +156,7 @@ docker run --rm sb-easy-cpp-core
 ```
 
 This image is intentionally not a replacement for the production container
-until administrative authentication and the remaining control APIs are
+until the remaining WireGuard, backup, system, and frontend cutover work is
 complete.
 
 The script contract is deliberately narrow:

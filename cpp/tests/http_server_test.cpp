@@ -794,8 +794,16 @@ void run_contract() {
             "config download must render enabled proxy outbounds and auto group");
     const auto full_config = request(client, drogon::Get, "/api/config/sing-box/full");
     require(full_config.status == drogon::k200OK &&
-                full_config.body.at("outbounds").is_array(),
-            "full config download must render the self host profile");
+                full_config.body.at("outbounds").is_array() &&
+                full_config.body.at("experimental")
+                        .at("clash_api")
+                        .at("external_controller") ==
+                    "127.0.0.1:" + std::to_string(clash_fixture.port()) +
+                        "/local" &&
+                full_config.body.at("experimental")
+                        .at("clash_api")
+                        .at("secret") == "local-secret",
+            "full config must render the self profile with runtime Clash settings");
     const auto measured_all =
         request(client, drogon::Post, "/api/proxy/nodes/test-all");
     require(measured_all.status == drogon::k200OK &&

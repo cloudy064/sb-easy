@@ -1,4 +1,6 @@
 #include <charconv>
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -8,9 +10,46 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "sbeasy/http_server.hpp"
 #include "sbeasy/store.hpp"
+
+namespace {
+
+[[nodiscard]] std::string environment(const char* name,
+                                      std::string fallback = {}) {
+    const auto* value = std::getenv(name);
+    return value == nullptr ? std::move(fallback) : std::string{value};
+}
+
+[[nodiscard]] bool environment_flag(const char* name, bool fallback) {
+    auto value = environment(name);
+    if (value.empty()) {
+        return fallback;
+    }
+    std::ranges::transform(value, value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+[[nodiscard]] std::uint64_t environment_integer(const char* name,
+                                                std::uint64_t fallback) {
+    const auto value = environment(name);
+    if (value.empty()) {
+        return fallback;
+    }
+    std::uint64_t parsed{};
+    const auto [end, error] =
+        std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (error != std::errc{} || end != value.data() + value.size()) {
+        throw std::invalid_argument(std::string{name} + " must be an integer");
+    }
+    return parsed;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     try {
@@ -59,6 +98,16 @@ int main(int argc, char** argv) {
         if (const auto* secret = std::getenv("SINGBOX_API_SECRET"); secret != nullptr) {
             options.clash_api_secret = secret;
         }
+        options.singbox_managed =
+            environment_flag("SINGBOX_MANAGED", false);
+        options.singbox_binary = environment("SINGBOX_BIN", "sing-box");
+        options.self_singbox_config_path =
+            environment("SELF_SINGBOX_CONFIG_PATH");
+        options.self_singbox_interval_seconds =
+            std::max<std::uint64_t>(
+                environment_integer("SELF_SINGBOX_INTERVAL", 10), 2U);
+        options.singbox_validate_config =
+            environment_flag("SINGBOX_VALIDATE_CONFIG", true);
         auto store = std::make_shared<sbeasy::Store>(std::filesystem::path{argv[1]},
                                                      std::filesystem::path{argv[2]});
         sbeasy::run_http_server(store, options);

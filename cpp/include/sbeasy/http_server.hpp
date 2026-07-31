@@ -20,6 +20,11 @@ struct HttpServerOptions {
     std::string admin_password{"admin"};
     std::string clash_api_url{"http://127.0.0.1:9090"};
     std::string clash_api_secret;
+    bool singbox_managed{false};
+    std::string singbox_binary{"sing-box"};
+    std::string self_singbox_config_path;
+    std::uint64_t self_singbox_interval_seconds{10};
+    bool singbox_validate_config{true};
     std::string wireguard_interface{"wg0"};
     std::uint16_t wireguard_port{51820};
     std::string wireguard_address{"10.59.32.1/24"};

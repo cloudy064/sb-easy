@@ -64,7 +64,8 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
   sing-box config.
 - [x] Authenticated Clash WebSocket proxying for live traffic, logs,
   connections, and memory.
-- [ ] Local sing-box supervisor.
+- [x] Local sing-box supervisor with validated atomic config, SIGHUP reload,
+  hard restart, crash backoff, and graceful child cleanup.
 
 The WebSocket bridge rejects invalid query JWTs before protocol upgrade, limits
 the route to the four supported stream kinds, and resolves local or per-host

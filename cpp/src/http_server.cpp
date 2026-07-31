@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <functional>
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,6 +41,7 @@
 #include "sbeasy/config_etag.hpp"
 #include "sbeasy/config_renderer.hpp"
 #include "sbeasy/proxy_parser.hpp"
+#include "sbeasy/singbox_supervisor.hpp"
 #include "sbeasy/store.hpp"
 #include "sbeasy/subscription_fetcher.hpp"
 
@@ -189,6 +192,20 @@ void assign_optional_string(const json& body, const char* field,
         value.pop_back();
     }
     return value;
+}
+
+[[nodiscard]] std::string clash_controller_address(std::string url) {
+    url = trim_trailing_slashes(std::move(url));
+    if (url.starts_with("https://")) {
+        url.erase(0, 8);
+    } else if (url.starts_with("http://")) {
+        url.erase(0, 7);
+    } else if (url.starts_with("wss://")) {
+        url.erase(0, 6);
+    } else if (url.starts_with("ws://")) {
+        url.erase(0, 5);
+    }
+    return url;
 }
 
 [[nodiscard]] std::string encode_component(std::string_view value) {
@@ -770,6 +787,71 @@ template <typename Function>
     return found->get<std::string>();
 }
 
+void run_self_singbox(std::stop_token stop,
+                      const std::shared_ptr<Store>& store,
+                      HttpServerOptions options) {
+    auto config_path = trim(options.self_singbox_config_path);
+    if (config_path.empty()) {
+        config_path = "data/sing-box.gen.json";
+    }
+    const auto logged_config_path = config_path;
+    SingBoxSupervisor supervisor({
+        .binary = options.singbox_binary,
+        .config_path = std::move(config_path),
+        .validate_config = options.singbox_validate_config,
+    });
+    const auto interval = std::chrono::seconds{
+        std::max<std::uint64_t>(options.self_singbox_interval_seconds, 2U)};
+    std::optional<std::string> last_etag;
+    std::optional<std::string> logged_error;
+    std::mutex wait_mutex;
+    std::condition_variable_any wakeup;
+
+    LOG_INFO << "managed sing-box enabled: binary=" << options.singbox_binary
+             << " config=" << logged_config_path
+             << " interval=" << interval.count() << "s";
+    while (!stop.stop_requested()) {
+        try {
+            const auto host = store->find_host("self");
+            if (host.has_value() && host->enabled &&
+                host->capabilities.value("runs_singbox", false)) {
+                auto request = store->render_request_for_host("self");
+                request.clash_controller =
+                    clash_controller_address(options.clash_api_url);
+                request.clash_secret = options.clash_api_secret;
+                const ConfigRenderer renderer;
+                const auto body = renderer.render(request).dump(2);
+                const auto etag =
+                    config_etag("self", body, options.config_hash_seed);
+                if (!last_etag.has_value() || *last_etag != etag) {
+                    supervisor.apply_config(body);
+                    last_etag = etag;
+                    LOG_INFO << "managed sing-box config applied: " << etag;
+                }
+            }
+            supervisor.ensure_alive();
+            if (supervisor.last_error().has_value() &&
+                supervisor.last_error() != logged_error) {
+                LOG_ERROR << *supervisor.last_error();
+                logged_error = supervisor.last_error();
+            } else if (!supervisor.last_error().has_value()) {
+                logged_error.reset();
+            }
+        } catch (const std::exception& error) {
+            const std::string message{error.what()};
+            if (!logged_error.has_value() || *logged_error != message) {
+                LOG_ERROR << "managed sing-box cycle failed: " << message;
+                logged_error = message;
+            }
+        }
+
+        std::unique_lock lock{wait_mutex};
+        static_cast<void>(
+            wakeup.wait_for(lock, stop, interval, [] { return false; }));
+    }
+    supervisor.stop();
+}
+
 } // namespace
 
 void register_http_routes(const std::shared_ptr<Store>& store,
@@ -1045,10 +1127,15 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Put});
     application.registerHandler(
         "/api/config/sing-box/full",
-        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+        [store, local_clash_api, local_clash_secret](
+            const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
             handle(std::move(callback), [&] {
+                auto request = store->render_request_for_host("self");
+                request.clash_controller =
+                    clash_controller_address(local_clash_api);
+                request.clash_secret = local_clash_secret;
                 const ConfigRenderer renderer;
-                return renderer.render(store->render_request_for_host("self"));
+                return renderer.render(request);
             });
         },
         {drogon::Get});
@@ -1767,10 +1854,18 @@ void register_http_routes(const std::shared_ptr<Store>& store,
 void run_http_server(const std::shared_ptr<Store>& store,
                      const HttpServerOptions& options) {
     register_http_routes(store, options);
+    std::jthread managed_singbox;
+    if (options.singbox_managed) {
+        managed_singbox =
+            std::jthread{run_self_singbox, store, options};
+    }
     drogon::app()
         .addListener(options.address, options.port)
         .setThreadNum(options.threads)
         .run();
+    if (managed_singbox.joinable()) {
+        managed_singbox.request_stop();
+    }
 }
 
 } // namespace sbeasy

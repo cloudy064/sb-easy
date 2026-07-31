@@ -173,7 +173,8 @@ std::string AuthService::create_token(const std::string& user_id,
         base64url_encode(reinterpret_cast<const unsigned char*>(payload.data()),
                          payload.size());
     const auto digest = signature(token, secret_);
-    token += "." + base64url_encode(digest.data(), digest.size());
+    token.push_back('.');
+    token += base64url_encode(digest.data(), digest.size());
     return token;
 }
 

@@ -1,4 +1,5 @@
 #include "sbeasy/clash_client.hpp"
+#include "sbeasy/version.hpp"
 
 #include <chrono>
 #include <memory>
@@ -85,7 +86,8 @@ class ClashClient::Impl final {
         const auto address = parse_base_url(target.base_url);
         auto client = drogon::HttpClient::newHttpClient(
             address.origin, event_loop_.getLoop(), false, true);
-        client->setUserAgent("sb-easy-cpp/0.1.0");
+        client->setUserAgent("sb-easy-cpp/" +
+                             std::string{application_version});
 
         auto request = drogon::HttpRequest::newHttpRequest();
         request->setMethod(method);

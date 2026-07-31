@@ -36,6 +36,7 @@ struct HttpServerOptions {
     std::string wireguard_config_directory{"/etc/wireguard"};
     std::string static_directory{"frontend/dist"};
     std::string cors_origins;
+    std::string log_level{"info"};
 };
 
 void register_http_routes(const std::shared_ptr<Store>& store,

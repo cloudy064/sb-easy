@@ -2,13 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [master, "feat/**"]
+    branches: [master, "feat/**", "rewrite/**"]
   pull_request:
     branches: [master]
 
 jobs:
-  backend:
-    name: Backend (build + test)
+  cpp:
+    name: C++ backend (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ git libjsoncpp-dev libsqlite3-dev libssl-dev uuid-dev zlib1g-dev
+      - name: Configure
+        run: cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release -DSB_EASY_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build/cpp --parallel 2
+      - name: Test
+        run: ctest --test-dir build/cpp --output-on-failure
+
+  rust-rollback:
+    name: Rust rollback baseline
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

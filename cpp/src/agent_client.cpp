@@ -1,4 +1,5 @@
 #include "sbeasy/agent_client.hpp"
+#include "sbeasy/version.hpp"
 
 #include <chrono>
 #include <memory>
@@ -88,7 +89,8 @@ class AgentClient::Impl final {
         event_loop_.run();
         client_ =
             drogon::HttpClient::newHttpClient(address_.origin, event_loop_.getLoop());
-        client_->setUserAgent("sb-easy-cpp-agent/0.1.0");
+        client_->setUserAgent("sb-easy-cpp-agent/" +
+                              std::string{application_version});
     }
 
     [[nodiscard]] drogon::HttpResponsePtr

@@ -48,6 +48,7 @@
 #include "sbeasy/singbox_supervisor.hpp"
 #include "sbeasy/store.hpp"
 #include "sbeasy/subscription_fetcher.hpp"
+#include "sbeasy/version.hpp"
 #include "sbeasy/wireguard.hpp"
 
 namespace sbeasy {
@@ -352,6 +353,35 @@ static_file_response(const std::filesystem::path& path, bool immutable) {
                         immutable ? "public, max-age=31536000, immutable"
                                   : "no-cache");
     return response;
+}
+
+[[nodiscard]] trantor::Logger::LogLevel
+log_level(std::string configured) {
+    configured = trim(std::move(configured));
+    std::ranges::transform(configured, configured.begin(),
+                           [](unsigned char character) {
+                               return static_cast<char>(std::tolower(character));
+                           });
+    if (configured == "trace") {
+        return trantor::Logger::kTrace;
+    }
+    if (configured == "debug") {
+        return trantor::Logger::kDebug;
+    }
+    if (configured == "warn" || configured == "warning") {
+        return trantor::Logger::kWarn;
+    }
+    if (configured == "error") {
+        return trantor::Logger::kError;
+    }
+    if (configured == "fatal") {
+        return trantor::Logger::kFatal;
+    }
+    if (configured.empty() || configured == "info") {
+        return trantor::Logger::kInfo;
+    }
+    throw std::invalid_argument(
+        "LOG_LEVEL must be trace, debug, info, warn, error, or fatal");
 }
 
 [[nodiscard]] std::string clash_controller_address(std::string url) {
@@ -1188,7 +1218,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
             handle(std::move(callback), [&] {
                 return json{
-                    {"version", "0.1.0"},
+                    {"version", application_version},
                     {"status", "running"},
                     {"wireguard",
                      {{"peer_count", store->list_wireguard_peers().size()}}},
@@ -1205,6 +1235,16 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             callback(json_response({{"lines", server_logs->lines()}}));
         },
         {drogon::Get});
+    application.registerHandler(
+        "/api/system/migrate/wg-easy",
+        [](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            callback(json_response(
+                {{"status", "not_implemented"},
+                 {"message",
+                  "wg-easy migration coming in a future update. Use manual "
+                  "import for now."}}));
+        },
+        {drogon::Post});
     application.registerHandler(
         "/api/auth/login",
         [store, auth](const drogon::HttpRequestPtr& request,
@@ -2484,6 +2524,7 @@ void run_http_server(const std::shared_ptr<Store>& store,
         drogon::app()
             .addListener(options.address, options.port)
             .setThreadNum(options.threads)
+            .setLogLevel(log_level(options.log_level))
             .run();
     } catch (...) {
         if (managed_singbox.joinable()) {

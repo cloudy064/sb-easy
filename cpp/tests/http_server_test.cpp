@@ -666,7 +666,8 @@ void run_contract() {
             "missing frontend assets must not fall back to index.html");
     const auto public_status = request(client, drogon::Get, "/api/system/status");
     require(public_status.status == drogon::k200OK &&
-                public_status.body.at("status") == "running",
+                public_status.body.at("status") == "running" &&
+                public_status.body.at("version") == "1.0.0",
             "system status must remain public for health dashboards");
     require(request(client, drogon::Get, "/api/hosts").status ==
                 drogon::k401Unauthorized,
@@ -678,6 +679,11 @@ void run_contract() {
                 login.body.at("token").is_string(),
             "the seeded administrator must be able to log in");
     default_bearer_token = login.body.at("token").get<std::string>();
+    const auto migration_placeholder =
+        request(client, drogon::Post, "/api/system/migrate/wg-easy");
+    require(migration_placeholder.status == drogon::k200OK &&
+                migration_placeholder.body.at("status") == "not_implemented",
+            "the legacy wg-easy migration placeholder must preserve its contract");
     const auto missing_api =
         request(client, drogon::Get, "/api/not-a-real-route");
     require(missing_api.status == drogon::k404NotFound &&

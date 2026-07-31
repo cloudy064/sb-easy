@@ -7,6 +7,7 @@
 
 #include "sbeasy/config_renderer.hpp"
 #include "sbeasy/store.hpp"
+#include "sbeasy/version.hpp"
 
 namespace {
 
@@ -43,7 +44,7 @@ void usage(const char* executable) {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string{argv[1]} == "--version") {
-            std::cout << "sb-easy-cpp 0.1.0\n";
+            std::cout << "sb-easy-cpp " << sbeasy::application_version << '\n';
             return 0;
         }
 

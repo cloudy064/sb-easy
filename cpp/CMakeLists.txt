@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(sb_easy_cpp VERSION 0.1.0 LANGUAGES C CXX)
+project(sb_easy_cpp VERSION 1.0.0 LANGUAGES C CXX)
 
 include(FetchContent)
 include(CTest)

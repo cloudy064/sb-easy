@@ -82,14 +82,15 @@ fallback for hosts whose Clash endpoint cannot be reached by the panel.
 - [x] Settings backup/restore and system log/status parity.
 - [x] Static Vue assets, CORS policy, and SPA fallback.
 
-### M5 — cutover
+### M5 — cutover (implemented)
 
 - [x] Contract test the Rust and C++ servers against the same temporary
   database.
 - [x] Run both backends in sequential shadow rendering mode and compare
   generated configs.
-- Switch Docker entrypoint to `sb-easy-cpp`.
-- Retire Rust sources only after parity and rollback validation.
+- [x] Switch the production Docker entrypoint to the C++ server and agent.
+- [x] Keep the Rust sources as a tested rollback/parity baseline during the
+  post-cutover soak period; they are no longer shipped in the image.
 
 ## Script failure policy
 

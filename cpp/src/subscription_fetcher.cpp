@@ -1,4 +1,5 @@
 #include "sbeasy/subscription_fetcher.hpp"
+#include "sbeasy/version.hpp"
 
 #include <chrono>
 #include <memory>
@@ -109,7 +110,8 @@ class SubscriptionFetcher::Impl final {
             const auto address = parse_url(url);
             auto client = drogon::HttpClient::newHttpClient(address.origin,
                                                             event_loop_.getLoop());
-            client->setUserAgent("sb-easy-cpp/0.1.0");
+            client->setUserAgent("sb-easy-cpp/" +
+                                 std::string{application_version});
             auto request = drogon::HttpRequest::newHttpRequest();
             request->setMethod(drogon::Get);
             request->setPath(address.target);

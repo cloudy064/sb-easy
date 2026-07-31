@@ -26,6 +26,7 @@
 #include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
 #include "sbeasy/atomic_file.hpp"
+#include "sbeasy/version.hpp"
 
 extern char** environ;
 
@@ -249,7 +250,9 @@ class AgentRuntime final {
         }
 
         try {
-            client_.report_status("sb-easy-cpp-agent/0.1.0", running_, last_etag_);
+            client_.report_status("sb-easy-cpp-agent/" +
+                                      std::string{sbeasy::application_version},
+                                  running_, last_etag_);
         } catch (const std::exception& error) {
             healthy = false;
             std::cerr << "status report failed: " << error.what() << '\n';

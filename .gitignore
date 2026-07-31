@@ -1,4 +1,5 @@
 /target
+/build
 
 # Node / Vue
 frontend/node_modules/

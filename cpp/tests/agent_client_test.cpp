@@ -30,6 +30,7 @@
 
 #include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
+#include "sbeasy/agent_config.hpp"
 #include "sbeasy/atomic_file.hpp"
 #include "sbeasy/http_server.hpp"
 #include "sbeasy/store.hpp"
@@ -210,6 +211,95 @@ void require(bool condition, const char* message) {
     }
 }
 
+void run_config_transform_contract() {
+    const auto input = nlohmann::json::parse(R"JSON(
+{
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "management-dns",
+        "server": "223.5.5.5",
+        "detour": "wg-internal"
+      }
+    ],
+    "rules": []
+  },
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "Proxy",
+      "outbounds": ["node-a", "node-b"],
+      "default": "node-b"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "node-a",
+      "server": "old.example",
+      "server_port": 443,
+      "detour": "wg-internal"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "node-b",
+      "server": "remote.example",
+      "server_port": 443
+    }
+  ],
+  "route": {
+    "final": "Proxy",
+    "rules": [
+      {"domain_suffix": "example.com", "outbound": "node-b"}
+    ]
+  }
+}
+)JSON");
+    sbeasy::AgentConfigTransformOptions options{
+        .local_proxy_egress = true,
+        .outbound_server_overrides = {{"node-a", "local.example"}},
+        .outbound_overrides = {{"node-b",
+                                {{"type", "socks"},
+                                 {"tag", "local-node-b"},
+                                 {"server", "127.0.0.1"},
+                                 {"server_port", 10'080}}}},
+        .default_proxy_outbound = "node-a",
+    };
+    const auto transformed =
+        nlohmann::json::parse(sbeasy::prepare_agent_config(input.dump(), options));
+    const auto& outbounds = transformed.at("outbounds");
+    require(outbounds.at(0).at("default") == "node-a",
+            "agent transform should select the node-local default outbound");
+    require(outbounds.at(1).at("server") == "local.example" &&
+                !outbounds.at(1).contains("detour"),
+            "agent transform should override servers and remove WG detours");
+    require(outbounds.at(2).at("tag") == "local-node-b" &&
+                outbounds.at(2).at("type") == "socks",
+            "agent transform should replace and rename complete outbounds");
+    require(transformed.at("route").at("rules").at(0).at("outbound") == "local-node-b",
+            "agent transform should rewrite references to renamed outbounds");
+    require(!transformed.at("dns").at("servers").at(0).contains("detour"),
+            "agent transform should remove management DNS detours");
+    require(transformed.at("dns").at("servers").at(1).at("tag") == "proxy-dns" &&
+                transformed.at("dns").at("servers").at(1).at("detour") == "Proxy" &&
+                transformed.at("dns").at("rules").at(0).at("server") == "proxy-dns",
+            "agent transform should install proxy-routed OpenAI DNS");
+
+    auto disabled = options;
+    disabled.local_proxy_egress = false;
+    require(sbeasy::prepare_agent_config(input.dump(), disabled) == input.dump(),
+            "disabled local egress must preserve the panel response byte-for-byte");
+
+    auto invalid_default = options;
+    invalid_default.default_proxy_outbound = "missing-node";
+    bool rejected = false;
+    try {
+        static_cast<void>(sbeasy::prepare_agent_config(input.dump(), invalid_default));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "agent transform should reject a default outside the selector");
+}
+
 void run_contract() {
     bool rejected_url = false;
     try {
@@ -334,6 +424,7 @@ void run_contract() {
 
 int main() {
     try {
+        run_config_transform_contract();
         run_contract();
         std::cout << "[pass] C++ agent client end-to-end contract\n";
         return 0;

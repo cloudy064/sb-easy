@@ -135,18 +135,24 @@ export SB_EASY_SERVER='https://panel.example.com'
 export AGENT_TOKEN='<token returned when the host was created>'
 export SINGBOX_CONFIG_PATH='/etc/sing-box/config.d/90-generated.json'
 export SINGBOX_BIN='sing-box'
-export RELOAD_CMD='systemctl reload sing-box'
-export RESTART_CMD='systemctl restart sing-box'
+export SINGBOX_MANAGED=true
 build/cpp/sb-easy-cpp-agent
 ```
 
-The agent runs `sing-box check -c <temporary-file>` before replacement,
-preserves the last good file when validation fails, fsyncs the new file and its
-directory, then renames it atomically. Reload and restart commands are parsed
-into an argument vector and executed directly without a shell. It reads
-`experimental.clash_api` from that installed config, handles `test-proxies`
-commands, reports each delay progressively, and samples connection/traffic
-telemetry on every poll. Use `--once` for provisioning checks.
+The agent supervises `sing-box run -c <config>` by default, validates and
+atomically installs new configs, reloads the child with SIGHUP, restarts it for
+panel commands, and respawns it after unexpected exits. Set
+`SINGBOX_MANAGED=false` plus `RELOAD_CMD`/`RESTART_CMD` only when an external
+service manager owns sing-box; those commands are parsed into argument vectors
+and executed directly without a shell.
+
+Node-local compatibility settings match the Rust agent:
+`SINGBOX_LOCAL_PROXY_EGRESS`, `SINGBOX_OUTBOUND_SERVER_OVERRIDES`,
+`SINGBOX_OUTBOUND_OVERRIDE_FILE`, and `SINGBOX_DEFAULT_PROXY_OUTBOUND`. The
+agent also reads `experimental.clash_api` from the installed config, handles
+`test-proxies` commands, reports each delay progressively, and samples
+connection/traffic telemetry on every poll. Use `--once` for provisioning
+checks.
 `SINGBOX_VALIDATE_CONFIG=false` is available for isolated development
 environments without a sing-box binary.
 

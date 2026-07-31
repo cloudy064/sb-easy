@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <spawn.h>
 #include <stdexcept>
@@ -25,7 +26,9 @@
 
 #include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
+#include "sbeasy/agent_config.hpp"
 #include "sbeasy/atomic_file.hpp"
+#include "sbeasy/singbox_supervisor.hpp"
 #include "sbeasy/version.hpp"
 
 extern char** environ;
@@ -63,6 +66,74 @@ struct ProcessResult {
         throw std::invalid_argument("AGENT_INTERVAL must be an integer");
     }
     return std::chrono::seconds{std::max<std::uint64_t>(seconds, 2U)};
+}
+
+[[nodiscard]] std::filesystem::path config_path() {
+    auto value = environment("SINGBOX_CONFIG_PATH");
+    if (value.empty()) {
+        value = environment("SELF_SINGBOX_CONFIG_PATH");
+    }
+    return value.empty() ? std::filesystem::path{"data/sing-box.gen.json"}
+                         : std::filesystem::path{value};
+}
+
+[[nodiscard]] std::map<std::string, std::string> outbound_server_overrides() {
+    const auto value = environment("SINGBOX_OUTBOUND_SERVER_OVERRIDES");
+    if (value.empty()) {
+        return {};
+    }
+    const auto parsed = nlohmann::json::parse(value);
+    if (!parsed.is_object()) {
+        throw std::invalid_argument(
+            "SINGBOX_OUTBOUND_SERVER_OVERRIDES must be a JSON object");
+    }
+    std::map<std::string, std::string> overrides;
+    for (const auto& [tag, server] : parsed.items()) {
+        if (!server.is_string()) {
+            throw std::invalid_argument("outbound server override for " + tag +
+                                        " must be a string");
+        }
+        overrides.emplace(tag, server.get<std::string>());
+    }
+    return overrides;
+}
+
+[[nodiscard]] std::map<std::string, nlohmann::json> outbound_overrides() {
+    const auto path = environment("SINGBOX_OUTBOUND_OVERRIDE_FILE");
+    if (path.empty()) {
+        return {};
+    }
+    std::ifstream input{path, std::ios::binary};
+    if (!input) {
+        throw std::runtime_error("cannot read outbound override file: " + path);
+    }
+    const auto parsed = nlohmann::json::parse(input);
+    if (!parsed.is_object()) {
+        throw std::invalid_argument(
+            "SINGBOX_OUTBOUND_OVERRIDE_FILE must contain a JSON object");
+    }
+    std::map<std::string, nlohmann::json> overrides;
+    for (const auto& [tag, outbound] : parsed.items()) {
+        if (!outbound.is_object()) {
+            throw std::invalid_argument("outbound override for " + tag +
+                                        " must be a JSON object");
+        }
+        overrides.emplace(tag, outbound);
+    }
+    return overrides;
+}
+
+[[nodiscard]] sbeasy::AgentConfigTransformOptions transform_options() {
+    auto default_outbound = environment("SINGBOX_DEFAULT_PROXY_OUTBOUND");
+    return {
+        .local_proxy_egress = environment_flag("SINGBOX_LOCAL_PROXY_EGRESS", true),
+        .outbound_server_overrides = outbound_server_overrides(),
+        .outbound_overrides = outbound_overrides(),
+        .default_proxy_outbound =
+            default_outbound.empty()
+                ? std::nullopt
+                : std::optional<std::string>{std::move(default_outbound)},
+    };
 }
 
 [[nodiscard]] std::vector<std::string> split_command_line(std::string_view command) {
@@ -203,13 +274,20 @@ class AgentRuntime final {
   public:
     AgentRuntime()
         : server_(environment("SB_EASY_SERVER")), token_(environment("AGENT_TOKEN")),
-          config_path_(environment("SINGBOX_CONFIG_PATH", "data/sing-box.gen.json")),
+          config_path_(config_path()),
           singbox_bin_(environment("SINGBOX_BIN", "sing-box")),
+          singbox_managed_(environment_flag("SINGBOX_MANAGED", true)),
           reload_command_(split_command_line(
               environment("RELOAD_CMD", "systemctl reload sing-box"))),
           restart_command_(split_command_line(
               environment("RESTART_CMD", "systemctl restart sing-box"))),
           validate_config_(environment_flag("SINGBOX_VALIDATE_CONFIG", true)),
+          transform_options_(transform_options()),
+          supervisor_({
+              .binary = singbox_bin_,
+              .config_path = config_path_,
+              .validate_config = validate_config_,
+          }),
           client_({.server = server_, .token = token_}), clash_(config_path_) {
         if (server_.empty()) {
             throw std::invalid_argument("SB_EASY_SERVER is required");
@@ -228,8 +306,16 @@ class AgentRuntime final {
             }
         } catch (const std::exception& error) {
             healthy = false;
-            running_ = false;
             std::cerr << "config poll/apply failed: " << error.what() << '\n';
+        }
+
+        if (singbox_managed_) {
+            supervisor_.ensure_alive();
+            running_ = supervisor_.running();
+            if (supervisor_.last_error().has_value()) {
+                healthy = false;
+                std::cerr << "managed sing-box: " << *supervisor_.last_error() << '\n';
+            }
         }
 
         try {
@@ -262,6 +348,16 @@ class AgentRuntime final {
 
   private:
     void apply_config(const sbeasy::AgentConfigResponse& config) {
+        const auto prepared =
+            sbeasy::prepare_agent_config(config.body, transform_options_);
+        if (singbox_managed_) {
+            supervisor_.apply_config(prepared);
+            running_ = supervisor_.running();
+            last_etag_ = config.etag;
+            std::cout << "applied config " << config.etag << '\n';
+            return;
+        }
+
         const auto previous = read_existing(config_path_);
         const auto validator = [this](const std::filesystem::path& temporary) {
             if (!validate_config_) {
@@ -274,7 +370,7 @@ class AgentRuntime final {
                                          checked.detail);
             }
         };
-        sbeasy::atomic_replace_file(config_path_, config.body, validator);
+        sbeasy::atomic_replace_file(config_path_, prepared, validator);
 
         const auto reloaded = run_program(reload_command_);
         if (!reloaded.success) {
@@ -294,10 +390,36 @@ class AgentRuntime final {
             ProcessResult result;
             bool changes_running_state = false;
             if (command.command == "reload") {
-                result = run_program(reload_command_);
+                if (singbox_managed_) {
+                    try {
+                        supervisor_.reload();
+                        result = {
+                            .success = supervisor_.running(),
+                            .detail = supervisor_.running() ? "reloaded"
+                                                            : "sing-box did not start",
+                        };
+                    } catch (const std::exception& error) {
+                        result.detail = error.what();
+                    }
+                } else {
+                    result = run_program(reload_command_);
+                }
                 changes_running_state = true;
             } else if (command.command == "restart") {
-                result = run_program(restart_command_);
+                if (singbox_managed_) {
+                    try {
+                        supervisor_.restart();
+                        result = {
+                            .success = supervisor_.running(),
+                            .detail = supervisor_.running() ? "restarted"
+                                                            : "sing-box did not start",
+                        };
+                    } catch (const std::exception& error) {
+                        result.detail = error.what();
+                    }
+                } else {
+                    result = run_program(restart_command_);
+                }
                 changes_running_state = true;
             } else if (command.command == "test-proxies" ||
                        command.command.starts_with("test-proxies ")) {
@@ -320,7 +442,8 @@ class AgentRuntime final {
                 result.detail = "unknown command: " + command.command;
             }
             if (changes_running_state) {
-                running_ = result.success;
+                running_ = singbox_managed_ ? std::optional<bool>{supervisor_.running()}
+                                            : std::optional<bool>{result.success};
             }
             client_.acknowledge_command(command.id, result.success, result.detail);
         }
@@ -330,9 +453,12 @@ class AgentRuntime final {
     std::string token_;
     std::filesystem::path config_path_;
     std::string singbox_bin_;
+    bool singbox_managed_{true};
     std::vector<std::string> reload_command_;
     std::vector<std::string> restart_command_;
     bool validate_config_{true};
+    sbeasy::AgentConfigTransformOptions transform_options_;
+    sbeasy::SingBoxSupervisor supervisor_;
     sbeasy::AgentClient client_;
     sbeasy::AgentClashService clash_;
     std::optional<std::string> last_etag_;

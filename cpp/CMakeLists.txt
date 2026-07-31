@@ -198,6 +198,7 @@ if(SB_EASY_BUILD_HTTP)
     add_library(sb_easy_agent
         src/agent_clash.cpp
         src/agent_client.cpp
+        src/agent_config.cpp
     )
     add_library(sb-easy::agent ALIAS sb_easy_agent)
     target_include_directories(sb_easy_agent

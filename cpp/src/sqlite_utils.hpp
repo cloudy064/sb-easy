@@ -133,6 +133,17 @@ class Statement final {
         return sqlite3_column_int64(statement_, column);
     }
 
+    [[nodiscard]] double real(int column) const {
+        return sqlite3_column_double(statement_, column);
+    }
+
+    [[nodiscard]] std::optional<double> optional_real(int column) const {
+        if (sqlite3_column_type(statement_, column) == SQLITE_NULL) {
+            return std::nullopt;
+        }
+        return real(column);
+    }
+
     [[nodiscard]] std::vector<unsigned char> blob(int column) const {
         const auto* data =
             static_cast<const unsigned char*>(sqlite3_column_blob(statement_, column));

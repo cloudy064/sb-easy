@@ -33,7 +33,9 @@
 
 #include "sbeasy/config_etag.hpp"
 #include "sbeasy/config_renderer.hpp"
+#include "sbeasy/proxy_parser.hpp"
 #include "sbeasy/store.hpp"
+#include "sbeasy/subscription_fetcher.hpp"
 
 namespace sbeasy {
 namespace {
@@ -359,6 +361,169 @@ profile_from_request(const json& body,
     return std::move(*profile);
 }
 
+[[nodiscard]] ProxyRecord require_proxy(Store& store, const std::string& id) {
+    auto node = store.find_proxy_node(id);
+    if (!node.has_value()) {
+        throw NotFoundError("Node not found");
+    }
+    return std::move(*node);
+}
+
+[[nodiscard]] Subscription require_subscription(Store& store, const std::string& id) {
+    auto subscription = store.find_subscription(id);
+    if (!subscription.has_value()) {
+        throw NotFoundError("Subscription not found");
+    }
+    return std::move(*subscription);
+}
+
+[[nodiscard]] std::uint16_t required_port(const json& body, const char* field) {
+    const auto found = body.find(field);
+    if (found == body.end() || !found->is_number_integer()) {
+        throw ValidationError(std::string{field} + " must be an integer");
+    }
+    const auto value = found->get<std::int64_t>();
+    if (value <= 0 || value > 65'535) {
+        throw ValidationError(std::string{field} + " must be between 1 and 65535");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+[[nodiscard]] ProxyRecord proxy_from_create_request(const json& body) {
+    ProxyRecord node;
+    node.tag = required_string(body, "tag");
+    node.node_type = required_string(body, "node_type");
+    node.enabled = body.value("enabled", true);
+    node.server = required_string(body, "server");
+    node.server_port = required_port(body, "server_port");
+    node.protocol_config = required_object(body, "protocol_config");
+    return node;
+}
+
+[[nodiscard]] ProxyRecord proxy_from_update_request(ProxyRecord node,
+                                                    const json& body) {
+    if (const auto tag = body.find("tag"); tag != body.end() && !tag->is_null()) {
+        node.tag = required_string(body, "tag");
+    }
+    if (const auto server = body.find("server");
+        server != body.end() && !server->is_null()) {
+        node.server = required_string(body, "server");
+    }
+    if (const auto port = body.find("server_port");
+        port != body.end() && !port->is_null()) {
+        node.server_port = required_port(body, "server_port");
+    }
+    if (const auto config = body.find("protocol_config");
+        config != body.end() && !config->is_null()) {
+        if (!config->is_object()) {
+            throw ValidationError("protocol_config must be a JSON object");
+        }
+        node.protocol_config = *config;
+    }
+    if (const auto enabled = body.find("enabled");
+        enabled != body.end() && !enabled->is_null()) {
+        if (!enabled->is_boolean()) {
+            throw ValidationError("enabled must be a boolean");
+        }
+        node.enabled = enabled->get<bool>();
+    }
+    return node;
+}
+
+[[nodiscard]] std::string default_subscription_name(const std::string& url) {
+    const auto separator = url.find("://");
+    const auto start = separator == std::string::npos ? 0U : separator + 3U;
+    const auto end = url.find('/', start);
+    auto authority =
+        url.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (const auto at = authority.rfind('@'); at != std::string::npos) {
+        authority.erase(0, at + 1U);
+    }
+    if (authority.starts_with('[')) {
+        if (const auto close = authority.find(']'); close != std::string::npos) {
+            authority = authority.substr(1, close - 1U);
+        }
+    } else if (const auto colon = authority.rfind(':'); colon != std::string::npos) {
+        authority.erase(colon);
+    }
+    return authority.empty() ? "Subscription" : authority;
+}
+
+[[nodiscard]] std::int64_t refresh_interval(const json& body, std::int64_t fallback) {
+    const auto found = body.find("refresh_interval");
+    if (found == body.end() || found->is_null()) {
+        return fallback;
+    }
+    if (!found->is_number_integer()) {
+        throw ValidationError("refresh_interval must be an integer");
+    }
+    const auto value = found->get<std::int64_t>();
+    if (value <= 0) {
+        throw ValidationError("refresh_interval must be positive");
+    }
+    return value;
+}
+
+[[nodiscard]] Subscription subscription_from_create_request(const json& body) {
+    const auto url = required_string(body, "url");
+    if (!body.contains("name") || !body["name"].is_string()) {
+        throw ValidationError("name must be a string");
+    }
+    auto name = trim(body["name"].get<std::string>());
+    if (name.empty()) {
+        name = default_subscription_name(url);
+    }
+    Subscription subscription;
+    subscription.name = std::move(name);
+    subscription.url = url;
+    subscription.enabled = true;
+    subscription.refresh_interval = refresh_interval(body, 3'600);
+    return subscription;
+}
+
+[[nodiscard]] Subscription subscription_from_update_request(Subscription subscription,
+                                                            const json& body) {
+    if (const auto name = body.find("name"); name != body.end() && !name->is_null()) {
+        subscription.name = trim(required_string(body, "name"));
+    }
+    if (const auto url = body.find("url"); url != body.end() && !url->is_null()) {
+        subscription.url = required_string(body, "url");
+    }
+    if (const auto enabled = body.find("enabled");
+        enabled != body.end() && !enabled->is_null()) {
+        if (!enabled->is_boolean()) {
+            throw ValidationError("enabled must be a boolean");
+        }
+        subscription.enabled = enabled->get<bool>();
+    }
+    subscription.refresh_interval =
+        refresh_interval(body, subscription.refresh_interval);
+    return subscription;
+}
+
+[[nodiscard]] SubscriptionFetchResult
+fetch_subscription(Store& store, SubscriptionFetcher& fetcher,
+                   const Subscription& subscription) {
+    std::string body;
+    try {
+        body = fetcher.fetch(subscription.url);
+    } catch (const std::exception& error) {
+        throw ValidationError("Failed to fetch subscription: " +
+                              std::string{error.what()});
+    }
+    const auto nodes = parse_subscription_body(body);
+    const auto upsert = store.upsert_proxy_nodes(nodes, subscription.id);
+    SubscriptionFetchResult result{
+        .added = upsert.added,
+        .updated = upsert.updated,
+        .skipped = 0,
+        .found = nodes.size(),
+        .errors = upsert.errors,
+    };
+    store.record_subscription_fetch(subscription.id, result);
+    return result;
+}
+
 [[nodiscard]] Host require_host(Store& store, const std::string& id) {
     auto host = store.find_host(id);
     if (!host.has_value()) {
@@ -437,6 +602,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
     }
 
     const auto telemetry = std::make_shared<TelemetryStore>();
+    const auto subscription_fetcher = std::make_shared<SubscriptionFetcher>();
     const auto public_server = options.public_server;
     const auto config_hash_seed = options.config_hash_seed;
     const auto legacy_agent_token = trim(options.legacy_agent_token);
@@ -447,6 +613,174 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             callback(json_response({{"status", "ok"}, {"service", "sb-easy-cpp"}}));
         },
         {drogon::Get});
+
+    application.registerHandler(
+        "/api/proxy/nodes",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback),
+                   [&] { return json(store->list_proxy_nodes()); });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/proxy/nodes",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                return json(store->create_proxy_node(
+                    proxy_from_create_request(request_object(request))));
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/proxy/nodes/import",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto body = request_object(request);
+                json config;
+                if (const auto profile_id = body.find("profile_id");
+                    profile_id != body.end() && profile_id->is_string() &&
+                    !profile_id->get_ref<const std::string&>().empty()) {
+                    config =
+                        require_profile(*store, profile_id->get<std::string>()).profile;
+                } else if (const auto raw = body.find("config");
+                           raw != body.end() && raw->is_string()) {
+                    config =
+                        json::parse(raw->get_ref<const std::string&>(), nullptr, false);
+                    if (config.is_discarded()) {
+                        throw ValidationError("Pasted config is not valid JSON");
+                    }
+                } else {
+                    throw ValidationError("Provide either profile_id or config");
+                }
+                const auto parsed = parse_outbound_config(config);
+                const auto result =
+                    store->upsert_proxy_nodes(parsed.nodes, std::nullopt);
+                return json{
+                    {"found", parsed.nodes.size()}, {"added", result.added},
+                    {"updated", result.updated},    {"skipped", parsed.skipped},
+                    {"errors", result.errors},
+                };
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/proxy/nodes/{id}",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback),
+                   [&] { return json(require_proxy(*store, id)); });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/proxy/nodes/{id}",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback), [&] {
+                auto node = require_proxy(*store, id);
+                return json(store->update_proxy_node(proxy_from_update_request(
+                    std::move(node), request_object(request))));
+            });
+        },
+        {drogon::Put});
+    application.registerHandler("/api/proxy/nodes/{id}",
+                                [store](const drogon::HttpRequestPtr&,
+                                        ResponseCallback&& callback,
+                                        const std::string& id) {
+                                    handle(std::move(callback), [&] {
+                                        store->delete_proxy_node(id);
+                                        return json{{"success", true}};
+                                    });
+                                },
+                                {drogon::Delete});
+
+    application.registerHandler(
+        "/api/subscriptions",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback),
+                   [&] { return json(store->list_subscriptions()); });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/subscriptions",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                return json(store->create_subscription(
+                    subscription_from_create_request(request_object(request))));
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/subscriptions/fetch-all",
+        [store, subscription_fetcher](const drogon::HttpRequestPtr&,
+                                      ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                json results = json::array();
+                for (const auto& subscription : store->list_subscriptions()) {
+                    if (!subscription.enabled) {
+                        continue;
+                    }
+                    try {
+                        const auto result = fetch_subscription(
+                            *store, *subscription_fetcher, subscription);
+                        results.push_back({
+                            {"id", subscription.id},
+                            {"name", subscription.name},
+                            {"added", result.added},
+                            {"updated", result.updated},
+                            {"found", result.found},
+                            {"errors", result.errors},
+                        });
+                    } catch (const std::exception& error) {
+                        results.push_back({
+                            {"id", subscription.id},
+                            {"name", subscription.name},
+                            {"error", error.what()},
+                        });
+                    }
+                }
+                return results;
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/subscriptions/{id}",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback),
+                   [&] { return json(require_subscription(*store, id)); });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/subscriptions/{id}",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback), [&] {
+                auto subscription = require_subscription(*store, id);
+                return json(store->update_subscription(subscription_from_update_request(
+                    std::move(subscription), request_object(request))));
+            });
+        },
+        {drogon::Put});
+    application.registerHandler("/api/subscriptions/{id}",
+                                [store](const drogon::HttpRequestPtr&,
+                                        ResponseCallback&& callback,
+                                        const std::string& id) {
+                                    handle(std::move(callback), [&] {
+                                        store->delete_subscription(id);
+                                        return json{{"success", true}};
+                                    });
+                                },
+                                {drogon::Delete});
+    application.registerHandler(
+        "/api/subscriptions/{id}/fetch",
+        [store, subscription_fetcher](const drogon::HttpRequestPtr&,
+                                      ResponseCallback&& callback,
+                                      const std::string& id) {
+            handle(std::move(callback), [&] {
+                return json(fetch_subscription(*store, *subscription_fetcher,
+                                               require_subscription(*store, id)));
+            });
+        },
+        {drogon::Post});
 
     application.registerHandler(
         "/api/hosts/profiles",

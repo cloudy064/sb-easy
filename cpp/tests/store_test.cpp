@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include "sbeasy/config_renderer.hpp"
+#include "sbeasy/proxy_parser.hpp"
 #include "sbeasy/store.hpp"
 
 namespace {
@@ -294,4 +295,102 @@ SB_EASY_TEST("agent repository isolates tokens, status, commands, and latency") 
     sbeasy::test::require(
         !store.find_enabled_host_by_token(created.agent_token).has_value(),
         "disabled hosts must lose agent API access immediately");
+}
+
+SB_EASY_TEST("proxy repository CRUD and imports preserve Rust API shape") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::ProxyRecord manual;
+    manual.tag = "Manual SS";
+    manual.node_type = "shadowsocks";
+    manual.enabled = true;
+    manual.server = "manual.example.com";
+    manual.server_port = 8388;
+    manual.protocol_config = {
+        {"method", "aes-256-gcm"},
+        {"password", "manual-secret"},
+    };
+    const auto created = store.create_proxy_node(std::move(manual));
+    sbeasy::test::require(created.fingerprint.size() == 64U,
+                          "manual proxy should receive a fingerprint");
+    const nlohmann::json serialized = created;
+    sbeasy::test::require(serialized.at("node_type") == "shadowsocks" &&
+                              serialized.at("protocol_config").is_string(),
+                          "proxy JSON should match the Rust model contract");
+
+    auto updated = created;
+    updated.tag = "Manual SS renamed";
+    updated.enabled = false;
+    const auto saved = store.update_proxy_node(std::move(updated));
+    sbeasy::test::require(saved.tag == "Manual SS renamed" && !saved.enabled,
+                          "proxy updates should round-trip");
+
+    const auto imported = sbeasy::parse_subscription_body(
+        "ss://YWVzLTI1Ni1nY206c2VjcmV0@rotate.example.com:443#Provider");
+    auto first = store.upsert_proxy_nodes(imported, std::nullopt);
+    sbeasy::test::require(first.added == 1U && first.updated == 0U &&
+                              first.errors.empty(),
+                          "first provider import should insert a node");
+
+    const auto rotated = sbeasy::parse_subscription_body(
+        "ss://YWVzLTI1Ni1nY206c2VjcmV0@new.example.com:443#Provider");
+    auto second = store.upsert_proxy_nodes(rotated, std::nullopt);
+    sbeasy::test::require(second.added == 0U && second.updated == 1U &&
+                              second.errors.empty(),
+                          "rotated provider addresses should reconcile by tag");
+    const auto nodes = store.list_proxy_nodes();
+    sbeasy::test::require(nodes.size() == 2U && nodes.at(1).server == "new.example.com",
+                          "proxy list should expose the reconciled node");
+
+    store.delete_proxy_node(created.id);
+    sbeasy::test::require(!store.find_proxy_node(created.id).has_value(),
+                          "deleted proxy should disappear");
+}
+
+SB_EASY_TEST("subscription repository records source attribution and fetch results") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::Subscription subscription;
+    subscription.name = "Provider";
+    subscription.url = "https://provider.example/sub";
+    subscription.refresh_interval = 1'800;
+    const auto created = store.create_subscription(std::move(subscription));
+    const auto parsed = sbeasy::parse_subscription_body(
+        "trojan://secret@trojan.example.com:443#Provider-Trojan");
+    const auto imported = store.upsert_proxy_nodes(parsed, created.id);
+    sbeasy::test::require(imported.added == 1U,
+                          "subscription import should insert its node");
+
+    const sbeasy::SubscriptionFetchResult result{
+        .added = imported.added,
+        .updated = imported.updated,
+        .skipped = 0,
+        .found = parsed.size(),
+        .errors = imported.errors,
+    };
+    store.record_subscription_fetch(created.id, result);
+    const auto reloaded = store.find_subscription(created.id);
+    sbeasy::test::require(reloaded.has_value() &&
+                              reloaded->last_fetched_at.has_value() &&
+                              reloaded->last_fetch_result.has_value(),
+                          "fetch metadata should persist on the subscription");
+    const auto metadata = nlohmann::json::parse(*reloaded->last_fetch_result);
+    sbeasy::test::require(metadata.at("total") == 1,
+                          "fetch metadata should retain parsed total");
+    const auto nodes = store.list_proxy_nodes();
+    sbeasy::test::require(nodes.size() == 1U &&
+                              nodes.front().subscription_id == created.id,
+                          "imported nodes should retain source attribution");
+
+    auto disabled = *reloaded;
+    disabled.enabled = false;
+    disabled.refresh_interval = 7'200;
+    const auto saved = store.update_subscription(std::move(disabled));
+    sbeasy::test::require(!saved.enabled && saved.refresh_interval == 7'200,
+                          "subscription updates should round-trip");
+    store.delete_subscription(created.id);
+    sbeasy::test::require(!store.find_subscription(created.id).has_value(),
+                          "deleted subscription should disappear");
 }

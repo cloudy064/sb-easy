@@ -4,6 +4,9 @@ project(sb_easy_cpp VERSION 0.1.0 LANGUAGES C CXX)
 
 include(FetchContent)
 include(CTest)
+# yaml-cpp 0.8.0 still declares compatibility with pre-3.5 CMake. CMake 4
+# requires consumers to state the oldest policy set they permit for subprojects.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 find_package(OpenSSL REQUIRED)
 find_package(SQLite3 REQUIRED)
 if(TARGET SQLite3::SQLite3)
@@ -37,6 +40,23 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    yaml_cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG 0.8.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(yaml_cpp)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # yaml-cpp 0.8.0's emitter uses uint16_t without including <cstdint>.
+    # Newer compilers no longer receive that typedef transitively.
+    target_compile_options(yaml-cpp PRIVATE -include cstdint)
+endif()
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
@@ -77,6 +97,7 @@ add_library(sb_easy_core
     src/config_etag.cpp
     src/config_renderer.cpp
     src/database.cpp
+    src/proxy_parser.cpp
     src/script_engine.cpp
     src/store.cpp
 )
@@ -92,6 +113,7 @@ target_link_libraries(sb_easy_core
         OpenSSL::Crypto
         ${SB_EASY_SQLITE_TARGET}
         qjs
+        yaml-cpp::yaml-cpp
 )
 sb_easy_enable_warnings(sb_easy_core)
 
@@ -100,7 +122,10 @@ target_link_libraries(sb-easy-cpp PRIVATE sb-easy::core)
 sb_easy_enable_warnings(sb-easy-cpp)
 
 if(SB_EASY_BUILD_HTTP)
-    add_library(sb_easy_http src/http_server.cpp)
+    add_library(sb_easy_http
+        src/http_server.cpp
+        src/subscription_fetcher.cpp
+    )
     add_library(sb-easy::http ALIAS sb_easy_http)
     target_include_directories(sb_easy_http
         PUBLIC
@@ -137,6 +162,7 @@ if(BUILD_TESTING)
     add_executable(sb-easy-core-tests
         tests/agent_core_test.cpp
         tests/config_renderer_test.cpp
+        tests/proxy_parser_test.cpp
         tests/script_engine_test.cpp
         tests/store_test.cpp
         tests/test_main.cpp

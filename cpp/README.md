@@ -17,6 +17,9 @@ The current foundation contains:
   acknowledgement, latency reports, and bounded telemetry snapshots;
 - a C++ polling agent with validated, durable atomic config replacement and
   shell-free reload/restart command execution;
+- proxy CRUD and sing-box outbound import, including URI/base64/Clash YAML
+  subscription parsing with fingerprint reconciliation;
+- subscription CRUD and bounded HTTP(S) fetches on an isolated event loop;
 - a CLI renderer for parity fixtures and migration testing;
 - focused tests for rendering, scripting limits, migrations, persistence, and
   live HTTP contracts.
@@ -39,10 +42,12 @@ Dependencies are pinned and fetched by CMake:
 - QuickJS-NG `v0.15.1`;
 - Drogon `v1.9.13`;
 - JSON for Modern C++ `v3.12.0`.
+- yaml-cpp `0.8.0`.
 
-QuickJS is linked statically. The std/os libraries and module loader are not
-linked into the rule engine. SQLite and OpenSSL are system build dependencies;
-OpenSSL SHA-384 is used to produce the same migration checksums as SQLx.
+QuickJS and yaml-cpp are linked statically. The std/os libraries and module
+loader are not linked into the rule engine. SQLite and OpenSSL are system build
+dependencies; OpenSSL SHA-384 is used to produce the same migration checksums
+as SQLx.
 
 ## Try the renderer
 
@@ -74,8 +79,17 @@ Implemented HTTP routes include:
 - `/api/hosts/{id}/config`;
 - `/api/hosts/{id}/commands` and `/api/hosts/{id}/telemetry`;
 - token reveal and rotation routes used by the existing frontend.
+- `/api/proxy/nodes`, node detail CRUD, and outbound import;
+- `/api/subscriptions`, subscription detail CRUD, fetch, and fetch-all;
 - bearer-authenticated `/api/agent/config`, status, commands, latency, and
   telemetry routes.
+
+Subscription fetches accept HTTP(S), verify HTTPS certificates, follow at most
+five redirects, and cap response bodies at 8 MiB. Supported inputs are plain or
+base64 URI lists and Clash YAML. Supported proxy types are Shadowsocks, VMess,
+VLESS, Trojan, Hysteria2, and TUIC. Existing nodes are reconciled by fingerprint
+first and tag second, matching the Rust behavior for providers that rotate
+server addresses.
 
 The server defaults to loopback because authentication has not been migrated
 for the administrative routes yet. Agent routes require a non-empty per-host

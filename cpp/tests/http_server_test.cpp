@@ -1,5 +1,8 @@
+#include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -10,6 +13,11 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -49,6 +57,88 @@ class TemporaryDatabase final {
 
   private:
     std::filesystem::path path_;
+};
+
+class SubscriptionFixture final {
+  public:
+    SubscriptionFixture() {
+        listener_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (listener_ < 0) {
+            throw std::runtime_error("could not create subscription fixture socket");
+        }
+        const int reuse = 1;
+        if (::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                         static_cast<socklen_t>(sizeof(reuse))) != 0) {
+            ::close(listener_);
+            throw std::runtime_error("could not configure subscription fixture socket");
+        }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        if (::bind(listener_, reinterpret_cast<const sockaddr*>(&address),
+                   static_cast<socklen_t>(sizeof(address))) != 0 ||
+            ::listen(listener_, 1) != 0) {
+            ::close(listener_);
+            throw std::runtime_error("could not listen for subscription fixture");
+        }
+        socklen_t size = sizeof(address);
+        if (::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) !=
+            0) {
+            ::close(listener_);
+            throw std::runtime_error("could not resolve subscription fixture port");
+        }
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { serve_once(); });
+    }
+
+    ~SubscriptionFixture() {
+        if (listener_ >= 0) {
+            ::shutdown(listener_, SHUT_RDWR);
+            ::close(listener_);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    SubscriptionFixture(const SubscriptionFixture&) = delete;
+    SubscriptionFixture& operator=(const SubscriptionFixture&) = delete;
+
+    [[nodiscard]] std::uint16_t port() const noexcept {
+        return port_;
+    }
+
+  private:
+    void serve_once() const {
+        const auto client = ::accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC);
+        if (client < 0) {
+            return;
+        }
+        std::array<char, 2'048> request_buffer{};
+        static_cast<void>(
+            ::recv(client, request_buffer.data(), request_buffer.size(), 0));
+
+        const std::string body =
+            "trojan://fixture-secret@fixture.example.com:443#Fixture\n";
+        const auto response =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+        std::size_t sent{};
+        while (sent < response.size()) {
+            const auto count = ::send(client, response.data() + sent,
+                                      response.size() - sent, MSG_NOSIGNAL);
+            if (count <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(count);
+        }
+        ::close(client);
+    }
+
+    int listener_{-1};
+    std::uint16_t port_{};
+    std::thread thread_;
 };
 
 class RunningServer final {
@@ -134,6 +224,7 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
 
 void run_contract() {
     const TemporaryDatabase database;
+    const SubscriptionFixture subscription_fixture;
     auto store = std::make_shared<sbeasy::Store>(
         database.path(), std::filesystem::path{SB_EASY_MIGRATIONS_DIR});
 
@@ -155,6 +246,65 @@ void run_contract() {
     require(health.status == drogon::k200OK &&
                 health.body.at("service") == "sb-easy-cpp",
             "health endpoint should identify the C++ service");
+
+    const auto created_node = request(client, drogon::Post, "/api/proxy/nodes",
+                                      json{
+                                          {"tag", "HTTP SS"},
+                                          {"node_type", "shadowsocks"},
+                                          {"server", "http-proxy.example.com"},
+                                          {"server_port", 8388},
+                                          {"protocol_config",
+                                           {
+                                               {"method", "aes-256-gcm"},
+                                               {"password", "http-secret"},
+                                           }},
+                                      });
+    require(created_node.status == drogon::k200OK &&
+                created_node.body.at("node_type") == "shadowsocks" &&
+                created_node.body.at("protocol_config").is_string(),
+            "proxy creation should preserve the Rust response contract");
+    const auto node_id = created_node.body.at("id").get<std::string>();
+    const auto updated_node =
+        request(client, drogon::Put, "/api/proxy/nodes/" + node_id,
+                json{{"tag", "HTTP SS renamed"}, {"enabled", false}});
+    require(updated_node.status == drogon::k200OK &&
+                updated_node.body.at("tag") == "HTTP SS renamed" &&
+                updated_node.body.at("enabled") == false,
+            "proxy partial updates should preserve omitted fields");
+
+    const auto imported = request(
+        client, drogon::Post, "/api/proxy/nodes/import",
+        json{
+            {"config",
+             R"JSON({"outbounds":[{"type":"vless","tag":"Imported VLESS","server":"vless.example.com","server_port":443,"uuid":"uuid-import","flow":"","packet_encoding":"xudp"}]})JSON"}});
+    require(imported.status == drogon::k200OK && imported.body.at("found") == 1 &&
+                imported.body.at("added") == 1,
+            "sing-box outbound import should add structured nodes");
+
+    const auto created_subscription = request(
+        client, drogon::Post, "/api/subscriptions",
+        json{{"name", ""},
+             {"url", "http://127.0.0.1:" + std::to_string(subscription_fixture.port()) +
+                         "/fixture/subscription"},
+             {"refresh_interval", 900}});
+    require(created_subscription.status == drogon::k200OK &&
+                created_subscription.body.at("name") == "127.0.0.1",
+            "blank subscription names should derive from the URL host");
+    const auto subscription_id = created_subscription.body.at("id").get<std::string>();
+    const auto fetched = request(client, drogon::Post,
+                                 "/api/subscriptions/" + subscription_id + "/fetch");
+    require(fetched.status == drogon::k200OK && fetched.body.at("found") == 1 &&
+                fetched.body.at("added") == 1,
+            "subscription fetch should pull, parse, and persist nodes");
+    const auto fetched_subscription =
+        request(client, drogon::Get, "/api/subscriptions/" + subscription_id);
+    require(fetched_subscription.status == drogon::k200OK &&
+                !fetched_subscription.body.at("last_fetched_at").is_null() &&
+                !fetched_subscription.body.at("last_fetch_result").is_null(),
+            "subscription fetch should persist result metadata");
+    const auto all_nodes = request(client, drogon::Get, "/api/proxy/nodes");
+    require(all_nodes.status == drogon::k200OK && all_nodes.body.size() == 3U,
+            "proxy list should include manual, imported, and subscribed nodes");
 
     const auto profiles = request(client, drogon::Get, "/api/hosts/profiles");
     require(profiles.status == drogon::k200OK && profiles.body.is_array() &&

@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <iomanip>
 #include <optional>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -87,6 +89,60 @@ using nlohmann::json;
         .created_at = statement.text(5),
         .acked_at = statement.optional_text(6),
     };
+}
+
+[[nodiscard]] ProxyRecord read_proxy_record(sqlite::Statement& statement) {
+    const auto raw_port = statement.integer(5);
+    if (raw_port <= 0 || raw_port > 65'535) {
+        throw std::runtime_error("proxy server_port is out of range for node " +
+                                 statement.text(0));
+    }
+    return ProxyRecord{
+        .id = statement.text(0),
+        .tag = statement.text(1),
+        .node_type = statement.text(2),
+        .enabled = statement.integer(3) != 0,
+        .server = statement.text(4),
+        .server_port = static_cast<std::uint16_t>(raw_port),
+        .protocol_config = parse_object(statement.text(6), "proxy protocol_config"),
+        .subscription_id = statement.optional_text(7),
+        .fingerprint = statement.text(8),
+        .latency = statement.optional_real(9),
+        .last_latency_test = statement.optional_text(10),
+        .created_at = statement.text(11),
+        .updated_at = statement.text(12),
+    };
+}
+
+[[nodiscard]] Subscription read_subscription(sqlite::Statement& statement) {
+    return Subscription{
+        .id = statement.text(0),
+        .name = statement.text(1),
+        .url = statement.text(2),
+        .enabled = statement.integer(3) != 0,
+        .refresh_interval = statement.integer(4),
+        .last_fetched_at = statement.optional_text(5),
+        .last_fetch_result = statement.optional_text(6),
+        .created_at = statement.text(7),
+        .updated_at = statement.text(8),
+    };
+}
+
+[[nodiscard]] bool supported_proxy_type(const std::string& type) {
+    static constexpr std::array<std::string_view, 6> supported{
+        "shadowsocks", "vmess", "vless", "trojan", "hysteria2", "tuic"};
+    return std::ranges::find(supported, type) != supported.end();
+}
+
+void validate_proxy(const ProxyRecord& node) {
+    if (node.tag.empty() || node.server.empty() || node.server_port == 0U ||
+        !node.protocol_config.is_object()) {
+        throw ValidationError(
+            "Proxy tag, server, port, and object protocol_config are required");
+    }
+    if (!supported_proxy_type(node.node_type)) {
+        throw ValidationError("Unsupported proxy type: " + node.node_type);
+    }
 }
 
 [[nodiscard]] std::string uuid_v4() {
@@ -213,6 +269,46 @@ void to_json(nlohmann::json& value, const HostCommand& command) {
         {"result", command.result},
         {"created_at", command.created_at},
         {"acked_at", command.acked_at},
+    };
+}
+
+void to_json(nlohmann::json& value, const ProxyRecord& node) {
+    value = nlohmann::json{
+        {"id", node.id},
+        {"tag", node.tag},
+        {"node_type", node.node_type},
+        {"enabled", node.enabled},
+        {"server", node.server},
+        {"server_port", node.server_port},
+        {"protocol_config", node.protocol_config.dump()},
+        {"subscription_id", node.subscription_id},
+        {"fingerprint", node.fingerprint},
+        {"latency", node.latency},
+        {"last_latency_test", node.last_latency_test},
+        {"created_at", node.created_at},
+        {"updated_at", node.updated_at},
+    };
+}
+
+void to_json(nlohmann::json& value, const Subscription& subscription) {
+    value = nlohmann::json{
+        {"id", subscription.id},
+        {"name", subscription.name},
+        {"url", subscription.url},
+        {"enabled", subscription.enabled},
+        {"refresh_interval", subscription.refresh_interval},
+        {"last_fetched_at", subscription.last_fetched_at},
+        {"last_fetch_result", subscription.last_fetch_result},
+        {"created_at", subscription.created_at},
+        {"updated_at", subscription.updated_at},
+    };
+}
+
+void to_json(nlohmann::json& value, const SubscriptionFetchResult& result) {
+    value = nlohmann::json{
+        {"added", result.added},     {"updated", result.updated},
+        {"skipped", result.skipped}, {"found", result.found},
+        {"errors", result.errors},
     };
 }
 
@@ -654,6 +750,352 @@ std::size_t Store::update_proxy_latencies(const nlohmann::json& results) {
     }
     transaction.commit();
     return updated;
+}
+
+std::vector<ProxyRecord> Store::list_proxy_nodes() const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_, "SELECT id, tag, node_type, enabled, server, server_port, "
+                           "protocol_config, subscription_id, fingerprint, latency, "
+                           "last_latency_test, created_at, updated_at "
+                           "FROM proxy_nodes ORDER BY node_type, tag"};
+    std::vector<ProxyRecord> nodes;
+    while (statement.step_row()) {
+        nodes.push_back(read_proxy_record(statement));
+    }
+    return nodes;
+}
+
+std::optional<ProxyRecord> Store::find_proxy_node(const std::string& id) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_, "SELECT id, tag, node_type, enabled, server, server_port, "
+                           "protocol_config, subscription_id, fingerprint, latency, "
+                           "last_latency_test, created_at, updated_at "
+                           "FROM proxy_nodes WHERE id = ?1"};
+    statement.bind(1, id);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    return read_proxy_record(statement);
+}
+
+ProxyRecord Store::create_proxy_node(ProxyRecord node) {
+    validate_proxy(node);
+    if (node.id.empty()) {
+        node.id = uuid_v4();
+    }
+    node.fingerprint =
+        ParsedProxyNode{
+            .node_type = node.node_type,
+            .tag = node.tag,
+            .server = node.server,
+            .server_port = node.server_port,
+            .protocol_config = node.protocol_config,
+        }
+            .fingerprint();
+
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement duplicate{
+            database_.handle_,
+            "SELECT 1 FROM proxy_nodes WHERE tag = ?1 OR fingerprint = ?2 LIMIT 1"};
+        duplicate.bind(1, node.tag);
+        duplicate.bind(2, node.fingerprint);
+        if (duplicate.step_row()) {
+            throw ValidationError(
+                "A proxy with the same tag or fingerprint already exists");
+        }
+        sqlite::Statement statement{
+            database_.handle_,
+            "INSERT INTO proxy_nodes "
+            "(id, tag, node_type, enabled, server, server_port, protocol_config, "
+            "subscription_id, fingerprint, latency, last_latency_test, "
+            "created_at, updated_at) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
+            "datetime('now'), datetime('now'))"};
+        statement.bind(1, node.id);
+        statement.bind(2, node.tag);
+        statement.bind(3, node.node_type);
+        statement.bind(4, node.enabled);
+        statement.bind(5, node.server);
+        statement.bind(6, static_cast<std::int64_t>(node.server_port));
+        statement.bind(7, node.protocol_config.dump());
+        statement.bind(8, node.subscription_id);
+        statement.bind(9, node.fingerprint);
+        statement.bind(10, node.latency);
+        statement.bind(11, node.last_latency_test);
+        statement.step_done();
+    }
+    return *find_proxy_node(node.id);
+}
+
+ProxyRecord Store::update_proxy_node(ProxyRecord node) {
+    validate_proxy(node);
+    if (node.id.empty()) {
+        throw ValidationError("Proxy id is required");
+    }
+    node.fingerprint =
+        ParsedProxyNode{
+            .node_type = node.node_type,
+            .tag = node.tag,
+            .server = node.server,
+            .server_port = node.server_port,
+            .protocol_config = node.protocol_config,
+        }
+            .fingerprint();
+
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement duplicate{database_.handle_,
+                                    "SELECT 1 FROM proxy_nodes WHERE id != ?1 "
+                                    "AND (tag = ?2 OR fingerprint = ?3) LIMIT 1"};
+        duplicate.bind(1, node.id);
+        duplicate.bind(2, node.tag);
+        duplicate.bind(3, node.fingerprint);
+        if (duplicate.step_row()) {
+            throw ValidationError(
+                "A proxy with the same tag or fingerprint already exists");
+        }
+        sqlite::Statement statement{
+            database_.handle_,
+            "UPDATE proxy_nodes SET tag = ?1, node_type = ?2, enabled = ?3, "
+            "server = ?4, server_port = ?5, protocol_config = ?6, "
+            "subscription_id = ?7, fingerprint = ?8, updated_at = datetime('now') "
+            "WHERE id = ?9"};
+        statement.bind(1, node.tag);
+        statement.bind(2, node.node_type);
+        statement.bind(3, node.enabled);
+        statement.bind(4, node.server);
+        statement.bind(5, static_cast<std::int64_t>(node.server_port));
+        statement.bind(6, node.protocol_config.dump());
+        statement.bind(7, node.subscription_id);
+        statement.bind(8, node.fingerprint);
+        statement.bind(9, node.id);
+        statement.step_done();
+        if (sqlite3_changes(database_.handle_) == 0) {
+            throw NotFoundError("Node not found");
+        }
+    }
+    return *find_proxy_node(node.id);
+}
+
+void Store::delete_proxy_node(const std::string& id) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement assignments{database_.handle_,
+                                  "DELETE FROM host_outbounds WHERE node_id = ?1"};
+    assignments.bind(1, id);
+    assignments.step_done();
+    sqlite::Statement node{database_.handle_, "DELETE FROM proxy_nodes WHERE id = ?1"};
+    node.bind(1, id);
+    node.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Node not found");
+    }
+    transaction.commit();
+}
+
+ProxyUpsertResult
+Store::upsert_proxy_nodes(const std::vector<ParsedProxyNode>& nodes,
+                          const std::optional<std::string>& subscription_id) {
+    ProxyUpsertResult result;
+    const std::scoped_lock lock{database_.mutex_};
+    if (subscription_id.has_value()) {
+        sqlite::Statement subscription{database_.handle_,
+                                       "SELECT 1 FROM subscriptions WHERE id = ?1"};
+        subscription.bind(1, *subscription_id);
+        if (!subscription.step_row()) {
+            throw NotFoundError("Subscription not found");
+        }
+    }
+
+    sqlite::Transaction transaction{database_.handle_};
+    for (const auto& node : nodes) {
+        try {
+            ProxyRecord candidate;
+            candidate.tag = node.tag;
+            candidate.node_type = node.node_type;
+            candidate.enabled = true;
+            candidate.server = node.server;
+            candidate.server_port = node.server_port;
+            candidate.protocol_config = node.protocol_config;
+            validate_proxy(candidate);
+            const auto fingerprint = node.fingerprint();
+
+            std::optional<std::string> existing_id;
+            {
+                sqlite::Statement existing{
+                    database_.handle_,
+                    "SELECT id FROM proxy_nodes WHERE fingerprint = ?1 "
+                    "UNION ALL "
+                    "SELECT id FROM proxy_nodes WHERE tag = ?2 "
+                    "AND fingerprint != ?1 LIMIT 1"};
+                existing.bind(1, fingerprint);
+                existing.bind(2, node.tag);
+                if (existing.step_row()) {
+                    existing_id = existing.text(0);
+                }
+            }
+
+            if (existing_id.has_value()) {
+                sqlite::Statement update{
+                    database_.handle_,
+                    "UPDATE proxy_nodes SET tag = ?1, node_type = ?2, "
+                    "server = ?3, server_port = ?4, protocol_config = ?5, "
+                    "fingerprint = ?6, subscription_id = ?7, "
+                    "updated_at = datetime('now') WHERE id = ?8"};
+                update.bind(1, node.tag);
+                update.bind(2, node.node_type);
+                update.bind(3, node.server);
+                update.bind(4, static_cast<std::int64_t>(node.server_port));
+                update.bind(5, node.protocol_config.dump());
+                update.bind(6, fingerprint);
+                update.bind(7, subscription_id);
+                update.bind(8, *existing_id);
+                update.step_done();
+                ++result.updated;
+            } else {
+                sqlite::Statement insert{
+                    database_.handle_,
+                    "INSERT INTO proxy_nodes "
+                    "(id, tag, node_type, enabled, server, server_port, "
+                    "protocol_config, subscription_id, fingerprint, "
+                    "created_at, updated_at) "
+                    "VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, "
+                    "datetime('now'), datetime('now'))"};
+                insert.bind(1, uuid_v4());
+                insert.bind(2, node.tag);
+                insert.bind(3, node.node_type);
+                insert.bind(4, node.server);
+                insert.bind(5, static_cast<std::int64_t>(node.server_port));
+                insert.bind(6, node.protocol_config.dump());
+                insert.bind(7, subscription_id);
+                insert.bind(8, fingerprint);
+                insert.step_done();
+                ++result.added;
+            }
+        } catch (const std::exception& error) {
+            result.errors.push_back("Failed to import " + node.tag + ": " +
+                                    error.what());
+        }
+    }
+    transaction.commit();
+    return result;
+}
+
+std::vector<Subscription> Store::list_subscriptions() const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_,
+        "SELECT id, name, url, enabled, refresh_interval, last_fetched_at, "
+        "last_fetch_result, created_at, updated_at "
+        "FROM subscriptions ORDER BY name"};
+    std::vector<Subscription> subscriptions;
+    while (statement.step_row()) {
+        subscriptions.push_back(read_subscription(statement));
+    }
+    return subscriptions;
+}
+
+std::optional<Subscription> Store::find_subscription(const std::string& id) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_,
+        "SELECT id, name, url, enabled, refresh_interval, last_fetched_at, "
+        "last_fetch_result, created_at, updated_at "
+        "FROM subscriptions WHERE id = ?1"};
+    statement.bind(1, id);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    return read_subscription(statement);
+}
+
+Subscription Store::create_subscription(Subscription subscription) {
+    if (subscription.name.empty() || subscription.url.empty() ||
+        subscription.refresh_interval <= 0) {
+        throw ValidationError(
+            "Subscription name, URL, and positive refresh interval are required");
+    }
+    if (subscription.id.empty()) {
+        subscription.id = uuid_v4();
+    }
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement statement{
+            database_.handle_,
+            "INSERT INTO subscriptions "
+            "(id, name, url, enabled, refresh_interval, last_fetched_at, "
+            "last_fetch_result, created_at, updated_at) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, "
+            "datetime('now'), datetime('now'))"};
+        statement.bind(1, subscription.id);
+        statement.bind(2, subscription.name);
+        statement.bind(3, subscription.url);
+        statement.bind(4, subscription.enabled);
+        statement.bind(5, subscription.refresh_interval);
+        statement.bind(6, subscription.last_fetched_at);
+        statement.bind(7, subscription.last_fetch_result);
+        statement.step_done();
+    }
+    return *find_subscription(subscription.id);
+}
+
+Subscription Store::update_subscription(Subscription subscription) {
+    if (subscription.id.empty() || subscription.name.empty() ||
+        subscription.url.empty() || subscription.refresh_interval <= 0) {
+        throw ValidationError(
+            "Subscription id, name, URL, and positive refresh interval are required");
+    }
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement statement{
+            database_.handle_,
+            "UPDATE subscriptions SET name = ?1, url = ?2, enabled = ?3, "
+            "refresh_interval = ?4, updated_at = datetime('now') WHERE id = ?5"};
+        statement.bind(1, subscription.name);
+        statement.bind(2, subscription.url);
+        statement.bind(3, subscription.enabled);
+        statement.bind(4, subscription.refresh_interval);
+        statement.bind(5, subscription.id);
+        statement.step_done();
+        if (sqlite3_changes(database_.handle_) == 0) {
+            throw NotFoundError("Subscription not found");
+        }
+    }
+    return *find_subscription(subscription.id);
+}
+
+void Store::delete_subscription(const std::string& id) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                "DELETE FROM subscriptions WHERE id = ?1"};
+    statement.bind(1, id);
+    statement.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Subscription not found");
+    }
+}
+
+void Store::record_subscription_fetch(const std::string& id,
+                                      const SubscriptionFetchResult& result) {
+    const json metadata{
+        {"added", result.added},     {"updated", result.updated},
+        {"skipped", result.skipped}, {"total", result.found},
+        {"errors", result.errors},
+    };
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_,
+        "UPDATE subscriptions SET last_fetched_at = datetime('now'), "
+        "last_fetch_result = ?1 WHERE id = ?2"};
+    statement.bind(1, metadata.dump());
+    statement.bind(2, id);
+    statement.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Subscription not found");
+    }
 }
 
 RenderRequest Store::render_request_for_host(const std::string& host_id) const {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -11,6 +12,7 @@
 
 #include "sbeasy/config_renderer.hpp"
 #include "sbeasy/database.hpp"
+#include "sbeasy/proxy_parser.hpp"
 
 namespace sbeasy {
 
@@ -77,6 +79,54 @@ struct HostCommand {
 
 void to_json(nlohmann::json& value, const HostCommand& command);
 
+struct ProxyRecord {
+    std::string id;
+    std::string tag;
+    std::string node_type;
+    bool enabled{true};
+    std::string server;
+    std::uint16_t server_port{};
+    nlohmann::json protocol_config = nlohmann::json::object();
+    std::optional<std::string> subscription_id;
+    std::string fingerprint;
+    std::optional<double> latency;
+    std::optional<std::string> last_latency_test;
+    std::string created_at;
+    std::string updated_at;
+};
+
+void to_json(nlohmann::json& value, const ProxyRecord& node);
+
+struct Subscription {
+    std::string id;
+    std::string name;
+    std::string url;
+    bool enabled{true};
+    std::int64_t refresh_interval{3'600};
+    std::optional<std::string> last_fetched_at;
+    std::optional<std::string> last_fetch_result;
+    std::string created_at;
+    std::string updated_at;
+};
+
+void to_json(nlohmann::json& value, const Subscription& subscription);
+
+struct ProxyUpsertResult {
+    std::size_t added{};
+    std::size_t updated{};
+    std::vector<std::string> errors;
+};
+
+struct SubscriptionFetchResult {
+    std::size_t added{};
+    std::size_t updated{};
+    std::size_t skipped{};
+    std::size_t found{};
+    std::vector<std::string> errors;
+};
+
+void to_json(nlohmann::json& value, const SubscriptionFetchResult& result);
+
 /// Repository facade for the first C++ parity slice.
 ///
 /// It deliberately uses the existing schema and query semantics instead of
@@ -120,6 +170,25 @@ class Store final {
                              const std::optional<std::string>& result);
 
     [[nodiscard]] std::size_t update_proxy_latencies(const nlohmann::json& results);
+
+    [[nodiscard]] std::vector<ProxyRecord> list_proxy_nodes() const;
+    [[nodiscard]] std::optional<ProxyRecord>
+    find_proxy_node(const std::string& id) const;
+    [[nodiscard]] ProxyRecord create_proxy_node(ProxyRecord node);
+    [[nodiscard]] ProxyRecord update_proxy_node(ProxyRecord node);
+    void delete_proxy_node(const std::string& id);
+    [[nodiscard]] ProxyUpsertResult
+    upsert_proxy_nodes(const std::vector<ParsedProxyNode>& nodes,
+                       const std::optional<std::string>& subscription_id);
+
+    [[nodiscard]] std::vector<Subscription> list_subscriptions() const;
+    [[nodiscard]] std::optional<Subscription>
+    find_subscription(const std::string& id) const;
+    [[nodiscard]] Subscription create_subscription(Subscription subscription);
+    [[nodiscard]] Subscription update_subscription(Subscription subscription);
+    void delete_subscription(const std::string& id);
+    void record_subscription_fetch(const std::string& id,
+                                   const SubscriptionFetchResult& result);
 
     [[nodiscard]] RenderRequest
     render_request_for_host(const std::string& host_id) const;

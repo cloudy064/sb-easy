@@ -54,10 +54,10 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 - [x] Status, command, latency, and bounded telemetry transport endpoints.
 - [x] C++ polling agent and validated atomic config replacement.
 
-### M3 — proxy sources and sing-box control
+### M3 — proxy sources and sing-box control (in progress)
 
-- Proxy CRUD and URI/outbound parsers.
-- Subscription fetch/reconciliation.
+- [x] Proxy CRUD and URI/base64/Clash YAML/outbound parsers.
+- [x] Bounded HTTPS subscription fetch and fingerprint/tag reconciliation.
 - sing-box supervisor, Clash telemetry sampling, and Clash API HTTP/WebSocket
   proxying.
 

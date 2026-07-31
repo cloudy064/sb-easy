@@ -9,6 +9,7 @@ include(CTest)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 find_package(OpenSSL REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(Threads REQUIRED)
 if(TARGET SQLite3::SQLite3)
     set(SB_EASY_SQLITE_TARGET SQLite3::SQLite3)
 else()
@@ -40,6 +41,27 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
+    argon2_source
+    URL https://github.com/P-H-C/phc-winner-argon2/archive/refs/tags/20190702.tar.gz
+    URL_HASH SHA256=daf972a89577f8772602bf2eb38b6a3dd3d922bf5724d45e7f9589b5e830442c
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(argon2_source)
+add_library(sb_easy_argon2 STATIC
+    ${argon2_source_SOURCE_DIR}/src/argon2.c
+    ${argon2_source_SOURCE_DIR}/src/blake2/blake2b.c
+    ${argon2_source_SOURCE_DIR}/src/core.c
+    ${argon2_source_SOURCE_DIR}/src/encoding.c
+    ${argon2_source_SOURCE_DIR}/src/ref.c
+    ${argon2_source_SOURCE_DIR}/src/thread.c
+)
+target_include_directories(sb_easy_argon2
+    PUBLIC ${argon2_source_SOURCE_DIR}/include
+    PRIVATE ${argon2_source_SOURCE_DIR}/src
+)
+target_link_libraries(sb_easy_argon2 PRIVATE Threads::Threads)
 
 set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -94,6 +116,7 @@ endif()
 
 add_library(sb_easy_core
     src/atomic_file.cpp
+    src/auth.cpp
     src/config_etag.cpp
     src/config_renderer.cpp
     src/database.cpp
@@ -113,6 +136,7 @@ target_link_libraries(sb_easy_core
         OpenSSL::Crypto
         ${SB_EASY_SQLITE_TARGET}
         qjs
+        sb_easy_argon2
         yaml-cpp::yaml-cpp
 )
 sb_easy_enable_warnings(sb_easy_core)
@@ -176,6 +200,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(sb-easy-core-tests
         tests/agent_core_test.cpp
+        tests/auth_test.cpp
         tests/config_renderer_test.cpp
         tests/proxy_parser_test.cpp
         tests/script_engine_test.cpp

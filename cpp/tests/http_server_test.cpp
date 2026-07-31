@@ -321,6 +321,8 @@ struct ApiResponse {
     std::string etag;
 };
 
+std::string default_bearer_token;
+
 void require(bool condition, const char* message) {
     if (!condition) {
         throw std::runtime_error(message);
@@ -339,6 +341,16 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
     if (body.has_value()) {
         http_request->setContentTypeString("application/json");
         http_request->setBody(body->dump());
+    }
+    const auto has_authorization = std::ranges::any_of(headers, [](const auto& header) {
+        auto name = header.first;
+        std::ranges::transform(name, name.begin(), [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+        return name == "authorization";
+    });
+    if (!default_bearer_token.empty() && !has_authorization) {
+        http_request->addHeader("Authorization", "Bearer " + default_bearer_token);
     }
     for (const auto& [name, value] : headers) {
         http_request->addHeader(name, value);
@@ -383,6 +395,8 @@ void run_contract() {
     options.public_server = "https://panel.example.com";
     options.config_hash_seed = "contract-seed";
     options.legacy_agent_token = "legacy-self-token";
+    options.jwt_secret = "contract-jwt-secret";
+    options.admin_password = "contract-admin-password";
     options.clash_api_url =
         "http://127.0.0.1:" + std::to_string(clash_fixture.port()) + "/local";
     options.clash_api_secret = "local-secret";
@@ -400,6 +414,83 @@ void run_contract() {
     require(health.status == drogon::k200OK &&
                 health.body.at("service") == "sb-easy-cpp",
             "health endpoint should identify the C++ service");
+    const auto public_status = request(client, drogon::Get, "/api/system/status");
+    require(public_status.status == drogon::k200OK &&
+                public_status.body.at("status") == "running",
+            "system status must remain public for health dashboards");
+    require(request(client, drogon::Get, "/api/hosts").status ==
+                drogon::k401Unauthorized,
+            "administrative APIs must reject requests without a JWT");
+    const auto login =
+        request(client, drogon::Post, "/api/auth/login",
+                json{{"username", "admin"}, {"password", "contract-admin-password"}});
+    require(login.status == drogon::k200OK && login.body.at("role") == "admin" &&
+                login.body.at("token").is_string(),
+            "the seeded administrator must be able to log in");
+    default_bearer_token = login.body.at("token").get<std::string>();
+    const auto session = request(client, drogon::Get, "/api/auth/session");
+    require(session.status == drogon::k200OK &&
+                session.body.at("authenticated") == true &&
+                session.body.at("username") == "admin",
+            "session inspection must return verified JWT claims");
+    const auto initial_settings = request(client, drogon::Get, "/api/settings");
+    require(initial_settings.status == drogon::k200OK &&
+                initial_settings.body.at("wireguard_interface").at("interface") ==
+                    "wg0",
+            "settings must merge persisted values with runtime defaults");
+    const auto updated_settings =
+        request(client, drogon::Put, "/api/settings",
+                json{{"general", {{"app_name", "contract-panel"}}}});
+    require(updated_settings.status == drogon::k200OK &&
+                updated_settings.body.at("general").at("app_name") == "contract-panel",
+            "settings mutations must persist supported sections");
+
+    const auto created_viewer = request(client, drogon::Post, "/api/users",
+                                        json{{"username", "contract-viewer"},
+                                             {"password", "viewer-password"},
+                                             {"role", "viewer"}});
+    require(created_viewer.status == drogon::k200OK &&
+                created_viewer.body.at("role") == "viewer" &&
+                !created_viewer.body.contains("password_hash"),
+            "administrators must be able to create viewers without leaking hashes");
+    const auto viewer_id = created_viewer.body.at("id").get<std::string>();
+    const auto viewer_login =
+        request(client, drogon::Post, "/api/auth/login",
+                json{{"username", "contract-viewer"}, {"password", "viewer-password"}});
+    const std::vector<std::pair<std::string, std::string>> viewer_auth{
+        {"Authorization",
+         "Bearer " + viewer_login.body.at("token").get<std::string>()}};
+    require(request(client, drogon::Get, "/api/proxy/nodes", std::nullopt, viewer_auth)
+                    .status == drogon::k200OK,
+            "viewers must retain read access to protected APIs");
+    require(
+        request(client, drogon::Post, "/api/proxy/nodes", json::object(), viewer_auth)
+                .status == drogon::k403Forbidden,
+        "viewers must be blocked before protected mutations run");
+    require(
+        request(client, drogon::Get, "/api/users", std::nullopt, viewer_auth).status ==
+            drogon::k403Forbidden,
+        "user administration must require the admin role");
+    require(request(client, drogon::Post, "/api/users/" + viewer_id + "/password",
+                    json{{"password", "replacement-password"}})
+                    .status == drogon::k200OK,
+            "administrators must be able to reset another user's password");
+    require(request(client, drogon::Delete,
+                    "/api/users/" + store->find_user_by_username("admin")->id)
+                    .status == drogon::k400BadRequest,
+            "administrators must not delete their own account");
+    require(request(client, drogon::Delete, "/api/users/" + viewer_id).status ==
+                drogon::k200OK,
+            "administrators must be able to remove another user");
+    const auto audit = request(client, drogon::Get, "/api/users/audit");
+    require(audit.status == drogon::k200OK && audit.body.is_array() &&
+                std::ranges::any_of(audit.body,
+                                    [](const auto& entry) {
+                                        return entry.at("actor") == "admin" &&
+                                               entry.at("action") == "POST" &&
+                                               entry.at("target") == "/api/users";
+                                    }),
+            "successful administrative mutations must be audit logged");
 
     const auto clash_proxies = request(client, drogon::Get, "/api/sing-box/proxies");
     require(clash_proxies.status == drogon::k200OK &&
@@ -519,6 +610,15 @@ void run_contract() {
     const auto all_nodes = request(client, drogon::Get, "/api/proxy/nodes");
     require(all_nodes.status == drogon::k200OK && all_nodes.body.size() == 3U,
             "proxy list should include manual, imported, and subscribed nodes");
+    const auto outbounds =
+        request(client, drogon::Get, "/api/config/sing-box/outbounds");
+    require(outbounds.status == drogon::k200OK && outbounds.body.is_array() &&
+                outbounds.body.size() == 3U,
+            "config download must render enabled proxy outbounds and auto group");
+    const auto full_config = request(client, drogon::Get, "/api/config/sing-box/full");
+    require(full_config.status == drogon::k200OK &&
+                full_config.body.at("outbounds").is_array(),
+            "full config download must render the self host profile");
     const auto measured_all =
         request(client, drogon::Post, "/api/proxy/nodes/test-all");
     require(measured_all.status == drogon::k200OK &&

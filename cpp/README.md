@@ -24,6 +24,9 @@ The current foundation contains:
   with local/per-host target resolution and bearer secrets;
 - local and remote-agent proxy latency tests, plus agent-side connection and
   traffic telemetry sampling;
+- Argon2id/HS256 administrator sessions, viewer read-only RBAC, user management,
+  and mutation audit logging compatible with the existing database;
+- settings and rendered sing-box config download APIs;
 - a CLI renderer for parity fixtures and migration testing;
 - focused tests for rendering, scripting limits, migrations, persistence, and
   live HTTP contracts.
@@ -44,6 +47,7 @@ ctest --test-dir build/cpp --output-on-failure
 Dependencies are pinned and fetched by CMake:
 
 - QuickJS-NG `v0.15.1`;
+- Argon2 reference implementation `20190702`;
 - Drogon `v1.9.13`;
 - JSON for Modern C++ `v3.12.0`.
 - yaml-cpp `0.8.0`.
@@ -90,6 +94,8 @@ Implemented HTTP routes include:
 - `/api/sing-box/proxies`, group delay, rules, connections, and version
   forwarding, with optional `?host=<id>`;
 - `/api/proxy/nodes/{id}/test-latency` and `/api/proxy/nodes/test-all`;
+- `/api/auth/login`, `/api/auth/session`, `/api/users`, and `/api/users/audit`;
+- `/api/settings` and `/api/config/sing-box/*`;
 - bearer-authenticated `/api/agent/config`, status, commands, latency, and
   telemetry routes.
 
@@ -100,10 +106,10 @@ VLESS, Trojan, Hysteria2, and TUIC. Existing nodes are reconciled by fingerprint
 first and tag second, matching the Rust behavior for providers that rotate
 server addresses.
 
-The server defaults to loopback because authentication has not been migrated
-for the administrative routes yet. Agent routes require a non-empty per-host
-bearer token, but binding the whole service to a public interface is not safe at
-this stage. `AGENT_TOKEN` remains an optional legacy token for the `self` host.
+Administrative routes require a JWT signed by `JWT_SECRET`; viewer accounts are
+read-only and successful mutations are written to `audit_log`. Agent routes use
+their separate non-empty per-host bearer tokens. `AGENT_TOKEN` remains an
+optional legacy token for the `self` host.
 
 Run the C++ polling agent on a managed host:
 

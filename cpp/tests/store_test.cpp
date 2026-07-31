@@ -5,6 +5,7 @@
 #include <string>
 #include <system_error>
 
+#include "sbeasy/auth.hpp"
 #include "sbeasy/config_renderer.hpp"
 #include "sbeasy/proxy_parser.hpp"
 #include "sbeasy/store.hpp"
@@ -40,6 +41,62 @@ class TemporaryDatabase final {
 }
 
 } // namespace
+
+SB_EASY_TEST("user repository preserves roles, passwords, and audit invariants") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    store.ensure_default_admin("initial-password");
+    store.ensure_default_admin("ignored-password");
+    const auto admin = store.find_user_by_username("admin");
+    sbeasy::test::require(
+        admin.has_value() && admin->role == "admin" &&
+            sbeasy::verify_password("initial-password", admin->password_hash) &&
+            !sbeasy::verify_password("ignored-password", admin->password_hash),
+        "default administrator seeding must be idempotent");
+
+    const auto viewer =
+        store.create_user("viewer", sbeasy::hash_password("viewer-password"), "viewer");
+    sbeasy::test::require(store.list_users().size() == 2U && viewer.role == "viewer",
+                          "created users must retain their assigned role");
+    sbeasy::test::require_throws<sbeasy::ConflictError>(
+        [&] {
+            static_cast<void>(store.create_user(
+                "viewer", sbeasy::hash_password("different-password"), "viewer"));
+        },
+        "usernames must remain unique");
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] { store.delete_user(admin->id, admin->id); },
+        "users must not delete their own account");
+
+    store.reset_user_password(viewer.id, sbeasy::hash_password("replacement-password"));
+    const auto reloaded_viewer = store.find_user_by_username("viewer");
+    sbeasy::test::require(reloaded_viewer.has_value() &&
+                              sbeasy::verify_password("replacement-password",
+                                                      reloaded_viewer->password_hash),
+                          "password reset must persist the replacement Argon2 hash");
+    store.delete_user(admin->id, viewer.id);
+    sbeasy::test::require(store.list_users().size() == 1U,
+                          "administrators must be able to delete another user");
+
+    store.record_audit("admin", "POST", std::string{"/api/users"});
+    const auto audit = store.list_audit();
+    sbeasy::test::require(
+        audit.size() == 1U && audit.front().actor == "admin" &&
+            audit.front().action == "POST" && audit.front().target == "/api/users",
+        "successful mutations must be queryable through the audit repository");
+
+    const auto settings = store.app_settings();
+    sbeasy::test::require(settings.at("general").at("app_name") == "sb-easy",
+                          "seeded app settings must decode as JSON");
+    store.update_app_settings(
+        {{"general", {{"app_name", "contract-name"}}}, {"ignored", {{"value", true}}}});
+    const auto updated_settings = store.app_settings();
+    sbeasy::test::require(updated_settings.at("general").at("app_name") ==
+                                  "contract-name" &&
+                              !updated_settings.contains("ignored"),
+                          "settings updates must persist only supported sections");
+}
 
 SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
     const TemporaryDatabase database;

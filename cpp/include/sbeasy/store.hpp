@@ -31,6 +31,32 @@ class ValidationError final : public StoreError {
     using StoreError::StoreError;
 };
 
+class ConflictError final : public StoreError {
+  public:
+    using StoreError::StoreError;
+};
+
+struct UserAccount {
+    std::string id;
+    std::string username;
+    std::string password_hash;
+    std::string role;
+    std::string created_at;
+};
+
+/// Serializes a user without exposing the password hash.
+void to_json(nlohmann::json& value, const UserAccount& user);
+
+struct AuditEntry {
+    std::int64_t id{};
+    std::string timestamp;
+    std::string actor;
+    std::string action;
+    std::optional<std::string> target;
+};
+
+void to_json(nlohmann::json& value, const AuditEntry& entry);
+
 struct ConfigProfile {
     std::string id;
     std::string name;
@@ -135,6 +161,22 @@ class Store final {
   public:
     Store(const std::filesystem::path& database_path,
           const std::filesystem::path& migration_directory);
+
+    void ensure_default_admin(const std::string& password);
+    [[nodiscard]] std::vector<UserAccount> list_users() const;
+    [[nodiscard]] std::optional<UserAccount>
+    find_user_by_username(const std::string& username) const;
+    [[nodiscard]] UserAccount create_user(const std::string& username,
+                                          const std::string& password_hash,
+                                          const std::string& role);
+    void delete_user(const std::string& actor_id, const std::string& user_id);
+    void reset_user_password(const std::string& user_id,
+                             const std::string& password_hash);
+    void record_audit(const std::string& actor, const std::string& action,
+                      const std::optional<std::string>& target);
+    [[nodiscard]] std::vector<AuditEntry> list_audit(std::size_t limit = 200U) const;
+    [[nodiscard]] nlohmann::json app_settings() const;
+    void update_app_settings(const nlohmann::json& sections);
 
     [[nodiscard]] std::vector<ConfigProfile> list_profiles() const;
     [[nodiscard]] std::optional<ConfigProfile>

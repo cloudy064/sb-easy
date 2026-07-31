@@ -72,11 +72,14 @@ streaming bridge would leak runtime traffic and logs. Until that boundary is
 implemented, the polling agent reports bounded connection snapshots and leaves
 the log list empty.
 
-### M4 — WireGuard and administrative APIs
+### M4 — WireGuard and administrative APIs (in progress)
 
-- WireGuard peer provisioning and config generation.
-- Authentication, users, roles, audit, settings, backup/restore.
-- Static Vue assets and SPA fallback.
+- [x] Rust-compatible Argon2id password hashes and HS256 JWT sessions.
+- [x] Protected administrative routes, viewer read-only RBAC, users, and audit.
+- [x] Settings persistence and sing-box config download routes.
+- [ ] WireGuard peer provisioning and config generation.
+- [ ] Settings backup/restore and system log/status parity.
+- [ ] Static Vue assets, CORS policy, and SPA fallback.
 
 ### M5 — cutover
 

@@ -16,12 +16,23 @@
 #include <openssl/rand.h>
 #include <sqlite3.h>
 
+#include "sbeasy/auth.hpp"
 #include "sqlite_utils.hpp"
 
 namespace sbeasy {
 namespace {
 
 using nlohmann::json;
+
+[[nodiscard]] UserAccount read_user(sqlite::Statement& statement) {
+    return UserAccount{
+        .id = statement.text(0),
+        .username = statement.text(1),
+        .password_hash = statement.text(2),
+        .role = statement.text(3),
+        .created_at = statement.text(4),
+    };
+}
 
 [[nodiscard]] ProfileMode parse_profile_mode(const std::string& value) {
     return value == "full" ? ProfileMode::full : ProfileMode::managed;
@@ -240,6 +251,22 @@ void to_json(nlohmann::json& value, const ConfigProfile& profile) {
     };
 }
 
+void to_json(nlohmann::json& value, const UserAccount& user) {
+    value = {
+        {"id", user.id},
+        {"username", user.username},
+        {"role", user.role},
+        {"created_at", user.created_at},
+    };
+}
+
+void to_json(nlohmann::json& value, const AuditEntry& entry) {
+    value = {
+        {"id", entry.id},         {"ts", entry.timestamp},  {"actor", entry.actor},
+        {"action", entry.action}, {"target", entry.target},
+    };
+}
+
 void to_json(nlohmann::json& value, const Host& host) {
     value = nlohmann::json{
         {"id", host.id},
@@ -316,6 +343,181 @@ Store::Store(const std::filesystem::path& database_path,
              const std::filesystem::path& migration_directory)
     : database_(database_path) {
     database_.migrate(migration_directory);
+}
+
+void Store::ensure_default_admin(const std::string& password) {
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement count{database_.handle_, "SELECT COUNT(*) FROM users"};
+        if (count.step_row() && count.integer(0) != 0) {
+            return;
+        }
+    }
+    static_cast<void>(create_user("admin", hash_password(password), "admin"));
+}
+
+std::vector<UserAccount> Store::list_users() const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                "SELECT id, username, password_hash, role, created_at "
+                                "FROM users ORDER BY created_at"};
+    std::vector<UserAccount> users;
+    while (statement.step_row()) {
+        users.push_back(read_user(statement));
+    }
+    return users;
+}
+
+std::optional<UserAccount>
+Store::find_user_by_username(const std::string& username) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                "SELECT id, username, password_hash, role, created_at "
+                                "FROM users WHERE username = ?1 LIMIT 1"};
+    statement.bind(1, username);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    return read_user(statement);
+}
+
+UserAccount Store::create_user(const std::string& username,
+                               const std::string& password_hash,
+                               const std::string& role) {
+    if (username.empty() || password_hash.empty() ||
+        (role != "admin" && role != "viewer")) {
+        throw ValidationError("Invalid user");
+    }
+    const auto id = uuid_v4();
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement duplicate{database_.handle_,
+                                    "SELECT 1 FROM users WHERE username = ?1"};
+        duplicate.bind(1, username);
+        if (duplicate.step_row()) {
+            throw ConflictError("Username already exists");
+        }
+        sqlite::Statement insert{
+            database_.handle_, "INSERT INTO users (id, username, password_hash, role) "
+                               "VALUES (?1, ?2, ?3, ?4)"};
+        insert.bind(1, id);
+        insert.bind(2, username);
+        insert.bind(3, password_hash);
+        insert.bind(4, role);
+        insert.step_done();
+    }
+    auto created = find_user_by_username(username);
+    if (!created.has_value()) {
+        throw std::runtime_error("created user could not be reloaded");
+    }
+    return std::move(*created);
+}
+
+void Store::delete_user(const std::string& actor_id, const std::string& user_id) {
+    if (actor_id == user_id) {
+        throw ValidationError("You cannot delete your own account");
+    }
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement target{database_.handle_, "SELECT role FROM users WHERE id = ?1"};
+    target.bind(1, user_id);
+    if (!target.step_row()) {
+        return;
+    }
+    if (target.text(0) == "admin") {
+        sqlite::Statement count{database_.handle_,
+                                "SELECT COUNT(*) FROM users WHERE role = 'admin'"};
+        if (count.step_row() && count.integer(0) <= 1) {
+            throw ValidationError("Cannot delete the last admin");
+        }
+    }
+    sqlite::Statement remove{database_.handle_, "DELETE FROM users WHERE id = ?1"};
+    remove.bind(1, user_id);
+    remove.step_done();
+}
+
+void Store::reset_user_password(const std::string& user_id,
+                                const std::string& password_hash) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement update{database_.handle_,
+                             "UPDATE users SET password_hash = ?1 WHERE id = ?2"};
+    update.bind(1, password_hash);
+    update.bind(2, user_id);
+    update.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("User not found");
+    }
+}
+
+void Store::record_audit(const std::string& actor, const std::string& action,
+                         const std::optional<std::string>& target) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement insert{
+        database_.handle_,
+        "INSERT INTO audit_log (actor, action, target) VALUES (?1, ?2, ?3)"};
+    insert.bind(1, actor);
+    insert.bind(2, action);
+    insert.bind(3, target);
+    insert.step_done();
+}
+
+std::vector<AuditEntry> Store::list_audit(std::size_t limit) const {
+    const auto bounded =
+        std::min<std::size_t>(std::max<std::size_t>(limit, 1U), 1'000U);
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                "SELECT id, ts, actor, action, target FROM audit_log "
+                                "ORDER BY id DESC LIMIT ?1"};
+    statement.bind(1, static_cast<std::int64_t>(bounded));
+    std::vector<AuditEntry> entries;
+    while (statement.step_row()) {
+        entries.push_back(AuditEntry{
+            .id = statement.integer(0),
+            .timestamp = statement.text(1),
+            .actor = statement.text(2),
+            .action = statement.text(3),
+            .target = statement.optional_text(4),
+        });
+    }
+    return entries;
+}
+
+nlohmann::json Store::app_settings() const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{database_.handle_,
+                                "SELECT key, value FROM app_settings"};
+    json settings = json::object();
+    while (statement.step_row()) {
+        auto value = json::parse(statement.text(1), nullptr, false);
+        if (!value.is_discarded()) {
+            settings[statement.text(0)] = std::move(value);
+        }
+    }
+    return settings;
+}
+
+void Store::update_app_settings(const nlohmann::json& sections) {
+    if (!sections.is_object()) {
+        throw ValidationError("settings must be a JSON object");
+    }
+    static constexpr std::array<std::string_view, 3> allowed{
+        "wireguard_interface", "singbox_connection", "general"};
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    for (const auto key : allowed) {
+        const auto found = sections.find(std::string{key});
+        if (found == sections.end()) {
+            continue;
+        }
+        sqlite::Statement upsert{
+            database_.handle_, "INSERT INTO app_settings (key, value, updated_at) "
+                               "VALUES (?1, ?2, datetime('now')) "
+                               "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                               "updated_at = datetime('now')"};
+        upsert.bind(1, std::string{key});
+        upsert.bind(2, found->dump());
+        upsert.step_done();
+    }
+    transaction.commit();
 }
 
 std::vector<ConfigProfile> Store::list_profiles() const {

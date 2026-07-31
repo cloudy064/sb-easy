@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "sbeasy/http_server.hpp"
 #include "sbeasy/store.hpp"
@@ -42,6 +43,15 @@ int main(int argc, char** argv) {
         }
         if (const auto* token = std::getenv("AGENT_TOKEN"); token != nullptr) {
             options.legacy_agent_token = token;
+        }
+        if (const auto* secret = std::getenv("JWT_SECRET");
+            secret != nullptr && std::string_view{secret}.size() > 0U) {
+            options.jwt_secret = secret;
+        } else {
+            throw std::invalid_argument("JWT_SECRET must be set");
+        }
+        if (const auto* password = std::getenv("ADMIN_PASSWORD"); password != nullptr) {
+            options.admin_password = password;
         }
         if (const auto* url = std::getenv("SINGBOX_API_URL"); url != nullptr) {
             options.clash_api_url = url;

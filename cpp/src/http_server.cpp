@@ -33,6 +33,7 @@
 #endif
 #include <nlohmann/json.hpp>
 
+#include "sbeasy/auth.hpp"
 #include "sbeasy/clash_client.hpp"
 #include "sbeasy/config_etag.hpp"
 #include "sbeasy/config_renderer.hpp"
@@ -56,6 +57,11 @@ class ServiceUnavailableError final : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+class ForbiddenError final : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
 [[nodiscard]] drogon::HttpResponsePtr
 json_response(json body, drogon::HttpStatusCode status = drogon::k200OK) {
     auto response = drogon::HttpResponse::newHttpResponse();
@@ -74,8 +80,12 @@ void handle_response(ResponseCallback&& callback, Function&& function) {
     } catch (const ServiceUnavailableError& error) {
         callback(
             json_response({{"error", error.what()}}, drogon::k503ServiceUnavailable));
+    } catch (const ForbiddenError& error) {
+        callback(json_response({{"error", error.what()}}, drogon::k403Forbidden));
     } catch (const NotFoundError& error) {
         callback(json_response({{"error", error.what()}}, drogon::k404NotFound));
+    } catch (const ConflictError& error) {
+        callback(json_response({{"error", error.what()}}, drogon::k409Conflict));
     } catch (const ValidationError& error) {
         callback(json_response({{"error", error.what()}}, drogon::k400BadRequest));
     } catch (const ScriptError& error) {
@@ -207,6 +217,42 @@ void assign_optional_string(const json& body, const char* field,
         throw ValidationError("Unknown command: " + command);
     }
     return command;
+}
+
+[[nodiscard]] bool safe_method(drogon::HttpMethod method) {
+    return method == drogon::Get || method == drogon::Head || method == drogon::Options;
+}
+
+[[nodiscard]] bool public_api_path(std::string_view path) {
+    return path == "/api/health" || path == "/api/system/status" ||
+           path.starts_with("/api/auth/") || path.starts_with("/api/agent/") ||
+           path.starts_with("/api/sing-box/ws/");
+}
+
+[[nodiscard]] std::optional<std::string>
+bearer_token(const drogon::HttpRequestPtr& request) {
+    constexpr std::string_view prefix{"Bearer "};
+    const auto authorization = request->getHeader("authorization");
+    if (!authorization.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    auto token = trim(authorization.substr(prefix.size()));
+    return token.empty() ? std::nullopt : std::optional<std::string>{std::move(token)};
+}
+
+constexpr std::string_view claims_attribute{"sb-easy.auth.claims"};
+
+[[nodiscard]] const AuthClaims& request_claims(const drogon::HttpRequestPtr& request) {
+    if (!request->attributes()->find(std::string{claims_attribute})) {
+        throw UnauthorizedError("Invalid or expired token");
+    }
+    return request->attributes()->get<AuthClaims>(std::string{claims_attribute});
+}
+
+void require_admin(const AuthClaims& claims) {
+    if (claims.role != "admin") {
+        throw ForbiddenError("Admin role required");
+    }
 }
 
 [[nodiscard]] std::string utc_now() {
@@ -633,6 +679,18 @@ template <typename Function>
     return std::nullopt;
 }
 
+[[nodiscard]] ProxyNode renderer_node(const ProxyRecord& node) {
+    return ProxyNode{
+        .id = node.id,
+        .tag = node.tag,
+        .type = node.node_type,
+        .enabled = node.enabled,
+        .server = node.server,
+        .server_port = node.server_port,
+        .protocol_config = node.protocol_config,
+    };
+}
+
 [[nodiscard]] Host require_host(Store& store, const std::string& id) {
     auto host = store.find_host(id);
     if (!host.has_value()) {
@@ -710,6 +768,8 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         throw std::invalid_argument("HTTP store is required");
     }
 
+    store->ensure_default_admin(options.admin_password);
+    const auto auth = std::make_shared<AuthService>(options.jwt_secret);
     const auto telemetry = std::make_shared<TelemetryStore>();
     const auto subscription_fetcher = std::make_shared<SubscriptionFetcher>();
     const auto clash_client = std::make_shared<ClashClient>();
@@ -718,13 +778,278 @@ void register_http_routes(const std::shared_ptr<Store>& store,
     const auto legacy_agent_token = trim(options.legacy_agent_token);
     const auto local_clash_api = options.clash_api_url;
     const auto local_clash_secret = options.clash_api_secret;
+    const auto wireguard_interface = options.wireguard_interface;
+    const auto wireguard_port = options.wireguard_port;
+    const auto wireguard_address = options.wireguard_address;
+    const auto wireguard_dns = options.wireguard_dns;
+    const auto wireguard_mtu = options.wireguard_mtu;
     auto& application = drogon::app();
+    application.registerPreRoutingAdvice([auth](const drogon::HttpRequestPtr& request,
+                                                drogon::AdviceCallback&& reject,
+                                                drogon::AdviceChainCallback&& proceed) {
+        if (!request->path().starts_with("/api/") || public_api_path(request->path())) {
+            proceed();
+            return;
+        }
+        const auto token = bearer_token(request);
+        const auto claims =
+            token.has_value() ? auth->verify_token(*token) : std::nullopt;
+        if (!claims.has_value()) {
+            reject(json_response({{"error", "Invalid or expired token"}},
+                                 drogon::k401Unauthorized));
+            return;
+        }
+        if (claims->role == "viewer" && !safe_method(request->method())) {
+            reject(json_response({{"error", "Viewer role is read-only"}},
+                                 drogon::k403Forbidden));
+            return;
+        }
+        request->attributes()->insert(std::string{claims_attribute}, *claims);
+        proceed();
+    });
+    application.registerPostHandlingAdvice(
+        [store](const drogon::HttpRequestPtr& request,
+                const drogon::HttpResponsePtr& response) {
+            if (safe_method(request->method()) ||
+                !request->attributes()->find(std::string{claims_attribute}) ||
+                response->statusCode() < 200 || response->statusCode() >= 300) {
+                return;
+            }
+            const auto& claims =
+                request->attributes()->get<AuthClaims>(std::string{claims_attribute});
+            try {
+                store->record_audit(claims.username,
+                                    std::string{request->methodString()},
+                                    request->path());
+            } catch (const std::exception& error) {
+                LOG_ERROR << "audit write failed: " << error.what();
+            }
+        });
     application.registerHandler(
         "/api/health",
         [](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
             callback(json_response({{"status", "ok"}, {"service", "sb-easy-cpp"}}));
         },
         {drogon::Get});
+    application.registerHandler(
+        "/api/system/status",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                return json{
+                    {"version", "0.1.0"},
+                    {"status", "running"},
+                    {"wireguard", {{"peer_count", 0}}},
+                    {"sing_box", {{"node_count", store->list_proxy_nodes().size()}}},
+                    {"subscriptions", {{"count", store->list_subscriptions().size()}}},
+                };
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/auth/login",
+        [store, auth](const drogon::HttpRequestPtr& request,
+                      ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto body = request_object(request);
+                auto username = std::string{"admin"};
+                if (const auto found = body.find("username");
+                    found != body.end() && !found->is_null()) {
+                    if (!found->is_string()) {
+                        throw ValidationError("username must be a string");
+                    }
+                    username = found->get<std::string>();
+                }
+                const auto password = required_string(body, "password");
+                const auto user = store->find_user_by_username(username);
+                if (!user.has_value() ||
+                    !verify_password(password, user->password_hash)) {
+                    throw UnauthorizedError("Invalid credentials");
+                }
+                return json{
+                    {"token", auth->create_token(user->id, user->username, user->role)},
+                    {"username", user->username},
+                    {"role", user->role},
+                };
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/auth/session",
+        [auth](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto token = bearer_token(request);
+                const auto claims =
+                    token.has_value() ? auth->verify_token(*token) : std::nullopt;
+                if (!claims.has_value()) {
+                    throw UnauthorizedError("Invalid or expired token");
+                }
+                return json{
+                    {"username", claims->username},
+                    {"role", claims->role},
+                    {"authenticated", true},
+                };
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/users/audit",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                require_admin(request_claims(request));
+                return json(store->list_audit());
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/users",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                require_admin(request_claims(request));
+                return json(store->list_users());
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/users",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                require_admin(request_claims(request));
+                const auto body = request_object(request);
+                const auto username = required_string(body, "username");
+                const auto password = required_string(body, "password");
+                auto role = std::string{"viewer"};
+                if (const auto found = body.find("role");
+                    found != body.end() && !found->is_null()) {
+                    if (!found->is_string()) {
+                        throw ValidationError("role must be a string");
+                    }
+                    role = found->get<std::string>();
+                }
+                if (trim(username).empty() || password.size() < 4U) {
+                    throw ValidationError(
+                        "Username required, password must be at least 4 characters");
+                }
+                if (role != "admin" && role != "viewer") {
+                    throw ValidationError("Role must be admin or viewer");
+                }
+                return json(
+                    store->create_user(username, hash_password(password), role));
+            });
+        },
+        {drogon::Post});
+    application.registerHandler("/api/users/{id}",
+                                [store](const drogon::HttpRequestPtr& request,
+                                        ResponseCallback&& callback,
+                                        const std::string& id) {
+                                    handle(std::move(callback), [&] {
+                                        const auto& claims = request_claims(request);
+                                        require_admin(claims);
+                                        store->delete_user(claims.subject, id);
+                                        return json{{"success", true}};
+                                    });
+                                },
+                                {drogon::Delete});
+    application.registerHandler(
+        "/api/users/{id}/password",
+        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback), [&] {
+                require_admin(request_claims(request));
+                const auto password =
+                    required_string(request_object(request), "password");
+                if (password.size() < 4U) {
+                    throw ValidationError("Password must be at least 4 characters");
+                }
+                store->reset_user_password(id, hash_password(password));
+                return json{{"success", true}};
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/settings",
+        [store, wireguard_interface, wireguard_port, wireguard_address, wireguard_dns,
+         wireguard_mtu](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                auto settings = store->app_settings();
+                json wireguard{
+                    {"interface", wireguard_interface},
+                    {"listen_port", wireguard_port},
+                    {"address", wireguard_address},
+                    {"dns", wireguard_dns},
+                    {"mtu", wireguard_mtu},
+                };
+                if (const auto saved = settings.find("wireguard_interface");
+                    saved != settings.end() && saved->is_object()) {
+                    for (const auto& [key, value] : saved->items()) {
+                        if (!value.is_null()) {
+                            wireguard[key] = value;
+                        }
+                    }
+                }
+                settings["wireguard_interface"] = std::move(wireguard);
+                return settings;
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/settings",
+        [store, wireguard_interface, wireguard_port, wireguard_address, wireguard_dns,
+         wireguard_mtu](const drogon::HttpRequestPtr& request,
+                        ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                store->update_app_settings(request_object(request));
+                auto settings = store->app_settings();
+                json wireguard{
+                    {"interface", wireguard_interface},
+                    {"listen_port", wireguard_port},
+                    {"address", wireguard_address},
+                    {"dns", wireguard_dns},
+                    {"mtu", wireguard_mtu},
+                };
+                if (const auto saved = settings.find("wireguard_interface");
+                    saved != settings.end() && saved->is_object()) {
+                    for (const auto& [key, value] : saved->items()) {
+                        if (!value.is_null()) {
+                            wireguard[key] = value;
+                        }
+                    }
+                }
+                settings["wireguard_interface"] = std::move(wireguard);
+                return settings;
+            });
+        },
+        {drogon::Put});
+    application.registerHandler(
+        "/api/config/sing-box/full",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const ConfigRenderer renderer;
+                return renderer.render(store->render_request_for_host("self"));
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/config/sing-box/outbounds",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                std::vector<ProxyNode> nodes;
+                for (const auto& record : store->list_proxy_nodes()) {
+                    nodes.push_back(renderer_node(record));
+                }
+                return ConfigRenderer::generate_outbounds(nodes);
+            });
+        },
+        {drogon::Get});
+    application.registerHandler("/api/config/sing-box/outbound/{id}",
+                                [store](const drogon::HttpRequestPtr&,
+                                        ResponseCallback&& callback,
+                                        const std::string& id) {
+                                    handle(std::move(callback), [&] {
+                                        return ConfigRenderer::generate_outbound(
+                                            renderer_node(require_proxy(*store, id)));
+                                    });
+                                },
+                                {drogon::Get});
 
     application.registerHandler(
         "/api/sing-box/proxies",

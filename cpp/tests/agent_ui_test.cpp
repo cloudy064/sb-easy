@@ -93,6 +93,14 @@ void run_contract() {
                 return json{
                     {"running", true},
                     {"server", "https://panel.example"},
+                    {"telemetry",
+                     {{"available", true},
+                      {"sampled_at", "2026-07-31T10:00:00Z"},
+                      {"up", 1024},
+                      {"down", 2048},
+                      {"up_total", 4096},
+                      {"down_total", 8192},
+                      {"conn_count", 3}}},
                 };
             },
         .settings = [&settings] { return settings; },
@@ -160,12 +168,17 @@ void run_contract() {
     require(root.status == drogon::k200OK &&
                 root.content_type.find("text/html") != std::string::npos &&
                 root.body.find("sb-easy Agent") != std::string::npos &&
+                root.body.find("data-view=\"proxies\"") != std::string::npos &&
+                root.body.find("/api/proxies") != std::string::npos &&
+                root.body.find("/api/settings") != std::string::npos &&
+                root.body.find("traffic-chart") != std::string::npos &&
                 root.frame_options == "DENY",
             "authenticated users should receive the secured Agent UI");
 
     const auto status = request(client, drogon::Get, "/api/status");
     require(status.status == drogon::k200OK &&
-                json::parse(status.body).at("running") == true,
+                json::parse(status.body).at("running") == true &&
+                json::parse(status.body).at("telemetry").at("down") == 2048,
             "Agent UI should expose runtime status");
 
     const auto updated = request(client, drogon::Put, "/api/settings",

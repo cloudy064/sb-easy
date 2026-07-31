@@ -412,6 +412,7 @@ class AgentRuntime final {
 
         try {
             if (auto telemetry = clash_.sample_telemetry(); telemetry.has_value()) {
+                update_local_telemetry(*telemetry);
                 client_.report_telemetry(*telemetry);
             }
         } catch (const std::exception& error) {
@@ -512,6 +513,26 @@ class AgentRuntime final {
     void set_running(bool value) {
         std::lock_guard lock{state_mutex_};
         running_ = value;
+    }
+
+    void update_local_telemetry(const nlohmann::json& telemetry) {
+        const auto integer = [&telemetry](const char* field) {
+            const auto found = telemetry.find(field);
+            return found != telemetry.end() &&
+                           (found->is_number_integer() || found->is_number_unsigned())
+                       ? *found
+                       : nlohmann::json{0};
+        };
+        std::lock_guard lock{state_mutex_};
+        last_telemetry_ = {
+            {"available", true},
+            {"sampled_at", current_time_iso8601()},
+            {"up", integer("up")},
+            {"down", integer("down")},
+            {"up_total", integer("up_total")},
+            {"down_total", integer("down_total")},
+            {"conn_count", integer("conn_count")},
+        };
     }
 
     void apply_config(const sbeasy::AgentConfigResponse& config) {
@@ -675,6 +696,7 @@ class AgentRuntime final {
                  {"reload", reload_requested_},
                  {"restart", restart_requested_},
              }},
+            {"telemetry", last_telemetry_},
         };
     }
 
@@ -783,6 +805,10 @@ class AgentRuntime final {
     std::optional<bool> running_;
     std::optional<std::string> last_cycle_;
     std::optional<std::string> last_error_;
+    nlohmann::json last_telemetry_{
+        {"available", false}, {"sampled_at", nullptr}, {"up", 0},         {"down", 0},
+        {"up_total", 0},      {"down_total", 0},       {"conn_count", 0},
+    };
     bool refresh_requested_{false};
     bool reload_requested_{false};
     bool restart_requested_{false};

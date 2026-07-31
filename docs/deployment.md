@@ -96,7 +96,8 @@ cd /root/workspace/sb-easy && docker compose up -d
 
 Agent 本地管理页默认监听 `0.0.0.0:51822`，访问
 `http://AGENT_IP:51822`，用户名默认 `admin`，密码为上面的
-`AGENT_UI_PASSWORD`。可通过 `AGENT_UI_BIND`/`AGENT_UI_USERNAME` 调整。
+`AGENT_UI_PASSWORD`，在独立登录页完成登录。可通过
+`AGENT_UI_BIND`/`AGENT_UI_USERNAME` 调整。
 该端口是明文 HTTP，只应通过可信 LAN/VPN 访问或放到 TLS 反向代理后，并用防火墙限制来源。
 
 ### agent 的 sing-box 如何连内网（WireGuard endpoint）

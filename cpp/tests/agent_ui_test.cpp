@@ -11,7 +11,6 @@
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #endif
 #include <drogon/drogon.h>
-#include <drogon/utils/Utilities.h>
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
@@ -30,7 +29,11 @@ struct Response {
     std::string body;
     std::string content_type;
     std::string authenticate;
+    std::string location;
     std::string frame_options;
+    std::string session_cookie;
+    bool session_cookie_http_only{false};
+    drogon::Cookie::SameSite session_cookie_same_site{drogon::Cookie::SameSite::kNull};
 };
 
 void require(bool condition, const char* message) {
@@ -41,13 +44,10 @@ void require(bool condition, const char* message) {
 
 [[nodiscard]] Response request(const drogon::HttpClientPtr& client,
                                drogon::HttpMethod method, std::string path,
-                               std::string authorization = {}, std::string body = {}) {
+                               std::string body = {}) {
     auto value = drogon::HttpRequest::newHttpRequest();
     value->setMethod(method);
     value->setPath(std::move(path));
-    if (!authorization.empty()) {
-        value->addHeader("Authorization", std::move(authorization));
-    }
     if (!body.empty()) {
         value->setContentTypeString("application/json");
         value->setBody(std::move(body));
@@ -64,7 +64,13 @@ void require(bool condition, const char* message) {
         .body = std::string{response->body()},
         .content_type = response->getHeader("content-type"),
         .authenticate = response->getHeader("www-authenticate"),
+        .location = response->getHeader("location"),
         .frame_options = response->getHeader("x-frame-options"),
+        .session_cookie = response->getCookie("sb_easy_agent_session").value(),
+        .session_cookie_http_only =
+            response->getCookie("sb_easy_agent_session").isHttpOnly(),
+        .session_cookie_same_site =
+            response->getCookie("sb_easy_agent_session").sameSite(),
     };
 }
 
@@ -117,8 +123,7 @@ void run_contract() {
     require(ui.port() != 0, "Agent UI should expose its bound ephemeral port");
     const auto client = drogon::HttpClient::newHttpClient("http://127.0.0.1:" +
                                                           std::to_string(ui.port()));
-    const auto authorization =
-        "Basic " + drogon::utils::base64Encode("local-admin:contract-password");
+    client->enableCookies(true);
 
     const auto health = request(client, drogon::Get, "/health");
     require(health.status == drogon::k200OK &&
@@ -126,23 +131,44 @@ void run_contract() {
             "Agent UI health endpoint should remain available without credentials");
 
     const auto unauthorized = request(client, drogon::Get, "/");
-    require(unauthorized.status == drogon::k401Unauthorized &&
-                unauthorized.authenticate.find("Basic") != std::string::npos,
-            "Agent UI should require Basic authentication");
+    require(unauthorized.status == drogon::k303SeeOther &&
+                unauthorized.location == "/login" && unauthorized.authenticate.empty(),
+            "Agent UI should redirect browsers to a dedicated login page");
 
-    const auto root = request(client, drogon::Get, "/", authorization);
+    const auto login_page = request(client, drogon::Get, "/login");
+    require(login_page.status == drogon::k200OK &&
+                login_page.content_type.find("text/html") != std::string::npos &&
+                login_page.body.find("欢迎回来") != std::string::npos,
+            "Agent UI should render its standalone login form");
+
+    const auto invalid_login =
+        request(client, drogon::Post, "/api/login",
+                json{{"username", "local-admin"}, {"password", "wrong"}}.dump());
+    require(invalid_login.status == drogon::k401Unauthorized &&
+                invalid_login.session_cookie.empty(),
+            "Agent UI should reject invalid login credentials");
+
+    const auto login = request(
+        client, drogon::Post, "/api/login",
+        json{{"username", "local-admin"}, {"password", "contract-password"}}.dump());
+    require(login.status == drogon::k200OK && !login.session_cookie.empty() &&
+                login.session_cookie_http_only &&
+                login.session_cookie_same_site == drogon::Cookie::SameSite::kStrict,
+            "Agent UI login should issue an HttpOnly SameSite session cookie");
+
+    const auto root = request(client, drogon::Get, "/");
     require(root.status == drogon::k200OK &&
                 root.content_type.find("text/html") != std::string::npos &&
                 root.body.find("sb-easy Agent") != std::string::npos &&
                 root.frame_options == "DENY",
             "authenticated users should receive the secured Agent UI");
 
-    const auto status = request(client, drogon::Get, "/api/status", authorization);
+    const auto status = request(client, drogon::Get, "/api/status");
     require(status.status == drogon::k200OK &&
                 json::parse(status.body).at("running") == true,
             "Agent UI should expose runtime status");
 
-    const auto updated = request(client, drogon::Put, "/api/settings", authorization,
+    const auto updated = request(client, drogon::Put, "/api/settings",
                                  json{{"local_proxy_egress", false},
                                       {"default_proxy_outbound", "node-a"},
                                       {"outbound_server_overrides", json::object()},
@@ -154,22 +180,29 @@ void run_contract() {
             "Agent UI should validate and update local settings");
 
     const auto invalid =
-        request(client, drogon::Put, "/api/settings", authorization,
+        request(client, drogon::Put, "/api/settings",
                 R"JSON({"outbound_server_overrides":{"node-a":42}})JSON");
     require(invalid.status == drogon::k400BadRequest,
             "Agent UI should reject invalid setting types");
 
-    const auto action =
-        request(client, drogon::Post, "/api/actions/restart", authorization);
+    const auto action = request(client, drogon::Post, "/api/actions/restart");
     require(action.status == drogon::k200OK &&
                 json::parse(action.body).at("accepted") == true &&
                 requested_action == "restart",
             "Agent UI should queue authenticated runtime actions");
 
-    const auto raw_config = request(client, drogon::Get, "/api/config", authorization);
+    const auto raw_config = request(client, drogon::Get, "/api/config");
     require(raw_config.status == drogon::k200OK &&
                 json::parse(raw_config.body) == config,
             "Agent UI should expose the current local config to authenticated users");
+
+    const auto logout = request(client, drogon::Post, "/api/logout");
+    require(logout.status == drogon::k200OK,
+            "Agent UI should accept an authenticated logout");
+    const auto after_logout = request(client, drogon::Get, "/");
+    require(after_logout.status == drogon::k303SeeOther &&
+                after_logout.location == "/login",
+            "Agent UI logout should revoke the local session");
 }
 
 } // namespace

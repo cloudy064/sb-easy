@@ -149,9 +149,10 @@ service manager owns sing-box; those commands are parsed into argument vectors
 and executed directly without a shell.
 
 With a non-empty `AGENT_UI_PASSWORD`, the Agent also starts a lightweight local
-management page on `0.0.0.0:51822`. Log in with HTTP Basic authentication
-(`AGENT_UI_USERNAME=admin` by default). `AGENT_UI_BIND` changes the listener,
-and `AGENT_UI_ENABLED=false` disables it explicitly. The authenticated page
+management page on `0.0.0.0:51822`. Its standalone login page uses
+`AGENT_UI_USERNAME=admin` by default and creates a 12-hour HttpOnly,
+SameSite=Strict session cookie. `AGENT_UI_BIND` changes the listener, and
+`AGENT_UI_ENABLED=false` disables it explicitly. The authenticated page
 provides status, the current config/proxy summary, durable node-local outbound
 settings, and queued refresh/reload/restart actions. Settings default to
 `agent-ui-settings.json` next to the generated sing-box config and can be moved

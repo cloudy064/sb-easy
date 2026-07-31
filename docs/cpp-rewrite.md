@@ -77,8 +77,9 @@ fallback for hosts whose Clash endpoint cannot be reached by the panel.
 - [x] Rust-compatible Argon2id password hashes and HS256 JWT sessions.
 - [x] Protected administrative routes, viewer read-only RBAC, users, and audit.
 - [x] Settings persistence and sing-box config download routes.
-- [ ] WireGuard peer provisioning and config generation.
-- [ ] Settings backup/restore and system log/status parity.
+- [x] WireGuard peer/managed-host provisioning, kernel sync, client configs,
+  live stats, quotas/expiry, and SVG QR generation.
+- [x] Settings backup/restore and system log/status parity.
 - [ ] Static Vue assets, CORS policy, and SPA fallback.
 
 ### M5 — cutover

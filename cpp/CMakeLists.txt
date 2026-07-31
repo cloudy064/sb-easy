@@ -43,6 +43,20 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 FetchContent_Declare(
+    qrcodegen
+    GIT_REPOSITORY https://github.com/nayuki/QR-Code-generator.git
+    GIT_TAG v1.8.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(qrcodegen)
+add_library(sb_easy_qrcode STATIC
+    ${qrcodegen_SOURCE_DIR}/cpp/qrcodegen.cpp
+)
+target_include_directories(sb_easy_qrcode
+    PUBLIC ${qrcodegen_SOURCE_DIR}/cpp
+)
+
+FetchContent_Declare(
     argon2_source
     URL https://github.com/P-H-C/phc-winner-argon2/archive/refs/tags/20190702.tar.gz
     URL_HASH SHA256=daf972a89577f8772602bf2eb38b6a3dd3d922bf5724d45e7f9589b5e830442c
@@ -124,6 +138,7 @@ add_library(sb_easy_core
     src/script_engine.cpp
     src/singbox_supervisor.cpp
     src/store.cpp
+    src/wireguard.cpp
 )
 add_library(sb-easy::core ALIAS sb_easy_core)
 
@@ -138,6 +153,7 @@ target_link_libraries(sb_easy_core
         ${SB_EASY_SQLITE_TARGET}
         qjs
         sb_easy_argon2
+        sb_easy_qrcode
         yaml-cpp::yaml-cpp
 )
 sb_easy_enable_warnings(sb_easy_core)
@@ -209,6 +225,7 @@ if(BUILD_TESTING)
         tests/singbox_supervisor_test.cpp
         tests/store_test.cpp
         tests/test_main.cpp
+        tests/wireguard_test.cpp
     )
     target_link_libraries(sb-easy-core-tests PRIVATE sb-easy::core)
     target_compile_definitions(sb-easy-core-tests PRIVATE

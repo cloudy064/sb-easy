@@ -27,6 +27,9 @@ The current foundation contains:
 - Argon2id/HS256 administrator sessions, viewer read-only RBAC, user management,
   and mutation audit logging compatible with the existing database;
 - settings and rendered sing-box config download APIs;
+- WireGuard X25519 key generation, peer/managed-host provisioning, client and
+  hub/mesh config generation, live stats/sync, quotas, expiry, and SVG QR codes;
+- JSON backup/restore plus bounded panel log and system status APIs;
 - an opt-in local sing-box supervisor with pre-install validation, atomic
   config replacement, SIGHUP reload, crash recovery, and graceful shutdown;
 - a CLI renderer for parity fixtures and migration testing;
@@ -53,6 +56,7 @@ Dependencies are pinned and fetched by CMake:
 - Drogon `v1.9.13`;
 - JSON for Modern C++ `v3.12.0`.
 - yaml-cpp `0.8.0`.
+- Nayuki QR Code generator `v1.8.0`.
 
 QuickJS and yaml-cpp are linked statically. The std/os libraries and module
 loader are not linked into the rule engine. SQLite and OpenSSL are system build
@@ -104,6 +108,9 @@ Implemented HTTP routes include:
 - `/api/proxy/nodes/{id}/test-latency` and `/api/proxy/nodes/test-all`;
 - `/api/auth/login`, `/api/auth/session`, `/api/users`, and `/api/users/audit`;
 - `/api/settings` and `/api/config/sing-box/*`;
+- `/api/settings/backup`, `/api/settings/restore`, and `/api/system/logs`;
+- `/api/wireguard/peers`, peer config/QR/toggle/one-time-link routes, stats,
+  and sync;
 - bearer-authenticated `/api/agent/config`, status, commands, latency, and
   telemetry routes.
 
@@ -147,6 +154,13 @@ use the session JWT in the `token` query parameter; after verification, the
 bridge resolves the selected `host` and uses only that target's Clash secret for
 the upstream connection. The optional `level` query parameter is forwarded to
 the log stream.
+
+With `WG_ENABLED=true`, server startup creates or synchronizes the configured
+WireGuard interface, persists the server keypair in `app_settings`, and installs
+fixed forwarding/masquerade rules using argument-vector process execution.
+`WG_INTERFACE`, `WG_PORT`, `WG_ADDRESS`, `WG_DNS`, `WG_MTU`, `WG_EGRESS`, and
+`EXTERNAL_HOSTNAME` provide runtime defaults; settings saved by the UI take
+priority. Shutdown removes the interface and the rules it owns.
 
 The core/database test image can be built independently:
 

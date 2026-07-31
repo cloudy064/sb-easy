@@ -383,6 +383,13 @@ struct ApiResponse {
     std::string etag;
 };
 
+struct RawResponse {
+    drogon::HttpStatusCode status;
+    std::string body;
+    std::string content_type;
+    std::string content_disposition;
+};
+
 struct WebSocketResult {
     drogon::ReqResult result;
     drogon::HttpStatusCode status;
@@ -443,6 +450,27 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
         .body = std::move(parsed),
         .raw_body = raw_body,
         .etag = response->getHeader("etag"),
+    };
+}
+
+[[nodiscard]] RawResponse
+raw_request(const drogon::HttpClientPtr& client, std::string path) {
+    auto http_request = drogon::HttpRequest::newHttpRequest();
+    http_request->setMethod(drogon::Get);
+    http_request->setPath(std::move(path));
+    if (!default_bearer_token.empty()) {
+        http_request->addHeader("Authorization",
+                                "Bearer " + default_bearer_token);
+    }
+    auto [result, response] = client->sendRequest(http_request, 2.0);
+    if (result != drogon::ReqResult::Ok || !response) {
+        throw std::runtime_error("raw HTTP request failed");
+    }
+    return {
+        .status = response->statusCode(),
+        .body = std::string{response->body()},
+        .content_type = response->getHeader("content-type"),
+        .content_disposition = response->getHeader("content-disposition"),
     };
 }
 
@@ -540,6 +568,7 @@ void run_contract() {
     options.clash_api_url =
         "http://127.0.0.1:" + std::to_string(clash_fixture.port()) + "/local";
     options.clash_api_secret = "local-secret";
+    options.external_hostname = "vpn.example.com";
     sbeasy::register_http_routes(store, options);
     drogon::app()
         .setLogLevel(trantor::Logger::kWarn)
@@ -610,6 +639,81 @@ void run_contract() {
                 session.body.at("authenticated") == true &&
                 session.body.at("username") == "admin",
             "session inspection must return verified JWT claims");
+    const auto server_logs =
+        request(client, drogon::Get, "/api/system/logs");
+    require(server_logs.status == drogon::k200OK &&
+                server_logs.body.at("lines").is_array() &&
+                !server_logs.body.at("lines").empty(),
+            "system logs must expose the bounded C++ server log buffer");
+    const auto created_peer =
+        request(client, drogon::Post, "/api/wireguard/peers",
+                json{{"name", "Contract phone"},
+                     {"notes", "created over HTTP"},
+                     {"quota_bytes", 1'000'000}});
+    require(created_peer.status == drogon::k200OK &&
+                created_peer.body.at("address") == "10.59.32.2/24" &&
+                created_peer.body.at("private_key").get<std::string>().size() ==
+                    44U &&
+                created_peer.body.at("public_key").get<std::string>().size() ==
+                    44U,
+            "WireGuard peer creation must generate keys and allocate an address");
+    const auto peer_id = created_peer.body.at("id").get<std::string>();
+    const auto peers = request(client, drogon::Get, "/api/wireguard/peers");
+    require(peers.status == drogon::k200OK && peers.body.size() == 1U &&
+                peers.body.at(0).at("kind") == "wg" &&
+                peers.body.at(0).at("expired") == false,
+            "WireGuard peer listing must merge classification and expiry state");
+    const auto updated_peer =
+        request(client, drogon::Put, "/api/wireguard/peers/" + peer_id,
+                json{{"name", "Renamed phone"},
+                     {"persistent_keepalive", 15},
+                     {"allowed_ips", "10.0.0.0/8"}});
+    require(updated_peer.body.at("name") == "Renamed phone" &&
+                updated_peer.body.at("persistent_keepalive") == 15 &&
+                updated_peer.body.at("allowed_ips") == "10.0.0.0/8",
+            "WireGuard peer updates must preserve omitted credentials");
+    require(request(client, drogon::Post,
+                    "/api/wireguard/peers/" + peer_id + "/disable")
+                    .status == drogon::k200OK &&
+                !store->find_wireguard_peer(peer_id)->enabled,
+            "WireGuard disable must persist");
+    require(request(client, drogon::Post,
+                    "/api/wireguard/peers/" + peer_id + "/enable")
+                    .status == drogon::k200OK &&
+                store->find_wireguard_peer(peer_id)->enabled,
+            "WireGuard enable must persist");
+    const auto peer_config =
+        raw_request(client, "/api/wireguard/peers/" + peer_id + "/config");
+    require(peer_config.status == drogon::k200OK &&
+                peer_config.body.find("Endpoint = vpn.example.com:51820") !=
+                    std::string::npos &&
+                peer_config.content_disposition.find("Renamed_phone.conf") !=
+                    std::string::npos,
+            "WireGuard config download must contain the deployment endpoint");
+    const auto peer_qr =
+        raw_request(client, "/api/wireguard/peers/" + peer_id + "/qr");
+    require(peer_qr.status == drogon::k200OK &&
+                peer_qr.content_type.starts_with("image/svg+xml") &&
+                peer_qr.body.find("<svg") != std::string::npos,
+            "WireGuard QR endpoint must return an SVG QR code");
+    const auto one_time = request(
+        client, drogon::Post,
+        "/api/wireguard/peers/" + peer_id + "/one-time-link");
+    require(one_time.body.at("url")
+                    .get<std::string>()
+                    .starts_with("https://vpn.example.com/api/one-time/") &&
+                one_time.body.at("expires_at").is_string(),
+            "WireGuard one-time links must be persisted with a bounded expiry");
+    require(request(client, drogon::Get, "/api/wireguard/stats")
+                    .body.at("peers")
+                    .empty() &&
+                request(client, drogon::Post, "/api/wireguard/sync")
+                        .status == drogon::k200OK,
+            "disabled WireGuard runtime should expose empty stats and safe sync");
+    require(request(client, drogon::Get, "/api/system/status")
+                    .body.at("wireguard")
+                    .at("peer_count") == 1,
+            "system status must report persisted WireGuard peers");
     const auto initial_settings = request(client, drogon::Get, "/api/settings");
     require(initial_settings.status == drogon::k200OK &&
                 initial_settings.body.at("wireguard_interface").at("interface") ==
@@ -787,6 +891,20 @@ void run_contract() {
     const auto all_nodes = request(client, drogon::Get, "/api/proxy/nodes");
     require(all_nodes.status == drogon::k200OK && all_nodes.body.size() == 3U,
             "proxy list should include manual, imported, and subscribed nodes");
+    const auto backup = request(client, drogon::Get, "/api/settings/backup");
+    require(backup.status == drogon::k200OK && backup.body.at("version") == 1 &&
+                backup.body.at("proxy_nodes").size() == 3U &&
+                backup.body.at("wireguard_peers").size() == 1U &&
+                backup.body.at("subscriptions").size() == 1U &&
+                backup.body.at("app_settings").is_object(),
+            "settings backup must export nodes, peers, subscriptions, and settings");
+    const auto restored =
+        request(client, drogon::Post, "/api/settings/restore", backup.body);
+    require(restored.status == drogon::k200OK &&
+                restored.body.at("restored").at("proxy_nodes") == 3 &&
+                restored.body.at("restored").at("wireguard_peers") == 1 &&
+                restored.body.at("restored").at("subscriptions") == 1,
+            "backup restore must idempotently upsert every exported data section");
     const auto outbounds =
         request(client, drogon::Get, "/api/config/sing-box/outbounds");
     require(outbounds.status == drogon::k200OK && outbounds.body.is_array() &&
@@ -887,6 +1005,37 @@ function buildRules(context) {
             "host creation must not expose the Clash secret");
     const auto host_id = created_host.body.at("id").get<std::string>();
     const auto original_token = created_host.body.at("agent_token").get<std::string>();
+    const auto joined_wg = request(
+        client, drogon::Put, "/api/hosts/" + host_id,
+        json{{"capabilities",
+              {{"runs_singbox", true},
+               {"is_wg_member", true},
+               {"is_wg_hub", false},
+               {"is_self", false}}}});
+    require(joined_wg.body.at("wg_address").is_string() &&
+                joined_wg.body.at("wg_public_key").is_string() &&
+                joined_wg.body.at("clash_api")
+                    .get<std::string>()
+                    .starts_with("http://10.59.32."),
+            "enabling host WG membership must provision reachback identity");
+    const auto host_wg =
+        raw_request(client, "/api/hosts/" + host_id + "/wg-config");
+    require(host_wg.status == drogon::k200OK &&
+                host_wg.body.find("# Hub (central server)") !=
+                    std::string::npos &&
+                host_wg.body.find("Endpoint = vpn.example.com:51820") !=
+                    std::string::npos,
+            "managed hosts must be able to download their intranet config");
+    const auto left_wg = request(
+        client, drogon::Put, "/api/hosts/" + host_id,
+        json{{"capabilities",
+              {{"runs_singbox", true},
+               {"is_wg_member", false},
+               {"is_wg_hub", false},
+               {"is_self", false}}}});
+    require(left_wg.status == drogon::k200OK &&
+                store->list_wireguard_peers().size() == 1U,
+            "disabling host WG membership must deprovision its peer");
 
     const auto hosts = request(client, drogon::Get, "/api/hosts");
     require(hosts.status == drogon::k200OK && hosts.body.is_array(),

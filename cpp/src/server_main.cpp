@@ -108,6 +108,36 @@ int main(int argc, char** argv) {
                 environment_integer("SELF_SINGBOX_INTERVAL", 10), 2U);
         options.singbox_validate_config =
             environment_flag("SINGBOX_VALIDATE_CONFIG", true);
+        options.wireguard_enabled =
+            environment_flag("WG_ENABLED", true);
+        options.wireguard_interface =
+            environment("WG_INTERFACE", "wg0");
+        const auto wireguard_port =
+            environment_integer("WG_PORT", 51'820);
+        if (wireguard_port == 0U ||
+            wireguard_port > std::numeric_limits<std::uint16_t>::max()) {
+            throw std::invalid_argument("WG_PORT is out of range");
+        }
+        options.wireguard_port =
+            static_cast<std::uint16_t>(wireguard_port);
+        options.wireguard_address =
+            environment("WG_ADDRESS", "10.59.32.1/24");
+        options.wireguard_dns =
+            environment("WG_DNS", "10.59.32.1");
+        const auto wireguard_mtu =
+            environment_integer("WG_MTU", 1'420);
+        if (wireguard_mtu >
+            std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("WG_MTU is out of range");
+        }
+        options.wireguard_mtu =
+            static_cast<std::uint32_t>(wireguard_mtu);
+        options.wireguard_egress =
+            environment("WG_EGRESS", "eth0");
+        options.external_hostname =
+            environment("EXTERNAL_HOSTNAME", "127.0.0.1");
+        options.wireguard_config_directory =
+            environment("WG_CONFIG_DIRECTORY", "/etc/wireguard");
         auto store = std::make_shared<sbeasy::Store>(std::filesystem::path{argv[1]},
                                                      std::filesystem::path{argv[2]});
         sbeasy::run_http_server(store, options);

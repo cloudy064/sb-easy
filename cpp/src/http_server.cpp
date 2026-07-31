@@ -5,8 +5,10 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <functional>
 #include <future>
 #include <iomanip>
@@ -34,6 +36,7 @@
 #pragma GCC diagnostic pop
 #endif
 #include <nlohmann/json.hpp>
+#include <openssl/rand.h>
 
 #include "sbeasy/auth.hpp"
 #include "sbeasy/clash_client.hpp"
@@ -44,12 +47,48 @@
 #include "sbeasy/singbox_supervisor.hpp"
 #include "sbeasy/store.hpp"
 #include "sbeasy/subscription_fetcher.hpp"
+#include "sbeasy/wireguard.hpp"
 
 namespace sbeasy {
 namespace {
 
 using nlohmann::json;
 using ResponseCallback = std::function<void(const drogon::HttpResponsePtr&)>;
+
+class ServerLogBuffer final {
+  public:
+    void append(std::string_view text) {
+        std::scoped_lock lock{mutex_};
+        std::size_t start{};
+        while (start < text.size()) {
+            const auto end = text.find('\n', start);
+            auto line = std::string{
+                text.substr(start, end == std::string_view::npos
+                                       ? text.size() - start
+                                       : end - start)};
+            if (!line.empty()) {
+                if (lines_.size() >= capacity_) {
+                    lines_.pop_front();
+                }
+                lines_.push_back(std::move(line));
+            }
+            if (end == std::string_view::npos) {
+                break;
+            }
+            start = end + 1U;
+        }
+    }
+
+    [[nodiscard]] std::vector<std::string> lines() const {
+        const std::scoped_lock lock{mutex_};
+        return {lines_.begin(), lines_.end()};
+    }
+
+  private:
+    static constexpr std::size_t capacity_{1'000};
+    mutable std::mutex mutex_;
+    std::deque<std::string> lines_;
+};
 
 class UnauthorizedError final : public std::runtime_error {
   public:
@@ -156,6 +195,29 @@ void assign_optional_string(const json& body, const char* field,
     destination = found->get<std::string>();
 }
 
+void assign_string(const json& body, const char* field,
+                   std::string& destination) {
+    const auto found = body.find(field);
+    if (found == body.end() || found->is_null()) {
+        return;
+    }
+    if (!found->is_string()) {
+        throw ValidationError(std::string{field} + " must be a string");
+    }
+    destination = found->get<std::string>();
+}
+
+void assign_boolean(const json& body, const char* field, bool& destination) {
+    const auto found = body.find(field);
+    if (found == body.end() || found->is_null()) {
+        return;
+    }
+    if (!found->is_boolean()) {
+        throw ValidationError(std::string{field} + " must be a boolean");
+    }
+    destination = found->get<bool>();
+}
+
 [[nodiscard]] std::vector<std::string> required_string_array(const json& body,
                                                              const char* field) {
     const auto found = body.find(field);
@@ -224,6 +286,22 @@ void assign_optional_string(const json& body, const char* field,
         }
     }
     return encoded;
+}
+
+[[nodiscard]] std::string secure_token(std::size_t bytes) {
+    std::vector<unsigned char> random(bytes);
+    if (bytes == 0U ||
+        RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) {
+        throw std::runtime_error("secure token generation failed");
+    }
+    static constexpr std::string_view digits{"0123456789abcdef"};
+    std::string value;
+    value.reserve(bytes * 2U);
+    for (const auto byte : random) {
+        value.push_back(digits[byte >> 4U]);
+        value.push_back(digits[byte & 0x0fU]);
+    }
+    return value;
 }
 
 [[nodiscard]] std::string normalized_command(const json& body) {
@@ -787,6 +865,41 @@ template <typename Function>
     return found->get<std::string>();
 }
 
+[[nodiscard]] WireGuardOptions
+wireguard_options(const HttpServerOptions& options) {
+    return {
+        .enabled = options.wireguard_enabled,
+        .interface = options.wireguard_interface,
+        .port = options.wireguard_port,
+        .address = options.wireguard_address,
+        .dns = options.wireguard_dns,
+        .mtu = options.wireguard_mtu,
+        .external_hostname = options.external_hostname,
+        .egress_interface = options.wireguard_egress,
+        .config_directory = options.wireguard_config_directory,
+    };
+}
+
+void sync_wireguard_best_effort(const std::shared_ptr<WireGuardService>& service) {
+    try {
+        service->sync();
+    } catch (const std::exception& error) {
+        LOG_ERROR << "WireGuard sync failed: " << error.what();
+    }
+}
+
+[[nodiscard]] std::string utc_after(std::chrono::minutes offset) {
+    const auto time = std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now() + offset);
+    std::tm utc{};
+    if (::gmtime_r(&time, &utc) == nullptr) {
+        throw std::runtime_error("UTC timestamp conversion failed");
+    }
+    std::ostringstream value;
+    value << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return value.str();
+}
+
 void run_self_singbox(std::stop_token stop,
                       const std::shared_ptr<Store>& store,
                       HttpServerOptions options) {
@@ -865,6 +978,18 @@ void register_http_routes(const std::shared_ptr<Store>& store,
     const auto telemetry = std::make_shared<TelemetryStore>();
     const auto subscription_fetcher = std::make_shared<SubscriptionFetcher>();
     const auto clash_client = std::make_shared<ClashClient>();
+    const auto wireguard = std::make_shared<WireGuardService>(
+        store, wireguard_options(options));
+    const auto server_logs = std::make_shared<ServerLogBuffer>();
+    trantor::Logger::setOutputFunction(
+        [server_logs](const char* message, std::uint64_t length) {
+            static_cast<void>(
+                std::fwrite(message, 1U, static_cast<std::size_t>(length), stdout));
+            server_logs->append(
+                std::string_view{message, static_cast<std::size_t>(length)});
+        },
+        [] { static_cast<void>(std::fflush(stdout)); });
+    LOG_INFO << "sb-easy C++ HTTP routes registered";
     const auto public_server = options.public_server;
     const auto config_hash_seed = options.config_hash_seed;
     const auto legacy_agent_token = trim(options.legacy_agent_token);
@@ -944,11 +1069,19 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                 return json{
                     {"version", "0.1.0"},
                     {"status", "running"},
-                    {"wireguard", {{"peer_count", 0}}},
+                    {"wireguard",
+                     {{"peer_count", store->list_wireguard_peers().size()}}},
                     {"sing_box", {{"node_count", store->list_proxy_nodes().size()}}},
                     {"subscriptions", {{"count", store->list_subscriptions().size()}}},
                 };
             });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/system/logs",
+        [server_logs](const drogon::HttpRequestPtr&,
+                      ResponseCallback&& callback) {
+            callback(json_response({{"lines", server_logs->lines()}}));
         },
         {drogon::Get});
     application.registerHandler(
@@ -1077,7 +1210,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
          wireguard_mtu](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
             handle(std::move(callback), [&] {
                 auto settings = store->app_settings();
-                json wireguard{
+                json wireguard_settings{
                     {"interface", wireguard_interface},
                     {"listen_port", wireguard_port},
                     {"address", wireguard_address},
@@ -1088,24 +1221,26 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                     saved != settings.end() && saved->is_object()) {
                     for (const auto& [key, value] : saved->items()) {
                         if (!value.is_null()) {
-                            wireguard[key] = value;
+                            wireguard_settings[key] = value;
                         }
                     }
                 }
-                settings["wireguard_interface"] = std::move(wireguard);
+                settings["wireguard_interface"] =
+                    std::move(wireguard_settings);
                 return settings;
             });
         },
         {drogon::Get});
     application.registerHandler(
         "/api/settings",
-        [store, wireguard_interface, wireguard_port, wireguard_address, wireguard_dns,
-         wireguard_mtu](const drogon::HttpRequestPtr& request,
+        [store, wireguard, wireguard_interface, wireguard_port, wireguard_address,
+         wireguard_dns, wireguard_mtu](const drogon::HttpRequestPtr& request,
                         ResponseCallback&& callback) {
             handle(std::move(callback), [&] {
                 store->update_app_settings(request_object(request));
+                sync_wireguard_best_effort(wireguard);
                 auto settings = store->app_settings();
-                json wireguard{
+                json wireguard_settings{
                     {"interface", wireguard_interface},
                     {"listen_port", wireguard_port},
                     {"address", wireguard_address},
@@ -1116,15 +1251,289 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                     saved != settings.end() && saved->is_object()) {
                     for (const auto& [key, value] : saved->items()) {
                         if (!value.is_null()) {
-                            wireguard[key] = value;
+                            wireguard_settings[key] = value;
                         }
                     }
                 }
-                settings["wireguard_interface"] = std::move(wireguard);
+                settings["wireguard_interface"] =
+                    std::move(wireguard_settings);
                 return settings;
             });
         },
         {drogon::Put});
+    application.registerHandler(
+        "/api/settings/backup",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                auto backup = store->export_backup();
+                backup["version"] = 1;
+                backup["exported_at"] = utc_now();
+                return backup;
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/settings/restore",
+        [store, wireguard](const drogon::HttpRequestPtr& request,
+                           ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto restored =
+                    store->restore_backup(request_object(request));
+                sync_wireguard_best_effort(wireguard);
+                return json{{"restored", restored}};
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/wireguard/peers",
+        [store, wireguard](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                std::vector<WireGuardPeerStats> stats;
+                try {
+                    stats = wireguard->stats();
+                } catch (const std::exception&) {
+                }
+                json result = json::array();
+                for (const auto& peer : store->list_wireguard_peers()) {
+                    auto value = json(peer);
+                    value["expired"] = WireGuardService::peer_expired(peer);
+                    value["kind"] = peer.host_id.has_value() ? "agent" : "wg";
+                    if (peer.host_id.has_value()) {
+                        const auto host = store->find_host(*peer.host_id);
+                        value["host_name"] =
+                            host.has_value() ? json(host->name) : json(nullptr);
+                    }
+                    const auto live =
+                        std::ranges::find(stats, peer.public_key,
+                                          &WireGuardPeerStats::public_key);
+                    if (live != stats.end()) {
+                        value["endpoint"] = live->endpoint;
+                        value["latest_handshake"] = live->latest_handshake;
+                        value["transfer_rx"] = live->transfer_rx;
+                        value["transfer_tx"] = live->transfer_tx;
+                    }
+                    result.push_back(std::move(value));
+                }
+                return result;
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/wireguard/peers",
+        [store, wireguard](const drogon::HttpRequestPtr& request,
+                           ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto body = request_object(request);
+                const auto runtime = wireguard->runtime_options();
+                const auto keys = WireGuardService::generate_keypair();
+                WireGuardPeer peer{
+                    .id = {},
+                    .name = trim(required_string(body, "name")),
+                    .private_key = keys.private_key,
+                    .public_key = keys.public_key,
+                    .preshared_key =
+                        WireGuardService::generate_preshared_key(),
+                    .address = body.contains("address") &&
+                                       body["address"].is_string()
+                                   ? body["address"].get<std::string>()
+                                   : store->next_wireguard_address(runtime.address),
+                    .dns = body.value("dns", runtime.dns),
+                    .enabled = true,
+                    .persistent_keepalive =
+                        body.value("persistent_keepalive", 25),
+                    .allowed_ips =
+                        body.value("allowed_ips", "0.0.0.0/0, ::/0"),
+                    .expire_at =
+                        body.contains("expire_at") && body["expire_at"].is_string()
+                            ? std::optional<std::string>{
+                                  body["expire_at"].get<std::string>()}
+                            : std::nullopt,
+                    .quota_bytes = body.value("quota_bytes", 0),
+                    .created_at = {},
+                    .updated_at = {},
+                    .notes =
+                        body.contains("notes") && body["notes"].is_string()
+                            ? std::optional<std::string>{
+                                  body["notes"].get<std::string>()}
+                            : std::nullopt,
+                    .host_id = std::nullopt,
+                };
+                auto created =
+                    store->create_wireguard_peer(std::move(peer));
+                sync_wireguard_best_effort(wireguard);
+                return json(created);
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/wireguard/peers/{id}",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback), [&] {
+                const auto peer = store->find_wireguard_peer(id);
+                if (!peer.has_value()) {
+                    throw NotFoundError("Peer not found");
+                }
+                return json(*peer);
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/wireguard/peers/{id}",
+        [store, wireguard](const drogon::HttpRequestPtr& request,
+                           ResponseCallback&& callback,
+                           const std::string& id) {
+            handle(std::move(callback), [&] {
+                auto peer = store->find_wireguard_peer(id);
+                if (!peer.has_value()) {
+                    throw NotFoundError("Peer not found");
+                }
+                const auto body = request_object(request);
+                assign_string(body, "name", peer->name);
+                assign_string(body, "dns", peer->dns);
+                assign_boolean(body, "enabled", peer->enabled);
+                assign_string(body, "allowed_ips", peer->allowed_ips);
+                if (const auto found = body.find("persistent_keepalive");
+                    found != body.end() && !found->is_null()) {
+                    peer->persistent_keepalive =
+                        found->get<std::int32_t>();
+                }
+                if (const auto found = body.find("quota_bytes");
+                    found != body.end() && !found->is_null()) {
+                    peer->quota_bytes = found->get<std::int64_t>();
+                }
+                if (const auto found = body.find("expire_at");
+                    found != body.end() && found->is_string()) {
+                    peer->expire_at = found->get<std::string>();
+                }
+                if (const auto found = body.find("notes");
+                    found != body.end() && found->is_string()) {
+                    peer->notes = found->get<std::string>();
+                }
+                auto updated =
+                    store->update_wireguard_peer(std::move(*peer));
+                sync_wireguard_best_effort(wireguard);
+                return json(updated);
+            });
+        },
+        {drogon::Put});
+    application.registerHandler(
+        "/api/wireguard/peers/{id}",
+        [store, wireguard](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback,
+                           const std::string& id) {
+            handle(std::move(callback), [&] {
+                const auto peer = store->find_wireguard_peer(id);
+                if (!peer.has_value()) {
+                    throw NotFoundError("Peer not found");
+                }
+                wireguard->remove_peer(peer->public_key);
+                store->delete_wireguard_peer(id);
+                return json{{"success", true}};
+            });
+        },
+        {drogon::Delete});
+    for (const auto& [path, enabled] :
+         {std::pair{"/api/wireguard/peers/{id}/enable", true},
+          std::pair{"/api/wireguard/peers/{id}/disable", false}}) {
+        application.registerHandler(
+            path,
+            [store, wireguard, enabled](const drogon::HttpRequestPtr&,
+                                        ResponseCallback&& callback,
+                                        const std::string& id) {
+                handle(std::move(callback), [&] {
+                    store->set_wireguard_peer_enabled(id, enabled);
+                    sync_wireguard_best_effort(wireguard);
+                    return json{{"success", true}};
+                });
+            },
+            {drogon::Post});
+    }
+    application.registerHandler(
+        "/api/wireguard/peers/{id}/config",
+        [store, wireguard](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback,
+                           const std::string& id) {
+            handle_response(std::move(callback), [&] {
+                const auto peer = store->find_wireguard_peer(id);
+                if (!peer.has_value()) {
+                    throw NotFoundError("Peer not found");
+                }
+                auto response = drogon::HttpResponse::newHttpResponse();
+                response->setStatusCode(drogon::k200OK);
+                response->setContentTypeCode(drogon::CT_APPLICATION_OCTET_STREAM);
+                auto filename = peer->name;
+                std::ranges::replace(filename, ' ', '_');
+                response->addHeader(
+                    "Content-Disposition",
+                    "attachment; filename=\"" + filename + ".conf\"");
+                response->setBody(wireguard->client_config(*peer));
+                return response;
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/wireguard/peers/{id}/qr",
+        [store, wireguard](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback,
+                           const std::string& id) {
+            handle_response(std::move(callback), [&] {
+                const auto peer = store->find_wireguard_peer(id);
+                if (!peer.has_value()) {
+                    throw NotFoundError("Peer not found");
+                }
+                auto response = drogon::HttpResponse::newHttpResponse();
+                response->setStatusCode(drogon::k200OK);
+                response->setContentTypeString("image/svg+xml");
+                response->setBody(wireguard->qr_svg(*peer));
+                return response;
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/wireguard/peers/{id}/one-time-link",
+        [store, external_hostname = options.external_hostname](
+            const drogon::HttpRequestPtr&, ResponseCallback&& callback,
+            const std::string& id) {
+            handle(std::move(callback), [&] {
+                if (!store->find_wireguard_peer(id).has_value()) {
+                    throw NotFoundError("Peer not found");
+                }
+                const auto token = secure_token(16U);
+                const auto expires = utc_after(std::chrono::minutes{5});
+                store->create_one_time_link(token, id, expires);
+                return json{
+                    {"url", "https://" + external_hostname +
+                                "/api/one-time/" + token},
+                    {"expires_at", expires},
+                };
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/wireguard/stats",
+        [wireguard](const drogon::HttpRequestPtr&,
+                    ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                try {
+                    return json{{"peers", wireguard->stats()}};
+                } catch (const std::exception&) {
+                    return json{{"peers", json::array()}};
+                }
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/wireguard/sync",
+        [wireguard](const drogon::HttpRequestPtr&,
+                    ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                wireguard->sync();
+                return json{{"success", true}};
+            });
+        },
+        {drogon::Post});
     application.registerHandler(
         "/api/config/sing-box/full",
         [store, local_clash_api, local_clash_secret](
@@ -1612,10 +2021,23 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Get});
     application.registerHandler(
         "/api/hosts",
-        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+        [store, wireguard](const drogon::HttpRequestPtr& request,
+                           ResponseCallback&& callback) {
             handle(std::move(callback), [&] {
-                const auto host = store->create_host(
-                    host_from_create_request(request_object(request)));
+                const auto body = request_object(request);
+                auto host =
+                    store->create_host(host_from_create_request(body));
+                if (host.id != "self" &&
+                    host.capabilities.value("is_wg_member", false)) {
+                    try {
+                        host = wireguard->provision_host(
+                            host, !body.contains("clash_api"));
+                        sync_wireguard_best_effort(wireguard);
+                    } catch (const std::exception& error) {
+                        LOG_ERROR << "managed host WireGuard provisioning failed: "
+                                  << error.what();
+                    }
+                }
                 json response = host;
                 response["agent_token"] = host.agent_token;
                 return response;
@@ -1631,21 +2053,43 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Get});
     application.registerHandler(
         "/api/hosts/{id}",
-        [store](const drogon::HttpRequestPtr& request, ResponseCallback&& callback,
-                const std::string& id) {
+        [store, wireguard](const drogon::HttpRequestPtr& request,
+                           ResponseCallback&& callback,
+                           const std::string& id) {
             handle(std::move(callback), [&] {
                 auto host = require_host(*store, id);
-                return json(store->update_host(host_from_update_request(
-                    std::move(host), request_object(request))));
+                const auto was_member =
+                    host.capabilities.value("is_wg_member", false);
+                host = store->update_host(host_from_update_request(
+                    std::move(host), request_object(request)));
+                const auto is_member =
+                    host.capabilities.value("is_wg_member", false);
+                if (is_member && !was_member && id != "self") {
+                    try {
+                        host = wireguard->provision_host(
+                            host, !host.clash_api.has_value());
+                        sync_wireguard_best_effort(wireguard);
+                    } catch (const std::exception& error) {
+                        LOG_ERROR << "managed host WireGuard provisioning failed: "
+                                  << error.what();
+                    }
+                } else if (!is_member && was_member) {
+                    wireguard->deprovision_host(id);
+                    sync_wireguard_best_effort(wireguard);
+                }
+                return json(host);
             });
         },
         {drogon::Put});
     application.registerHandler("/api/hosts/{id}",
-                                [store](const drogon::HttpRequestPtr&,
-                                        ResponseCallback&& callback,
-                                        const std::string& id) {
+                                [store, wireguard](
+                                    const drogon::HttpRequestPtr&,
+                                    ResponseCallback&& callback,
+                                    const std::string& id) {
                                     handle(std::move(callback), [&] {
+                                        wireguard->deprovision_host(id);
                                         store->delete_host(id);
+                                        sync_wireguard_best_effort(wireguard);
                                         return json{{"success", true}};
                                     });
                                 },
@@ -1716,6 +2160,27 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             handle(std::move(callback), [&] {
                 const ConfigRenderer renderer;
                 return renderer.render(store->render_request_for_host(id));
+            });
+        },
+        {drogon::Get});
+    application.registerHandler(
+        "/api/hosts/{id}/wg-config",
+        [store, wireguard](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback,
+                           const std::string& id) {
+            handle_response(std::move(callback), [&] {
+                const auto host = require_host(*store, id);
+                auto response = drogon::HttpResponse::newHttpResponse();
+                response->setStatusCode(drogon::k200OK);
+                response->setContentTypeCode(
+                    drogon::CT_APPLICATION_OCTET_STREAM);
+                auto filename = host.name;
+                std::ranges::replace(filename, ' ', '_');
+                response->addHeader(
+                    "Content-Disposition",
+                    "attachment; filename=\"" + filename + "-wg.conf\"");
+                response->setBody(wireguard->host_config(host));
+                return response;
             });
         },
         {drogon::Get});
@@ -1853,19 +2318,31 @@ void register_http_routes(const std::shared_ptr<Store>& store,
 
 void run_http_server(const std::shared_ptr<Store>& store,
                      const HttpServerOptions& options) {
+    auto wireguard =
+        std::make_shared<WireGuardService>(store, wireguard_options(options));
+    wireguard->startup();
     register_http_routes(store, options);
     std::jthread managed_singbox;
     if (options.singbox_managed) {
         managed_singbox =
             std::jthread{run_self_singbox, store, options};
     }
-    drogon::app()
-        .addListener(options.address, options.port)
-        .setThreadNum(options.threads)
-        .run();
+    try {
+        drogon::app()
+            .addListener(options.address, options.port)
+            .setThreadNum(options.threads)
+            .run();
+    } catch (...) {
+        if (managed_singbox.joinable()) {
+            managed_singbox.request_stop();
+        }
+        wireguard->shutdown();
+        throw;
+    }
     if (managed_singbox.joinable()) {
         managed_singbox.request_stop();
     }
+    wireguard->shutdown();
 }
 
 } // namespace sbeasy

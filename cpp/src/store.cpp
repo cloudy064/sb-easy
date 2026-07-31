@@ -102,6 +102,28 @@ using nlohmann::json;
     };
 }
 
+[[nodiscard]] WireGuardPeer read_wireguard_peer(sqlite::Statement& statement) {
+    return WireGuardPeer{
+        .id = statement.text(0),
+        .name = statement.text(1),
+        .private_key = statement.text(2),
+        .public_key = statement.text(3),
+        .preshared_key = statement.optional_text(4),
+        .address = statement.text(5),
+        .dns = statement.text(6),
+        .enabled = statement.integer(7) != 0,
+        .persistent_keepalive =
+            static_cast<std::int32_t>(statement.integer(8)),
+        .allowed_ips = statement.text(9),
+        .expire_at = statement.optional_text(10),
+        .quota_bytes = statement.integer(11),
+        .created_at = statement.text(12),
+        .updated_at = statement.text(13),
+        .notes = statement.optional_text(14),
+        .host_id = statement.optional_text(15),
+    };
+}
+
 [[nodiscard]] ProxyRecord read_proxy_record(sqlite::Statement& statement) {
     const auto raw_port = statement.integer(5);
     if (raw_port <= 0 || raw_port > 65'535) {
@@ -192,6 +214,13 @@ SELECT h.id, h.name, h.agent_token, h.capabilities, h.profile_id,
 FROM hosts h
 )SQL";
 
+constexpr auto wireguard_peer_select = R"SQL(
+SELECT id, name, private_key, public_key, preshared_key, address, dns,
+       enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes,
+       created_at, updated_at, notes, host_id
+FROM wireguard_peers
+)SQL";
+
 [[nodiscard]] std::string controller_address(std::optional<std::string> address) {
     if (!address.has_value() || address->empty()) {
         return "0.0.0.0:9090";
@@ -264,6 +293,27 @@ void to_json(nlohmann::json& value, const AuditEntry& entry) {
     value = {
         {"id", entry.id},         {"ts", entry.timestamp},  {"actor", entry.actor},
         {"action", entry.action}, {"target", entry.target},
+    };
+}
+
+void to_json(nlohmann::json& value, const WireGuardPeer& peer) {
+    value = {
+        {"id", peer.id},
+        {"name", peer.name},
+        {"private_key", peer.private_key},
+        {"public_key", peer.public_key},
+        {"preshared_key", peer.preshared_key},
+        {"address", peer.address},
+        {"dns", peer.dns},
+        {"enabled", peer.enabled},
+        {"persistent_keepalive", peer.persistent_keepalive},
+        {"allowed_ips", peer.allowed_ips},
+        {"expire_at", peer.expire_at},
+        {"quota_bytes", peer.quota_bytes},
+        {"created_at", peer.created_at},
+        {"updated_at", peer.updated_at},
+        {"notes", peer.notes},
+        {"host_id", peer.host_id},
     };
 }
 
@@ -518,6 +568,419 @@ void Store::update_app_settings(const nlohmann::json& sections) {
         upsert.step_done();
     }
     transaction.commit();
+}
+
+std::optional<nlohmann::json>
+Store::app_setting(const std::string& key) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_, "SELECT value FROM app_settings WHERE key = ?1"};
+    statement.bind(1, key);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    auto value = json::parse(statement.text(0), nullptr, false);
+    return value.is_discarded() ? std::nullopt :
+                                  std::optional<json>{std::move(value)};
+}
+
+void Store::set_app_setting(const std::string& key,
+                            const nlohmann::json& value) {
+    if (key.empty()) {
+        throw ValidationError("setting key is required");
+    }
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement upsert{
+        database_.handle_,
+        "INSERT INTO app_settings (key, value, updated_at) "
+        "VALUES (?1, ?2, datetime('now')) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+        "updated_at = datetime('now')"};
+    upsert.bind(1, key);
+    upsert.bind(2, value.dump());
+    upsert.step_done();
+}
+
+std::vector<WireGuardPeer> Store::list_wireguard_peers() const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_, std::string{wireguard_peer_select} + " ORDER BY address"};
+    std::vector<WireGuardPeer> peers;
+    while (statement.step_row()) {
+        peers.push_back(read_wireguard_peer(statement));
+    }
+    return peers;
+}
+
+std::optional<WireGuardPeer>
+Store::find_wireguard_peer(const std::string& id) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_,
+        std::string{wireguard_peer_select} + " WHERE id = ?1"};
+    statement.bind(1, id);
+    if (!statement.step_row()) {
+        return std::nullopt;
+    }
+    return read_wireguard_peer(statement);
+}
+
+WireGuardPeer Store::create_wireguard_peer(WireGuardPeer peer) {
+    if (peer.name.empty() || peer.private_key.empty() ||
+        peer.public_key.empty() || peer.address.empty()) {
+        throw ValidationError(
+            "WireGuard name, keys, and address are required");
+    }
+    if (peer.persistent_keepalive < 0 || peer.persistent_keepalive > 65'535 ||
+        peer.quota_bytes < 0) {
+        throw ValidationError("Invalid WireGuard keepalive or quota");
+    }
+    if (peer.id.empty()) {
+        peer.id = uuid_v4();
+    }
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement duplicate{
+            database_.handle_,
+            "SELECT 1 FROM wireguard_peers WHERE address = ?1"};
+        duplicate.bind(1, peer.address);
+        if (duplicate.step_row()) {
+            throw ConflictError("WireGuard address already exists");
+        }
+        sqlite::Statement insert{
+            database_.handle_,
+            "INSERT INTO wireguard_peers "
+            "(id, name, private_key, public_key, preshared_key, address, dns, "
+            "enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes, "
+            "created_at, updated_at, notes, host_id) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
+            "datetime('now'), datetime('now'), ?13, ?14)"};
+        insert.bind(1, peer.id);
+        insert.bind(2, peer.name);
+        insert.bind(3, peer.private_key);
+        insert.bind(4, peer.public_key);
+        insert.bind(5, peer.preshared_key);
+        insert.bind(6, peer.address);
+        insert.bind(7, peer.dns);
+        insert.bind(8, peer.enabled);
+        insert.bind(9, static_cast<std::int64_t>(peer.persistent_keepalive));
+        insert.bind(10, peer.allowed_ips);
+        insert.bind(11, peer.expire_at);
+        insert.bind(12, peer.quota_bytes);
+        insert.bind(13, peer.notes);
+        insert.bind(14, peer.host_id);
+        insert.step_done();
+    }
+    return *find_wireguard_peer(peer.id);
+}
+
+WireGuardPeer Store::update_wireguard_peer(WireGuardPeer peer) {
+    if (peer.id.empty() || peer.name.empty() || peer.persistent_keepalive < 0 ||
+        peer.persistent_keepalive > 65'535 || peer.quota_bytes < 0) {
+        throw ValidationError("Invalid WireGuard peer");
+    }
+    {
+        const std::scoped_lock lock{database_.mutex_};
+        sqlite::Statement update{
+            database_.handle_,
+            "UPDATE wireguard_peers SET name = ?1, enabled = ?2, dns = ?3, "
+            "persistent_keepalive = ?4, allowed_ips = ?5, expire_at = ?6, "
+            "quota_bytes = ?7, updated_at = datetime('now'), notes = ?8 "
+            "WHERE id = ?9"};
+        update.bind(1, peer.name);
+        update.bind(2, peer.enabled);
+        update.bind(3, peer.dns);
+        update.bind(4, static_cast<std::int64_t>(peer.persistent_keepalive));
+        update.bind(5, peer.allowed_ips);
+        update.bind(6, peer.expire_at);
+        update.bind(7, peer.quota_bytes);
+        update.bind(8, peer.notes);
+        update.bind(9, peer.id);
+        update.step_done();
+        if (sqlite3_changes(database_.handle_) == 0) {
+            throw NotFoundError("Peer not found");
+        }
+    }
+    return *find_wireguard_peer(peer.id);
+}
+
+void Store::delete_wireguard_peer(const std::string& id) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement remove{
+        database_.handle_, "DELETE FROM wireguard_peers WHERE id = ?1"};
+    remove.bind(1, id);
+    remove.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Peer not found");
+    }
+}
+
+void Store::set_wireguard_peer_enabled(const std::string& id, bool enabled) {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement update{
+        database_.handle_,
+        "UPDATE wireguard_peers SET enabled = ?1, updated_at = datetime('now') "
+        "WHERE id = ?2"};
+    update.bind(1, enabled);
+    update.bind(2, id);
+    update.step_done();
+    if (sqlite3_changes(database_.handle_) == 0) {
+        throw NotFoundError("Peer not found");
+    }
+}
+
+std::string
+Store::next_wireguard_address(const std::string& server_address) const {
+    const auto slash = server_address.find('/');
+    const auto host = server_address.substr(0, slash);
+    const auto dot = host.rfind('.');
+    const auto base =
+        dot == std::string::npos ? std::string{"10.59.32"} :
+                                   host.substr(0, dot);
+    std::array<bool, 255> taken{};
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement statement{
+        database_.handle_, "SELECT address FROM wireguard_peers"};
+    while (statement.step_row()) {
+        const auto address = statement.text(0);
+        const auto address_host = address.substr(0, address.find('/'));
+        const auto address_dot = address_host.rfind('.');
+        if (address_dot == std::string::npos ||
+            address_host.substr(0, address_dot) != base) {
+            continue;
+        }
+        try {
+            const auto octet = std::stoul(address_host.substr(address_dot + 1U));
+            if (octet < taken.size()) {
+                taken[octet] = true;
+            }
+        } catch (const std::exception&) {
+        }
+    }
+    for (std::size_t octet = 2; octet <= 254; ++octet) {
+        if (!taken[octet]) {
+            return base + "." + std::to_string(octet) + "/24";
+        }
+    }
+    throw ConflictError("No available IPs in subnet");
+}
+
+void Store::create_one_time_link(const std::string& token,
+                                 const std::string& peer_id,
+                                 const std::string& expires_at) {
+    if (!find_wireguard_peer(peer_id).has_value()) {
+        throw NotFoundError("Peer not found");
+    }
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement insert{
+        database_.handle_,
+        "INSERT INTO one_time_links "
+        "(id, peer_id, expires_at, used, created_at) "
+        "VALUES (?1, ?2, ?3, 0, datetime('now'))"};
+    insert.bind(1, token);
+    insert.bind(2, peer_id);
+    insert.bind(3, expires_at);
+    insert.step_done();
+}
+
+nlohmann::json Store::export_backup() const {
+    return {
+        {"proxy_nodes", list_proxy_nodes()},
+        {"wireguard_peers", list_wireguard_peers()},
+        {"subscriptions", list_subscriptions()},
+        {"app_settings", app_settings()},
+    };
+}
+
+nlohmann::json Store::restore_backup(const nlohmann::json& backup) {
+    if (!backup.is_object()) {
+        throw ValidationError("backup must be a JSON object");
+    }
+    const auto settings = backup.find("app_settings");
+    const auto subscriptions = backup.find("subscriptions");
+    const auto nodes = backup.find("proxy_nodes");
+    const auto peers = backup.find("wireguard_peers");
+    if (settings != backup.end() && !settings->is_object()) {
+        throw ValidationError("backup app_settings must be an object");
+    }
+    if ((subscriptions != backup.end() && !subscriptions->is_array()) ||
+        (nodes != backup.end() && !nodes->is_array()) ||
+        (peers != backup.end() && !peers->is_array())) {
+        throw ValidationError("backup row sections must be arrays");
+    }
+
+    std::size_t settings_count{};
+    std::size_t subscription_count{};
+    std::size_t node_count{};
+    std::size_t peer_count{};
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+
+    if (settings != backup.end()) {
+        for (const auto& [key, value] : settings->items()) {
+            sqlite::Statement row{
+                database_.handle_,
+                "INSERT INTO app_settings (key, value, updated_at) "
+                "VALUES (?1, ?2, datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = datetime('now')"};
+            row.bind(1, key);
+            row.bind(2, value.dump());
+            row.step_done();
+            ++settings_count;
+        }
+    }
+
+    if (subscriptions != backup.end()) {
+        for (const auto& value : *subscriptions) {
+            if (!value.is_object()) {
+                continue;
+            }
+            const auto id = value.value("id", "");
+            const auto url = value.value("url", "");
+            if (id.empty() || url.empty()) {
+                continue;
+            }
+            sqlite::Statement row{
+                database_.handle_,
+                "INSERT OR REPLACE INTO subscriptions "
+                "(id, name, url, enabled, refresh_interval, last_fetched_at, "
+                "last_fetch_result, created_at, updated_at) "
+                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, "
+                "COALESCE(NULLIF(?8, ''), datetime('now')), datetime('now'))"};
+            row.bind(1, id);
+            row.bind(2, value.value("name", ""));
+            row.bind(3, url);
+            row.bind(4, value.value("enabled", true));
+            row.bind(5, value.value<std::int64_t>("refresh_interval", 3'600));
+            row.bind(6, value.contains("last_fetched_at") &&
+                                value["last_fetched_at"].is_string()
+                            ? std::optional<std::string>{
+                                  value["last_fetched_at"].get<std::string>()}
+                            : std::nullopt);
+            row.bind(7, value.contains("last_fetch_result") &&
+                                value["last_fetch_result"].is_string()
+                            ? std::optional<std::string>{
+                                  value["last_fetch_result"].get<std::string>()}
+                            : std::nullopt);
+            row.bind(8, value.value("created_at", ""));
+            row.step_done();
+            ++subscription_count;
+        }
+    }
+
+    if (nodes != backup.end()) {
+        for (const auto& value : *nodes) {
+            if (!value.is_object()) {
+                continue;
+            }
+            const auto id = value.value("id", "");
+            const auto tag = value.value("tag", "");
+            if (id.empty() || tag.empty()) {
+                continue;
+            }
+            auto protocol = value.value("protocol_config", json::object());
+            const auto protocol_text =
+                protocol.is_string() ? protocol.get<std::string>() :
+                                       protocol.dump();
+            sqlite::Statement row{
+                database_.handle_,
+                "INSERT OR REPLACE INTO proxy_nodes "
+                "(id, tag, node_type, enabled, server, server_port, "
+                "protocol_config, subscription_id, fingerprint, latency, "
+                "last_latency_test, created_at, updated_at) "
+                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
+                "COALESCE(NULLIF(?12, ''), datetime('now')), datetime('now'))"};
+            row.bind(1, id);
+            row.bind(2, tag);
+            row.bind(3, value.value("node_type", ""));
+            row.bind(4, value.value("enabled", true));
+            row.bind(5, value.value("server", ""));
+            row.bind(6, value.value<std::int64_t>("server_port", 0));
+            row.bind(7, protocol_text);
+            row.bind(8, value.contains("subscription_id") &&
+                                value["subscription_id"].is_string()
+                            ? std::optional<std::string>{
+                                  value["subscription_id"].get<std::string>()}
+                            : std::nullopt);
+            row.bind(9, value.value("fingerprint", ""));
+            row.bind(10, value.contains("latency") &&
+                                 value["latency"].is_number()
+                             ? std::optional<double>{
+                                   value["latency"].get<double>()}
+                             : std::nullopt);
+            row.bind(11, value.contains("last_latency_test") &&
+                                 value["last_latency_test"].is_string()
+                             ? std::optional<std::string>{
+                                   value["last_latency_test"].get<std::string>()}
+                             : std::nullopt);
+            row.bind(12, value.value("created_at", ""));
+            row.step_done();
+            ++node_count;
+        }
+    }
+
+    if (peers != backup.end()) {
+        for (const auto& value : *peers) {
+            if (!value.is_object()) {
+                continue;
+            }
+            const auto id = value.value("id", "");
+            const auto address = value.value("address", "");
+            if (id.empty() || address.empty()) {
+                continue;
+            }
+            sqlite::Statement row{
+                database_.handle_,
+                "INSERT OR REPLACE INTO wireguard_peers "
+                "(id, name, private_key, public_key, preshared_key, address, dns, "
+                "enabled, persistent_keepalive, allowed_ips, expire_at, "
+                "quota_bytes, created_at, updated_at, notes, host_id) "
+                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
+                "COALESCE(NULLIF(?13, ''), datetime('now')), datetime('now'), "
+                "?14, ?15)"};
+            row.bind(1, id);
+            row.bind(2, value.value("name", ""));
+            row.bind(3, value.value("private_key", ""));
+            row.bind(4, value.value("public_key", ""));
+            row.bind(5, value.contains("preshared_key") &&
+                                value["preshared_key"].is_string()
+                            ? std::optional<std::string>{
+                                  value["preshared_key"].get<std::string>()}
+                            : std::nullopt);
+            row.bind(6, address);
+            row.bind(7, value.value("dns", "10.59.32.1"));
+            row.bind(8, value.value("enabled", true));
+            row.bind(9,
+                     value.value<std::int64_t>("persistent_keepalive", 25));
+            row.bind(10, value.value("allowed_ips", "0.0.0.0/0, ::/0"));
+            row.bind(11, value.contains("expire_at") &&
+                                 value["expire_at"].is_string()
+                             ? std::optional<std::string>{
+                                   value["expire_at"].get<std::string>()}
+                             : std::nullopt);
+            row.bind(12, value.value<std::int64_t>("quota_bytes", 0));
+            row.bind(13, value.value("created_at", ""));
+            row.bind(14, value.contains("notes") && value["notes"].is_string()
+                             ? std::optional<std::string>{
+                                   value["notes"].get<std::string>()}
+                             : std::nullopt);
+            row.bind(15, value.contains("host_id") &&
+                                 value["host_id"].is_string()
+                             ? std::optional<std::string>{
+                                   value["host_id"].get<std::string>()}
+                             : std::nullopt);
+            row.step_done();
+            ++peer_count;
+        }
+    }
+    transaction.commit();
+    return {
+        {"app_settings", settings_count},
+        {"subscriptions", subscription_count},
+        {"proxy_nodes", node_count},
+        {"wireguard_peers", peer_count},
+    };
 }
 
 std::vector<ConfigProfile> Store::list_profiles() const {

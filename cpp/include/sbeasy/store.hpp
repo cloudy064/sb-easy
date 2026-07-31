@@ -57,6 +57,27 @@ struct AuditEntry {
 
 void to_json(nlohmann::json& value, const AuditEntry& entry);
 
+struct WireGuardPeer {
+    std::string id;
+    std::string name;
+    std::string private_key;
+    std::string public_key;
+    std::optional<std::string> preshared_key;
+    std::string address;
+    std::string dns{"10.59.32.1"};
+    bool enabled{true};
+    std::int32_t persistent_keepalive{25};
+    std::string allowed_ips{"0.0.0.0/0, ::/0"};
+    std::optional<std::string> expire_at;
+    std::int64_t quota_bytes{};
+    std::string created_at;
+    std::string updated_at;
+    std::optional<std::string> notes;
+    std::optional<std::string> host_id;
+};
+
+void to_json(nlohmann::json& value, const WireGuardPeer& peer);
+
 struct ConfigProfile {
     std::string id;
     std::string name;
@@ -177,6 +198,25 @@ class Store final {
     [[nodiscard]] std::vector<AuditEntry> list_audit(std::size_t limit = 200U) const;
     [[nodiscard]] nlohmann::json app_settings() const;
     void update_app_settings(const nlohmann::json& sections);
+    [[nodiscard]] std::optional<nlohmann::json>
+    app_setting(const std::string& key) const;
+    void set_app_setting(const std::string& key, const nlohmann::json& value);
+
+    [[nodiscard]] std::vector<WireGuardPeer> list_wireguard_peers() const;
+    [[nodiscard]] std::optional<WireGuardPeer>
+    find_wireguard_peer(const std::string& id) const;
+    [[nodiscard]] WireGuardPeer create_wireguard_peer(WireGuardPeer peer);
+    [[nodiscard]] WireGuardPeer update_wireguard_peer(WireGuardPeer peer);
+    void delete_wireguard_peer(const std::string& id);
+    void set_wireguard_peer_enabled(const std::string& id, bool enabled);
+    [[nodiscard]] std::string
+    next_wireguard_address(const std::string& server_address) const;
+    void create_one_time_link(const std::string& token,
+                              const std::string& peer_id,
+                              const std::string& expires_at);
+    [[nodiscard]] nlohmann::json export_backup() const;
+    [[nodiscard]] nlohmann::json
+    restore_backup(const nlohmann::json& backup);
 
     [[nodiscard]] std::vector<ConfigProfile> list_profiles() const;
     [[nodiscard]] std::optional<ConfigProfile>

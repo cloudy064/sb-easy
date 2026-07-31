@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <ctime>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <iomanip>
@@ -254,6 +255,103 @@ void assign_boolean(const json& body, const char* field, bool& destination) {
         value.pop_back();
     }
     return value;
+}
+
+class CorsPolicy final {
+  public:
+    explicit CorsPolicy(std::string configured_origins) {
+        configured_origins = trim(std::move(configured_origins));
+        wildcard_ = configured_origins.empty() || configured_origins == "*";
+        std::size_t start{};
+        while (!wildcard_ && start <= configured_origins.size()) {
+            const auto end = configured_origins.find(',', start);
+            auto origin = trim(configured_origins.substr(
+                start, end == std::string::npos
+                           ? configured_origins.size() - start
+                           : end - start));
+            if (origin == "*") {
+                wildcard_ = true;
+                origins_.clear();
+                break;
+            }
+            if (!origin.empty()) {
+                origins_.push_back(std::move(origin));
+            }
+            if (end == std::string::npos) {
+                break;
+            }
+            start = end + 1U;
+        }
+    }
+
+    [[nodiscard]] std::optional<std::string>
+    allowed_origin(const drogon::HttpRequestPtr& request) const {
+        auto origin = trim(request->getHeader("origin"));
+        if (origin.empty()) {
+            return std::nullopt;
+        }
+        if (wildcard_) {
+            return "*";
+        }
+        if (std::ranges::find(origins_, origin) == origins_.end()) {
+            return std::nullopt;
+        }
+        return origin;
+    }
+
+    void apply(const drogon::HttpRequestPtr& request,
+               const drogon::HttpResponsePtr& response) const {
+        if (!response->getHeader("access-control-allow-origin").empty()) {
+            return;
+        }
+        const auto origin = allowed_origin(request);
+        if (!origin.has_value()) {
+            return;
+        }
+        response->addHeader("Access-Control-Allow-Origin", *origin);
+        response->addHeader("Access-Control-Allow-Methods",
+                            "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+        auto headers = trim(request->getHeader("access-control-request-headers"));
+        response->addHeader("Access-Control-Allow-Headers",
+                            headers.empty() ? "Authorization, Content-Type"
+                                            : std::move(headers));
+        response->addHeader("Access-Control-Expose-Headers",
+                            "ETag, Content-Disposition");
+        response->addHeader("Access-Control-Max-Age", "600");
+        if (!wildcard_) {
+            response->addHeader("Vary", "Origin");
+        }
+    }
+
+  private:
+    bool wildcard_{false};
+    std::vector<std::string> origins_;
+};
+
+[[nodiscard]] bool safe_static_relative_path(const std::string& value) {
+    if (value.empty() || value.front() == '/' ||
+        value.find('\0') != std::string::npos) {
+        return false;
+    }
+    const std::filesystem::path path{value};
+    return !path.is_absolute() &&
+           std::ranges::none_of(path, [](const auto& component) {
+               return component == "..";
+           });
+}
+
+[[nodiscard]] drogon::HttpResponsePtr
+static_file_response(const std::filesystem::path& path, bool immutable) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) {
+        return json_response({{"error", "Static resource not found"}},
+                             drogon::k404NotFound);
+    }
+    auto response = drogon::HttpResponse::newFileResponse(path.string());
+    response->addHeader("Cache-Control",
+                        immutable ? "public, max-age=31536000, immutable"
+                                  : "no-cache");
+    return response;
 }
 
 [[nodiscard]] std::string clash_controller_address(std::string url) {
@@ -1000,7 +1098,25 @@ void register_http_routes(const std::shared_ptr<Store>& store,
     const auto wireguard_address = options.wireguard_address;
     const auto wireguard_dns = options.wireguard_dns;
     const auto wireguard_mtu = options.wireguard_mtu;
+    const auto static_directory =
+        std::filesystem::path{options.static_directory};
+    const auto cors =
+        std::make_shared<CorsPolicy>(options.cors_origins);
     auto& application = drogon::app();
+    application.registerPreRoutingAdvice(
+        [cors](const drogon::HttpRequestPtr& request,
+               drogon::AdviceCallback&& reject,
+               drogon::AdviceChainCallback&& proceed) {
+            if (request->method() != drogon::Options ||
+                request->getHeader("access-control-request-method").empty()) {
+                proceed();
+                return;
+            }
+            auto response = drogon::HttpResponse::newHttpResponse();
+            response->setStatusCode(drogon::k204NoContent);
+            cors->apply(request, response);
+            reject(std::move(response));
+        });
     application.registerPreRoutingAdvice([auth](const drogon::HttpRequestPtr& request,
                                                 drogon::AdviceCallback&& reject,
                                                 drogon::AdviceChainCallback&& proceed) {
@@ -1054,6 +1170,11 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             } catch (const std::exception& error) {
                 LOG_ERROR << "audit write failed: " << error.what();
             }
+        });
+    application.registerPreSendingAdvice(
+        [cors](const drogon::HttpRequestPtr& request,
+               const drogon::HttpResponsePtr& response) {
+            cors->apply(request, response);
         });
     register_clash_websocket_routes(store, local_clash_api, local_clash_secret);
     application.registerHandler(
@@ -2314,6 +2435,38 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             });
         },
         {drogon::Post});
+    application.registerHandlerViaRegex(
+        R"(^/assets/(.*)$)",
+        [static_directory](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback,
+                           const std::string& relative_path) {
+            if (!safe_static_relative_path(relative_path)) {
+                callback(json_response({{"error", "Static resource not found"}},
+                                       drogon::k404NotFound));
+                return;
+            }
+            callback(static_file_response(
+                static_directory / "assets" /
+                    std::filesystem::path{relative_path},
+                true));
+        },
+        {drogon::Get, drogon::Head});
+    application.registerHandlerViaRegex(
+        R"(^/api(?:/.*)?$)",
+        [](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
+            callback(json_response({{"error", "API route not found"}},
+                                   drogon::k404NotFound));
+        },
+        {drogon::Get, drogon::Post, drogon::Put, drogon::Delete,
+         drogon::Patch, drogon::Head});
+    application.registerHandlerViaRegex(
+        R"(^/(?!api(?:/|$)|assets(?:/|$)).*$)",
+        [static_directory](const drogon::HttpRequestPtr&,
+                           ResponseCallback&& callback) {
+            callback(static_file_response(static_directory / "index.html",
+                                          false));
+        },
+        {drogon::Get, drogon::Head});
 }
 
 void run_http_server(const std::shared_ptr<Store>& store,

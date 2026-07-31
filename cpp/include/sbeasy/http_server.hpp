@@ -34,6 +34,8 @@ struct HttpServerOptions {
     std::string wireguard_egress{"eth0"};
     std::string external_hostname{"127.0.0.1"};
     std::string wireguard_config_directory{"/etc/wireguard"};
+    std::string static_directory{"frontend/dist"};
+    std::string cors_origins;
 };
 
 void register_http_routes(const std::shared_ptr<Store>& store,

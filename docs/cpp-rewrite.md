@@ -54,7 +54,7 @@ depend on Drogon types. HTTP controllers only translate requests and responses.
 - [x] Status, command, latency, and bounded telemetry transport endpoints.
 - [x] C++ polling agent and validated atomic config replacement.
 
-### M3 — proxy sources and sing-box control (in progress)
+### M3 — proxy sources and sing-box control (implemented)
 
 - [x] Proxy CRUD and URI/base64/Clash YAML/outbound parsers.
 - [x] Bounded HTTPS subscription fetch and fingerprint/tag reconciliation.
@@ -72,7 +72,7 @@ the route to the four supported stream kinds, and resolves local or per-host
 Clash URL/secret pairs independently. The polling agent remains the bounded
 fallback for hosts whose Clash endpoint cannot be reached by the panel.
 
-### M4 — WireGuard and administrative APIs (in progress)
+### M4 — WireGuard and administrative APIs (implemented)
 
 - [x] Rust-compatible Argon2id password hashes and HS256 JWT sessions.
 - [x] Protected administrative routes, viewer read-only RBAC, users, and audit.
@@ -80,7 +80,7 @@ fallback for hosts whose Clash endpoint cannot be reached by the panel.
 - [x] WireGuard peer/managed-host provisioning, kernel sync, client configs,
   live stats, quotas/expiry, and SVG QR generation.
 - [x] Settings backup/restore and system log/status parity.
-- [ ] Static Vue assets, CORS policy, and SPA fallback.
+- [x] Static Vue assets, CORS policy, and SPA fallback.
 
 ### M5 — cutover
 

@@ -88,6 +88,8 @@ export SINGBOX_MANAGED=true
 export SINGBOX_BIN='sing-box'
 export SELF_SINGBOX_CONFIG_PATH='data/sing-box.gen.json'
 export SELF_SINGBOX_INTERVAL=10
+export STATIC_DIR='frontend/dist'
+export CORS_ORIGINS='https://panel.example.com'
 build/cpp/sb-easy-cpp-server \
   data/sb-easy.db migrations 127.0.0.1 51821 https://panel.example.com
 curl http://127.0.0.1:51821/api/health
@@ -162,6 +164,12 @@ fixed forwarding/masquerade rules using argument-vector process execution.
 `EXTERNAL_HOSTNAME` provide runtime defaults; settings saved by the UI take
 priority. Shutdown removes the interface and the rules it owns.
 
+`STATIC_DIR` points at the Vue production build. The server gives immutable
+cache headers to `/assets/*`, returns `index.html` for client-side routes, and
+keeps unknown `/api/*` routes as JSON 404 responses. `CORS_ORIGINS` accepts a
+comma-separated exact-origin allowlist; empty or `*` is intended for local
+development only.
+
 The core/database test image can be built independently:
 
 ```sh
@@ -169,9 +177,8 @@ docker build -f cpp/Dockerfile -t sb-easy-cpp-core .
 docker run --rm sb-easy-cpp-core
 ```
 
-This image is intentionally not a replacement for the production container
-until the remaining WireGuard, backup, system, and frontend cutover work is
-complete.
+This image is the isolated C++ test image; the repository root image is the
+production cutover artifact.
 
 The script contract is deliberately narrow:
 

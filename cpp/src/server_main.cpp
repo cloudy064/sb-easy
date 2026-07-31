@@ -138,6 +138,10 @@ int main(int argc, char** argv) {
             environment("EXTERNAL_HOSTNAME", "127.0.0.1");
         options.wireguard_config_directory =
             environment("WG_CONFIG_DIRECTORY", "/etc/wireguard");
+        options.static_directory =
+            environment("STATIC_DIR", "frontend/dist");
+        options.cors_origins =
+            environment("CORS_ORIGINS");
         auto store = std::make_shared<sbeasy::Store>(std::filesystem::path{argv[1]},
                                                      std::filesystem::path{argv[2]});
         sbeasy::run_http_server(store, options);

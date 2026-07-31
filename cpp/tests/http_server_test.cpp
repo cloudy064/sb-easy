@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -58,6 +59,35 @@ class TemporaryDatabase final {
         std::filesystem::remove(path_, ignored);
         std::filesystem::remove(path_.string() + "-shm", ignored);
         std::filesystem::remove(path_.string() + "-wal", ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+  private:
+    std::filesystem::path path_;
+};
+
+class TemporaryStaticDirectory final {
+  public:
+    TemporaryStaticDirectory()
+        : path_(std::filesystem::temp_directory_path() /
+                ("sb-easy-static-" + std::to_string(std::random_device{}()))) {
+        std::filesystem::create_directories(path_ / "assets");
+        {
+            std::ofstream index{path_ / "index.html"};
+            index << "<!doctype html><title>sb-easy contract</title>";
+        }
+        {
+            std::ofstream asset{path_ / "assets" / "contract.js"};
+            asset << "window.sbEasyContract = true;\n";
+        }
+    }
+
+    ~TemporaryStaticDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
     }
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
@@ -381,6 +411,7 @@ struct ApiResponse {
     json body;
     std::string raw_body;
     std::string etag;
+    std::string access_control_allow_origin;
 };
 
 struct RawResponse {
@@ -388,6 +419,7 @@ struct RawResponse {
     std::string body;
     std::string content_type;
     std::string content_disposition;
+    std::string access_control_allow_origin;
 };
 
 struct WebSocketResult {
@@ -450,17 +482,24 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
         .body = std::move(parsed),
         .raw_body = raw_body,
         .etag = response->getHeader("etag"),
+        .access_control_allow_origin =
+            response->getHeader("access-control-allow-origin"),
     };
 }
 
 [[nodiscard]] RawResponse
-raw_request(const drogon::HttpClientPtr& client, std::string path) {
+raw_request(
+    const drogon::HttpClientPtr& client, std::string path,
+    const std::vector<std::pair<std::string, std::string>>& headers = {}) {
     auto http_request = drogon::HttpRequest::newHttpRequest();
     http_request->setMethod(drogon::Get);
     http_request->setPath(std::move(path));
     if (!default_bearer_token.empty()) {
         http_request->addHeader("Authorization",
                                 "Bearer " + default_bearer_token);
+    }
+    for (const auto& [name, value] : headers) {
+        http_request->addHeader(name, value);
     }
     auto [result, response] = client->sendRequest(http_request, 2.0);
     if (result != drogon::ReqResult::Ok || !response) {
@@ -471,6 +510,8 @@ raw_request(const drogon::HttpClientPtr& client, std::string path) {
         .body = std::string{response->body()},
         .content_type = response->getHeader("content-type"),
         .content_disposition = response->getHeader("content-disposition"),
+        .access_control_allow_origin =
+            response->getHeader("access-control-allow-origin"),
     };
 }
 
@@ -547,6 +588,7 @@ websocket_request(std::uint16_t port, std::string kind, std::string token,
 
 void run_contract() {
     const TemporaryDatabase database;
+    const TemporaryStaticDirectory static_directory;
     const SubscriptionFixture subscription_fixture;
     const ClashFixture clash_fixture;
     auto store = std::make_shared<sbeasy::Store>(
@@ -569,6 +611,8 @@ void run_contract() {
         "http://127.0.0.1:" + std::to_string(clash_fixture.port()) + "/local";
     options.clash_api_secret = "local-secret";
     options.external_hostname = "vpn.example.com";
+    options.static_directory = static_directory.path().string();
+    options.cors_origins = "https://allowed.example";
     sbeasy::register_http_routes(store, options);
     drogon::app()
         .setLogLevel(trantor::Logger::kWarn)
@@ -583,6 +627,43 @@ void run_contract() {
     require(health.status == drogon::k200OK &&
                 health.body.at("service") == "sb-easy-cpp",
             "health endpoint should identify the C++ service");
+    const auto allowed_cors = request(
+        client, drogon::Get, "/api/health", std::nullopt,
+        {{"Origin", "https://allowed.example"}});
+    require(allowed_cors.access_control_allow_origin ==
+                "https://allowed.example",
+            "configured CORS origins must be reflected on API responses");
+    const auto rejected_cors = request(
+        client, drogon::Get, "/api/health", std::nullopt,
+        {{"Origin", "https://rejected.example"}});
+    require(rejected_cors.access_control_allow_origin.empty(),
+            "unconfigured CORS origins must not receive an allow header");
+    const auto preflight = request(
+        client, drogon::Options, "/api/hosts", std::nullopt,
+        {{"Origin", "https://allowed.example"},
+         {"Access-Control-Request-Method", "GET"},
+         {"Access-Control-Request-Headers", "authorization,content-type"}});
+    require(preflight.status == drogon::k204NoContent &&
+                preflight.access_control_allow_origin ==
+                    "https://allowed.example",
+            "CORS preflight must complete before JWT authentication");
+    const auto root_page = raw_request(client, "/");
+    require(root_page.status == drogon::k200OK &&
+                root_page.body.find("sb-easy contract") != std::string::npos &&
+                root_page.content_type.starts_with("text/html"),
+            "the frontend entry point must be served at the root");
+    const auto spa_page = raw_request(client, "/devices/example");
+    require(spa_page.status == drogon::k200OK &&
+                spa_page.body == root_page.body,
+            "client-side routes must fall back to the frontend entry point");
+    const auto frontend_asset =
+        raw_request(client, "/assets/contract.js");
+    require(frontend_asset.status == drogon::k200OK &&
+                frontend_asset.body.find("sbEasyContract") != std::string::npos,
+            "fingerprinted frontend assets must be served from the build directory");
+    require(raw_request(client, "/assets/missing.js").status ==
+                drogon::k404NotFound,
+            "missing frontend assets must not fall back to index.html");
     const auto public_status = request(client, drogon::Get, "/api/system/status");
     require(public_status.status == drogon::k200OK &&
                 public_status.body.at("status") == "running",
@@ -597,6 +678,11 @@ void run_contract() {
                 login.body.at("token").is_string(),
             "the seeded administrator must be able to log in");
     default_bearer_token = login.body.at("token").get<std::string>();
+    const auto missing_api =
+        request(client, drogon::Get, "/api/not-a-real-route");
+    require(missing_api.status == drogon::k404NotFound &&
+                missing_api.body.at("error") == "API route not found",
+            "unknown API paths must remain structured JSON errors");
     require(
         request(client, drogon::Get,
                 "/api/sing-box/ws/traffic?token=invalid-token")

@@ -96,6 +96,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'profiles.delete.q': 'Delete profile',
     'profiles.delete.hint': 'Hosts using this profile fall back to the default profile.',
     'profiles.tab.form': 'Form',
+    'profiles.tab.script': 'QuickJS Rules',
     'profiles.tab.raw': 'Raw JSON',
     'profiles.log': 'Log level',
     'profiles.inbounds': 'Inbounds',
@@ -121,6 +122,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'profiles.script.all': 'all requests',
     'profiles.script.fallthrough': 'continue matching',
     'profiles.script.go': 'via',
+    'profiles.script.disabled.title': 'QuickJS is available for this Profile',
+    'profiles.script.disabled.hint': 'Turn on the switch above to edit and test buildRules(context). The tab remains visible even when disabled.',
 
     'page.devices.title': 'Devices',
     'page.devices.desc': 'Everything on your network in one place — WireGuard clients (phones/laptops) and managed hosts that run sing-box.',
@@ -296,6 +299,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'profiles.delete.q': '删除画像',
     'profiles.delete.hint': '使用此画像的主机将回退到默认画像。',
     'profiles.tab.form': '表单',
+    'profiles.tab.script': 'QuickJS 规则',
     'profiles.tab.raw': '原始 JSON',
     'profiles.log': '日志级别',
     'profiles.inbounds': '入站 Inbounds',
@@ -321,6 +325,8 @@ const messages: Record<Locale, Record<string, string>> = {
     'profiles.script.all': '所有请求',
     'profiles.script.fallthrough': '继续匹配',
     'profiles.script.go': '走',
+    'profiles.script.disabled.title': '这个 Profile 可以使用 QuickJS',
+    'profiles.script.disabled.hint': '打开上方开关即可编辑并试运行 buildRules(context)；即使未启用，这个配置入口也会一直显示。',
 
     'page.devices.title': '设备',
     'page.devices.desc': '把你网络里的一切放在一处 —— WireGuard 客户端（手机/笔记本）和运行 sing-box 的受管主机。',

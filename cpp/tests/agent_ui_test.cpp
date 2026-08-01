@@ -173,9 +173,14 @@ void run_contract() {
                 root.body.find("/api/proxies") != std::string::npos &&
                 root.body.find("/api/settings") != std::string::npos &&
                 root.body.find("traffic-chart") != std::string::npos &&
-                root.body.find("data-config-mode=\"visual\"") != std::string::npos &&
+                root.body.find("data-config-mode=\"overview\"") != std::string::npos &&
+                root.body.find("data-config-mode=\"network\"") != std::string::npos &&
+                root.body.find("data-config-mode=\"routing\"") != std::string::npos &&
+                root.body.find("data-config-mode=\"quickjs\"") != std::string::npos &&
+                root.body.find("data-config-mode=\"outbounds\"") != std::string::npos &&
                 root.body.find("config-route-rules") != std::string::npos &&
-                root.body.find("config-rule-source") != std::string::npos &&
+                root.body.find("config-quickjs-panel") != std::string::npos &&
+                root.body.find("前往中心端配置 QuickJS") != std::string::npos &&
                 root.frame_options == "DENY",
             "authenticated users should receive the secured Agent UI");
 

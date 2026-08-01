@@ -17,6 +17,7 @@
             <span class="profile-id">{{ p.id }}<span v-if="p.id === 'default'" class="badge badge-gray" style="margin-left:.5rem">{{ t('profiles.builtin') }}</span><span v-if="p.rule_script_enabled" class="badge script-badge" style="margin-left:.5rem">{{ t('profiles.script.badge') }}</span></span>
           </div>
           <div class="flex-center gap-2">
+            <button class="btn-ghost btn-sm quickjs-entry" @click="openScript(p)">QuickJS</button>
             <button class="btn-ghost btn-sm" @click="openEdit(p)">{{ t('profiles.edit') }}</button>
             <button v-if="p.id !== 'default'" class="btn-danger btn-sm" @click="deleteTarget = p">{{ t('action.delete') }}</button>
           </div>
@@ -33,6 +34,10 @@
 
         <div class="tabs">
           <button :class="['tab', { active: editor.mode === 'form' }]" @click="switchMode('form')">{{ t('profiles.tab.form') }}</button>
+          <button :class="['tab', 'script-tab', { active: editor.mode === 'script' }]" @click="switchMode('script')">
+            {{ t('profiles.tab.script') }}
+            <span :class="['script-tab-state', { enabled: editor.ruleScriptEnabled }]">{{ editor.ruleScriptEnabled ? 'ON' : 'OFF' }}</span>
+          </button>
           <button :class="['tab', { active: editor.mode === 'raw' }]" @click="switchMode('raw')">{{ t('profiles.tab.raw') }}</button>
         </div>
 
@@ -98,30 +103,37 @@
           </div>
         </div>
 
+        <!-- QUICKJS MODE -->
+        <div v-else-if="editor.mode === 'script'" class="script-tab-panel">
+          <div class="section-block script-block">
+            <div class="flex-between script-title-row">
+              <div><h4>{{ t('profiles.script.title') }}</h4><p class="text-xs text-muted">{{ t('profiles.script.hint') }}</p></div>
+              <label class="script-toggle"><input v-model="editor.ruleScriptEnabled" type="checkbox" @change="onScriptToggle" /><span>{{ t('profiles.script.enabled') }}</span></label>
+            </div>
+            <div class="script-context"><span v-for="item in ['host','outboundTags','currentRules']" :key="item"><code>context.{{ item }}</code></span></div>
+            <template v-if="editor.ruleScriptEnabled">
+              <div class="form-group script-source"><label>{{ t('profiles.script.source') }}</label><textarea v-model="editor.ruleScript" class="script-editor" spellcheck="false" @input="clearScriptResult"></textarea></div>
+              <div class="flex-between script-actions"><p class="text-xs" :class="editor.scriptError ? 'json-err' : 'text-muted'">{{ editor.scriptError || t('profiles.script.context') }}</p><button class="btn-secondary btn-sm" :disabled="editor.scriptTesting" @click="testRuleScript">{{ editor.scriptTesting ? t('profiles.script.testing') : t('profiles.script.test') }}</button></div>
+              <div v-if="editor.scriptResult" class="script-result">
+                <div class="flex-between"><strong>{{ t('profiles.script.result') }}</strong><span class="badge badge-gray">{{ editor.scriptResult.length }}</span></div>
+                <div v-if="editor.scriptResult.length" class="script-result-list"><div v-for="(rule, index) in editor.scriptResult" :key="index" class="script-result-row"><span class="script-result-index">{{ index + 1 }}</span><code>{{ scriptRuleCondition(rule) }}</code><span class="script-result-arrow">→</span><strong>{{ scriptRuleTarget(rule) }}</strong></div></div>
+                <p v-else class="text-xs text-muted" style="margin-top:.6rem">{{ t('profiles.script.empty') }}</p>
+              </div>
+            </template>
+            <div v-else class="script-disabled">
+              <strong>{{ t('profiles.script.disabled.title') }}</strong>
+              <p>{{ t('profiles.script.disabled.hint') }}</p>
+            </div>
+          </div>
+        </div>
+
         <!-- RAW MODE -->
-        <div v-else class="form-group">
+        <div v-else-if="editor.mode === 'raw'" class="form-group">
           <label>{{ t('profiles.template') }}</label>
           <textarea v-model="editor.rawText" class="json-editor" spellcheck="false" @input="editor.error = ''"></textarea>
         </div>
 
-        <p class="text-xs" :class="editor.error ? 'json-err' : 'text-muted'">{{ editor.error || t('profiles.template.hint') }}</p>
-
-        <div class="section-block script-block">
-          <div class="flex-between script-title-row">
-            <div><h4>{{ t('profiles.script.title') }}</h4><p class="text-xs text-muted">{{ t('profiles.script.hint') }}</p></div>
-            <label class="script-toggle"><input v-model="editor.ruleScriptEnabled" type="checkbox" @change="onScriptToggle" /><span>{{ t('profiles.script.enabled') }}</span></label>
-          </div>
-          <template v-if="editor.ruleScriptEnabled">
-            <div class="script-context"><span v-for="item in ['host','outboundTags','currentRules']" :key="item"><code>context.{{ item }}</code></span></div>
-            <div class="form-group script-source"><label>{{ t('profiles.script.source') }}</label><textarea v-model="editor.ruleScript" class="script-editor" spellcheck="false" @input="clearScriptResult"></textarea></div>
-            <div class="flex-between script-actions"><p class="text-xs" :class="editor.scriptError ? 'json-err' : 'text-muted'">{{ editor.scriptError || t('profiles.script.context') }}</p><button class="btn-secondary btn-sm" :disabled="editor.scriptTesting" @click="testRuleScript">{{ editor.scriptTesting ? t('profiles.script.testing') : t('profiles.script.test') }}</button></div>
-            <div v-if="editor.scriptResult" class="script-result">
-              <div class="flex-between"><strong>{{ t('profiles.script.result') }}</strong><span class="badge badge-gray">{{ editor.scriptResult.length }}</span></div>
-              <div v-if="editor.scriptResult.length" class="script-result-list"><div v-for="(rule, index) in editor.scriptResult" :key="index" class="script-result-row"><span class="script-result-index">{{ index + 1 }}</span><code>{{ scriptRuleCondition(rule) }}</code><span class="script-result-arrow">→</span><strong>{{ scriptRuleTarget(rule) }}</strong></div></div>
-              <p v-else class="text-xs text-muted" style="margin-top:.6rem">{{ t('profiles.script.empty') }}</p>
-            </div>
-          </template>
-        </div>
+        <p v-if="editor.error || editor.mode !== 'script'" class="text-xs" :class="editor.error ? 'json-err' : 'text-muted'">{{ editor.error || t('profiles.template.hint') }}</p>
         <div class="modal-actions">
           <button class="btn-secondary" @click="editor.open = false">{{ t('action.cancel') }}</button>
           <button class="btn-primary" @click="save">{{ t('action.save') }}</button>
@@ -168,7 +180,7 @@ interface EditorState {
   open: boolean
   id: string
   name: string
-  mode: 'form' | 'raw'
+  mode: 'form' | 'script' | 'raw'
   rawText: string
   error: string
   ruleScript: string
@@ -271,24 +283,32 @@ function openEdit(p: ConfigProfile) {
   })
 }
 
-function switchMode(mode: 'form' | 'raw') {
+function openScript(profile: ConfigProfile) {
+  openEdit(profile)
+  editor.value.mode = 'script'
+}
+
+function switchMode(mode: 'form' | 'script' | 'raw') {
   if (mode === editor.value.mode) return
   if (mode === 'raw') {
     editor.value.rawText = JSON.stringify(model, null, 2)
     editor.value.error = ''
     editor.value.mode = 'raw'
-  } else {
-    // Parse raw back into the form; stay on raw if it's invalid.
+    return
+  }
+  if (editor.value.mode === 'raw') {
+    // Keep form/script input in sync with edits made in raw JSON.
     try {
       const parsed = JSON.parse(editor.value.rawText)
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object')
       setModel(parsed)
       editor.value.error = ''
-      editor.value.mode = 'form'
     } catch (e: any) {
       editor.value.error = t('profiles.template.invalid') + ': ' + e.message
+      return
     }
   }
+  editor.value.mode = mode
 }
 
 async function save() {
@@ -310,6 +330,7 @@ async function save() {
   try {
     if (editor.value.ruleScriptEnabled && !editor.value.ruleScript.trim()) {
       editor.value.scriptError = t('profiles.script.required')
+      editor.value.mode = 'script'
       return
     }
     if (editor.value.id) {
@@ -354,14 +375,6 @@ function clearScriptResult() {
 }
 
 function previewRules(): any[] {
-  if (editor.value.mode === 'raw') {
-    try {
-      const parsed = JSON.parse(editor.value.rawText)
-      return Array.isArray(parsed?.route?.rules) ? parsed.route.rules : []
-    } catch {
-      return []
-    }
-  }
   return Array.isArray(model.route?.rules) ? JSON.parse(JSON.stringify(model.route.rules)) : []
 }
 
@@ -420,8 +433,13 @@ async function doDelete() {
 .profile-card { padding: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
 .profile-name { font-size: 0.95rem; font-weight: 640; color: var(--ink-primary); }
 .profile-id { font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink-muted); }
+.quickjs-entry { color:#81adf5;border-color:rgba(91,156,255,.35); }
 .script-badge { background:rgba(91,156,255,.14);border:1px solid rgba(91,156,255,.38);color:#81adf5; }
 .script-block { border-color:rgba(91,156,255,.35);background:rgba(55,91,143,.08); }
+.script-tab-panel { max-height:56vh;overflow-y:auto;padding-right:.25rem; }
+.script-tab { display:flex;align-items:center;gap:.45rem; }
+.script-tab-state { padding:.08rem .35rem;border-radius:999px;background:var(--paper-bg);color:var(--ink-muted);font:600 .58rem/1.4 var(--font-mono); }
+.script-tab-state.enabled { background:rgba(91,156,255,.18);color:#81adf5; }
 .script-title-row { align-items:flex-start;gap:1rem; }
 .script-title-row p { margin-top:.2rem;max-width:580px; }
 .script-toggle { display:flex;align-items:center;gap:.45rem;white-space:nowrap;font-size:.75rem;font-weight:600;color:var(--ink-secondary);cursor:pointer; }
@@ -439,6 +457,9 @@ async function doDelete() {
 .script-result-index { color:var(--ink-muted);text-align:center; }
 .script-result-arrow { color:var(--ink-muted); }
 .script-result-row strong { color:#78aaf7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.script-disabled { margin-top:.9rem;padding:1rem;border:1px dashed rgba(91,156,255,.35);border-radius:var(--radius-sm);background:var(--paper-bg); }
+.script-disabled strong { display:block;color:var(--ink-primary);font-size:.82rem; }
+.script-disabled p { margin:.25rem 0 0;color:var(--ink-muted);font-size:.72rem; }
 @media(max-width:700px){.script-title-row,.script-actions{align-items:flex-start;flex-direction:column}.script-result-row{grid-template-columns:1.3rem minmax(0,1fr)}.script-result-arrow{display:none}.script-result-row strong{grid-column:2}.script-toggle{white-space:normal}}
 .profile-summary { font-family: var(--font-mono); }
 .modal-wide { max-width: 760px; width: 94vw; }

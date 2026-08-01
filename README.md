@@ -86,8 +86,9 @@ separate `AGENT_UI_PASSWORD` to enable its local management page on
 `0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
 The page shows live Clash API traffic plus runtime/config status, persists
 node-local outbound settings, and queues refresh/reload/restart operations
-without exposing the Agent token. Runtime configuration defaults to a grouped,
-human-readable view and can be switched to the complete JSON source when needed.
+without exposing the Agent token. Runtime configuration is split into focused
+tabs for overview, network/DNS, routing, QuickJS, outbounds, and raw JSON. The
+QuickJS tab is always visible and links directly to the central Profile editor.
 
 ## Backup & restore
 - DB lives at `./data/sb-easy.db`. Online backup with rotation:

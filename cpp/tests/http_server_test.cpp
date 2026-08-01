@@ -411,6 +411,7 @@ struct ApiResponse {
     json body;
     std::string raw_body;
     std::string etag;
+    std::string rule_source;
     std::string access_control_allow_origin;
 };
 
@@ -482,6 +483,7 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
         .body = std::move(parsed),
         .raw_body = raw_body,
         .etag = response->getHeader("etag"),
+        .rule_source = response->getHeader("x-sb-easy-rule-source"),
         .access_control_allow_origin =
             response->getHeader("access-control-allow-origin"),
     };
@@ -1040,6 +1042,25 @@ function buildRules(context) {
   }];
 }
 )JS";
+    const auto script_preview =
+        request(client, drogon::Post, "/api/hosts/rule-script/test",
+                json{{"rule_script", rule_script},
+                     {"context",
+                      {{"host", {{"id", "preview"}, {"name", "Preview"}}},
+                       {"outboundTags", json::array({"direct", "block"})},
+                       {"currentRules", json::array()}}}});
+    require(script_preview.status == drogon::k200OK &&
+                script_preview.body.at("success") == true &&
+                script_preview.body.at("count") == 1 &&
+                script_preview.body.at("rules").at(0).at("outbound") == "direct",
+            "rule script preview should execute unsaved QuickJS source");
+    const auto invalid_script_preview = request(
+        client, drogon::Post, "/api/hosts/rule-script/test",
+        json{{"rule_script", "function buildRules() { throw new Error('bad'); }"}});
+    require(invalid_script_preview.status == drogon::k422UnprocessableEntity &&
+                invalid_script_preview.body.at("kind") == "rule_script",
+            "rule script preview should expose bounded execution errors");
+
     const auto created_profile = request(client, drogon::Post, "/api/hosts/profiles",
                                          json{
                                              {"name", "Scripted profile"},
@@ -1179,6 +1200,7 @@ function buildRules(context) {
     const auto agent_config =
         request(client, drogon::Get, "/api/agent/config", std::nullopt, agent_auth);
     require(agent_config.status == drogon::k200OK && !agent_config.etag.empty() &&
+                agent_config.rule_source == "quickjs" &&
                 agent_config.body.at("route").at("rules").at(0).at("outbound") ==
                     "direct",
             "authenticated agents should receive their rendered config and ETag");
@@ -1188,7 +1210,8 @@ function buildRules(context) {
         request(client, drogon::Get, "/api/agent/config", std::nullopt, cached_headers);
     require(cached_config.status == drogon::k304NotModified &&
                 cached_config.raw_body.empty() &&
-                cached_config.etag == agent_config.etag,
+                cached_config.etag == agent_config.etag &&
+                cached_config.rule_source == "quickjs",
             "matching agent ETags should produce an empty 304 response");
     const auto touched_host = store->find_host(host_id);
     require(touched_host.has_value() && touched_host->last_seen.has_value(),

@@ -363,7 +363,8 @@ void run_contract() {
         .timeout = std::chrono::seconds{2},
     });
     const auto config = client.poll_config();
-    require(config.modified && !config.etag.empty() && !config.body.empty(),
+    require(config.modified && !config.etag.empty() && !config.body.empty() &&
+                config.rule_source == "profile",
             "agent client should fetch its first config");
     const auto config_path = directory.path() / "config" / "sing-box.json";
     sbeasy::atomic_replace_file(
@@ -402,7 +403,8 @@ void run_contract() {
             "agent Clash telemetry should expose totals and an initial zero rate");
 
     const auto unchanged = client.poll_config(config.etag);
-    require(!unchanged.modified && unchanged.etag == config.etag,
+    require(!unchanged.modified && unchanged.etag == config.etag &&
+                unchanged.rule_source == "profile",
             "agent client should honor 304 responses");
 
     const auto command = store->enqueue_host_command(created.id, "restart");

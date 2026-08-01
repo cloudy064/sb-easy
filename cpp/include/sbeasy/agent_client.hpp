@@ -21,6 +21,7 @@ struct AgentConfigResponse {
     bool modified{false};
     std::string etag;
     std::string body;
+    std::string rule_source{"profile"};
 };
 
 struct AgentCommand {

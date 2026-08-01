@@ -9,6 +9,8 @@ The current foundation contains:
 - a framework-independent sing-box configuration renderer;
 - managed/full profile behavior compatible with the Rust renderer;
 - a constrained QuickJS-NG `buildRules(context)` execution engine;
+- a Profile UI for enabling/editing QuickJS, running unsaved scripts on the
+  bounded server engine, and previewing generated rules before save;
 - a SQLite migration runner compatible with the existing SQLx metadata and
   checksums, plus a profile/host repository;
 - a Drogon HTTP server for host/profile CRUD, outbound assignment, token
@@ -233,6 +235,12 @@ Available context:
 - `host`: non-secret host metadata supplied by the renderer;
 - `outboundTags`: usable generated, built-in, and external route tags;
 - `currentRules`: rules from the profile before script execution.
+
+The Profiles editor exposes this contract without requiring direct API calls.
+`POST /api/hosts/rule-script/test` executes unsaved source with preview context.
+Agent config responses include `X-SB-Easy-Rule-Source`, allowing the local Agent
+console to distinguish static Profile rules from the final QuickJS-generated
+rules it displays.
 
 Each execution gets a fresh runtime with memory, stack, source, output, and time
 limits. `Date` and `Math.random` are disabled to keep generated configs and ETags

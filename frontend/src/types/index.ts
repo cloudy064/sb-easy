@@ -53,6 +53,9 @@ export interface ConfigProfile {
   id: string
   name: string
   template: string
+  mode: 'managed' | 'full'
+  rule_script: string
+  rule_script_enabled: boolean
   created_at: string
   updated_at: string
 }

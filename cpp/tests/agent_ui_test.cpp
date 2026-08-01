@@ -93,6 +93,7 @@ void run_contract() {
                 return json{
                     {"running", true},
                     {"server", "https://panel.example"},
+                    {"rule_source", "quickjs"},
                     {"telemetry",
                      {{"available", true},
                       {"sampled_at", "2026-07-31T10:00:00Z"},
@@ -174,6 +175,7 @@ void run_contract() {
                 root.body.find("traffic-chart") != std::string::npos &&
                 root.body.find("data-config-mode=\"visual\"") != std::string::npos &&
                 root.body.find("config-route-rules") != std::string::npos &&
+                root.body.find("config-rule-source") != std::string::npos &&
                 root.frame_options == "DENY",
             "authenticated users should receive the secured Agent UI");
 

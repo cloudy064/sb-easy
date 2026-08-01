@@ -144,11 +144,13 @@ AgentConfigResponse AgentClient::poll_config(const std::optional<std::string>& e
     const auto response =
         implementation_->send(drogon::Get, "/api/agent/config", std::nullopt, etag);
     const auto response_etag = response->getHeader("etag");
+    const auto rule_source = response->getHeader("x-sb-easy-rule-source");
     if (response->statusCode() == drogon::k304NotModified) {
         return {
             .modified = false,
             .etag = response_etag.empty() ? etag.value_or("") : response_etag,
             .body = {},
+            .rule_source = rule_source.empty() ? "profile" : rule_source,
         };
     }
     if (response->statusCode() != drogon::k200OK) {
@@ -168,6 +170,7 @@ AgentConfigResponse AgentClient::poll_config(const std::optional<std::string>& e
         .modified = true,
         .etag = response_etag,
         .body = body,
+        .rule_source = rule_source.empty() ? "profile" : rule_source,
     };
 }
 

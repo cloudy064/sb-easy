@@ -33,14 +33,35 @@ export const useHostsStore = defineStore('hosts', () => {
     profiles.value = Array.isArray(data) ? data : []
   }
 
-  async function createProfile(name: string, template: unknown): Promise<ConfigProfile> {
-    const { data } = await client.post('/hosts/profiles', { name, template })
+  async function createProfile(
+    name: string,
+    template: unknown,
+    ruleScript = '',
+    ruleScriptEnabled = false,
+  ): Promise<ConfigProfile> {
+    const { data } = await client.post('/hosts/profiles', {
+      name,
+      template,
+      rule_script: ruleScript,
+      rule_script_enabled: ruleScriptEnabled,
+    })
     await fetchProfiles()
     return data
   }
 
-  async function updateProfile(id: string, name: string, template: unknown): Promise<ConfigProfile> {
-    const { data } = await client.put(`/hosts/profiles/${id}`, { name, template })
+  async function updateProfile(
+    id: string,
+    name: string,
+    template: unknown,
+    ruleScript: string,
+    ruleScriptEnabled: boolean,
+  ): Promise<ConfigProfile> {
+    const { data } = await client.put(`/hosts/profiles/${id}`, {
+      name,
+      template,
+      rule_script: ruleScript,
+      rule_script_enabled: ruleScriptEnabled,
+    })
     await fetchProfiles()
     return data
   }

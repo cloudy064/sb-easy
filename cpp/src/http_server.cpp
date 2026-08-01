@@ -317,7 +317,7 @@ class CorsPolicy final {
                             headers.empty() ? "Authorization, Content-Type"
                                             : std::move(headers));
         response->addHeader("Access-Control-Expose-Headers",
-                            "ETag, Content-Disposition");
+                            "ETag, Content-Disposition, X-SB-Easy-Rule-Source");
         response->addHeader("Access-Control-Max-Age", "600");
         if (!wildcard_) {
             response->addHeader("Vary", "Origin");
@@ -594,6 +594,10 @@ profile_from_request(const json& body,
             throw ValidationError("rule_script_enabled must be a boolean");
         }
         profile.rule_script_enabled = enabled->get<bool>();
+    }
+    if (profile.rule_script_enabled && trim(profile.rule_script).empty()) {
+        throw ValidationError(
+            "rule_script must not be empty when rule_script_enabled is true");
     }
     return profile;
 }
@@ -2145,6 +2149,43 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         },
         {drogon::Post});
     application.registerHandler(
+        "/api/hosts/rule-script/test",
+        [](const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto body = request_object(request);
+                const auto script = required_string(body, "rule_script");
+                auto context = body.value("context", json::object());
+                if (!context.is_object()) {
+                    throw ValidationError("context must be a JSON object");
+                }
+                if (!context.contains("host")) {
+                    context["host"] = {
+                        {"id", "preview"},
+                        {"name", "QuickJS preview"},
+                        {"capabilities", json::object()},
+                    };
+                }
+                if (!context.contains("outboundTags")) {
+                    context["outboundTags"] = json::array({"Proxy", "direct", "block"});
+                }
+                if (!context.contains("currentRules")) {
+                    context["currentRules"] = json::array();
+                }
+                if (!context["host"].is_object() ||
+                    !context["outboundTags"].is_array() ||
+                    !context["currentRules"].is_array()) {
+                    throw ValidationError(
+                        "context host/outboundTags/currentRules have invalid types");
+                }
+                RuleScriptEngine engine;
+                auto rules = engine.build_rules(script, context);
+                return json{{"success", true},
+                            {"count", rules.size()},
+                            {"rules", std::move(rules)}};
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
         "/api/hosts/profiles/{id}",
         [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
                 const std::string& id) {
@@ -2382,13 +2423,16 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                 const auto host =
                     resolve_agent_host(*store, request, legacy_agent_token);
                 const ConfigRenderer renderer;
-                const auto body =
-                    renderer.render(store->render_request_for_host(host.id)).dump(2);
+                const auto render_input = store->render_request_for_host(host.id);
+                const auto rule_source =
+                    render_input.rule_script.has_value() ? "quickjs" : "profile";
+                const auto body = renderer.render(render_input).dump(2);
                 const auto etag = config_etag(host.id, body, config_hash_seed);
                 store->touch_host(host.id);
 
                 auto response = drogon::HttpResponse::newHttpResponse();
                 response->addHeader("ETag", etag);
+                response->addHeader("X-SB-Easy-Rule-Source", rule_source);
                 if (request->getHeader("if-none-match") == etag) {
                     response->setStatusCode(drogon::k304NotModified);
                     return response;

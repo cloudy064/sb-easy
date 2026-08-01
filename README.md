@@ -12,6 +12,8 @@ install.
 ## Features
 - Multi-host central management: register hosts, assign proxies, edit config
   profiles (managed = panel-built, or **full** = paste a complete config).
+- Profile-scoped QuickJS rule generation with an enable switch, bounded
+  server-side test run, readable output preview, and Agent result provenance.
 - Per-host agent token; the image runs the panel as `sb-easy` and preserves
   `sb-easy agent` as a compatibility alias for the dedicated C++ agent.
 - Managed sing-box: spawn / reload-on-change / respawn-on-crash; Clash API

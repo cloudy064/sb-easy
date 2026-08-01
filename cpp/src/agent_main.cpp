@@ -384,6 +384,8 @@ class AgentRuntime final {
             const auto config = client_.poll_config(etag());
             if (config.modified) {
                 apply_config(config);
+            } else {
+                set_rule_source(config.rule_source);
             }
         } catch (const std::exception& error) {
             record_error(errors, "config poll/apply", error);
@@ -505,6 +507,11 @@ class AgentRuntime final {
         last_etag_ = std::move(value);
     }
 
+    void set_rule_source(std::string value) {
+        std::lock_guard lock{state_mutex_};
+        last_rule_source_ = value == "quickjs" ? "quickjs" : "profile";
+    }
+
     [[nodiscard]] std::optional<bool> running() const {
         std::lock_guard lock{state_mutex_};
         return running_;
@@ -546,6 +553,7 @@ class AgentRuntime final {
             supervisor_.apply_config(prepared);
             set_running(supervisor_.running());
             set_etag(config.etag);
+            set_rule_source(config.rule_source);
             std::cout << "applied config " << config.etag << '\n';
             return;
         }
@@ -574,6 +582,7 @@ class AgentRuntime final {
         }
         set_running(true);
         set_etag(config.etag);
+        set_rule_source(config.rule_source);
         std::cout << "applied config " << config.etag << '\n';
     }
 
@@ -690,6 +699,7 @@ class AgentRuntime final {
                                                    : nlohmann::json(nullptr)},
             {"last_error", last_error_.has_value() ? nlohmann::json(*last_error_)
                                                    : nlohmann::json(nullptr)},
+            {"rule_source", last_rule_source_},
             {"pending",
              {
                  {"refresh", refresh_requested_},
@@ -809,6 +819,7 @@ class AgentRuntime final {
         {"available", false}, {"sampled_at", nullptr}, {"up", 0},         {"down", 0},
         {"up_total", 0},      {"down_total", 0},       {"conn_count", 0},
     };
+    std::string last_rule_source_{"profile"};
     bool refresh_requested_{false};
     bool reload_requested_{false};
     bool restart_requested_{false};

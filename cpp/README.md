@@ -161,7 +161,10 @@ refresh/reload/restart actions. The runtime configuration separates overview,
 network/DNS, routing, QuickJS, outbounds/endpoints, and complete JSON into tabs.
 The QuickJS tab remains visible when the assigned Profile has scripting disabled
 and links to the central Profile editor; when enabled it identifies the final
-generated rules shown by the Agent. Settings default to
+generated rules shown by the Agent. The routing tab includes a live URL test: the
+Agent opens a short-lived CONNECT tunnel through its current mixed/http inbound
+and correlates the source port with Clash API connections to report the actual
+rule, selector chain, and final proxy/direct outbound. Settings default to
 `agent-ui-settings.json` next to the generated sing-box config and can be moved
 with `AGENT_UI_SETTINGS_PATH`. The Agent token is never returned by the UI.
 Because the listener is plain HTTP on every interface, restrict port 51822 to a

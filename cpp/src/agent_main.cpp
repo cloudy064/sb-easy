@@ -451,6 +451,8 @@ class AgentRuntime final {
                 },
             .config = [this] { return ui_config(); },
             .proxies = [this] { return ui_proxies(); },
+            .test_route =
+                [this](const std::string& url) { return clash_.test_route(url); },
             .request_action =
                 [this](const std::string& action) { queue_action(action); },
         };

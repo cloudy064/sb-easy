@@ -202,7 +202,8 @@ void handle_response(ResponseCallback&& callback, Function&& function) {
 
 void validate_callbacks(const AgentUiCallbacks& callbacks) {
     if (!callbacks.status || !callbacks.settings || !callbacks.update_settings ||
-        !callbacks.config || !callbacks.proxies || !callbacks.request_action) {
+        !callbacks.config || !callbacks.proxies || !callbacks.test_route ||
+        !callbacks.request_action) {
         throw std::invalid_argument("all Agent UI callbacks are required");
     }
 }
@@ -367,6 +368,27 @@ void register_routes(const AgentLocalUiOptions& options,
             });
         },
         {drogon::Get});
+    application.registerHandler(
+        "/api/route-test",
+        [callbacks](const drogon::HttpRequestPtr& request,
+                    ResponseCallback&& callback) {
+            handle_response(std::move(callback), [&callbacks, &request] {
+                if (request->body().size() > 8U * 1024U) {
+                    return json_response({{"error", "路由测试请求过大"}},
+                                         drogon::k413RequestEntityTooLarge);
+                }
+                const auto value = json::parse(request->body());
+                if (!value.is_object()) {
+                    throw std::invalid_argument("路由测试请求必须是 JSON 对象");
+                }
+                const auto found = value.find("url");
+                if (found == value.end() || !found->is_string()) {
+                    throw std::invalid_argument("请输入要测试的 URL");
+                }
+                return json_response(callbacks.test_route(found->get<std::string>()));
+            });
+        },
+        {drogon::Post});
 
     const auto register_action = [&application, callbacks](std::string action) {
         const auto path = "/api/actions/" + action;

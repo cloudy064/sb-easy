@@ -15,6 +15,7 @@ struct AgentUiCallbacks {
     std::function<nlohmann::json(const nlohmann::json&)> update_settings;
     std::function<nlohmann::json()> config;
     std::function<nlohmann::json()> proxies;
+    std::function<nlohmann::json(const std::string&)> test_route;
     std::function<void(const std::string&)> request_action;
 };
 

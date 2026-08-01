@@ -89,6 +89,8 @@ node-local outbound settings, and queues refresh/reload/restart operations
 without exposing the Agent token. Runtime configuration is split into focused
 tabs for overview, network/DNS, routing, QuickJS, outbounds, and raw JSON. The
 QuickJS tab is always visible and links directly to the central Profile editor.
+The routing tab can open a short-lived test connection for a URL and reports the
+actual sing-box rule, selector chain, and final proxy/direct decision.
 
 ## Backup & restore
 - DB lives at `./data/sb-easy.db`. Online backup with rotation:

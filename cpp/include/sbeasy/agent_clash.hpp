@@ -40,6 +40,10 @@ class AgentClashService final {
     /// does not expose a Clash controller.
     [[nodiscard]] std::optional<nlohmann::json> sample_telemetry();
 
+    /// Opens a short-lived CONNECT tunnel through the installed local HTTP/mixed
+    /// inbound and returns the actual Clash connection chain selected by sing-box.
+    [[nodiscard]] nlohmann::json test_route(const std::string& url);
+
   private:
     class Impl;
     std::unique_ptr<Impl> implementation_;

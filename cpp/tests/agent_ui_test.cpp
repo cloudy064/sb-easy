@@ -77,6 +77,7 @@ void require(bool condition, const char* message) {
 void run_contract() {
     auto settings = sbeasy::agent_config_transform_options_to_json({});
     std::string requested_action;
+    std::string tested_url;
     const json config{
         {"outbounds", json::array({
                           {{"tag", "Proxy"},
@@ -117,6 +118,21 @@ void run_contract() {
             [] {
                 return json::array(
                     {{{"tag", "node-a"}, {"type", "shadowsocks"}, {"default", true}}});
+            },
+        .test_route =
+            [&tested_url](const std::string& url) {
+                tested_url = url;
+                return json{
+                    {"success", true},
+                    {"url", url},
+                    {"host", "example.com"},
+                    {"port", 443},
+                    {"kind", "proxy"},
+                    {"outbound", "node-a"},
+                    {"chains", json::array({"node-a", "Proxy"})},
+                    {"rule", "domain_suffix=example.com => route(Proxy)"},
+                    {"rule_payload", ""},
+                };
             },
         .request_action = [&requested_action](
                               const std::string& action) { requested_action = action; },
@@ -179,6 +195,8 @@ void run_contract() {
                 root.body.find("data-config-mode=\"quickjs\"") != std::string::npos &&
                 root.body.find("data-config-mode=\"outbounds\"") != std::string::npos &&
                 root.body.find("config-route-rules") != std::string::npos &&
+                root.body.find("URL 实际路由测试") != std::string::npos &&
+                root.body.find("/api/route-test") != std::string::npos &&
                 root.body.find("config-quickjs-panel") != std::string::npos &&
                 root.body.find("前往中心端配置 QuickJS") != std::string::npos &&
                 root.frame_options == "DENY",
@@ -217,6 +235,19 @@ void run_contract() {
     require(raw_config.status == drogon::k200OK &&
                 json::parse(raw_config.body) == config,
             "Agent UI should expose the current local config to authenticated users");
+
+    const auto route_test = request(client, drogon::Post, "/api/route-test",
+                                    json{{"url", "https://example.com/path"}}.dump());
+    require(route_test.status == drogon::k200OK &&
+                json::parse(route_test.body).at("outbound") == "node-a" &&
+                json::parse(route_test.body).at("kind") == "proxy" &&
+                tested_url == "https://example.com/path",
+            "Agent UI should return the actual route test callback result");
+
+    const auto invalid_route_test =
+        request(client, drogon::Post, "/api/route-test", json::object().dump());
+    require(invalid_route_test.status == drogon::k400BadRequest,
+            "Agent UI should reject a route test without a URL");
 
     const auto logout = request(client, drogon::Post, "/api/logout");
     require(logout.status == drogon::k200OK,

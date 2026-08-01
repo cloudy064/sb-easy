@@ -172,6 +172,8 @@ void run_contract() {
                 root.body.find("/api/proxies") != std::string::npos &&
                 root.body.find("/api/settings") != std::string::npos &&
                 root.body.find("traffic-chart") != std::string::npos &&
+                root.body.find("data-config-mode=\"visual\"") != std::string::npos &&
+                root.body.find("config-route-rules") != std::string::npos &&
                 root.frame_options == "DENY",
             "authenticated users should receive the secured Agent UI");
 

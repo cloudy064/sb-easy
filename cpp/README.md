@@ -155,7 +155,9 @@ SameSite=Strict session cookie. `AGENT_UI_BIND` changes the listener, and
 `AGENT_UI_ENABLED=false` disables it explicitly. The authenticated page
 provides live Clash API traffic and connection metrics, a searchable current
 config/proxy summary, durable node-local outbound settings, and queued
-refresh/reload/restart actions. Settings default to
+refresh/reload/restart actions. The runtime configuration opens as a
+human-readable view of inbounds, DNS, routing, rule sets, outbounds, and
+endpoints, with an explicit switch to the complete JSON source. Settings default to
 `agent-ui-settings.json` next to the generated sing-box config and can be moved
 with `AGENT_UI_SETTINGS_PATH`. The Agent token is never returned by the UI.
 Because the listener is plain HTTP on every interface, restrict port 51822 to a

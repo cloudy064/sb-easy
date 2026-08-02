@@ -12,7 +12,7 @@
         <p class="text-sm text-muted summary">{{ t('downloads.summary') }}</p>
 
         <div class="details">
-          <div><span>{{ t('downloads.version') }}</span><strong>1.0.1</strong></div>
+          <div><span>{{ t('downloads.version') }}</span><strong>1.0.2</strong></div>
           <div><span>{{ t('downloads.core') }}</span><strong>sing-box 1.13.12</strong></div>
           <div><span>{{ t('downloads.android') }}</span><strong>{{ t('downloads.android.value') }}</strong></div>
         </div>
@@ -35,7 +35,7 @@
           >{{ t('downloads.action.universal') }}</a>
           <a
             class="release-link"
-            href="https://github.com/cloudy064/sb-easy/releases/tag/android-v1.0.1"
+            href="https://github.com/cloudy064/sb-easy/releases/tag/android-v1.0.2"
             target="_blank"
             rel="noopener"
           >{{ t('downloads.action.release') }} ↗</a>

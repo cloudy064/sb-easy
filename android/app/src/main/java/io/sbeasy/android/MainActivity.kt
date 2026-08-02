@@ -198,8 +198,9 @@ class MainActivity : ComponentActivity() {
 
     private fun decodeQrCode(uri: Uri): String {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val boundsStream = contentResolver.openInputStream(uri)
             ?: error("无法读取所选图片")
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         require(bounds.outWidth > 0 && bounds.outHeight > 0) { "所选文件不是有效图片" }
 
         var sampleSize = 1

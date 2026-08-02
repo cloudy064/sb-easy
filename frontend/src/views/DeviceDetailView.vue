@@ -85,6 +85,7 @@ import { useHostsStore } from '../stores/hosts'
 import HostManageModal from '../components/HostManageModal.vue'
 import client from '../api/client'
 import { formatRate, formatBytes } from '../api/realtime'
+import { serverTimestampAgeMs } from '../api/time'
 import type { Host } from '../types'
 
 const { t } = useI18n()
@@ -138,13 +139,16 @@ function rate(bps: number) { return formatRate(bps || 0) }
 function bytes(b: number) { return formatBytes(b || 0) }
 function ago(iso: string) {
   if (!iso) return ''
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000))
+  const age = serverTimestampAgeMs(iso)
+  if (age === null) return ''
+  const s = Math.round(age / 1000)
   return s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`
 }
 const online = computed(() => {
   if (isSelf.value) return true
   if (!host.value?.last_seen) return false
-  return Date.now() - new Date(host.value.last_seen).getTime() < 60_000
+  const age = serverTimestampAgeMs(host.value.last_seen)
+  return age !== null && age < 60_000
 })
 const statusText = computed(() => {
   if (isSelf.value) return t('hosts.status.local')

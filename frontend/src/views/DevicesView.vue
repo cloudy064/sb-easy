@@ -274,6 +274,7 @@ import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
 import HostManageModal from '../components/HostManageModal.vue'
 import client from '../api/client'
+import { serverTimestampAgeMs } from '../api/time'
 import type { AgentEnrollment, Host, WireGuardPeer } from '../types'
 
 const { t } = useI18n()
@@ -467,7 +468,8 @@ function online(d: DeviceRow): boolean {
   if (d._t === 'host') {
     if (d.is_self) return true // managed in-process
     if (!d.last_seen) return false
-    return Date.now() - new Date(d.last_seen).getTime() < 60_000
+    const age = serverTimestampAgeMs(d.last_seen)
+    return age !== null && age < 60_000
   }
   if (!d.latest_handshake) return false
   return Date.now() / 1000 - d.latest_handshake < 180

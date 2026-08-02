@@ -173,6 +173,7 @@ import { ref, onMounted } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useProxyNodesStore } from '../stores/proxyNodes'
+import { serverTimestampAgeMs } from '../api/time'
 import type { Host } from '../types'
 
 const { t } = useI18n()
@@ -262,9 +263,8 @@ async function doEdit() {
 // ── Online status ────────────────────────────────────────────
 function secondsSinceSeen(h: Host): number | null {
   if (!h.last_seen) return null
-  const ts = Date.parse(h.last_seen)
-  if (Number.isNaN(ts)) return null
-  return (Date.now() - ts) / 1000
+  const age = serverTimestampAgeMs(h.last_seen)
+  return age === null ? null : age / 1000
 }
 function isOnline(h: Host): boolean {
   const s = secondsSinceSeen(h)

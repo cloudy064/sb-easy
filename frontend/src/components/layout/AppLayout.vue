@@ -60,6 +60,12 @@
           </svg>
           {{ t('nav.serverlogs') }}
         </router-link>
+        <router-link to="/downloads" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M9 2v9"/><path d="M5.5 8.5L9 12l3.5-3.5"/><path d="M3 15h12"/>
+          </svg>
+          {{ t('nav.downloads') }}
+        </router-link>
         <router-link v-if="isAdmin" to="/users" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <circle cx="6.5" cy="6" r="2.5"/><path d="M2 16c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/>

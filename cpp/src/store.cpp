@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <iomanip>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <sstream>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include <openssl/rand.h>
+#include <openssl/evp.h>
 #include <sqlite3.h>
 
 #include "sbeasy/auth.hpp"
@@ -203,6 +205,27 @@ void validate_proxy(const ProxyRecord& node) {
     std::erase(first, '-');
     std::erase(second, '-');
     return first + second;
+}
+
+[[nodiscard]] std::string sha256_hex(std::string_view value) {
+    using Context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    Context context{EVP_MD_CTX_new(), EVP_MD_CTX_free};
+    if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(context.get(), value.data(), value.size()) != 1) {
+        throw std::runtime_error("SHA-256 initialization failed");
+    }
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size{};
+    if (EVP_DigestFinal_ex(context.get(), digest.data(), &size) != 1 ||
+        size != 32U) {
+        throw std::runtime_error("SHA-256 finalization failed");
+    }
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (unsigned int index = 0; index < size; ++index) {
+        output << std::setw(2) << static_cast<unsigned int>(digest[index]);
+    }
+    return output.str();
 }
 
 constexpr auto host_select = R"SQL(
@@ -1265,6 +1288,114 @@ std::string Store::rotate_agent_token(const std::string& host_id) {
         throw NotFoundError("Host not found");
     }
     return token;
+}
+
+AgentEnrollment Store::create_agent_enrollment(const std::string& host_id) {
+    const auto host = find_host(host_id);
+    if (!host.has_value()) {
+        throw NotFoundError("Host not found");
+    }
+    if (host->id == "self" || !host->enabled) {
+        throw ValidationError("Enrollment requires an enabled remote host");
+    }
+
+    AgentEnrollment enrollment{
+        .id = uuid_v4(),
+        .host_id = host_id,
+        .code = new_agent_token(),
+        .expires_at = {},
+    };
+    const auto code_hash = sha256_hex(enrollment.code);
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement expire_previous{
+        database_.handle_,
+        "UPDATE agent_enrollments SET expires_at = datetime('now') "
+        "WHERE host_id = ?1 AND redeemed_at IS NULL"};
+    expire_previous.bind(1, host_id);
+    expire_previous.step_done();
+
+    sqlite::Statement insert{
+        database_.handle_,
+        "INSERT INTO agent_enrollments "
+        "(id, host_id, code_hash, expires_at) "
+        "VALUES (?1, ?2, ?3, datetime('now', '+10 minutes'))"};
+    insert.bind(1, enrollment.id);
+    insert.bind(2, host_id);
+    insert.bind(3, code_hash);
+    insert.step_done();
+
+    sqlite::Statement read{
+        database_.handle_,
+        "SELECT expires_at FROM agent_enrollments WHERE id = ?1"};
+    read.bind(1, enrollment.id);
+    if (!read.step_row()) {
+        throw std::runtime_error("Created enrollment could not be read");
+    }
+    enrollment.expires_at = read.text(0);
+    transaction.commit();
+    return enrollment;
+}
+
+AgentEnrollmentResult
+Store::redeem_agent_enrollment(const std::string& code,
+                               const nlohmann::json& device) {
+    if (code.size() < 32U || !device.is_object()) {
+        throw ValidationError("A valid enrollment code and device are required");
+    }
+    const auto code_hash = sha256_hex(code);
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement read{
+        database_.handle_,
+        "SELECT e.id, h.id, h.name, h.agent_token, "
+        "COALESCE(h.profile_id, 'default'), p.name, h.capabilities "
+        "FROM agent_enrollments e "
+        "JOIN hosts h ON h.id = e.host_id "
+        "JOIN config_profiles p ON p.id = COALESCE(h.profile_id, 'default') "
+        "WHERE e.code_hash = ?1 AND e.redeemed_at IS NULL "
+        "AND e.expires_at > datetime('now') AND h.enabled = 1"};
+    read.bind(1, code_hash);
+    if (!read.step_row()) {
+        throw ValidationError("Enrollment code is invalid or expired");
+    }
+
+    const auto enrollment_id = read.text(0);
+    AgentEnrollmentResult result{
+        .host_id = read.text(1),
+        .host_name = read.text(2),
+        .agent_token = read.text(3),
+        .profile_id = read.text(4),
+        .profile_name = read.text(5),
+    };
+    auto capabilities = parse_object_or_empty(read.text(6));
+    capabilities["platform"] = "android";
+    for (const auto* key : {"app_version", "core_version", "install_id", "model"}) {
+        const auto found = device.find(key);
+        if (found != device.end() && found->is_string()) {
+            capabilities[key] = *found;
+        }
+    }
+
+    sqlite::Statement redeem{
+        database_.handle_,
+        "UPDATE agent_enrollments SET redeemed_at = datetime('now') "
+        "WHERE id = ?1 AND redeemed_at IS NULL"};
+    redeem.bind(1, enrollment_id);
+    redeem.step_done();
+    if (sqlite3_changes(database_.handle_) != 1) {
+        throw ConflictError("Enrollment code was already redeemed");
+    }
+
+    sqlite::Statement update_host{
+        database_.handle_,
+        "UPDATE hosts SET capabilities = ?1, last_seen = datetime('now'), "
+        "updated_at = datetime('now') WHERE id = ?2"};
+    update_host.bind(1, capabilities.dump());
+    update_host.bind(2, result.host_id);
+    update_host.step_done();
+    transaction.commit();
+    return result;
 }
 
 std::optional<Host> Store::find_enabled_host_by_token(const std::string& token) const {

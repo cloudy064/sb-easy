@@ -58,7 +58,9 @@ services:
     ports:
       - "51821:51821/tcp"   # 面板
       - "51820:51820/udp"   # WireGuard
-    volumes: [ ./data:/app/data ]
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/frontend/dist/downloads:ro
     env_file: [ .env ]
     environment:
       - SINGBOX_MANAGED=false        # 服务器只做面板 + WG hub
@@ -72,6 +74,10 @@ services:
 cd /root/workspace/sb-easy && docker compose up -d
 ```
 面板：`http://SERVER:51821`（admin / 你设的密码）。
+
+Android APK 放在服务器的 `./downloads/sb-easy-android.apk`，管理端的
+Android 客户端页会链接到
+`http://SERVER:51821/downloads/sb-easy-android.apk`。
 > 若服务器在跑 wg-easy，先停掉（占用 51820/51821）：`docker stop wg-easy && docker update --restart=no wg-easy`。
 
 ## 二、加一个 agent 端点

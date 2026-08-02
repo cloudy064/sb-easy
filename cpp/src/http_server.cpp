@@ -317,7 +317,8 @@ class CorsPolicy final {
                             headers.empty() ? "Authorization, Content-Type"
                                             : std::move(headers));
         response->addHeader("Access-Control-Expose-Headers",
-                            "ETag, Content-Disposition, X-SB-Easy-Rule-Source");
+                            "ETag, Content-Disposition, X-SB-Easy-Rule-Source, "
+                            "X-SB-Easy-Profile-Id, X-SB-Easy-Profile-Name");
         response->addHeader("Access-Control-Max-Age", "600");
         if (!wildcard_) {
             response->addHeader("Vary", "Origin");
@@ -1123,6 +1124,15 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         [] { static_cast<void>(std::fflush(stdout)); });
     LOG_INFO << "sb-easy C++ HTTP routes registered";
     const auto public_server = options.public_server;
+    auto enrollment_server = trim_trailing_slashes(public_server);
+    if (!enrollment_server.starts_with("http://") &&
+        !enrollment_server.starts_with("https://")) {
+        if (enrollment_server.find(':') == std::string::npos ||
+            (enrollment_server.starts_with('[') && enrollment_server.ends_with(']'))) {
+            enrollment_server += ":" + std::to_string(options.port);
+        }
+        enrollment_server = "http://" + enrollment_server;
+    }
     const auto config_hash_seed = options.config_hash_seed;
     const auto legacy_agent_token = trim(options.legacy_agent_token);
     const auto local_clash_api = options.clash_api_url;
@@ -2408,6 +2418,25 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             });
         },
         {drogon::Post});
+    application.registerHandler(
+        "/api/hosts/{id}/enrollment-codes",
+        [store, enrollment_server](const drogon::HttpRequestPtr&,
+                                   ResponseCallback&& callback,
+                                   const std::string& id) {
+            handle(std::move(callback), [&] {
+                const auto enrollment = store->create_agent_enrollment(id);
+                const auto uri =
+                    "sbeasy://enroll?server=" + encode_component(enrollment_server) +
+                    "&code=" + encode_component(enrollment.code);
+                return json{{"host_id", enrollment.host_id},
+                            {"server", enrollment_server},
+                            {"code", enrollment.code},
+                            {"expires_at", enrollment.expires_at},
+                            {"enrollment_uri", uri},
+                            {"qr_svg", qr_svg_for_text(uri)}};
+            });
+        },
+        {drogon::Post});
 
     application.registerHandler(
         "/api/agent/health",
@@ -2415,6 +2444,25 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             callback(json_response({{"status", "ok"}}));
         },
         {drogon::Get});
+    application.registerHandler(
+        "/api/agent/enroll",
+        [store, enrollment_server](const drogon::HttpRequestPtr& request,
+                                   ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                const auto body = request_object(request);
+                const auto device = body.value("device", json::object());
+                const auto enrollment = store->redeem_agent_enrollment(
+                    required_string(body, "code"), device);
+                return json{{"server", enrollment_server},
+                            {"host_id", enrollment.host_id},
+                            {"host_name", enrollment.host_name},
+                            {"agent_token", enrollment.agent_token},
+                            {"profile",
+                             {{"id", enrollment.profile_id},
+                              {"name", enrollment.profile_name}}}};
+            });
+        },
+        {drogon::Post});
     application.registerHandler(
         "/api/agent/config",
         [store, config_hash_seed, legacy_agent_token](
@@ -2424,6 +2472,8 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                     resolve_agent_host(*store, request, legacy_agent_token);
                 const ConfigRenderer renderer;
                 const auto render_input = store->render_request_for_host(host.id);
+                const auto profile_id = host.profile_id.value_or("default");
+                const auto profile = require_profile(*store, profile_id);
                 const auto rule_source =
                     render_input.rule_script.has_value() ? "quickjs" : "profile";
                 const auto body = renderer.render(render_input).dump(2);
@@ -2433,6 +2483,8 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                 auto response = drogon::HttpResponse::newHttpResponse();
                 response->addHeader("ETag", etag);
                 response->addHeader("X-SB-Easy-Rule-Source", rule_source);
+                response->addHeader("X-SB-Easy-Profile-Id", profile_id);
+                response->addHeader("X-SB-Easy-Profile-Name", profile.name);
                 if (request->getHeader("if-none-match") == etag) {
                     response->setStatusCode(drogon::k304NotModified);
                     return response;
@@ -2456,8 +2508,10 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                     host.id,
                     {
                         {"version", optional_string_field(body, "singbox_version")},
+                        {"app_version", optional_string_field(body, "app_version")},
                         {"running", optional_boolean_field(body, "singbox_running")},
                         {"etag", optional_string_field(body, "config_etag")},
+                        {"last_error", optional_string_field(body, "last_error")},
                     });
                 return json{{"ok", true}};
             });
@@ -2535,6 +2589,33 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                 true));
         },
         {drogon::Get, drogon::Head});
+    constexpr std::array android_downloads{
+        std::string_view{"sb-easy-android.apk"},
+        std::string_view{"sb-easy-android-arm64-v8a.apk"},
+        std::string_view{"sb-easy-android-armeabi-v7a.apk"},
+        std::string_view{"sb-easy-android-x86.apk"},
+        std::string_view{"sb-easy-android-x86_64.apk"},
+        std::string_view{"sb-easy-android-universal.apk"},
+    };
+    for (const auto name : android_downloads) {
+        const auto file_name = std::string{name};
+        application.registerHandler(
+            "/downloads/" + file_name,
+            [static_directory, file_name](const drogon::HttpRequestPtr&,
+                                          ResponseCallback&& callback) {
+                auto response = static_file_response(
+                    static_directory / "downloads" / file_name, false);
+                if (response->statusCode() == drogon::k200OK) {
+                    response->setContentTypeString(
+                        "application/vnd.android.package-archive");
+                    response->addHeader(
+                        "Content-Disposition",
+                        "attachment; filename=\"" + file_name + "\"");
+                }
+                callback(std::move(response));
+            },
+            {drogon::Get, drogon::Head});
+    }
     application.registerHandlerViaRegex(
         R"(^/api(?:/.*)?$)",
         [](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {
@@ -2544,7 +2625,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Get, drogon::Post, drogon::Put, drogon::Delete,
          drogon::Patch, drogon::Head});
     application.registerHandlerViaRegex(
-        R"(^/(?!api(?:/|$)|assets(?:/|$)).*$)",
+        R"(^/(?!api(?:/|$)|assets(?:/|$)|downloads/).*$)",
         [static_directory](const drogon::HttpRequestPtr&,
                            ResponseCallback&& callback) {
             callback(static_file_response(static_directory / "index.html",

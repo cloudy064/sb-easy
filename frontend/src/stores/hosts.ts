@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import client from '../api/client'
-import type { Host, ConfigProfile, HostCapabilities } from '../types'
+import type { Host, ConfigProfile, HostCapabilities, AgentEnrollment } from '../types'
 
 export interface CreateHostBody {
   name: string
@@ -114,6 +114,11 @@ export const useHostsStore = defineStore('hosts', () => {
     return data
   }
 
+  async function createEnrollment(id: string): Promise<AgentEnrollment> {
+    const { data } = await client.post(`/hosts/${id}/enrollment-codes`)
+    return data
+  }
+
   async function downloadWgConfig(host: Host) {
     const { data } = await client.get(`/hosts/${host.id}/wg-config`, { responseType: 'blob' })
     const url = URL.createObjectURL(data as Blob)
@@ -128,6 +133,7 @@ export const useHostsStore = defineStore('hosts', () => {
     hosts, profiles, loading,
     fetchHosts, fetchProfiles, createHost, updateHost, deleteHost,
     revealToken, rotateToken, getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
+    createEnrollment,
     createProfile, updateProfile, deleteProfile,
   }
 })

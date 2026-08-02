@@ -75,6 +75,7 @@ class TemporaryStaticDirectory final {
         : path_(std::filesystem::temp_directory_path() /
                 ("sb-easy-static-" + std::to_string(std::random_device{}()))) {
         std::filesystem::create_directories(path_ / "assets");
+        std::filesystem::create_directories(path_ / "downloads");
         {
             std::ofstream index{path_ / "index.html"};
             index << "<!doctype html><title>sb-easy contract</title>";
@@ -82,6 +83,11 @@ class TemporaryStaticDirectory final {
         {
             std::ofstream asset{path_ / "assets" / "contract.js"};
             asset << "window.sbEasyContract = true;\n";
+        }
+        for (const auto name : {"sb-easy-android.apk",
+                                "sb-easy-android-universal.apk"}) {
+            std::ofstream apk{path_ / "downloads" / name};
+            apk << "sb-easy android contract artifact: " << name << '\n';
         }
     }
 
@@ -412,6 +418,8 @@ struct ApiResponse {
     std::string raw_body;
     std::string etag;
     std::string rule_source;
+    std::string profile_id;
+    std::string profile_name;
     std::string access_control_allow_origin;
 };
 
@@ -484,6 +492,8 @@ request(const drogon::HttpClientPtr& client, drogon::HttpMethod method,
         .raw_body = raw_body,
         .etag = response->getHeader("etag"),
         .rule_source = response->getHeader("x-sb-easy-rule-source"),
+        .profile_id = response->getHeader("x-sb-easy-profile-id"),
+        .profile_name = response->getHeader("x-sb-easy-profile-name"),
         .access_control_allow_origin =
             response->getHeader("access-control-allow-origin"),
     };
@@ -666,6 +676,33 @@ void run_contract() {
     require(raw_request(client, "/assets/missing.js").status ==
                 drogon::k404NotFound,
             "missing frontend assets must not fall back to index.html");
+    const auto android_apk =
+        raw_request(client, "/downloads/sb-easy-android.apk");
+    require(android_apk.status == drogon::k200OK &&
+                android_apk.body.find("android contract artifact") !=
+                    std::string::npos &&
+                android_apk.content_type.starts_with(
+                    "application/vnd.android.package-archive") &&
+                android_apk.content_disposition.find(
+                    "filename=\"sb-easy-android.apk\"") !=
+                    std::string::npos,
+            "the Android APK must be served as a named download");
+    const auto universal_android_apk =
+        raw_request(client, "/downloads/sb-easy-android-universal.apk");
+    require(universal_android_apk.status == drogon::k200OK &&
+                universal_android_apk.body.find("sb-easy-android-universal.apk") !=
+                    std::string::npos &&
+                universal_android_apk.content_type.starts_with(
+                    "application/vnd.android.package-archive") &&
+                universal_android_apk.content_disposition.find(
+                    "filename=\"sb-easy-android-universal.apk\"") !=
+                    std::string::npos,
+            "the universal Android APK must be served as a named download");
+    require(raw_request(client, "/downloads/missing.apk").status ==
+                drogon::k404NotFound,
+            "missing downloads must not fall back to the SPA");
+    require(raw_request(client, "/downloads").body == root_page.body,
+            "the downloads UI route must fall back to the SPA");
     const auto public_status = request(client, drogon::Get, "/api/system/status");
     require(public_status.status == drogon::k200OK &&
                 public_status.body.at("status") == "running" &&
@@ -1118,6 +1155,48 @@ function buildRules(context) {
             "host creation must not expose the Clash secret");
     const auto host_id = created_host.body.at("id").get<std::string>();
     const auto original_token = created_host.body.at("agent_token").get<std::string>();
+    const auto enrollment = request(
+        client, drogon::Post, "/api/hosts/" + host_id + "/enrollment-codes");
+    require(enrollment.status == drogon::k200OK &&
+                enrollment.body.at("server") == "https://panel.example.com" &&
+                enrollment.body.at("code").get_ref<const std::string&>().size() ==
+                    64U &&
+                enrollment.body.at("enrollment_uri")
+                    .get_ref<const std::string&>()
+                    .starts_with("sbeasy://enroll?server=https%3A%2F%2F") &&
+                enrollment.body.at("qr_svg")
+                    .get_ref<const std::string&>()
+                    .find("<svg") != std::string::npos,
+            "administrators should create a complete Android enrollment payload");
+    const auto enrollment_code = enrollment.body.at("code").get<std::string>();
+    const std::vector<std::pair<std::string, std::string>> no_auth{
+        {"Authorization", ""},
+    };
+    const auto redeemed = request(
+        client, drogon::Post, "/api/agent/enroll",
+        json{{"code", enrollment_code},
+             {"device",
+              {{"app_version", "1.0.0"},
+               {"core_version", "1.13.12"},
+               {"install_id", "android-contract"},
+               {"model", "Contract Phone"}}}},
+        no_auth);
+    require(redeemed.status == drogon::k200OK &&
+                redeemed.body.at("host_id") == host_id &&
+                redeemed.body.at("agent_token") == original_token &&
+                redeemed.body.at("profile").at("id") == profile_id,
+            "an Android device should redeem an enrollment without admin auth");
+    require(request(client, drogon::Post, "/api/agent/enroll",
+                    json{{"code", enrollment_code}, {"device", json::object()}},
+                    no_auth)
+                .status == drogon::k400BadRequest,
+            "an enrollment code must only be redeemable once");
+    const auto enrolled_host = store->find_host(host_id);
+    require(enrolled_host.has_value() &&
+                enrolled_host->capabilities.at("platform") == "android" &&
+                enrolled_host->capabilities.at("install_id") ==
+                    "android-contract",
+            "enrollment should persist Android device metadata");
     const auto joined_wg = request(
         client, drogon::Put, "/api/hosts/" + host_id,
         json{{"capabilities",
@@ -1201,6 +1280,8 @@ function buildRules(context) {
         request(client, drogon::Get, "/api/agent/config", std::nullopt, agent_auth);
     require(agent_config.status == drogon::k200OK && !agent_config.etag.empty() &&
                 agent_config.rule_source == "quickjs" &&
+                agent_config.profile_id == profile_id &&
+                agent_config.profile_name == "Renamed scripted profile" &&
                 agent_config.body.at("route").at("rules").at(0).at("outbound") ==
                     "direct",
             "authenticated agents should receive their rendered config and ETag");
@@ -1211,7 +1292,9 @@ function buildRules(context) {
     require(cached_config.status == drogon::k304NotModified &&
                 cached_config.raw_body.empty() &&
                 cached_config.etag == agent_config.etag &&
-                cached_config.rule_source == "quickjs",
+                cached_config.rule_source == "quickjs" &&
+                cached_config.profile_id == profile_id &&
+                cached_config.profile_name == "Renamed scripted profile",
             "matching agent ETags should produce an empty 304 response");
     const auto touched_host = store->find_host(host_id);
     require(touched_host.has_value() && touched_host->last_seen.has_value(),

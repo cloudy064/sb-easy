@@ -8,6 +8,7 @@
       <div class="flex-center gap-3">
         <button class="btn-secondary btn-sm" @click="syncConfig">Sync Config</button>
         <button class="btn-secondary btn-sm" @click="openManage(null)">{{ t('devices.add.host') }}</button>
+        <button class="btn-secondary btn-sm" @click="openAndroid">{{ t('devices.add.android') }}</button>
         <button class="btn-primary" @click="showCreate = true">{{ t('devices.add.client') }}</button>
       </div>
     </div>
@@ -61,6 +62,7 @@
               <!-- host sub-state -->
               <template v-else>
                 <span v-if="d.is_self" class="kind-badge kind-self">SELF</span>
+                <span v-if="d.capabilities?.platform === 'android'" class="kind-badge kind-android">ANDROID</span>
                 <span v-if="d.config_drift" class="badge badge-red" style="margin-left:0.4rem" :title="t('hosts.drift.hint')">{{ t('hosts.drift') }}</span>
               </template>
             </h3>
@@ -169,6 +171,52 @@
       </div>
     </div>
 
+    <!-- Android enrollment -->
+    <div v-if="showAndroid" class="modal-overlay" @click.self="closeAndroid">
+      <div class="modal android-modal">
+        <template v-if="!androidEnrollment">
+          <h3>{{ t('android.enroll.title') }}</h3>
+          <p class="text-sm text-muted android-lead">{{ t('android.enroll.hint') }}</p>
+          <form @submit.prevent="createAndroidEnrollment">
+            <div class="form-group">
+              <label>{{ t('android.enroll.name') }}</label>
+              <input v-model.trim="androidName" required :placeholder="t('android.enroll.name.placeholder')" />
+            </div>
+            <div class="modal-actions">
+              <button type="button" class="btn-secondary" @click="closeAndroid">{{ t('action.cancel') }}</button>
+              <button type="submit" class="btn-primary" :disabled="androidCreating">
+                {{ androidCreating ? t('android.enroll.creating') : t('android.enroll.create') }}
+              </button>
+            </div>
+          </form>
+        </template>
+        <template v-else>
+          <h3>{{ t('android.enroll.ready') }}</h3>
+          <p class="text-sm text-muted android-lead">{{ t('android.enroll.scan') }}</p>
+          <div class="android-enrollment-layout">
+            <img :src="androidQrSrc" :alt="t('android.enroll.qr.alt')" class="android-qr" />
+            <div class="android-enrollment-info">
+              <div class="enrollment-meta">
+                <span>{{ t('android.enroll.server') }}</span>
+                <strong>{{ androidEnrollment.server }}</strong>
+              </div>
+              <div class="enrollment-meta">
+                <span>{{ t('android.enroll.expires') }}</span>
+                <strong>{{ enrollmentExpiry(androidEnrollment.expires_at) }}</strong>
+              </div>
+              <label class="text-sm">{{ t('android.enroll.manual') }}</label>
+              <textarea readonly rows="4" :value="androidEnrollment.enrollment_uri"></textarea>
+              <button class="btn-secondary btn-sm" @click="copyEnrollment">{{ t('action.copy') }}</button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-secondary" @click="closeAndroid">{{ t('action.close') }}</button>
+            <button class="btn-primary" @click="resetAndroid">{{ t('android.enroll.another') }}</button>
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- Edit client -->
     <div v-if="editTarget" class="modal-overlay" @click.self="editTarget = null">
       <div class="modal">
@@ -226,7 +274,7 @@ import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
 import HostManageModal from '../components/HostManageModal.vue'
 import client from '../api/client'
-import type { Host, WireGuardPeer } from '../types'
+import type { AgentEnrollment, Host, WireGuardPeer } from '../types'
 
 const { t } = useI18n()
 const hostsStore = useHostsStore()
@@ -268,10 +316,67 @@ const typeFilter = ref<'all' | 'hosts' | 'clients'>('all')
 const statusFilter = ref<'all' | 'online' | 'offline'>('all')
 const loading = ref(false)
 const showCreate = ref(false)
+const showAndroid = ref(false)
+const androidName = ref('')
+const androidCreating = ref(false)
+const androidEnrollment = ref<AgentEnrollment | null>(null)
+const androidHostId = ref<string | null>(null)
 const editTarget = ref<WireGuardPeer | null>(null)
 const deleteTarget = ref<DeviceRow | null>(null)
 const qrPeer = ref<WireGuardPeer | null>(null)
 const qrSrc = ref('')
+
+const androidQrSrc = computed(() => androidEnrollment.value
+  ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(androidEnrollment.value.qr_svg)}`
+  : '')
+
+function openAndroid() {
+  androidName.value = ''
+  androidEnrollment.value = null
+  androidHostId.value = null
+  showAndroid.value = true
+}
+function closeAndroid() {
+  showAndroid.value = false
+  androidEnrollment.value = null
+  androidName.value = ''
+  androidHostId.value = null
+}
+function resetAndroid() {
+  androidEnrollment.value = null
+  androidName.value = ''
+  androidHostId.value = null
+}
+async function createAndroidEnrollment() {
+  if (!androidName.value || androidCreating.value) return
+  androidCreating.value = true
+  try {
+    if (!androidHostId.value) {
+      const host = await hostsStore.createHost({
+        name: androidName.value,
+        profile_id: 'android-client',
+        capabilities: {
+          runs_singbox: true,
+          is_wg_member: false,
+          is_wg_hub: false,
+          is_self: false,
+          platform: 'android',
+        },
+      })
+      androidHostId.value = host.id
+    }
+    androidEnrollment.value = await hostsStore.createEnrollment(androidHostId.value)
+  } catch (error) {
+    notify(error instanceof Error ? error.message : t('android.enroll.failed'), false)
+  } finally {
+    androidCreating.value = false
+  }
+}
+async function copyEnrollment() {
+  if (!androidEnrollment.value) return
+  await navigator.clipboard.writeText(androidEnrollment.value.enrollment_uri)
+  notify(t('action.copied'))
+}
 
 function showQr(d: WireGuardPeer) {
   qrPeer.value = d
@@ -441,6 +546,7 @@ function quotaClass(p: WireGuardPeer) {
   return q >= 100 ? 'q-bad' : q >= 80 ? 'q-warn' : 'q-ok'
 }
 function formatTime(ts: number) { return new Date(ts * 1000).toLocaleString() }
+function enrollmentExpiry(value: string) { return new Date(value.replace(' ', 'T') + 'Z').toLocaleString() }
 function formatBytes(b: number) {
   if (b < 1024) return b + ' B'
   if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'
@@ -496,6 +602,7 @@ function formatBytes(b: number) {
 .kind-agent { background: var(--accent-subtle); color: var(--accent); }
 .kind-wg { background: #e8f0fe; color: #3c6ea8; }
 .kind-self { background: var(--paper-border); color: var(--ink-secondary); }
+.kind-android { background: #e9f4ff; color: #1769aa; }
 
 .online-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.35rem; vertical-align: middle; }
 .online-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
@@ -519,4 +626,18 @@ function formatBytes(b: number) {
 .q-ok { background: var(--ok); }
 .q-warn { background: var(--warn); }
 .q-bad { background: var(--bad); }
+
+.android-modal { width: min(760px, calc(100vw - 2rem)); }
+.android-lead { margin: 0.45rem 0 1.25rem; line-height: 1.55; }
+.android-enrollment-layout { display: grid; grid-template-columns: 260px 1fr; gap: 1.5rem; align-items: start; margin-top: 1rem; }
+.android-qr { width: 260px; max-width: 100%; border: 1px solid var(--paper-border); border-radius: var(--radius-sm); background: white; padding: 0.5rem; }
+.android-enrollment-info { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+.android-enrollment-info textarea { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: 0.72rem; }
+.enrollment-meta { display: flex; flex-direction: column; gap: 0.15rem; }
+.enrollment-meta span { color: var(--ink-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: .04em; }
+.enrollment-meta strong { font-size: .82rem; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .android-enrollment-layout { grid-template-columns: 1fr; }
+  .android-qr { margin: 0 auto; }
+}
 </style>

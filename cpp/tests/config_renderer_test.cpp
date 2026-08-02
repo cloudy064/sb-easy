@@ -68,6 +68,27 @@ SB_EASY_TEST("duplicate proxy tags receive deterministic suffixes") {
                           "duplicate tag was not suffixed");
 }
 
+SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
+    sbeasy::RenderRequest request;
+    request.profile = {{"route", {{"final", "Proxy"}}}};
+    request.nodes = {shadowsocks("hk"), shadowsocks("us")};
+    request.host_context = {
+        {"id", "phone"},
+        {"capabilities", {{"platform", "android"}}},
+    };
+
+    const sbeasy::ConfigRenderer renderer;
+    const auto config = renderer.render(request);
+    const auto& selector = config["outbounds"].back();
+    sbeasy::test::require(selector["type"] == "selector" &&
+                              selector["tag"] == "Proxy" &&
+                              selector["outbounds"] ==
+                                  nlohmann::json::array({"auto", "hk", "us"}),
+                          "Android configs should include auto and manual selection");
+    sbeasy::test::require(config["route"]["final"] == "Proxy",
+                          "Android traffic should enter the selector group");
+}
+
 SB_EASY_TEST("generated rules cannot reference unknown outbounds") {
     sbeasy::RenderRequest request;
     request.profile = {{"route", {{"rules", nlohmann::json::array()}}}};

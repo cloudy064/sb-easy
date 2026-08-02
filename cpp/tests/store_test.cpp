@@ -102,10 +102,10 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
-    sbeasy::test::require(store.database().applied_migration_count() == 6,
+    sbeasy::test::require(store.database().applied_migration_count() == 7,
                           "all canonical migrations should be recorded");
     store.database().migrate(migration_directory());
-    sbeasy::test::require(store.database().applied_migration_count() == 6,
+    sbeasy::test::require(store.database().applied_migration_count() == 7,
                           "re-running migrations must be idempotent");
 }
 
@@ -294,6 +294,69 @@ SB_EASY_TEST("profile deletion resets assigned hosts to default") {
     sbeasy::test::require_throws<sbeasy::ValidationError>(
         [&] { store.delete_profile("default"); },
         "the default profile must be protected");
+}
+
+SB_EASY_TEST("Android enrollment codes are expiring and single use") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::Host host;
+    host.name = "Android phone";
+    host.profile_id = "android-client";
+    host.capabilities = {{"runs_singbox", true}, {"is_wg_member", false}};
+    const auto created = store.create_host(std::move(host));
+    const auto enrollment = store.create_agent_enrollment(created.id);
+    sbeasy::test::require(enrollment.code.size() == 64U &&
+                              !enrollment.expires_at.empty(),
+                          "enrollment creation should return a high entropy code");
+
+    const auto redeemed = store.redeem_agent_enrollment(
+        enrollment.code,
+        {{"app_version", "1.0.0"},
+         {"core_version", "1.13.12"},
+         {"install_id", "store-contract"},
+         {"model", "Contract Phone"}});
+    sbeasy::test::require(redeemed.host_id == created.id &&
+                              redeemed.agent_token == created.agent_token &&
+                              redeemed.profile_id == "android-client",
+                          "a valid code should return the device credential and profile");
+    const auto reloaded = store.find_host(created.id);
+    sbeasy::test::require(reloaded.has_value() &&
+                              reloaded->capabilities.at("platform") == "android" &&
+                              reloaded->capabilities.at("install_id") ==
+                                  "store-contract",
+                          "redemption should attach Android metadata to the host");
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] {
+            static_cast<void>(store.redeem_agent_enrollment(
+                enrollment.code, nlohmann::json::object()));
+        },
+        "redeemed enrollment codes must reject replay");
+
+    const auto expired = store.create_agent_enrollment(created.id);
+    store.database().execute("UPDATE agent_enrollments SET expires_at = "
+                             "datetime('now', '-1 minute') WHERE id = '" +
+                             expired.id + "'");
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] {
+            static_cast<void>(store.redeem_agent_enrollment(
+                expired.code, nlohmann::json::object()));
+        },
+        "expired enrollment codes must be rejected");
+
+    const auto disabled_code = store.create_agent_enrollment(created.id);
+    auto disabled = *store.find_host(created.id);
+    disabled.enabled = false;
+    static_cast<void>(store.update_host(std::move(disabled)));
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] {
+            static_cast<void>(store.redeem_agent_enrollment(
+                disabled_code.code, nlohmann::json::object()));
+        },
+        "disabled hosts must not redeem enrollment codes");
+    sbeasy::test::require_throws<sbeasy::ValidationError>(
+        [&] { static_cast<void>(store.create_agent_enrollment("self")); },
+        "the built-in self host must not create an enrollment code");
 }
 
 SB_EASY_TEST("agent repository isolates tokens, status, commands, and latency") {

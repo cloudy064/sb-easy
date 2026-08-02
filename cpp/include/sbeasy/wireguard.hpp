@@ -38,6 +38,9 @@ struct WireGuardPeerStats {
 
 void to_json(nlohmann::json& value, const WireGuardPeerStats& stats);
 
+/// Builds a self-contained QR code SVG for enrollment and WireGuard exports.
+[[nodiscard]] std::string qr_svg_for_text(const std::string& text);
+
 class WireGuardService final {
   public:
     WireGuardService(std::shared_ptr<Store> store, WireGuardOptions options);

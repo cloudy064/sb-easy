@@ -195,8 +195,10 @@ fixed forwarding/masquerade rules using argument-vector process execution.
 priority. Shutdown removes the interface and the rules it owns.
 
 `STATIC_DIR` points at the Vue production build. The server gives immutable
-cache headers to `/assets/*`, returns `index.html` for client-side routes, and
-keeps unknown `/api/*` routes as JSON 404 responses. `CORS_ORIGINS` accepts a
+cache headers to `/assets/*`, serves the Android artifact at
+`/downloads/sb-easy-android.apk` from `STATIC_DIR/downloads`, returns
+`index.html` for client-side routes, and keeps unknown `/api/*` routes as JSON
+404 responses. `CORS_ORIGINS` accepts a
 comma-separated exact-origin allowlist; empty or `*` is intended for local
 development only.
 

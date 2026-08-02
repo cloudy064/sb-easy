@@ -1,0 +1,195 @@
+package io.sbeasy.android.core
+
+import android.os.Build
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+
+class AgentRepository internal constructor(
+    private val secureStore: SecureEnrollmentStore,
+    private val configStore: AtomicConfigStore,
+    private val client: ControlPlaneClient,
+    private val installId: String,
+) {
+    private val syncMutex = Mutex()
+    private val mutableState = MutableStateFlow(
+        ControlPlaneSnapshot(
+            enrollment = secureStore.load(),
+            config = configStore.active(),
+        ),
+    )
+    val state: StateFlow<ControlPlaneSnapshot> = mutableState.asStateFlow()
+    private val routeTester = RouteTester()
+
+    suspend fun enroll(rawUri: String, appVersion: String, coreVersion: String) = withContext(Dispatchers.IO) {
+        mutableState.value = mutableState.value.copy(syncPhase = SyncPhase.SYNCING, lastError = null)
+        try {
+            val enrollment = client.enroll(
+                rawUri,
+                JSONObject()
+                    .put("platform", "android")
+                    .put("app_version", appVersion)
+                    .put("core_version", coreVersion)
+                    .put("install_id", installId)
+                    .put("model", "${Build.MANUFACTURER} ${Build.MODEL}".trim()),
+            )
+            secureStore.save(enrollment)
+            mutableState.value = mutableState.value.copy(enrollment = enrollment)
+            syncConfiguration(force = true)
+        } catch (error: Throwable) {
+            mutableState.value = mutableState.value.copy(
+                syncPhase = SyncPhase.ERROR,
+                lastError = friendly(error),
+            )
+            throw error
+        }
+    }
+
+    suspend fun syncConfiguration(force: Boolean = false): Boolean = syncMutex.withLock {
+        val enrollment = requireNotNull(mutableState.value.enrollment) { "设备尚未注册" }
+        mutableState.value = mutableState.value.copy(syncPhase = SyncPhase.SYNCING, lastError = null)
+        try {
+            val active = configStore.active()
+            when (val result = withContext(Dispatchers.IO) {
+                client.fetchConfig(enrollment, active?.etag, force)
+            }) {
+                ConfigFetchResult.NotModified -> {
+                    mutableState.value = mutableState.value.copy(
+                        config = active,
+                        syncPhase = SyncPhase.CURRENT,
+                    )
+                    false
+                }
+                is ConfigFetchResult.Updated -> {
+                    require(result.config.etag.isNotBlank()) { "服务器配置缺少 ETag" }
+                    configStore.saveCandidate(result.config)
+                    val control = RuntimeBridge.control
+                    if (control != null) {
+                        control.applyConfiguration(result.config)
+                    } else {
+                        requireNotNull(RuntimeBridge.validator) { "sing-box 核心尚未初始化" }
+                            .validate(result.config.content)
+                    }
+                    val promoted = configStore.promoteCandidate()
+                    mutableState.value = mutableState.value.copy(
+                        config = promoted,
+                        syncPhase = SyncPhase.CURRENT,
+                        lastError = null,
+                    )
+                    VpnRuntimeState.configurationChanged(promoted)
+                    true
+                }
+            }
+        } catch (error: Throwable) {
+            mutableState.value = mutableState.value.copy(
+                config = configStore.active(),
+                syncPhase = SyncPhase.ERROR,
+                lastError = friendly(error),
+            )
+            VpnRuntimeState.runtimeWarning(friendly(error))
+            throw error
+        }
+    }
+
+    suspend fun runControlCycle(appVersion: String, coreVersion: String) {
+        val enrollment = mutableState.value.enrollment ?: return
+        runCatching { syncConfiguration() }
+        runCatching {
+            withContext(Dispatchers.IO) {
+                client.reportStatus(
+                    enrollment,
+                    JSONObject()
+                        .put("app_version", appVersion)
+                        .put("singbox_version", coreVersion)
+                        .put("singbox_running", VpnRuntimeState.state.value.phase == VpnPhase.CONNECTED)
+                        .put("config_etag", configStore.active()?.etag ?: JSONObject.NULL)
+                        .put("last_error", VpnRuntimeState.state.value.error ?: JSONObject.NULL),
+                )
+            }
+        }
+        val commands = runCatching { withContext(Dispatchers.IO) { client.commands(enrollment) } }
+            .getOrDefault(emptyList())
+        for (command in commands) {
+            val result = runCatching {
+                when (command.command) {
+                    "reload" -> syncConfiguration(force = true)
+                    "restart" -> requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.restart()
+                    else -> error("未知命令 ${command.command}")
+                }
+                "${command.command} completed"
+            }
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    client.acknowledge(
+                        enrollment,
+                        command,
+                        result.isSuccess,
+                        result.getOrElse(::friendly),
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun reportTelemetry() {
+        val enrollment = mutableState.value.enrollment ?: return
+        val traffic = RuntimeObservability.traffic.value
+        val logs = JSONArray()
+        RuntimeObservability.logs.value.takeLast(200).forEach { logs.put(it.message.take(2_000)) }
+        val body = JSONObject()
+            .put("up", traffic.uplink)
+            .put("down", traffic.downlink)
+            .put("up_total", traffic.uplinkTotal)
+            .put("down_total", traffic.downlinkTotal)
+            .put("conn_count", traffic.connectionsIn + traffic.connectionsOut)
+            .put("connections", JSONArray())
+            .put("logs", logs)
+        withContext(Dispatchers.IO) { client.reportTelemetry(enrollment, body) }
+    }
+
+    suspend fun selectOutbound(groupTag: String, outboundTag: String) {
+        requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.selectOutbound(groupTag, outboundTag)
+    }
+
+    suspend fun testGroup(groupTag: String) {
+        requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.urlTest(groupTag)
+        delay(1_500)
+        val enrollment = mutableState.value.enrollment ?: return
+        val group = RuntimeObservability.groups.value.find { it.tag == groupTag } ?: return
+        withContext(Dispatchers.IO) {
+            client.reportLatencies(
+                enrollment,
+                group.items.associate { item ->
+                    item.tag to item.urlTestDelay.takeIf { it > 0 }
+                },
+            )
+        }
+    }
+
+    suspend fun testRoute(url: String): RouteTestResult = routeTester.test(url)
+
+    suspend fun clearRuntimeLogs() {
+        RuntimeBridge.control?.clearLogs()
+        RuntimeObservability.clearLogs()
+    }
+
+    fun forgetDevice() {
+        check(VpnRuntimeState.state.value.phase == VpnPhase.DISCONNECTED ||
+            VpnRuntimeState.state.value.phase == VpnPhase.ERROR) { "请先断开 VPN" }
+        secureStore.clear()
+        configStore.clear()
+        mutableState.value = ControlPlaneSnapshot()
+    }
+
+    fun activeConfig(): ManagedConfig? = configStore.active()
+
+    private fun friendly(error: Throwable): String =
+        error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+}

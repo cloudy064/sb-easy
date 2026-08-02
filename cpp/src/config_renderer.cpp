@@ -243,6 +243,33 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
         const bool has_auto = std::ranges::any_of(outbounds, [](const auto& outbound) {
             return outbound.value("tag", "") == "auto";
         });
+        const auto capabilities =
+            request.host_context.value("capabilities", json::object());
+        const bool is_android = capabilities.is_object() &&
+                                capabilities.value("platform", "") == "android";
+        std::optional<std::string> android_selector;
+        if (has_auto && is_android) {
+            auto selector_tag = std::string{"Proxy"};
+            while (std::ranges::any_of(outbounds, [&selector_tag](const auto& outbound) {
+                return outbound.value("tag", "") == selector_tag;
+            })) {
+                selector_tag += " group";
+            }
+            json selector_outbounds = json::array({"auto"});
+            for (const auto& outbound : outbounds) {
+                const auto tag = outbound.value("tag", "");
+                if (!tag.empty() && tag != "auto") {
+                    selector_outbounds.push_back(tag);
+                }
+            }
+            outbounds.push_back({
+                {"type", "selector"},
+                {"tag", selector_tag},
+                {"outbounds", std::move(selector_outbounds)},
+                {"default", "auto"},
+            });
+            android_selector = std::move(selector_tag);
+        }
         if (!has_auto) {
             outbounds.push_back({{"type", "direct"}, {"tag", "direct"}});
         }
@@ -254,6 +281,10 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
                 const auto current = route["final"].get<std::string>();
                 if (!has_auto) {
                     route["final"] = "direct";
+                } else if (android_selector.has_value() &&
+                           (current == "Proxy" || current == "Auto" ||
+                            current == "auto")) {
+                    route["final"] = *android_selector;
                 } else if (current == "Proxy" || current == "Auto") {
                     route["final"] = "auto";
                 }

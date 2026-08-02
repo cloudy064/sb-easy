@@ -126,6 +126,21 @@ struct HostCommand {
 
 void to_json(nlohmann::json& value, const HostCommand& command);
 
+struct AgentEnrollment {
+    std::string id;
+    std::string host_id;
+    std::string code;
+    std::string expires_at;
+};
+
+struct AgentEnrollmentResult {
+    std::string host_id;
+    std::string host_name;
+    std::string agent_token;
+    std::string profile_id;
+    std::string profile_name;
+};
+
 struct ProxyRecord {
     std::string id;
     std::string tag;
@@ -236,6 +251,11 @@ class Store final {
     void set_host_outbounds(const std::string& host_id,
                             const std::vector<std::string>& node_ids);
     [[nodiscard]] std::string rotate_agent_token(const std::string& host_id);
+    [[nodiscard]] AgentEnrollment
+    create_agent_enrollment(const std::string& host_id);
+    [[nodiscard]] AgentEnrollmentResult
+    redeem_agent_enrollment(const std::string& code,
+                            const nlohmann::json& device);
 
     [[nodiscard]] std::optional<Host>
     find_enabled_host_by_token(const std::string& token) const;

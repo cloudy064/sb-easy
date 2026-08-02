@@ -256,6 +256,10 @@ parse_rfc3339(std::string value) {
 
 } // namespace
 
+std::string qr_svg_for_text(const std::string& text) {
+    return svg_for_text(text);
+}
+
 void to_json(nlohmann::json& value, const WireGuardPeerStats& stats) {
     value = {
         {"public_key", stats.public_key},
@@ -457,7 +461,7 @@ std::string WireGuardService::client_config(const WireGuardPeer& peer) {
 }
 
 std::string WireGuardService::qr_svg(const WireGuardPeer& peer) {
-    return svg_for_text(client_config(peer));
+    return qr_svg_for_text(client_config(peer));
 }
 
 std::string WireGuardService::server_config() {

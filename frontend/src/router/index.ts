@@ -19,6 +19,7 @@ const router = createRouter({
         // Config / Monitor / Logs are per-device — viewed inside a device's detail.
         { path: 'devices/:id', name: 'DeviceDetail', component: () => import('../views/DeviceDetailView.vue') },
         { path: 'server-logs', name: 'ServerLogs', component: () => import('../views/ServerLogsView.vue') },
+        { path: 'downloads', name: 'Downloads', component: () => import('../views/DownloadsView.vue') },
         // Old top-level realtime/config pages now live per-device.
         { path: 'monitor', redirect: '/devices' },
         { path: 'logs', redirect: '/devices' },

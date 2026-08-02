@@ -268,7 +268,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
@@ -453,13 +453,26 @@ const statusCounts = computed(() => {
   return { all: base.length, online: on, offline: base.length - on }
 })
 
-onMounted(load)
-async function load() {
-  loading.value = true
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+let refreshInFlight = false
+
+onMounted(async () => {
+  await load(true)
+  refreshTimer = setInterval(() => { void load(false) }, 10_000)
+})
+onBeforeUnmount(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
+})
+
+async function load(showLoading = true) {
+  if (refreshInFlight) return
+  refreshInFlight = true
+  if (showLoading) loading.value = true
   try {
     await Promise.all([wgStore.fetchPeers(), hostsStore.fetchHosts()])
   } finally {
-    loading.value = false
+    refreshInFlight = false
+    if (showLoading) loading.value = false
   }
 }
 

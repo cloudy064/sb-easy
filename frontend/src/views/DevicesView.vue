@@ -7,22 +7,13 @@
       </div>
       <div class="flex-center gap-3">
         <button class="btn-secondary btn-sm" @click="syncConfig">Sync Config</button>
-        <button class="btn-secondary btn-sm" @click="openManage(null)">{{ t('devices.add.host') }}</button>
-        <button class="btn-secondary btn-sm" @click="openAndroid">{{ t('devices.add.android') }}</button>
-        <button class="btn-primary" @click="showCreate = true">{{ t('devices.add.client') }}</button>
+        <button class="btn-secondary btn-sm" @click="showCreate = true">{{ t('devices.add.wireguard') }}</button>
+        <button class="btn-primary" @click="openEnrollment">{{ t('devices.add.device') }}</button>
       </div>
     </div>
 
-    <!-- Two orthogonal facets: Type × Status (combined with AND) -->
+    <!-- Platform and runtime are device metadata, not separate device types. -->
     <div class="filters mb-5">
-      <div class="filter-row">
-        <span class="filter-label">{{ t('devices.filter.type') }}</span>
-        <div class="seg">
-          <button class="seg-btn" :class="{ active: typeFilter === 'all' }" @click="typeFilter = 'all'">{{ t('devices.filter.all') }}<span class="seg-count">{{ typeCounts.all }}</span></button>
-          <button class="seg-btn" :class="{ active: typeFilter === 'hosts' }" @click="typeFilter = 'hosts'">{{ t('devices.filter.hosts') }}<span class="seg-count">{{ typeCounts.hosts }}</span></button>
-          <button class="seg-btn" :class="{ active: typeFilter === 'clients' }" @click="typeFilter = 'clients'">{{ t('devices.filter.clients') }}<span class="seg-count">{{ typeCounts.clients }}</span></button>
-        </div>
-      </div>
       <div class="filter-row">
         <span class="filter-label">{{ t('devices.filter.status') }}</span>
         <div class="seg">
@@ -49,20 +40,12 @@
               <span class="online-dot" :class="online(d) ? 'on' : 'off'" :title="online(d) ? 'Online' : 'Offline'"></span>
               <router-link v-if="d._t === 'host'" :to="`/devices/${d.id}`" class="device-name-link">{{ d.name }}</router-link>
               <template v-else>{{ d.name }}</template>
-              <span class="type-badge" :class="d._t === 'host' ? 'type-host' : 'type-client'">
-                {{ d._t === 'host' ? t('devices.type.host') : t('devices.type.client') }}
-              </span>
-              <!-- client sub-kind -->
               <template v-if="d._t === 'client'">
-                <span class="kind-badge" :class="d.kind === 'agent' ? 'kind-agent' : 'kind-wg'">
-                  {{ d.kind === 'agent' ? 'AGENT' : 'WG' }}
-                </span>
+                <span class="kind-badge kind-wg">WIREGUARD</span>
                 <span v-if="d.expired" class="badge badge-red" style="margin-left:0.4rem">Expired</span>
               </template>
-              <!-- host sub-state -->
               <template v-else>
                 <span v-if="d.is_self" class="kind-badge kind-self">SELF</span>
-                <span v-if="d.capabilities?.platform === 'android'" class="kind-badge kind-android">ANDROID</span>
                 <span v-if="d.config_drift" class="badge badge-red" style="margin-left:0.4rem" :title="t('hosts.drift.hint')">{{ t('hosts.drift') }}</span>
               </template>
             </h3>
@@ -153,10 +136,10 @@
       </article>
     </div>
 
-    <!-- Create client -->
+    <!-- Raw WireGuard credential for devices that do not run the managed agent. -->
     <div v-if="showCreate" class="modal-overlay" @click.self="showCreate = false">
       <div class="modal">
-        <h3>{{ t('devices.add.client') }}</h3>
+        <h3>{{ t('devices.add.wireguard') }}</h3>
         <form @submit.prevent="doCreateClient">
           <div class="form-group"><label>Name</label><input v-model="form.name" required placeholder="e.g. office-pc" /></div>
           <div class="form-group"><label>Address</label><input v-model="form.address" placeholder="Auto-assign if left empty (10.59.32.x/24)" /></div>
@@ -165,53 +148,62 @@
           <div class="form-group"><label>Traffic Quota (GB, 0 = unlimited)</label><input v-model.number="form.quota_gb" type="number" min="0" step="0.5" /></div>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showCreate = false">Cancel</button>
-            <button type="submit" class="btn-primary">{{ t('devices.add.client') }}</button>
+            <button type="submit" class="btn-primary">{{ t('devices.add.wireguard') }}</button>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- Android enrollment -->
-    <div v-if="showAndroid" class="modal-overlay" @click.self="closeAndroid">
-      <div class="modal android-modal">
-        <template v-if="!androidEnrollment">
-          <h3>{{ t('android.enroll.title') }}</h3>
-          <p class="text-sm text-muted android-lead">{{ t('android.enroll.hint') }}</p>
-          <form @submit.prevent="createAndroidEnrollment">
+    <!-- One enrollment flow for every managed device. The device reports its
+         platform only after it has redeemed the shared one-time code. -->
+    <div v-if="showEnrollment" class="modal-overlay" @click.self="closeEnrollment">
+      <div class="modal enrollment-modal">
+        <template v-if="!deviceEnrollment">
+          <h3>{{ t('device.enroll.title') }}</h3>
+          <p class="text-sm text-muted enrollment-lead">{{ t('device.enroll.hint') }}</p>
+          <form @submit.prevent="createDeviceEnrollment">
             <div class="form-group">
-              <label>{{ t('android.enroll.name') }}</label>
-              <input v-model.trim="androidName" required :placeholder="t('android.enroll.name.placeholder')" />
+              <label>{{ t('device.enroll.name') }}</label>
+              <input v-model.trim="deviceName" required :placeholder="t('device.enroll.name.placeholder')" />
+            </div>
+            <div class="form-group">
+              <label>{{ t('hosts.profile') }}</label>
+              <select v-model="deviceProfileId">
+                <option v-for="profile in hostsStore.profiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+              </select>
             </div>
             <div class="modal-actions">
-              <button type="button" class="btn-secondary" @click="closeAndroid">{{ t('action.cancel') }}</button>
-              <button type="submit" class="btn-primary" :disabled="androidCreating">
-                {{ androidCreating ? t('android.enroll.creating') : t('android.enroll.create') }}
+              <button type="button" class="btn-secondary" @click="closeEnrollment">{{ t('action.cancel') }}</button>
+              <button type="submit" class="btn-primary" :disabled="deviceCreating">
+                {{ deviceCreating ? t('device.enroll.creating') : t('device.enroll.create') }}
               </button>
             </div>
           </form>
         </template>
         <template v-else>
-          <h3>{{ t('android.enroll.ready') }}</h3>
-          <p class="text-sm text-muted android-lead">{{ t('android.enroll.scan') }}</p>
-          <div class="android-enrollment-layout">
-            <img :src="androidQrSrc" :alt="t('android.enroll.qr.alt')" class="android-qr" />
-            <div class="android-enrollment-info">
+          <h3>{{ t('device.enroll.ready') }}</h3>
+          <p class="text-sm text-muted enrollment-lead">{{ t('device.enroll.scan') }}</p>
+          <div class="enrollment-layout">
+            <img :src="deviceQrSrc" :alt="t('device.enroll.qr.alt')" class="enrollment-qr" />
+            <div class="enrollment-info">
               <div class="enrollment-meta">
-                <span>{{ t('android.enroll.server') }}</span>
-                <strong>{{ androidEnrollment.server }}</strong>
+                <span>{{ t('device.enroll.server') }}</span>
+                <strong>{{ deviceEnrollment.server }}</strong>
               </div>
               <div class="enrollment-meta">
-                <span>{{ t('android.enroll.expires') }}</span>
-                <strong>{{ enrollmentExpiry(androidEnrollment.expires_at) }}</strong>
+                <span>{{ t('device.enroll.expires') }}</span>
+                <strong>{{ enrollmentExpiry(deviceEnrollment.expires_at) }}</strong>
               </div>
-              <label class="text-sm">{{ t('android.enroll.manual') }}</label>
-              <textarea readonly rows="4" :value="androidEnrollment.enrollment_uri"></textarea>
+              <label class="text-sm">{{ t('device.enroll.native') }}</label>
+              <div class="cmd-box"><code>{{ enrollmentCommand }}</code></div>
+              <label class="text-sm">{{ t('device.enroll.manual') }}</label>
+              <textarea readonly rows="3" :value="deviceEnrollment.enrollment_uri"></textarea>
               <button class="btn-secondary btn-sm" @click="copyEnrollment">{{ t('action.copy') }}</button>
             </div>
           </div>
           <div class="modal-actions">
-            <button class="btn-secondary" @click="closeAndroid">{{ t('action.close') }}</button>
-            <button class="btn-primary" @click="resetAndroid">{{ t('android.enroll.another') }}</button>
+            <button class="btn-secondary" @click="closeEnrollment">{{ t('action.close') }}</button>
+            <button class="btn-primary" @click="resetEnrollment">{{ t('device.enroll.another') }}</button>
           </div>
         </template>
       </div>
@@ -251,7 +243,7 @@
       <div class="modal">
         <h3>Delete &ldquo;{{ deleteTarget.name }}&rdquo;?</h3>
         <p class="text-sm text-muted">
-          {{ deleteTarget._t === 'host' ? t('hosts.delete.hint') : 'This will permanently remove the client. It will no longer be able to connect.' }}
+          {{ deleteTarget._t === 'host' ? t('hosts.delete.hint') : t('devices.delete.wireguard.hint') }}
         </p>
         <div class="modal-actions">
           <button class="btn-secondary" @click="deleteTarget = null">Cancel</button>
@@ -313,69 +305,75 @@ type ClientRow = WireGuardPeer & { _t: 'client' }
 type HostRow = Host & { _t: 'host'; address: string | null; is_self: boolean; wg: WireGuardPeer | null }
 type DeviceRow = ClientRow | HostRow
 
-const typeFilter = ref<'all' | 'hosts' | 'clients'>('all')
 const statusFilter = ref<'all' | 'online' | 'offline'>('all')
 const loading = ref(false)
 const showCreate = ref(false)
-const showAndroid = ref(false)
-const androidName = ref('')
-const androidCreating = ref(false)
-const androidEnrollment = ref<AgentEnrollment | null>(null)
-const androidHostId = ref<string | null>(null)
+const showEnrollment = ref(false)
+const deviceName = ref('')
+const deviceProfileId = ref('android-client')
+const deviceCreating = ref(false)
+const deviceEnrollment = ref<AgentEnrollment | null>(null)
+const deviceHostId = ref<string | null>(null)
 const editTarget = ref<WireGuardPeer | null>(null)
 const deleteTarget = ref<DeviceRow | null>(null)
 const qrPeer = ref<WireGuardPeer | null>(null)
 const qrSrc = ref('')
 
-const androidQrSrc = computed(() => androidEnrollment.value
-  ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(androidEnrollment.value.qr_svg)}`
+const deviceQrSrc = computed(() => deviceEnrollment.value
+  ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(deviceEnrollment.value.qr_svg)}`
+  : '')
+const enrollmentCommand = computed(() => deviceEnrollment.value
+  ? `SB_EASY_SERVER=${deviceEnrollment.value.server} AGENT_ENROLLMENT_CODE=${deviceEnrollment.value.code} sb-easy-agent`
   : '')
 
-function openAndroid() {
-  androidName.value = ''
-  androidEnrollment.value = null
-  androidHostId.value = null
-  showAndroid.value = true
+async function openEnrollment() {
+  if (hostsStore.profiles.length === 0) await hostsStore.fetchProfiles()
+  deviceName.value = ''
+  deviceProfileId.value = hostsStore.profiles.some((profile) => profile.id === 'android-client')
+    ? 'android-client'
+    : (hostsStore.profiles[0]?.id ?? 'default')
+  deviceEnrollment.value = null
+  deviceHostId.value = null
+  showEnrollment.value = true
 }
-function closeAndroid() {
-  showAndroid.value = false
-  androidEnrollment.value = null
-  androidName.value = ''
-  androidHostId.value = null
+function closeEnrollment() {
+  showEnrollment.value = false
+  deviceEnrollment.value = null
+  deviceName.value = ''
+  deviceHostId.value = null
 }
-function resetAndroid() {
-  androidEnrollment.value = null
-  androidName.value = ''
-  androidHostId.value = null
+function resetEnrollment() {
+  deviceEnrollment.value = null
+  deviceName.value = ''
+  deviceHostId.value = null
 }
-async function createAndroidEnrollment() {
-  if (!androidName.value || androidCreating.value) return
-  androidCreating.value = true
+async function createDeviceEnrollment() {
+  if (!deviceName.value || deviceCreating.value) return
+  deviceCreating.value = true
   try {
-    if (!androidHostId.value) {
+    if (!deviceHostId.value) {
       const host = await hostsStore.createHost({
-        name: androidName.value,
-        profile_id: 'android-client',
+        name: deviceName.value,
+        profile_id: deviceProfileId.value,
         capabilities: {
           runs_singbox: true,
           is_wg_member: false,
           is_wg_hub: false,
           is_self: false,
-          platform: 'android',
         },
       })
-      androidHostId.value = host.id
+      deviceHostId.value = host.id
     }
-    androidEnrollment.value = await hostsStore.createEnrollment(androidHostId.value)
+    deviceEnrollment.value = await hostsStore.createEnrollment(deviceHostId.value)
   } catch (error) {
-    notify(error instanceof Error ? error.message : t('android.enroll.failed'), false)
+    notify(error instanceof Error ? error.message : t('device.enroll.failed'), false)
   } finally {
-    androidCreating.value = false
+    deviceCreating.value = false
   }
 }
 async function copyEnrollment() {
-  if (!androidEnrollment.value) return
-  await navigator.clipboard.writeText(androidEnrollment.value.enrollment_uri)
+  if (!deviceEnrollment.value) return
+  await navigator.clipboard.writeText(deviceEnrollment.value.enrollment_uri)
   notify(t('action.copied'))
 }
 
@@ -427,28 +425,16 @@ const hostRows = computed<HostRow[]>(() =>
   })),
 )
 
-// Two orthogonal facets, combined with AND: Type (all/hosts/clients) × Status
-// (all/online/offline). Each facet's counts reflect the OTHER facet's selection.
 function byStatus(list: DeviceRow[]): DeviceRow[] {
   if (statusFilter.value === 'online') return list.filter((d) => online(d))
   if (statusFilter.value === 'offline') return list.filter((d) => !online(d))
   return list
 }
-function byType(): DeviceRow[] {
-  if (typeFilter.value === 'hosts') return hostRows.value
-  if (typeFilter.value === 'clients') return clientRows.value
-  return [...hostRows.value, ...clientRows.value]
-}
 
-const devices = computed<DeviceRow[]>(() => byStatus(byType()))
-
-const typeCounts = computed(() => {
-  const h = byStatus(hostRows.value)
-  const c = byStatus(clientRows.value)
-  return { all: h.length + c.length, hosts: h.length, clients: c.length }
-})
+const allDevices = computed<DeviceRow[]>(() => [...hostRows.value, ...clientRows.value])
+const devices = computed<DeviceRow[]>(() => byStatus(allDevices.value))
 const statusCounts = computed(() => {
-  const base = byType()
+  const base = allDevices.value
   const on = base.filter((d) => online(d)).length
   return { all: base.length, online: on, offline: base.length - on }
 })
@@ -603,21 +589,12 @@ function formatBytes(b: number) {
 .device-name-link { color: var(--ink-primary); text-decoration: none; }
 .device-name-link:hover { color: var(--accent); text-decoration: underline; }
 
-.type-badge {
-  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-  padding: 0.12rem 0.45rem; border-radius: 4px; margin-left: 0.5rem; vertical-align: middle;
-}
-.type-host { background: #f0ecfb; color: #6b4fa0; }
-.type-client { background: #e8f5e8; color: #4a7c4a; }
-
 .kind-badge {
   font-family: var(--font-mono); font-size: 0.55rem; font-weight: 700; letter-spacing: 0.05em;
   padding: 0.1rem 0.38rem; border-radius: 4px; margin-left: 0.35rem; vertical-align: middle;
 }
-.kind-agent { background: var(--accent-subtle); color: var(--accent); }
 .kind-wg { background: #e8f0fe; color: #3c6ea8; }
 .kind-self { background: var(--paper-border); color: var(--ink-secondary); }
-.kind-android { background: #e9f4ff; color: #1769aa; }
 
 .online-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.35rem; vertical-align: middle; }
 .online-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
@@ -642,17 +619,18 @@ function formatBytes(b: number) {
 .q-warn { background: var(--warn); }
 .q-bad { background: var(--bad); }
 
-.android-modal { width: min(760px, calc(100vw - 2rem)); }
-.android-lead { margin: 0.45rem 0 1.25rem; line-height: 1.55; }
-.android-enrollment-layout { display: grid; grid-template-columns: 260px 1fr; gap: 1.5rem; align-items: start; margin-top: 1rem; }
-.android-qr { width: 260px; max-width: 100%; border: 1px solid var(--paper-border); border-radius: var(--radius-sm); background: white; padding: 0.5rem; }
-.android-enrollment-info { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
-.android-enrollment-info textarea { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: 0.72rem; }
+.enrollment-modal { width: min(760px, calc(100vw - 2rem)); }
+.enrollment-lead { margin: 0.45rem 0 1.25rem; line-height: 1.55; }
+.enrollment-layout { display: grid; grid-template-columns: 260px 1fr; gap: 1.5rem; align-items: start; margin-top: 1rem; }
+.enrollment-qr { width: 260px; max-width: 100%; border: 1px solid var(--paper-border); border-radius: var(--radius-sm); background: white; padding: 0.5rem; }
+.enrollment-info { display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+.enrollment-info textarea { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: 0.72rem; }
+.cmd-box { background: var(--paper-bg); border: 1px solid var(--paper-border); border-radius: var(--radius-sm); padding: 0.75rem; font-family: var(--font-mono); font-size: 0.72rem; overflow-wrap: anywhere; color: var(--ink-primary); }
 .enrollment-meta { display: flex; flex-direction: column; gap: 0.15rem; }
 .enrollment-meta span { color: var(--ink-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: .04em; }
 .enrollment-meta strong { font-size: .82rem; overflow-wrap: anywhere; }
 @media (max-width: 680px) {
-  .android-enrollment-layout { grid-template-columns: 1fr; }
-  .android-qr { margin: 0 auto; }
+  .enrollment-layout { grid-template-columns: 1fr; }
+  .enrollment-qr { margin: 0 auto; }
 }
 </style>

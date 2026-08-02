@@ -38,7 +38,7 @@ class ControlPlaneClient(context: Context) {
     fun enroll(rawUri: String, device: JSONObject): Enrollment {
         val (server, code) = parseEnrollmentUri(rawUri)
         val body = JSONObject().put("code", code).put("device", device)
-        val response = execute(server, "/api/agent/enroll", "POST", body)
+        val response = execute(server, "/api/devices/enroll", "POST", body)
         response.use {
             val json = requireJson(it.code, it.body?.string())
             val profile = json.getJSONObject("profile")

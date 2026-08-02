@@ -1369,10 +1369,15 @@ Store::redeem_agent_enrollment(const std::string& code,
         .profile_name = read.text(5),
     };
     auto capabilities = parse_object_or_empty(read.text(6));
-    capabilities["platform"] = "android";
-    for (const auto* key : {"app_version", "core_version", "install_id", "model"}) {
+    // Enrollment is shared by every managed device. The enrolling runtime may
+    // describe its platform and build, but the server must never infer a device
+    // kind from the transport used to redeem the code.
+    for (const auto* key : {"platform", "app_version", "agent_version",
+                            "core_version", "install_id", "model", "hostname",
+                            "architecture", "os"}) {
         const auto found = device.find(key);
-        if (found != device.end() && found->is_string()) {
+        if (found != device.end() && found->is_string() &&
+            !found->get_ref<const std::string&>().empty()) {
             capabilities[key] = *found;
         }
     }

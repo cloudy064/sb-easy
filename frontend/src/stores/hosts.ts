@@ -89,16 +89,6 @@ export const useHostsStore = defineStore('hosts', () => {
     hosts.value = hosts.value.filter(h => h.id !== id)
   }
 
-  async function revealToken(id: string): Promise<{ agent_token: string; server: string }> {
-    const { data } = await client.get(`/hosts/${id}/token`)
-    return data
-  }
-
-  async function rotateToken(id: string): Promise<string> {
-    const { data } = await client.post(`/hosts/${id}/rotate-token`)
-    return data.agent_token
-  }
-
   async function getOutbounds(id: string): Promise<string[]> {
     const { data } = await client.get(`/hosts/${id}/outbounds`)
     return data.node_ids
@@ -115,7 +105,7 @@ export const useHostsStore = defineStore('hosts', () => {
   }
 
   async function createEnrollment(id: string): Promise<AgentEnrollment> {
-    const { data } = await client.post(`/hosts/${id}/enrollment-codes`)
+    const { data } = await client.post(`/devices/${id}/enrollment-codes`)
     return data
   }
 
@@ -132,7 +122,7 @@ export const useHostsStore = defineStore('hosts', () => {
   return {
     hosts, profiles, loading,
     fetchHosts, fetchProfiles, createHost, updateHost, deleteHost,
-    revealToken, rotateToken, getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
+    getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
     createEnrollment,
     createProfile, updateProfile, deleteProfile,
   }

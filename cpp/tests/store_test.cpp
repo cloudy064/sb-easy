@@ -102,10 +102,15 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
-    sbeasy::test::require(store.database().applied_migration_count() == 7,
+    sbeasy::test::require(store.database().applied_migration_count() == 8,
                           "all canonical migrations should be recorded");
+    const auto managed_device = store.find_profile("android-client");
+    sbeasy::test::require(managed_device.has_value() &&
+                              managed_device->name == "Managed Device",
+                          "the shared device profile should not expose a "
+                          "platform-specific name");
     store.database().migrate(migration_directory());
-    sbeasy::test::require(store.database().applied_migration_count() == 7,
+    sbeasy::test::require(store.database().applied_migration_count() == 8,
                           "re-running migrations must be idempotent");
 }
 
@@ -296,12 +301,12 @@ SB_EASY_TEST("profile deletion resets assigned hosts to default") {
         "the default profile must be protected");
 }
 
-SB_EASY_TEST("Android enrollment codes are expiring and single use") {
+SB_EASY_TEST("device enrollment codes are platform-neutral, expiring, and single use") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
     sbeasy::Host host;
-    host.name = "Android phone";
+    host.name = "Managed device";
     host.profile_id = "android-client";
     host.capabilities = {{"runs_singbox", true}, {"is_wg_member", false}};
     const auto created = store.create_host(std::move(host));
@@ -312,20 +317,25 @@ SB_EASY_TEST("Android enrollment codes are expiring and single use") {
 
     const auto redeemed = store.redeem_agent_enrollment(
         enrollment.code,
-        {{"app_version", "1.0.0"},
+        {{"platform", "linux"},
+         {"agent_version", "sb-easy-cpp-agent/test"},
          {"core_version", "1.13.12"},
          {"install_id", "store-contract"},
-         {"model", "Contract Phone"}});
+         {"hostname", "contract-device"},
+         {"architecture", "x86_64"},
+         {"os", "Linux"}});
     sbeasy::test::require(redeemed.host_id == created.id &&
                               redeemed.agent_token == created.agent_token &&
                               redeemed.profile_id == "android-client",
                           "a valid code should return the device credential and profile");
     const auto reloaded = store.find_host(created.id);
     sbeasy::test::require(reloaded.has_value() &&
-                              reloaded->capabilities.at("platform") == "android" &&
+                              reloaded->capabilities.at("platform") == "linux" &&
                               reloaded->capabilities.at("install_id") ==
-                                  "store-contract",
-                          "redemption should attach Android metadata to the host");
+                                  "store-contract" &&
+                              reloaded->capabilities.at("hostname") ==
+                                  "contract-device",
+                          "redemption should preserve device-supplied metadata");
     sbeasy::test::require_throws<sbeasy::ValidationError>(
         [&] {
             static_cast<void>(store.redeem_agent_enrollment(

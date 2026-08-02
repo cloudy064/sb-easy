@@ -1,7 +1,7 @@
 <template>
   <div class="modal-overlay" @click.self="$emit('close')">
     <div class="modal modal-wide">
-      <h3>{{ isCreate ? t('devices.add.host') : t('hosts.edit') + ' — ' + (host?.name || '') }}</h3>
+      <h3>{{ isCreate ? t('devices.add.device') : t('hosts.edit') + ' — ' + (host?.name || '') }}</h3>
 
       <div class="hm-body">
         <!-- Settings -->
@@ -51,7 +51,6 @@
           <div class="flex-center gap-2" style="justify-content:flex-end;margin-top:.5rem">
             <button class="btn-ghost btn-xs" @click="revealInstall">{{ installCommand ? 'Refresh' : t('hosts.install') }}</button>
             <button v-if="installCommand" class="btn-ghost btn-xs" @click="copyInstall">{{ copied ? t('action.copied') : t('action.copy') }}</button>
-            <button v-if="installCommand" class="btn-ghost btn-xs" @click="rotate">{{ t('hosts.rotate') }}</button>
           </div>
         </div>
       </div>
@@ -137,19 +136,13 @@ async function saveOutbounds() {
 
 async function revealInstall() {
   if (!props.host) return
-  const { agent_token, server } = await store.revealToken(props.host.id)
-  installCommand.value = buildCommand(server, agent_token)
+  const enrollment = await store.createEnrollment(props.host.id)
+  installCommand.value = buildCommand(enrollment.server, enrollment.code)
   copied.value = false
 }
-async function rotate() {
-  if (!props.host) return
-  const token = await store.rotateToken(props.host.id)
-  const { server } = await store.revealToken(props.host.id)
-  installCommand.value = buildCommand(server, token)
-}
-function buildCommand(server: string, token: string) {
+function buildCommand(server: string, code: string) {
   const base = server.startsWith('http') ? server : `http://${server}:51821`
-  return `SB_EASY_SERVER=${base} AGENT_TOKEN=${token} sb-easy-agent`
+  return `SB_EASY_SERVER=${base} AGENT_ENROLLMENT_CODE=${code} sb-easy-agent`
 }
 function copyInstall() {
   navigator.clipboard?.writeText(installCommand.value)

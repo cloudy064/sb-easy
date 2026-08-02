@@ -6,7 +6,7 @@ server, or administrator account is required on the phone.
 
 ## Features
 
-- one-time QR/deep-link enrollment with a per-device Agent token, using either
+- shared one-time device authorization with a per-device Agent token, using either
   the camera or a QR image selected from the system photo picker;
 - Android Keystore AES-GCM credential storage;
 - ETag configuration sync over an explicit non-VPN underlying network;
@@ -56,10 +56,11 @@ users do not need to download native libraries for unrelated architectures.
 1. Install the APK matching the phone architecture from
    `app/build/outputs/apk/debug/`, normally `app-arm64-v8a-debug.apk`, or use
    `app-universal-debug.apk` as the compatibility fallback.
-2. In the sb-easy Web panel, open **Devices → Add Android**.
-3. Name the phone and create the ten-minute, single-use enrollment QR code.
+2. In the sb-easy Web panel, open **Devices → Add device**.
+3. Name the device and create the ten-minute, single-use authorization QR code.
 4. Open the App, scan the code with the camera or select its screenshot from the
-   system photo picker, then accept Android's VPN consent dialog.
+   system photo picker, then accept Android's VPN consent dialog. Native agents
+   redeem the same authorization with the command shown beside the QR code.
 5. Use the four tabs for connection status, proxies, route/config/log tools, and
    device settings.
 

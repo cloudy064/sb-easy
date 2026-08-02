@@ -1148,15 +1148,14 @@ function buildRules(context) {
                                           {"clash_secret", "hidden"},
                                       });
     require(created_host.status == drogon::k200OK, "host creation should succeed");
-    require(created_host.body.at("agent_token").get_ref<const std::string&>().size() ==
-                64,
-            "host creation should return the one-time token");
+    require(!created_host.body.contains("agent_token"),
+            "device creation must not expose its long-lived credential");
     require(!created_host.body.contains("clash_secret"),
             "host creation must not expose the Clash secret");
     const auto host_id = created_host.body.at("id").get<std::string>();
-    const auto original_token = created_host.body.at("agent_token").get<std::string>();
+    const auto original_token = store->find_host(host_id)->agent_token;
     const auto enrollment = request(
-        client, drogon::Post, "/api/hosts/" + host_id + "/enrollment-codes");
+        client, drogon::Post, "/api/devices/" + host_id + "/enrollment-codes");
     require(enrollment.status == drogon::k200OK &&
                 enrollment.body.at("server") == "https://panel.example.com" &&
                 enrollment.body.at("code").get_ref<const std::string&>().size() ==
@@ -1167,36 +1166,48 @@ function buildRules(context) {
                 enrollment.body.at("qr_svg")
                     .get_ref<const std::string&>()
                     .find("<svg") != std::string::npos,
-            "administrators should create a complete Android enrollment payload");
+            "administrators should create a complete device enrollment payload");
     const auto enrollment_code = enrollment.body.at("code").get<std::string>();
     const std::vector<std::pair<std::string, std::string>> no_auth{
         {"Authorization", ""},
     };
     const auto redeemed = request(
-        client, drogon::Post, "/api/agent/enroll",
+        client, drogon::Post, "/api/devices/enroll",
         json{{"code", enrollment_code},
              {"device",
-              {{"app_version", "1.0.0"},
+              {{"platform", "linux"},
+               {"agent_version", "sb-easy-cpp-agent/test"},
                {"core_version", "1.13.12"},
-               {"install_id", "android-contract"},
-               {"model", "Contract Phone"}}}},
+               {"install_id", "device-contract"},
+               {"hostname", "Contract Device"}}}},
         no_auth);
     require(redeemed.status == drogon::k200OK &&
                 redeemed.body.at("host_id") == host_id &&
                 redeemed.body.at("agent_token") == original_token &&
                 redeemed.body.at("profile").at("id") == profile_id,
-            "an Android device should redeem an enrollment without admin auth");
-    require(request(client, drogon::Post, "/api/agent/enroll",
+            "a device should redeem an enrollment without admin auth");
+    require(request(client, drogon::Post, "/api/devices/enroll",
                     json{{"code", enrollment_code}, {"device", json::object()}},
                     no_auth)
                 .status == drogon::k400BadRequest,
             "an enrollment code must only be redeemable once");
     const auto enrolled_host = store->find_host(host_id);
     require(enrolled_host.has_value() &&
-                enrolled_host->capabilities.at("platform") == "android" &&
+                enrolled_host->capabilities.at("platform") == "linux" &&
                 enrolled_host->capabilities.at("install_id") ==
-                    "android-contract",
-            "enrollment should persist Android device metadata");
+                    "device-contract",
+            "enrollment should persist device-supplied metadata");
+    const auto legacy_enrollment = request(
+        client, drogon::Post,
+        "/api/hosts/" + host_id + "/enrollment-codes");
+    require(legacy_enrollment.status == drogon::k200OK,
+            "the previous enrollment-code path should remain compatible");
+    require(request(client, drogon::Post, "/api/agent/enroll",
+                    json{{"code", legacy_enrollment.body.at("code")},
+                         {"device", {{"platform", "android"}}}},
+                    no_auth)
+                .status == drogon::k200OK,
+            "released Android apps should keep their enrollment alias");
     const auto joined_wg = request(
         client, drogon::Put, "/api/hosts/" + host_id,
         json{{"capabilities",

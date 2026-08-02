@@ -82,21 +82,21 @@ Android 客户端页会链接到
 
 ## 二、加一个 agent 端点
 
-1. **面板里建主机**：Hosts → 添加 → 勾选"运行 sing-box"+"WG 成员"。保存后它会自动分配一个
-   WG 内网地址（10.59.32.x）和 per-host token。给它分配一个**配置画像（Profile）**。
-2. **拿 token**：主机卡片 → 安装命令，复制 `AGENT_TOKEN`。
+1. **面板里添加设备**：Devices → 添加设备，填写名称并选择**配置画像（Profile）**。
+2. **拿一次性授权码**：复制页面给出的 `AGENT_ENROLLMENT_CODE` 安装命令。Android App 扫描同一个二维码，授权逻辑完全一致。
 3. **端点上跑 agent**（Docker，同一镜像）：
    ```sh
    AGENT_UI_PASSWORD=$(openssl rand -hex 24)
    docker run -d --name sb-easy-agent --restart unless-stopped \
      --network host --cap-add NET_ADMIN --device /dev/net/tun \
      -e SB_EASY_SERVER=http://SERVER:51821 \
-     -e AGENT_TOKEN=<该主机 token> \
+     -e AGENT_ENROLLMENT_CODE=<一次性设备授权码> \
      -e AGENT_UI_PASSWORD="$AGENT_UI_PASSWORD" \
      -v "$PWD/agent-data:/app/data" \
      sb-easy:latest sb-easy agent
    ```
    注意命令是 `sb-easy agent`（容器 CMD 整体替换，需带上 `sb-easy`）。
+   agent 首次启动会换取并在挂载的数据目录中保存长期设备凭据，后续重启不再使用一次性授权码。已有 `AGENT_TOKEN` 部署仍兼容。
 4. agent 启动后从服务器拉配置、跑 sing-box；sing-box 的配置里含一条连服务器的 WireGuard
    `endpoint` → 自动进内网。面板 Hosts 页该主机变在线。
 

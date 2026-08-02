@@ -450,7 +450,8 @@ log_level(std::string configured) {
 
 [[nodiscard]] bool public_api_path(std::string_view path) {
     return path == "/api/health" || path == "/api/system/status" ||
-           path.starts_with("/api/auth/") || path.starts_with("/api/agent/");
+           path == "/api/devices/enroll" || path.starts_with("/api/auth/") ||
+           path.starts_with("/api/agent/");
 }
 
 [[nodiscard]] bool clash_websocket_path(std::string_view path) {
@@ -2250,9 +2251,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                                   << error.what();
                     }
                 }
-                json response = host;
-                response["agent_token"] = host.agent_token;
-                return response;
+                return json(host);
             });
         },
         {drogon::Post});
@@ -2418,8 +2417,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             });
         },
         {drogon::Post});
-    application.registerHandler(
-        "/api/hosts/{id}/enrollment-codes",
+    const auto create_device_enrollment =
         [store, enrollment_server](const drogon::HttpRequestPtr&,
                                    ResponseCallback&& callback,
                                    const std::string& id) {
@@ -2435,6 +2433,22 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                             {"enrollment_uri", uri},
                             {"qr_svg", qr_svg_for_text(uri)}};
             });
+        };
+    application.registerHandler(
+        "/api/devices/{id}/enrollment-codes",
+        [create_device_enrollment](const drogon::HttpRequestPtr& request,
+                                   ResponseCallback&& callback,
+                                   const std::string& id) {
+            create_device_enrollment(request, std::move(callback), id);
+        },
+        {drogon::Post});
+    // Backward-compatible alias for older panels and Android releases.
+    application.registerHandler(
+        "/api/hosts/{id}/enrollment-codes",
+        [create_device_enrollment](const drogon::HttpRequestPtr& request,
+                                   ResponseCallback&& callback,
+                                   const std::string& id) {
+            create_device_enrollment(request, std::move(callback), id);
         },
         {drogon::Post});
 
@@ -2444,8 +2458,7 @@ void register_http_routes(const std::shared_ptr<Store>& store,
             callback(json_response({{"status", "ok"}}));
         },
         {drogon::Get});
-    application.registerHandler(
-        "/api/agent/enroll",
+    const auto redeem_device_enrollment =
         [store, enrollment_server](const drogon::HttpRequestPtr& request,
                                    ResponseCallback&& callback) {
             handle(std::move(callback), [&] {
@@ -2461,6 +2474,20 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                              {{"id", enrollment.profile_id},
                               {"name", enrollment.profile_name}}}};
             });
+        };
+    application.registerHandler(
+        "/api/devices/enroll",
+        [redeem_device_enrollment](const drogon::HttpRequestPtr& request,
+                                   ResponseCallback&& callback) {
+            redeem_device_enrollment(request, std::move(callback));
+        },
+        {drogon::Post});
+    // Backward-compatible alias used by already released Android apps.
+    application.registerHandler(
+        "/api/agent/enroll",
+        [redeem_device_enrollment](const drogon::HttpRequestPtr& request,
+                                   ResponseCallback&& callback) {
+            redeem_device_enrollment(request, std::move(callback));
         },
         {drogon::Post});
     application.registerHandler(

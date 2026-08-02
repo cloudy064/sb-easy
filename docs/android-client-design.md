@@ -190,14 +190,14 @@ App 的“配置”页面展示可读摘要、最终路由规则和 JSON。Quick
 
 ### 7.1 注册流程
 
-管理员在 Web 管理端点击“添加 Android 设备”：
+管理员在 Web 管理端点击“添加设备”；Android 与原生 agent 不再有不同的授权入口：
 
-1. 中心创建 Host，自动选择 Android Profile，`is_wg_member=false`。
-2. `POST /api/hosts/{id}/enrollment-codes` 生成 10 分钟有效、单次使用的随机注册码。
+1. 中心创建设备，选择受管 Profile，`is_wg_member=false`。
+2. `POST /api/devices/{id}/enrollment-codes` 生成 10 分钟有效、单次使用的随机注册码。
 3. Web 显示 `sbeasy://enroll?...` 二维码和短码。
-4. App 扫码后通过 HTTPS 调用 `POST /api/agent/enroll`。
+4. App 扫码或原生 agent 执行安装命令后，通过 HTTPS 调用 `POST /api/devices/enroll`。
 5. 中心在同一数据库事务内校验、消费注册码，返回 host id 和长期 Agent Token。
-6. App 用 Keystore 加密 Token，立即拉取首份配置；注册码从此失效。
+6. App 用 Keystore、原生 agent 用 `0600` 凭据文件保存 Token，立即拉取首份配置；注册码从此失效。
 
 注册码数据库只保存高熵 code 的哈希：
 

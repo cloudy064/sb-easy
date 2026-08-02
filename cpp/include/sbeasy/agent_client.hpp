@@ -24,6 +24,27 @@ struct AgentConfigResponse {
     std::string rule_source{"profile"};
 };
 
+struct DeviceEnrollmentOptions {
+    std::string server;
+    std::string code;
+    nlohmann::json device = nlohmann::json::object();
+    std::chrono::milliseconds timeout{15'000};
+};
+
+struct DeviceCredential {
+    std::string server;
+    std::string host_id;
+    std::string host_name;
+    std::string token;
+    std::string profile_id;
+    std::string profile_name;
+};
+
+/// Redeem the same single-use device enrollment code used by the Android app.
+/// The returned bearer token is the device's long-lived internal credential and
+/// should be persisted locally instead of exposed in installation commands.
+[[nodiscard]] DeviceCredential enroll_device(DeviceEnrollmentOptions options);
+
 struct AgentCommand {
     std::string id;
     std::string command;

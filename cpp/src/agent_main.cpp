@@ -28,7 +28,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <sys/utsname.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
@@ -95,6 +97,149 @@ settings_path(const std::filesystem::path& singbox_config_path) {
         directory = ".";
     }
     return directory / "agent-ui-settings.json";
+}
+
+[[nodiscard]] std::filesystem::path
+device_credential_path(const std::filesystem::path& singbox_config_path) {
+    const auto value = environment("AGENT_CREDENTIAL_PATH");
+    if (!value.empty()) {
+        return value;
+    }
+    auto directory = singbox_config_path.parent_path();
+    if (directory.empty()) {
+        directory = ".";
+    }
+    return directory / "device-credential.json";
+}
+
+struct AgentIdentity {
+    std::string server;
+    std::string token;
+    std::string host_id;
+    std::string host_name;
+    std::string profile_id;
+    std::string profile_name;
+};
+
+[[nodiscard]] nlohmann::json local_device_metadata() {
+    std::array<char, 256> hostname{};
+    std::string hostname_value;
+    if (::gethostname(hostname.data(), hostname.size()) == 0) {
+        hostname.back() = '\0';
+        hostname_value = hostname.data();
+    }
+
+    struct utsname system_information{};
+    std::string operating_system{"linux"};
+    std::string architecture;
+    if (::uname(&system_information) == 0) {
+        operating_system = system_information.sysname;
+        architecture = system_information.machine;
+    }
+
+    return {
+        {"platform", environment("AGENT_PLATFORM", "linux")},
+        {"agent_version",
+         "sb-easy-cpp-agent/" + std::string{sbeasy::application_version}},
+        {"hostname", hostname_value},
+        {"architecture", architecture},
+        {"os", operating_system},
+    };
+}
+
+[[nodiscard]] std::optional<AgentIdentity>
+load_device_credential(const std::filesystem::path& path) {
+    std::ifstream input{path, std::ios::binary};
+    if (!input) {
+        std::error_code error;
+        if (!std::filesystem::exists(path, error) && !error) {
+            return std::nullopt;
+        }
+        throw std::runtime_error("cannot read device credential: " + path.string());
+    }
+    const auto parsed = nlohmann::json::parse(input, nullptr, false);
+    if (!parsed.is_object()) {
+        throw std::runtime_error("device credential is not valid JSON: " +
+                                 path.string());
+    }
+    AgentIdentity identity{
+        .server = parsed.value("server", std::string{}),
+        .token = parsed.value("agent_token", std::string{}),
+        .host_id = parsed.value("host_id", std::string{}),
+        .host_name = parsed.value("host_name", std::string{}),
+        .profile_id = parsed.value("profile_id", std::string{}),
+        .profile_name = parsed.value("profile_name", std::string{}),
+    };
+    if (identity.server.empty() || identity.token.empty()) {
+        throw std::runtime_error("device credential is incomplete: " + path.string());
+    }
+    return identity;
+}
+
+void save_device_credential(const std::filesystem::path& path,
+                            const sbeasy::DeviceCredential& credential) {
+    const auto serialized =
+        nlohmann::json{
+            {"server", credential.server},
+            {"host_id", credential.host_id},
+            {"host_name", credential.host_name},
+            {"agent_token", credential.token},
+            {"profile_id", credential.profile_id},
+            {"profile_name", credential.profile_name},
+        }
+            .dump(2);
+    sbeasy::atomic_replace_file(path, serialized + "\n");
+    std::filesystem::permissions(
+        path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+}
+
+[[nodiscard]] AgentIdentity
+resolve_agent_identity(const std::filesystem::path& credential_path) {
+    const auto environment_server = environment("SB_EASY_SERVER");
+    const auto environment_token = environment("AGENT_TOKEN");
+    if (!environment_token.empty()) {
+        if (environment_server.empty()) {
+            throw std::invalid_argument(
+                "SB_EASY_SERVER is required when AGENT_TOKEN is set");
+        }
+        return {
+            .server = environment_server,
+            .token = environment_token,
+            .host_id = {},
+            .host_name = {},
+            .profile_id = {},
+            .profile_name = {},
+        };
+    }
+
+    if (auto persisted = load_device_credential(credential_path);
+        persisted.has_value()) {
+        return std::move(*persisted);
+    }
+
+    const auto enrollment_code = environment("AGENT_ENROLLMENT_CODE");
+    if (environment_server.empty() || enrollment_code.empty()) {
+        throw std::invalid_argument(
+            "set SB_EASY_SERVER with AGENT_ENROLLMENT_CODE for first-time "
+            "enrollment, or provide an existing AGENT_TOKEN");
+    }
+    const auto credential = sbeasy::enroll_device({
+        .server = environment_server,
+        .code = enrollment_code,
+        .device = local_device_metadata(),
+    });
+    save_device_credential(credential_path, credential);
+    std::cout << "device enrolled as " << credential.host_name << " ("
+              << credential.host_id << ")\n";
+    return {
+        .server = credential.server,
+        .token = credential.token,
+        .host_id = credential.host_id,
+        .host_name = credential.host_name,
+        .profile_id = credential.profile_id,
+        .profile_name = credential.profile_name,
+    };
 }
 
 [[nodiscard]] std::uint16_t parse_port(std::string_view value,
@@ -352,8 +497,11 @@ proxy_test_tags(std::string_view command) {
 class AgentRuntime final {
   public:
     AgentRuntime()
-        : server_(environment("SB_EASY_SERVER")), token_(environment("AGENT_TOKEN")),
-          config_path_(config_path()), settings_path_(settings_path(config_path_)),
+        : config_path_(config_path()),
+          credential_path_(device_credential_path(config_path_)),
+          identity_(resolve_agent_identity(credential_path_)),
+          server_(identity_.server), token_(identity_.token),
+          settings_path_(settings_path(config_path_)),
           singbox_bin_(environment("SINGBOX_BIN", "sing-box")),
           singbox_managed_(environment_flag("SINGBOX_MANAGED", true)),
           reload_command_(split_command_line(
@@ -368,14 +516,7 @@ class AgentRuntime final {
               .config_path = config_path_,
               .validate_config = validate_config_,
           }),
-          client_({.server = server_, .token = token_}), clash_(config_path_) {
-        if (server_.empty()) {
-            throw std::invalid_argument("SB_EASY_SERVER is required");
-        }
-        if (token_.empty()) {
-            throw std::invalid_argument("AGENT_TOKEN is required");
-        }
-    }
+          client_({.server = server_, .token = token_}), clash_(config_path_) {}
 
     [[nodiscard]] bool run_cycle() {
         std::vector<std::string> errors;
@@ -798,9 +939,11 @@ class AgentRuntime final {
         wakeup_.notify_one();
     }
 
+    std::filesystem::path config_path_;
+    std::filesystem::path credential_path_;
+    AgentIdentity identity_;
     std::string server_;
     std::string token_;
-    std::filesystem::path config_path_;
     std::filesystem::path settings_path_;
     std::string singbox_bin_;
     bool singbox_managed_{true};
@@ -829,7 +972,10 @@ class AgentRuntime final {
 
 void usage(const char* executable) {
     std::cerr << "Usage: " << executable << " [--once]\n"
-              << "Required environment: SB_EASY_SERVER, AGENT_TOKEN\n"
+              << "First use: SB_EASY_SERVER, AGENT_ENROLLMENT_CODE\n"
+              << "Compatibility: SB_EASY_SERVER, AGENT_TOKEN\n"
+              << "Enrolled credentials default beside the sing-box config; "
+                 "override with AGENT_CREDENTIAL_PATH\n"
               << "Local UI: set AGENT_UI_PASSWORD; bind defaults to "
                  "0.0.0.0:51822\n";
 }

@@ -113,7 +113,7 @@
       </div>
     </div>
 
-    <!-- Install command / token -->
+    <!-- Shared one-time device authorization -->
     <div v-if="installTarget" class="modal-overlay" @click.self="installTarget = null">
       <div class="modal">
         <h3>{{ t('hosts.install') }} — {{ installTarget.name }}</h3>
@@ -123,7 +123,7 @@
         </div>
         <div class="flex-center gap-2" style="margin-top:0.75rem;justify-content:flex-end">
           <button class="btn-ghost btn-sm" @click="copyInstall">{{ copied ? t('action.copied') : t('action.copy') }}</button>
-          <button class="btn-secondary btn-sm" @click="doRotate">{{ t('hosts.rotate') }}</button>
+          <button class="btn-secondary btn-sm" @click="refreshEnrollment">Refresh</button>
         </div>
         <div class="modal-actions">
           <button class="btn-secondary" @click="installTarget = null">{{ t('action.close') }}</button>
@@ -299,18 +299,17 @@ async function toggleEnabled(h: Host) {
 async function openInstall(h: Host) {
   installTarget.value = h
   copied.value = false
-  const { agent_token, server } = await store.revealToken(h.id)
-  installCommand.value = buildCommand(server, agent_token)
+  const enrollment = await store.createEnrollment(h.id)
+  installCommand.value = buildCommand(enrollment.server, enrollment.code)
 }
-function buildCommand(server: string, token: string) {
+function buildCommand(server: string, code: string) {
   const base = server.startsWith('http') ? server : `http://${server}:51821`
-  return `SB_EASY_SERVER=${base} AGENT_TOKEN=${token} sb-easy-agent`
+  return `SB_EASY_SERVER=${base} AGENT_ENROLLMENT_CODE=${code} sb-easy-agent`
 }
-async function doRotate() {
+async function refreshEnrollment() {
   if (!installTarget.value) return
-  const token = await store.rotateToken(installTarget.value.id)
-  const { server } = await store.revealToken(installTarget.value.id)
-  installCommand.value = buildCommand(server, token)
+  const enrollment = await store.createEnrollment(installTarget.value.id)
+  installCommand.value = buildCommand(enrollment.server, enrollment.code)
   copied.value = false
 }
 function copyInstall() {

@@ -73,7 +73,64 @@ struct ServerAddress {
     return body;
 }
 
+[[nodiscard]] drogon::HttpResponsePtr
+send_enrollment_request(const DeviceEnrollmentOptions& options,
+                        const ServerAddress& address) {
+    if (options.code.size() < 32U) {
+        throw std::invalid_argument("device enrollment code is required");
+    }
+    if (!options.device.is_object()) {
+        throw std::invalid_argument("device enrollment metadata must be an object");
+    }
+    if (options.timeout <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("device enrollment timeout must be positive");
+    }
+
+    trantor::EventLoopThread event_loop{"sb-easy-device-enrollment"};
+    event_loop.run();
+    const auto client =
+        drogon::HttpClient::newHttpClient(address.origin, event_loop.getLoop());
+    client->setUserAgent("sb-easy-cpp-agent/" + std::string{application_version});
+
+    auto request = drogon::HttpRequest::newHttpRequest();
+    request->setMethod(drogon::Post);
+    request->setPath(address.path_prefix + "/api/devices/enroll");
+    request->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+    request->setBody(json{{"code", options.code}, {"device", options.device}}.dump());
+    const auto [result, response] =
+        client->sendRequest(request, timeout_seconds(options.timeout));
+    if (result != drogon::ReqResult::Ok || !response) {
+        throw std::runtime_error(request_failure(result));
+    }
+    return response;
+}
+
 } // namespace
+
+DeviceCredential enroll_device(DeviceEnrollmentOptions options) {
+    auto address = parse_server(options.server);
+    const auto response = send_enrollment_request(options, address);
+    const auto status = static_cast<int>(response->statusCode());
+    if (status < 200 || status >= 300) {
+        throw std::runtime_error("device enrollment endpoint returned HTTP " +
+                                 std::to_string(status));
+    }
+    const auto body = parse_response_json(response);
+    const auto profile = body.value("profile", json::object());
+    DeviceCredential credential{
+        .server = body.value("server", options.server),
+        .host_id = body.value("host_id", std::string{}),
+        .host_name = body.value("host_name", std::string{}),
+        .token = body.value("agent_token", std::string{}),
+        .profile_id = profile.value("id", std::string{}),
+        .profile_name = profile.value("name", std::string{}),
+    };
+    if (credential.server.empty() || credential.host_id.empty() ||
+        credential.token.empty()) {
+        throw std::runtime_error("device enrollment response is incomplete");
+    }
+    return credential;
+}
 
 class AgentClient::Impl final {
   public:

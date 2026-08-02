@@ -135,13 +135,19 @@ Run the C++ polling agent on a managed host:
 
 ```sh
 export SB_EASY_SERVER='https://panel.example.com'
-export AGENT_TOKEN='<token returned when the host was created>'
+export AGENT_ENROLLMENT_CODE='<single-use code from Devices → Add device>'
 export SINGBOX_CONFIG_PATH='/etc/sing-box/config.d/90-generated.json'
 export SINGBOX_BIN='sing-box'
 export SINGBOX_MANAGED=true
 export AGENT_UI_PASSWORD='<independent strong local password>'
 build/cpp/sb-easy-cpp-agent
 ```
+
+On first use the agent redeems the same `/api/devices/enroll` authorization used
+by the Android app, then stores its per-device bearer credential beside the
+generated config with mode `0600`. Existing `SB_EASY_SERVER` + `AGENT_TOKEN`
+deployments remain supported for compatibility. Set `AGENT_CREDENTIAL_PATH` to
+move the persisted credential.
 
 The agent supervises `sing-box run -c <config>` by default, validates and
 atomically installs new configs, reloads the child with SIGHUP, restarts it for

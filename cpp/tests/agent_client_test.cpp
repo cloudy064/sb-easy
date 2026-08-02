@@ -356,10 +356,31 @@ void run_contract() {
         .setThreadNum(1);
     const RunningServer server;
     const auto port = server.wait_for_port();
+    const auto server_url = "http://127.0.0.1:" + std::to_string(port);
+
+    const auto enrollment = store->create_agent_enrollment(created.id);
+    const auto credential = sbeasy::enroll_device({
+        .server = server_url,
+        .code = enrollment.code,
+        .device =
+            {
+                {"platform", "linux"},
+                {"agent_version", "sb-easy-cpp-agent/test"},
+                {"hostname", "agent-client-contract"},
+                {"architecture", "x86_64"},
+            },
+        .timeout = std::chrono::seconds{2},
+    });
+    require(credential.host_id == created.id && credential.token == created.agent_token,
+            "native agents should redeem the shared device enrollment endpoint");
+    const auto enrolled = store->find_host(created.id);
+    require(enrolled.has_value() && enrolled->capabilities.at("platform") == "linux" &&
+                enrolled->capabilities.at("hostname") == "agent-client-contract",
+            "native enrollment should persist its own platform metadata");
 
     sbeasy::AgentClient client({
-        .server = "http://127.0.0.1:" + std::to_string(port),
-        .token = created.agent_token,
+        .server = server_url,
+        .token = credential.token,
         .timeout = std::chrono::seconds{2},
     });
     const auto config = client.poll_config();
@@ -433,7 +454,7 @@ void run_contract() {
             "agent client should report proxy latency");
 
     sbeasy::AgentClient invalid({
-        .server = "http://127.0.0.1:" + std::to_string(port),
+        .server = server_url,
         .token = "invalid",
         .timeout = std::chrono::seconds{2},
     });

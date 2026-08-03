@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -82,12 +81,6 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     internal fun attachTun(descriptor: ParcelFileDescriptor) {
         tunDescriptor?.close()
         tunDescriptor = descriptor
-    }
-
-    internal fun updateUnderlyingNetwork(network: Network?) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1 && tunDescriptor != null) {
-            setUnderlyingNetworks(network?.let { arrayOf(it) })
-        }
     }
 
     private suspend fun startRuntime() {

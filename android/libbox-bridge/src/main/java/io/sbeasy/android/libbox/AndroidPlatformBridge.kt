@@ -10,7 +10,6 @@ import android.content.Context
 import android.content.pm.PackageManager.NameNotFoundException
 import android.net.ConnectivityManager
 import android.net.IpPrefix
-import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
@@ -44,9 +43,7 @@ internal class AndroidPlatformBridge(
     private val service: SbEasyVpnService,
 ) : PlatformInterface {
     private val connectivity = service.getSystemService(ConnectivityManager::class.java)
-    private val networkMonitor = UnderlyingNetworkMonitor(service) { network ->
-        service.updateUnderlyingNetwork(network)
-    }
+    private val networkMonitor = UnderlyingNetworkMonitor(service)
 
     fun start() = networkMonitor.start()
 
@@ -68,8 +65,6 @@ internal class AndroidPlatformBridge(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
         }
-        networkMonitor.currentNetwork?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
-
         val inet4Addresses = options.inet4Address.drain()
         val inet6Addresses = options.inet6Address.drain()
         (inet4Addresses + inet6Addresses).forEach { prefix ->

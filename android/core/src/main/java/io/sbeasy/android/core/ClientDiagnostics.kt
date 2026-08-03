@@ -19,8 +19,10 @@ object ClientDiagnostics {
     private val lock = Any()
     private val mutableEntries = MutableStateFlow<List<RuntimeLog>>(emptyList())
     private val additionalLogs = linkedMapOf<String, File>()
+    private var libboxEntries = emptyList<RuntimeLog>()
     private var initialized = false
     private var logFile: File? = null
+    private var libboxLogFile: File? = null
 
     val entries: StateFlow<List<RuntimeLog>> = mutableEntries.asStateFlow()
 
@@ -28,12 +30,19 @@ object ClientDiagnostics {
         if (initialized) return
         val directory = File(context.filesDir, "diagnostics").apply { mkdirs() }
         logFile = File(directory, "client.log")
-        val restored = runCatching {
+        libboxLogFile = File(directory, "libbox.log")
+        val legacy = runCatching {
             logFile?.takeIf(File::isFile)?.readLines().orEmpty().takeLast(MAX_ENTRIES)
         }.getOrDefault(emptyList())
-        mutableEntries.value = restored.map { line ->
+        val restoredLibbox = runCatching {
+            libboxLogFile?.takeIf(File::isFile)?.readLines().orEmpty()
+        }.getOrDefault(emptyList())
+        mutableEntries.value = legacy.filterNot(::isLibboxLine).map { line ->
             RuntimeLog(levelFromLine(line), line, 0L)
         }
+        libboxEntries = (legacy.filter(::isLibboxLine) + restoredLibbox)
+            .takeLast(MAX_LIBBOX_ENTRIES)
+            .map { line -> RuntimeLog(levelFromLine(line), line, 0L) }
         initialized = true
         appendLocked(listOf(newEntry(INFO, "diagnostics", "local diagnostic log initialized")))
     }
@@ -61,11 +70,11 @@ object ClientDiagnostics {
 
     fun appendLibbox(values: List<RuntimeLog>): Unit = synchronized(lock) {
         if (!initialized || values.isEmpty()) return
-        appendLocked(
-            values.map { value ->
-                newEntry(value.level, "libbox", value.message)
-            },
-        )
+        val safeValues = values.map { value ->
+            newEntry(value.level, "libbox", value.message)
+        }
+        libboxEntries = (libboxEntries + safeValues).takeLast(MAX_LIBBOX_ENTRIES)
+        appendFileLocked(libboxLogFile, safeValues, libboxEntries, ROTATED_LIBBOX_ENTRIES)
     }
 
     fun snapshotLines(maxLines: Int = 1_200): List<String> = synchronized(lock) {
@@ -73,16 +82,20 @@ object ClientDiagnostics {
             tailLines(file, EXTERNAL_LOG_LINES_PER_FILE).map { line ->
                 "[external:$name] ${redactDiagnosticText(line)}"
             }
-        }.takeLast((maxLines / 4).coerceAtLeast(1))
-        val appLines = mutableEntries.value
-            .takeLast((maxLines - external.size).coerceAtLeast(0))
-            .map(RuntimeLog::message)
-        appLines + external
+        }
+        mergeDiagnosticLines(
+            app = mutableEntries.value.map(RuntimeLog::message),
+            libbox = libboxEntries.map(RuntimeLog::message),
+            external = external,
+            maxLines = maxLines,
+        )
     }
 
     fun clear() = synchronized(lock) {
         mutableEntries.value = emptyList()
+        libboxEntries = emptyList()
         runCatching { logFile?.writeText("") }
+        runCatching { libboxLogFile?.writeText("") }
         if (initialized) appendLocked(listOf(newEntry(INFO, "diagnostics", "local diagnostic log cleared")))
     }
 
@@ -110,11 +123,20 @@ object ClientDiagnostics {
     private fun appendLocked(values: List<RuntimeLog>) {
         if (values.isEmpty()) return
         mutableEntries.value = (mutableEntries.value + values).takeLast(MAX_ENTRIES)
-        val file = logFile ?: return
+        appendFileLocked(logFile, values, mutableEntries.value, ROTATED_ENTRIES)
+    }
+
+    private fun appendFileLocked(
+        target: File?,
+        values: List<RuntimeLog>,
+        retained: List<RuntimeLog>,
+        rotatedEntries: Int,
+    ) {
+        val file = target ?: return
         runCatching {
             val payload = values.joinToString(separator = "\n", postfix = "\n", transform = RuntimeLog::message)
             if (file.length() + payload.toByteArray().size > MAX_FILE_BYTES) {
-                file.writeText(mutableEntries.value.takeLast(ROTATED_ENTRIES).joinToString("\n", postfix = "\n") { it.message })
+                file.writeText(retained.takeLast(rotatedEntries).joinToString("\n", postfix = "\n") { it.message })
             } else {
                 file.appendText(payload)
             }
@@ -148,15 +170,33 @@ object ClientDiagnostics {
         else -> INFO
     }
 
+    private fun isLibboxLine(line: String): Boolean =
+        " [libbox] " in line || " [libbox-debug] " in line
+
     const val INFO = 3
     const val WARN = 4
     const val ERROR = 5
     private const val MAX_ENTRIES = 1_500
+    private const val MAX_LIBBOX_ENTRIES = 1_000
     private const val ROTATED_ENTRIES = 900
+    private const val ROTATED_LIBBOX_ENTRIES = 700
     private const val MAX_FILE_BYTES = 2 * 1_024 * 1_024L
     private const val MAX_MESSAGE_LENGTH = 4_000
     private const val EXTERNAL_LOG_LINES_PER_FILE = 200
     private const val MAX_EXTERNAL_LOG_BYTES = 256 * 1_024L
+}
+
+internal fun mergeDiagnosticLines(
+    app: List<String>,
+    libbox: List<String>,
+    external: List<String>,
+    maxLines: Int,
+): List<String> {
+    if (maxLines <= 0) return emptyList()
+    val externalLines = external.takeLast((maxLines / 6).coerceAtLeast(1))
+    val libboxLines = libbox.takeLast((maxLines / 2).coerceAtLeast(1))
+    val appLines = app.takeLast((maxLines - externalLines.size - libboxLines.size).coerceAtLeast(0))
+    return appLines + libboxLines + externalLines
 }
 
 internal fun redactDiagnosticText(raw: String): String {

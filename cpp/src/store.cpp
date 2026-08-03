@@ -2045,6 +2045,7 @@ RenderRequest Store::render_request_for_host(const std::string& host_id) const {
                 {"capabilities", parse_object(host.text(2), "host capabilities")},
             },
         .external_route_tags = {},
+        .control_plane_server = {},
         .rule_script = std::nullopt,
         .clash_controller = controller_address(host.optional_text(4)),
         .clash_secret = host.text(5),

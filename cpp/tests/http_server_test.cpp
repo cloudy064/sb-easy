@@ -1194,11 +1194,15 @@ function buildRules(context) {
                 (!embedded_config.body.contains("experimental") ||
                  !embedded_config.body.at("experimental").contains("clash_api")) &&
                 embedded_config.body.at("route").at("rules")[0].at("outbound") ==
+                    "direct" &&
+                embedded_config.body.at("route").at("rules")[0].at("domain") ==
+                    json::array({"panel.example.com"}) &&
+                embedded_config.body.at("route").at("rules")[1].at("outbound") ==
                     embedded_config.body.at("endpoints")[0].at("tag") &&
-                embedded_config.body.at("route").at("rules")[0].at("ip_cidr") ==
+                embedded_config.body.at("route").at("rules")[1].at("ip_cidr") ==
                     json::array({"10.59.32.0/24"}),
             "Android agents should receive their intranet endpoint through the same "
-            "authenticated config API");
+            "authenticated config API with a direct control-plane route");
     const auto embedded_host = store->find_host(host_id);
     require(embedded_host.has_value() && embedded_host->wg_address.has_value(),
             "embedded network config should provision one device identity");

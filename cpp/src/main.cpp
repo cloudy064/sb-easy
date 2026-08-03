@@ -21,6 +21,7 @@ namespace {
     request.host_context = value.value("host", nlohmann::json::object());
     request.external_route_tags =
         value.value("external_route_tags", std::vector<std::string>{});
+    request.control_plane_server = value.value("control_plane_server", "");
     if (value.contains("rule_script") && value["rule_script"].is_string()) {
         request.rule_script = value["rule_script"].get<std::string>();
     }

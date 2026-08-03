@@ -1,6 +1,7 @@
 #include "sbeasy/config_renderer.hpp"
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -85,6 +86,68 @@ void disable_clash_dashboard(json& config) {
     api.erase("external_ui");
     api.erase("external_ui_download_url");
     api.erase("external_ui_download_detour");
+}
+
+[[nodiscard]] std::string url_host(std::string value) {
+    const auto scheme = value.find("://");
+    if (scheme != std::string::npos) {
+        value.erase(0, scheme + 3U);
+    }
+    if (const auto path = value.find_first_of("/?#"); path != std::string::npos) {
+        value.erase(path);
+    }
+    if (value.starts_with('[')) {
+        const auto closing = value.find(']');
+        return closing == std::string::npos ? std::string{} :
+                                             value.substr(1, closing - 1U);
+    }
+    if (const auto colon = value.rfind(':');
+        colon != std::string::npos && value.find(':') == colon) {
+        value.erase(colon);
+    }
+    return value;
+}
+
+[[nodiscard]] json control_plane_route(const std::string& server) {
+    const auto host = url_host(server);
+    if (host.empty()) {
+        return nullptr;
+    }
+    in_addr ipv4{};
+    if (::inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
+        return {{"ip_cidr", json::array({host + "/32"})},
+                {"outbound", "direct"}};
+    }
+    in6_addr ipv6{};
+    if (::inet_pton(AF_INET6, host.c_str(), &ipv6) == 1) {
+        return {{"ip_cidr", json::array({host + "/128"})},
+                {"outbound", "direct"}};
+    }
+    return {{"domain", json::array({host})}, {"outbound", "direct"}};
+}
+
+void normalize_managed_dns_detours(
+    json& config, bool has_auto,
+    const std::optional<std::string>& android_selector) {
+    if (!config.contains("dns") || !config["dns"].is_object()) {
+        return;
+    }
+    auto& servers = config["dns"]["servers"];
+    if (!servers.is_array()) {
+        return;
+    }
+    const auto target = !has_auto ? std::string{"direct"} :
+                                    android_selector.value_or("auto");
+    for (auto& server : servers) {
+        if (!server.is_object() || !server.contains("detour") ||
+            !server["detour"].is_string()) {
+            continue;
+        }
+        const auto detour = server["detour"].get<std::string>();
+        if (detour == "Proxy" || detour == "Auto") {
+            server["detour"] = target;
+        }
+    }
 }
 
 } // namespace
@@ -278,6 +341,7 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
             outbounds.push_back({{"type", "direct"}, {"tag", "direct"}});
         }
         config["outbounds"] = std::move(outbounds);
+        normalize_managed_dns_detours(config, has_auto, android_selector);
 
         if (config.contains("route") && config["route"].is_object()) {
             auto& route = config["route"];
@@ -331,8 +395,17 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
         config["route"]["rules"] = std::move(rules);
     }
 
-    if (request.priority_route_rules.is_array() &&
-        !request.priority_route_rules.empty()) {
+    auto protected_rules = json::array();
+    const auto control_rule = control_plane_route(request.control_plane_server);
+    if (!control_rule.is_null()) {
+        protected_rules.push_back(control_rule);
+    }
+    if (request.priority_route_rules.is_array()) {
+        protected_rules.insert(protected_rules.end(),
+                               request.priority_route_rules.begin(),
+                               request.priority_route_rules.end());
+    }
+    if (!protected_rules.empty()) {
         if (!config.contains("route") || !config["route"].is_object()) {
             config["route"] = json::object();
         }
@@ -340,8 +413,8 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
         if (!rules.is_array()) {
             rules = json::array();
         }
-        rules.insert(rules.begin(), request.priority_route_rules.begin(),
-                     request.priority_route_rules.end());
+        rules.insert(rules.begin(), protected_rules.begin(),
+                     protected_rules.end());
     }
 
     // These fields remain under server control even when scripting is enabled.

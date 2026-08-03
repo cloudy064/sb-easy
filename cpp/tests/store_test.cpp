@@ -102,15 +102,20 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
-    sbeasy::test::require(store.database().applied_migration_count() == 9,
+    sbeasy::test::require(store.database().applied_migration_count() == 10,
                           "all canonical migrations should be recorded");
     const auto managed_device = store.find_profile("android-client");
     sbeasy::test::require(managed_device.has_value() &&
-                              managed_device->name == "Managed Device",
+                              managed_device->name == "Managed Device" &&
+                              managed_device->profile["dns"]["final"] ==
+                                  "secure-dns" &&
+                              managed_device->profile["route"]
+                                                     ["default_domain_resolver"]
+                                                     ["server"] == "local-dns",
                           "the shared device profile should not expose a "
-                          "platform-specific name");
+                          "platform-specific name and must use mobile-safe DNS");
     store.database().migrate(migration_directory());
-    sbeasy::test::require(store.database().applied_migration_count() == 9,
+    sbeasy::test::require(store.database().applied_migration_count() == 10,
                           "re-running migrations must be idempotent");
 }
 

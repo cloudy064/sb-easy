@@ -38,6 +38,9 @@ struct RenderRequest {
     // Server-owned routes that must survive user profile and QuickJS rule
     // replacement, such as the managed sb-easy private network endpoint.
     nlohmann::json priority_route_rules = nlohmann::json::array();
+    // Public control-plane URL used by managed clients. It is routed directly
+    // so configuration sync and diagnostics do not depend on a working proxy.
+    std::string control_plane_server;
     std::optional<std::string> rule_script;
     std::string clash_controller;
     std::string clash_secret;

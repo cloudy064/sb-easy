@@ -25,6 +25,7 @@ import io.sbeasy.android.core.ManagedConfig
 import io.sbeasy.android.core.ProxyGroupSnapshot
 import io.sbeasy.android.core.RuntimeBridge
 import io.sbeasy.android.core.RuntimeControl
+import io.sbeasy.android.core.RuntimeLog
 import io.sbeasy.android.core.RuntimeObservability
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -295,7 +296,9 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override fun writeDebugMessage(message: String?) {
         Log.d(TAG, message.orEmpty())
-        message?.takeIf { it.isNotBlank() }?.let { ClientDiagnostics.info("libbox-debug", it) }
+        message?.takeIf { it.isNotBlank() }?.let {
+            ClientDiagnostics.appendLibbox(listOf(RuntimeLog(ClientDiagnostics.INFO, it)))
+        }
     }
 
     private fun restoreRememberedSelections(groups: List<ProxyGroupSnapshot>) {

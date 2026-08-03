@@ -1116,7 +1116,8 @@ void sync_wireguard_best_effort(const std::shared_ptr<WireGuardService>& service
 [[nodiscard]] RenderRequest managed_render_request(Store& store,
                                                    WireGuardService& wireguard,
                                                    Host& host,
-                                                   bool provision_network_identity) {
+                                                   bool provision_network_identity,
+                                                   const std::string& control_plane_server) {
     if (uses_embedded_managed_network(host) && provision_network_identity &&
         !host.wg_address.has_value()) {
         host = wireguard.provision_host(std::move(host), false);
@@ -1126,6 +1127,7 @@ void sync_wireguard_best_effort(const std::shared_ptr<WireGuardService>& service
     if (!uses_embedded_managed_network(host)) {
         return request;
     }
+    request.control_plane_server = control_plane_server;
     // Android controls libbox through its in-process CommandServer. A TCP
     // Clash controller is redundant there and makes hot reload race the old
     // service for 0.0.0.0:9090. Remove both the repository default and any
@@ -2523,13 +2525,14 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Put});
     application.registerHandler(
         "/api/hosts/{id}/config",
-        [store, wireguard](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
-                           const std::string& id) {
+        [store, wireguard, enrollment_server](const drogon::HttpRequestPtr&,
+                                               ResponseCallback&& callback,
+                                               const std::string& id) {
             handle(std::move(callback), [&] {
                 auto host = require_host(*store, id);
                 const ConfigRenderer renderer;
-                return renderer.render(
-                    managed_render_request(*store, *wireguard, host, false));
+                return renderer.render(managed_render_request(
+                    *store, *wireguard, host, false, enrollment_server));
             });
         },
         {drogon::Get});
@@ -2651,14 +2654,15 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Post});
     application.registerHandler(
         "/api/agent/config",
-        [store, wireguard, config_hash_seed, legacy_agent_token](
+        [store, wireguard, config_hash_seed, legacy_agent_token,
+         enrollment_server](
             const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
             handle_response(std::move(callback), [&] {
                 auto host = resolve_agent_host(*store, request, legacy_agent_token);
                 const auto previous_wireguard_address = host.wg_address;
                 const ConfigRenderer renderer;
-                const auto render_input =
-                    managed_render_request(*store, *wireguard, host, true);
+                const auto render_input = managed_render_request(
+                    *store, *wireguard, host, true, enrollment_server);
                 if (host.wg_address != previous_wireguard_address) {
                     sync_wireguard_best_effort(wireguard);
                 }

@@ -81,7 +81,18 @@ SB_EASY_TEST("URLTest interval has a compatible idle timeout") {
 
 SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
     sbeasy::RenderRequest request;
-    request.profile = {{"route", {{"final", "Proxy"}}}};
+    request.profile = {
+        {"dns",
+         {{"servers",
+           nlohmann::json::array({
+               {{"type", "local"}, {"tag", "local-dns"}},
+               {{"type", "https"},
+                {"tag", "secure-dns"},
+                {"server", "1.1.1.1"},
+                {"detour", "Proxy"}},
+           })}}},
+        {"route", {{"final", "Proxy"}}},
+    };
     request.nodes = {shadowsocks("hk"), shadowsocks("us")};
     request.host_context = {
         {"id", "phone"},
@@ -98,6 +109,32 @@ SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
                           "Android configs should include auto and manual selection");
     sbeasy::test::require(config["route"]["final"] == "Proxy",
                           "Android traffic should enter the selector group");
+    sbeasy::test::require(config["dns"]["servers"][1]["detour"] == "Proxy",
+                          "secure DNS should follow the Android selector group");
+}
+
+SB_EASY_TEST("Android DNS follows a renamed selector when Proxy is a node tag") {
+    sbeasy::RenderRequest request;
+    request.profile = {
+        {"dns",
+         {{"servers",
+           nlohmann::json::array({
+               {{"type", "https"},
+                {"tag", "secure-dns"},
+                {"server", "1.1.1.1"},
+                {"detour", "Proxy"}},
+           })}}},
+        {"route", {{"final", "Proxy"}}},
+    };
+    request.nodes = {shadowsocks("Proxy")};
+    request.host_context = {{"capabilities", {{"platform", "android"}}}};
+
+    const sbeasy::ConfigRenderer renderer;
+    const auto config = renderer.render(request);
+    sbeasy::test::require(config["outbounds"].back()["tag"] == "Proxy group" &&
+                              config["dns"]["servers"][0]["detour"] ==
+                                  "Proxy group",
+                          "DNS detour must target the generated selector tag");
 }
 
 SB_EASY_TEST("generated rules cannot reference unknown outbounds") {
@@ -134,6 +171,24 @@ SB_EASY_TEST("server priority routes survive QuickJS rule replacement") {
             config["route"]["rules"][0]["outbound"] == "sb-easy-network" &&
             config["route"]["rules"][1]["outbound"] == "hk",
         "managed network routes must remain ahead of script-generated rules");
+}
+
+SB_EASY_TEST("control plane route survives QuickJS and uses the exact server host") {
+    sbeasy::RenderRequest request;
+    request.profile = {{"route", {{"rules", nlohmann::json::array()}}}};
+    request.nodes = {shadowsocks("hk")};
+    request.control_plane_server = "http://39.108.98.208:51821/api";
+    request.rule_script =
+        "function buildRules() { return [{ outbound: 'hk' }]; }";
+
+    const sbeasy::ConfigRenderer renderer;
+    const auto config = renderer.render(request);
+    sbeasy::test::require(
+        config["route"]["rules"][0]["ip_cidr"] ==
+                nlohmann::json::array({"39.108.98.208/32"}) &&
+            config["route"]["rules"][0]["outbound"] == "direct" &&
+            config["route"]["rules"][1]["outbound"] == "hk",
+        "control-plane direct route must precede script rules");
 }
 
 SB_EASY_TEST("empty managed profiles fall back to direct") {

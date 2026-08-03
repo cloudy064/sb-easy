@@ -95,7 +95,6 @@ class AgentRepository internal constructor(
                 syncPhase = SyncPhase.ERROR,
                 lastError = friendly(error),
             )
-            VpnRuntimeState.runtimeWarning(friendly(error))
             throw error
         }
     }

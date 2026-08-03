@@ -58,7 +58,7 @@ class ControlPlaneClient(context: Context) {
             .get()
             .apply { if (!force && !etag.isNullOrBlank()) header("If-None-Match", etag) }
             .build()
-        val response = execute(enrollment.server, request)
+        val response = execute(request)
         response.use {
             if (it.code == 304) return ConfigFetchResult.NotModified
             val content = it.body?.string().orEmpty()
@@ -159,7 +159,7 @@ class ControlPlaneClient(context: Context) {
             "POST" -> builder.post((body ?: JSONObject()).toString().toRequestBody(JSON_MEDIA_TYPE))
             else -> error("Unsupported method")
         }
-        val response = execute(enrollment.server, builder.build())
+        val response = execute(builder.build())
         if (!response.isSuccessful) {
             val raw = response.body?.string().orEmpty()
             response.close()
@@ -177,12 +177,31 @@ class ControlPlaneClient(context: Context) {
     private fun execute(server: String, path: String, method: String, body: JSONObject): okhttp3.Response {
         val builder = Request.Builder().url(server + path).header("Accept", "application/json")
         if (method == "POST") builder.post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
-        return execute(server, builder.build())
+        return execute(builder.build())
     }
 
-    private fun execute(server: String, request: Request): okhttp3.Response {
+    private fun execute(request: Request): okhttp3.Response {
+        val primaryError = try {
+            // Let Android choose the route first. A Network returned by
+            // allNetworks is observable, but the current app UID is not
+            // necessarily allowed to bind sockets to it (some vendors return
+            // EPERM for inactive cellular networks while Wi-Fi is active).
+            return baseClient.newCall(request).execute()
+        } catch (error: IOException) {
+            ClientDiagnostics.warn(
+                "ControlPlane",
+                "${request.method} ${request.url.encodedPath} failed on the system default route: ${error.message}",
+            )
+            error
+        }
+
+        // A direct physical-network retry is useful only while our own VPN is
+        // active and may be the reason the normal route failed. Outside that
+        // state it creates noisy, vendor-specific EPERM failures.
+        if (VpnRuntimeState.state.value.phase != VpnPhase.CONNECTED) {
+            throw primaryError
+        }
         val networks = preferredUnderlyingNetworks()
-        var lastError: IOException? = null
         networks.forEach { network ->
             val client = baseClient.newBuilder()
                 .socketFactory(network.socketFactory)
@@ -193,30 +212,22 @@ class ControlPlaneClient(context: Context) {
             try {
                 return client.newCall(request).execute()
             } catch (error: IOException) {
-                lastError = error
+                primaryError.addSuppressed(error)
                 ClientDiagnostics.warn(
                     "ControlPlane",
-                    "${request.method} ${request.url.encodedPath} failed via ${networkLabel(network)}: ${error.message}",
+                    "physical fallback failed via ${networkLabel(network)}: ${error.message}",
                 )
             }
         }
-        if (networks.isNotEmpty()) throw lastError ?: IOException("No usable underlying network")
-        return try {
-            baseClient.newCall(request).execute()
-        } catch (error: IOException) {
-            ClientDiagnostics.warn(
-                "ControlPlane",
-                "${request.method} ${request.url.encodedPath} failed without an underlying network: ${error.message}",
-            )
-            throw error
-        }
+        throw primaryError
     }
 
     private fun preferredUnderlyingNetworks(): List<Network> = connectivity.allNetworks
         .mapNotNull { network ->
             val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
             if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
-                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) ||
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             ) return@mapNotNull null
             val score = (if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 100 else 0) +
                 when {

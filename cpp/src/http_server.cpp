@@ -1043,6 +1043,15 @@ void sync_wireguard_best_effort(const std::shared_ptr<WireGuardService>& service
     if (!uses_embedded_managed_network(host)) {
         return request;
     }
+    // Android controls libbox through its in-process CommandServer. A TCP
+    // Clash controller is redundant there and makes hot reload race the old
+    // service for 0.0.0.0:9090. Remove both the repository default and any
+    // controller accidentally persisted in the profile template.
+    request.clash_controller.clear();
+    if (request.profile.contains("experimental") &&
+        request.profile["experimental"].is_object()) {
+        request.profile["experimental"].erase("clash_api");
+    }
     auto endpoint = wireguard.client_endpoint(host);
     if (!endpoint.has_value()) {
         return request;

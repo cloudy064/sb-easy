@@ -1191,6 +1191,8 @@ function buildRules(context) {
                                          std::nullopt, embedded_agent_auth);
     require(embedded_config.status == drogon::k200OK &&
                 embedded_config.body.at("endpoints")[0].at("type") == "wireguard" &&
+                (!embedded_config.body.contains("experimental") ||
+                 !embedded_config.body.at("experimental").contains("clash_api")) &&
                 embedded_config.body.at("route").at("rules")[0].at("outbound") ==
                     embedded_config.body.at("endpoints")[0].at("tag") &&
                 embedded_config.body.at("route").at("rules")[0].at("ip_cidr") ==

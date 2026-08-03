@@ -49,8 +49,8 @@ function buildRules(context) {
     const sbeasy::ConfigRenderer renderer;
     const auto config = renderer.render(request);
 
-    sbeasy::test::require(config["outbounds"].size() == 2,
-                          "expected proxy and auto outbounds");
+    sbeasy::test::require(config["outbounds"].size() == 3,
+                          "expected proxy, auto, and direct outbounds");
     sbeasy::test::require(config["route"]["final"] == "auto",
                           "legacy final was not normalized");
     sbeasy::test::require(config["route"]["rules"][0]["outbound"] == "hk",
@@ -105,7 +105,8 @@ SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
     sbeasy::test::require(selector["type"] == "selector" &&
                               selector["tag"] == "Proxy" &&
                               selector["outbounds"] ==
-                                  nlohmann::json::array({"auto", "hk", "us"}),
+                                  nlohmann::json::array(
+                                      {"auto", "hk", "us", "direct"}),
                           "Android configs should include auto and manual selection");
     sbeasy::test::require(config["route"]["final"] == "Proxy",
                           "Android traffic should enter the selector group");

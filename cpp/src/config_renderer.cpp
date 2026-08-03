@@ -314,6 +314,13 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
             request.host_context.value("capabilities", json::object());
         const bool is_android = capabilities.is_object() &&
                                 capabilities.value("platform", "") == "android";
+        const bool has_direct =
+            std::ranges::any_of(outbounds, [](const auto& outbound) {
+                return outbound.value("tag", "") == "direct";
+            });
+        if (!has_direct) {
+            outbounds.push_back({{"type", "direct"}, {"tag", "direct"}});
+        }
         std::optional<std::string> android_selector;
         if (has_auto && is_android) {
             auto selector_tag = std::string{"Proxy"};
@@ -336,9 +343,6 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
                 {"default", "auto"},
             });
             android_selector = std::move(selector_tag);
-        }
-        if (!has_auto) {
-            outbounds.push_back({{"type", "direct"}, {"tag", "direct"}});
         }
         config["outbounds"] = std::move(outbounds);
         normalize_managed_dns_detours(config, has_auto, android_selector);

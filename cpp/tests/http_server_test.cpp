@@ -1375,6 +1375,40 @@ function buildRules(context) {
                 telemetry.body.at("logs").at(0) == "2",
             "telemetry should retain the latest snapshot and cap logs");
 
+    json diagnostic_logs = json::array();
+    for (int index = 0; index < 1'502; ++index) {
+        diagnostic_logs.push_back("diagnostic-" + std::to_string(index));
+    }
+    require(request(client, drogon::Post, "/api/agent/diagnostics",
+                    json{{"reason", "manual"}, {"logs", json::array()}}, no_auth)
+                .status == drogon::k401Unauthorized,
+            "diagnostic uploads must require a device credential");
+    const auto diagnostic_upload = request(
+        client, drogon::Post, "/api/agent/diagnostics",
+        json{{"reason", "manual"},
+             {"app_version", "1.1.2"},
+             {"core_version", "1.13.12"},
+             {"device", {{"model", "Contract Phone"}}},
+             {"vpn", {{"phase", "CONNECTED"}}},
+             {"network", {{"active_network", "cellular"}}},
+             {"config", {{"profile_name", "Managed Device"}}},
+             {"runtime_log_count", 1'502},
+             {"connection_count", 3},
+             {"logs", std::move(diagnostic_logs)},
+             {"untrusted_extra", "must not be persisted"}},
+        agent_auth);
+    require(diagnostic_upload.status == drogon::k200OK &&
+                diagnostic_upload.body.at("report_id").is_string(),
+            "agents should explicitly upload a diagnostic report");
+    const auto diagnostics = request(
+        client, drogon::Get, "/api/hosts/" + host_id + "/diagnostics");
+    require(diagnostics.status == drogon::k200OK && diagnostics.body.size() == 1U &&
+                diagnostics.body.at(0).at("logs").size() == 1'500U &&
+                diagnostics.body.at(0).at("logs").at(0) == "diagnostic-2" &&
+                diagnostics.body.at(0).at("app_version") == "1.1.2" &&
+                !diagnostics.body.at(0).contains("untrusted_extra"),
+            "administrators should read bounded, whitelisted device diagnostics");
+
     const auto latency =
         request(client, drogon::Post, "/api/agent/proxy-latency",
                 json{{"results", {{"http-node", 42.5}, {"missing-node", nullptr}}}},

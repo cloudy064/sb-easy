@@ -19,6 +19,7 @@ import io.nekohasekai.libbox.CommandServerHandler
 import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.SystemProxyStatus
 import io.sbeasy.android.core.VpnRuntimeState
+import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.CoreGraph
 import io.sbeasy.android.core.ManagedConfig
 import io.sbeasy.android.core.ProxyGroupSnapshot
@@ -46,22 +47,27 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private var commandMonitor: LibboxCommandMonitor? = null
     private val restoredSelectionGroups = mutableSetOf<String>()
     private var controlLoopJob: Job? = null
+    private var networkRestartJob: Job? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
+    private var lastActiveUnderlyingInterface: String? = null
 
     override fun onCreate() {
         super.onCreate()
         LibboxInitializer.initialize(this)
         platform = AndroidPlatformBridge(this)
         createNotificationChannel()
+        ClientDiagnostics.info(TAG, "VPN service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            ClientDiagnostics.info(TAG, "stop requested")
             serviceScope.launch { stopRuntime(stopService = true) }
             return Service.START_NOT_STICKY
         }
 
         startForegroundNotification("正在同步受管配置")
+        ClientDiagnostics.info(TAG, "start requested")
         serviceScope.launch { startRuntime() }
         return Service.START_STICKY
     }
@@ -83,6 +89,39 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         tunDescriptor = descriptor
     }
 
+    internal fun onUnderlyingInterfaceChanged(interfaceName: String?) {
+        if (interfaceName == null) {
+            ClientDiagnostics.warn(TAG, "no usable underlying interface")
+            return
+        }
+        val previous = lastActiveUnderlyingInterface
+        lastActiveUnderlyingInterface = interfaceName
+        ClientDiagnostics.info(TAG, "underlying interface $previous -> $interfaceName")
+        if (previous == null || previous == interfaceName) return
+
+        networkRestartJob?.cancel()
+        networkRestartJob = serviceScope.launch {
+            delay(NETWORK_RESTART_DEBOUNCE_MS)
+            lifecycleMutex.withLock {
+                val config = CoreGraph.repository.activeConfig()
+                if (commandServer == null || config == null) return@withLock
+                ClientDiagnostics.info(TAG, "restarting libbox after network handover $previous -> $interfaceName")
+                try {
+                    closeCore()
+                    startCore(config)
+                    RuntimeBridge.control = this@SbEasyVpnService
+                    VpnRuntimeState.connected(config)
+                    startForegroundNotification("${config.profileName} · 网络已切换")
+                    ClientDiagnostics.info(TAG, "libbox network handover restart completed")
+                } catch (error: Throwable) {
+                    ClientDiagnostics.error(TAG, "libbox network handover restart failed", error)
+                    VpnRuntimeState.failed(error.message ?: error.javaClass.simpleName)
+                    startForegroundNotification("网络切换失败，请上传诊断日志")
+                }
+            }
+        }
+    }
+
     private suspend fun startRuntime() {
         try {
             runCatching { CoreGraph.repository.syncConfiguration() }
@@ -92,15 +131,18 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
             lifecycleMutex.withLock {
             if (commandServer != null) return
             VpnRuntimeState.starting()
+                ClientDiagnostics.info(TAG, "starting libbox runtime")
                 platform.start()
                 startCore(config)
                 RuntimeBridge.control = this
                 VpnRuntimeState.connected(config)
                 startForegroundNotification("${config.profileName} · 代理运行中")
                 startControlLoop()
+                ClientDiagnostics.info(TAG, "libbox runtime connected profile=${config.profileName}")
             }
         } catch (error: Throwable) {
             Log.e(TAG, "Failed to start libbox", error)
+            ClientDiagnostics.error(TAG, "failed to start libbox", error)
             closeResources()
             VpnRuntimeState.failed(error.message ?: error.javaClass.simpleName)
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -117,6 +159,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeResources() {
+        networkRestartJob?.cancel()
+        networkRestartJob = null
         controlLoopJob?.cancel()
         controlLoopJob = null
         if (RuntimeBridge.control === this) RuntimeBridge.control = null
@@ -131,6 +175,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         tunDescriptor = null
         restoredSelectionGroups.clear()
         if (::platform.isInitialized) platform.stop()
+        lastActiveUnderlyingInterface = null
+        ClientDiagnostics.info(TAG, "VPN runtime resources closed")
     }
 
     private fun closeCore() {
@@ -249,6 +295,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override fun writeDebugMessage(message: String?) {
         Log.d(TAG, message.orEmpty())
+        message?.takeIf { it.isNotBlank() }?.let { ClientDiagnostics.info("libbox-debug", it) }
     }
 
     private fun restoreRememberedSelections(groups: List<ProxyGroupSnapshot>) {
@@ -318,5 +365,6 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         private const val NOTIFICATION_CHANNEL = "sb_easy_vpn"
         private const val NOTIFICATION_ID = 51822
         private const val SELECTION_PREFERENCES = "sb_easy_proxy_selections"
+        private const val NETWORK_RESTART_DEBOUNCE_MS = 1_200L
     }
 }

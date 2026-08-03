@@ -102,7 +102,7 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
-    sbeasy::test::require(store.database().applied_migration_count() == 8,
+    sbeasy::test::require(store.database().applied_migration_count() == 9,
                           "all canonical migrations should be recorded");
     const auto managed_device = store.find_profile("android-client");
     sbeasy::test::require(managed_device.has_value() &&
@@ -110,7 +110,7 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
                           "the shared device profile should not expose a "
                           "platform-specific name");
     store.database().migrate(migration_directory());
-    sbeasy::test::require(store.database().applied_migration_count() == 8,
+    sbeasy::test::require(store.database().applied_migration_count() == 9,
                           "re-running migrations must be idempotent");
 }
 
@@ -179,6 +179,32 @@ function buildRules(context) {
         rendered.at("experimental").at("clash_api").at("external_controller") ==
             "0.0.0.0:9090",
         "host render should inject the controlled Clash endpoint");
+}
+
+SB_EASY_TEST("diagnostic reports are host-scoped and retain the latest twenty") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+
+    sbeasy::Host host;
+    host.name = "Diagnostic device";
+    const auto created = store.create_host(std::move(host));
+    for (int index = 0; index < 21; ++index) {
+        static_cast<void>(store.save_diagnostic_report(
+            created.id,
+            {{"reason", "manual"},
+             {"app_version", std::to_string(index)},
+             {"core_version", "1.13.12"},
+             {"logs", nlohmann::json::array({std::to_string(index)})}}));
+    }
+
+    const auto reports = store.list_diagnostic_reports(created.id);
+    sbeasy::test::require(
+        reports.size() == 20U && reports.front().at("app_version") == "20" &&
+            reports.back().at("app_version") == "1",
+        "diagnostic retention must discard only the oldest report");
+    sbeasy::test::require_throws<sbeasy::NotFoundError>(
+        [&] { static_cast<void>(store.list_diagnostic_reports("missing")); },
+        "diagnostics must not leak data for a missing host");
 }
 
 SB_EASY_TEST("profile CRUD uses the existing config_profiles schema") {

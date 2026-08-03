@@ -10,33 +10,46 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import io.sbeasy.android.core.ClientDiagnostics
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import java.net.NetworkInterface
 
 internal class UnderlyingNetworkMonitor(
     context: Context,
+    private val onDefaultInterfaceChanged: (String?) -> Unit = {},
 ) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var listener: InterfaceUpdateListener? = null
     private var registered = false
+    private var lastPublishedInterface: String? = null
 
     @Volatile
     var currentNetwork: Network? = null
         private set
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) = select(network)
+        override fun onAvailable(network: Network) {
+            ClientDiagnostics.info(TAG, "network available: ${describe(network)}")
+            select(network)
+        }
 
         override fun onLost(network: Network) {
+            ClientDiagnostics.warn(TAG, "network lost: ${describe(network)}")
             if (network == currentNetwork) select(null)
         }
 
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            if (network == currentNetwork) {
+                ClientDiagnostics.info(TAG, "capabilities changed: ${describe(network, capabilities)}")
+            }
             if (network == currentNetwork) publish(network)
         }
 
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            if (network == currentNetwork) {
+                ClientDiagnostics.info(TAG, "link changed: network=$network interface=${linkProperties.interfaceName ?: "unknown"}")
+            }
             if (network == currentNetwork) publish(network)
         }
     }
@@ -50,6 +63,7 @@ internal class UnderlyingNetworkMonitor(
     fun start() {
         if (registered) return
         registered = true
+        ClientDiagnostics.info(TAG, "starting default network monitor on Android ${Build.VERSION.SDK_INT}")
         when {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
                 connectivity.registerBestMatchingNetworkCallback(request, callback, mainHandler)
@@ -76,7 +90,9 @@ internal class UnderlyingNetworkMonitor(
         runCatching { connectivity.unregisterNetworkCallback(callback) }
         mainHandler.removeCallbacksAndMessages(null)
         currentNetwork = null
+        lastPublishedInterface = null
         listener = null
+        ClientDiagnostics.info(TAG, "default network monitor stopped")
     }
 
     fun setListener(value: InterfaceUpdateListener?) {
@@ -117,13 +133,14 @@ internal class UnderlyingNetworkMonitor(
         }
         currentNetwork = network
         Log.i(TAG, "Default underlying network changed to ${network ?: "none"}")
+        ClientDiagnostics.info(TAG, "selected underlying network: ${describe(network)}")
         publish(network)
     }
 
     private fun publish(network: Network?, attempt: Int = 0) {
-        val target = listener ?: return
         if (network == null) {
-            target.updateDefaultInterface("", -1, false, false)
+            notifyPublishedInterface(null)
+            listener?.updateDefaultInterface("", -1, false, false)
             return
         }
         if (network != currentNetwork) return
@@ -138,11 +155,36 @@ internal class UnderlyingNetworkMonitor(
         }
         if (name == null || index < 0) {
             Log.w(TAG, "No interface found for underlying network $network")
+            ClientDiagnostics.warn(TAG, "interface lookup failed after $attempt attempts for $network")
             return
         }
         val capabilities = connectivity.getNetworkCapabilities(network)
-        val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
-        target.updateDefaultInterface(name, index, metered, false)
+        notifyPublishedInterface(name)
+        ClientDiagnostics.info(TAG, "published default interface: name=$name index=$index ${describe(network, capabilities)}")
+        // Match SFA: expensive/constrained are informational Apple-network flags,
+        // not Android metering. Android interface metering is exposed by getInterfaces().
+        listener?.updateDefaultInterface(name, index, false, false)
+    }
+
+    private fun notifyPublishedInterface(name: String?) {
+        if (name == lastPublishedInterface) return
+        lastPublishedInterface = name
+        onDefaultInterfaceChanged(name)
+    }
+
+    private fun describe(network: Network?, capabilities: NetworkCapabilities? = null): String {
+        if (network == null) return "none"
+        val caps = capabilities ?: connectivity.getNetworkCapabilities(network)
+        val properties = connectivity.getLinkProperties(network)
+        val transports = buildList {
+            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) add("wifi")
+            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) add("cellular")
+            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("ethernet")
+            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
+        }.ifEmpty { listOf("other") }.joinToString("+")
+        val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        val metered = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
+        return "network=$network interface=${properties?.interfaceName ?: "unknown"} transport=$transports validated=$validated metered=$metered"
     }
 
     companion object {

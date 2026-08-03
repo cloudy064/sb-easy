@@ -12,6 +12,7 @@ import io.nekohasekai.libbox.OutboundGroupIterator
 import io.nekohasekai.libbox.StatusMessage
 import io.nekohasekai.libbox.StringIterator
 import io.sbeasy.android.core.ConnectionSnapshot
+import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ProxyGroupSnapshot
 import io.sbeasy.android.core.ProxyItemSnapshot
 import io.sbeasy.android.core.RuntimeLog
@@ -58,10 +59,12 @@ internal class LibboxCommandMonitor(
 
     override fun connected() {
         Log.i(TAG, "libbox command stream connected")
+        ClientDiagnostics.info(TAG, "libbox command stream connected")
     }
 
     override fun disconnected(message: String?) {
         Log.w(TAG, "libbox command stream disconnected: ${message.orEmpty()}")
+        ClientDiagnostics.warn(TAG, "libbox command stream disconnected: ${message.orEmpty()}")
     }
 
     override fun setDefaultLogLevel(level: Int) = Unit

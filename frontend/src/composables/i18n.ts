@@ -46,6 +46,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'action.close': 'Close',
     'action.copy': 'Copy',
     'action.copied': 'Copied!',
+    'action.refresh': 'Refresh',
 
     'page.hosts.title': 'Hosts',
     'page.hosts.desc': 'Managed machines running the agent / sing-box. Assign proxies and watch their status.',
@@ -184,6 +185,12 @@ const messages: Record<Locale, Record<string, string>> = {
     'devices.host.proxies': 'Proxies',
     'devices.host.proxies.n': 'assigned',
     'devices.host.proxies.all': 'all enabled',
+    'device.tab.diagnostics': 'Diagnostics',
+    'device.diag.hint': 'User-uploaded, redacted client diagnostics are retained here for troubleshooting.',
+    'device.diag.none': 'No diagnostic report has been uploaded from this device.',
+    'device.diag.report': 'Diagnostic report',
+    'device.diag.network': 'Network snapshot',
+    'device.diag.logs': 'Local client log',
 
     'page.dashboard.title': 'Dashboard',
     'page.dashboard.desc': 'Overview of your VPN clients, proxy nodes, and subscriptions.',
@@ -301,6 +308,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'action.close': '关闭',
     'action.copy': '复制',
     'action.copied': '已复制！',
+    'action.refresh': '刷新',
 
     'page.hosts.title': '主机',
     'page.hosts.desc': '运行 agent / sing-box 的受管机器。为其分配代理并查看状态。',
@@ -439,6 +447,12 @@ const messages: Record<Locale, Record<string, string>> = {
     'devices.host.proxies': '分配代理',
     'devices.host.proxies.n': '个',
     'devices.host.proxies.all': '全部',
+    'device.tab.diagnostics': '诊断报告',
+    'device.diag.hint': '客户端手动上传的脱敏诊断会保存在这里，供排查切网与 VPN 故障。',
+    'device.diag.none': '这台设备还没有上传诊断报告。',
+    'device.diag.report': '诊断报告',
+    'device.diag.network': '网络快照',
+    'device.diag.logs': '客户端本地日志',
 
     'page.dashboard.title': '仪表盘',
     'page.dashboard.desc': 'VPN 客户端、代理节点与订阅总览。',

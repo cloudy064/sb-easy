@@ -72,6 +72,45 @@
       </template>
     </div>
 
+    <!-- DIAGNOSTIC REPORTS -->
+    <div v-else-if="tab === 'diagnostics'">
+      <div class="flex-between mb-3">
+        <span class="text-xs text-muted">{{ t('device.diag.hint') }}</span>
+        <button class="btn-secondary btn-sm" @click="loadDiagnostics">{{ t('action.refresh') }}</button>
+      </div>
+      <div v-if="!diagnosticReports.length" class="empty-state">
+        <span class="empty-icon">··</span><p>{{ t('device.diag.none') }}</p>
+      </div>
+      <template v-else>
+        <select v-model="selectedDiagnosticId" class="diag-select mb-3">
+          <option v-for="report in diagnosticReports" :key="report.report_id" :value="report.report_id">
+            {{ report.created_at }} · App {{ report.app_version || '—' }} · {{ report.report_id.slice(0, 8) }}
+          </option>
+        </select>
+        <div v-if="selectedDiagnostic" class="card diag-card">
+          <div class="flex-between mb-3">
+            <div>
+              <h3 class="section-title">{{ t('device.diag.report') }} {{ selectedDiagnostic.report_id.slice(0, 8) }}</h3>
+              <span class="text-xs text-muted">{{ selectedDiagnostic.created_at }}</span>
+            </div>
+            <span class="badge badge-blue">{{ selectedDiagnostic.vpn?.phase || 'UNKNOWN' }}</span>
+          </div>
+          <div class="diag-summary">
+            <div><span>App / Core</span><strong>{{ selectedDiagnostic.app_version || '—' }} / {{ selectedDiagnostic.core_version || '—' }}</strong></div>
+            <div><span>Device</span><strong>{{ selectedDiagnostic.device?.manufacturer || '' }} {{ selectedDiagnostic.device?.model || '—' }}</strong></div>
+            <div><span>Profile</span><strong>{{ selectedDiagnostic.config?.profile_name || '—' }}</strong></div>
+            <div><span>Logs / Connections</span><strong>{{ selectedDiagnostic.logs?.length || 0 }} / {{ selectedDiagnostic.connection_count || 0 }}</strong></div>
+          </div>
+          <h4 class="diag-heading">{{ t('device.diag.network') }}</h4>
+          <pre class="diag-json">{{ JSON.stringify(selectedDiagnostic.network || {}, null, 2) }}</pre>
+          <h4 class="diag-heading">{{ t('device.diag.logs') }}</h4>
+          <div class="log-box diag-log-box">
+            <div v-for="(line, index) in selectedDiagnostic.logs || []" :key="index" class="log-line">{{ line }}</div>
+          </div>
+        </div>
+      </template>
+    </div>
+
     <HostManageModal v-if="showManage" :host="host" @close="showManage = false" @saved="onManageSaved" />
     <div v-if="toast" class="toast"><div class="toast-item toast-success">{{ toast }}</div></div>
   </div>
@@ -93,11 +132,12 @@ const route = useRoute()
 const hostsStore = useHostsStore()
 
 const id = computed(() => String(route.params.id || ''))
-const tab = ref<'config' | 'monitor' | 'logs'>('config')
+const tab = ref<'config' | 'monitor' | 'logs' | 'diagnostics'>('config')
 const tabs = computed(() => [
   { key: 'config' as const, label: t('device.tab.config') },
   { key: 'monitor' as const, label: t('device.tab.monitor') },
   { key: 'logs' as const, label: t('device.tab.logs') },
+  { key: 'diagnostics' as const, label: t('device.tab.diagnostics') },
 ])
 
 const host = ref<Host | null>(null)
@@ -112,6 +152,11 @@ const toast = ref('')
 const tel = ref<any>({})
 const telAt = computed(() => tel.value?.at || '')
 const conns = computed<any[]>(() => Array.isArray(tel.value?.connections) ? tel.value.connections : [])
+const diagnosticReports = ref<any[]>([])
+const selectedDiagnosticId = ref('')
+const selectedDiagnostic = computed(() =>
+  diagnosticReports.value.find((report) => report.report_id === selectedDiagnosticId.value) || diagnosticReports.value[0] || null,
+)
 let poll: ReturnType<typeof setInterval> | null = null
 
 onMounted(async () => {
@@ -122,17 +167,29 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => { if (poll) clearInterval(poll) })
 
-watch(tab, (v) => { if (v !== 'config') refreshTel() })
+watch(tab, (value) => {
+  if (value === 'monitor' || value === 'logs') refreshTel()
+  if (value === 'diagnostics') loadDiagnostics()
+})
 
 async function loadConfig() {
   try { const { data } = await client.get(`/hosts/${id.value}/config`); config.value = data } catch { config.value = { error: 'failed to render config' } }
 }
 function startPoll() {
   refreshTel()
-  poll = setInterval(() => { if (tab.value !== 'config') refreshTel() }, 3000)
+  poll = setInterval(() => { if (tab.value === 'monitor' || tab.value === 'logs') refreshTel() }, 3000)
 }
 async function refreshTel() {
   try { const { data } = await client.get(`/hosts/${id.value}/telemetry`); tel.value = data || {} } catch { /* keep last */ }
+}
+async function loadDiagnostics() {
+  try {
+    const { data } = await client.get(`/hosts/${id.value}/diagnostics`)
+    diagnosticReports.value = Array.isArray(data) ? data : []
+    if (!diagnosticReports.value.some((report) => report.report_id === selectedDiagnosticId.value)) {
+      selectedDiagnosticId.value = diagnosticReports.value[0]?.report_id || ''
+    }
+  } catch { diagnosticReports.value = [] }
 }
 
 function rate(bps: number) { return formatRate(bps || 0) }
@@ -195,4 +252,14 @@ function notify(m: string) { toast.value = m; setTimeout(() => (toast.value = ''
 
 .log-box { height: 62vh; min-height: 320px; overflow-y: auto; background: #1c1a17; border-radius: var(--radius-sm); padding: 0.85rem 1.1rem; font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.7; }
 .log-line { color: #d8d0c4; white-space: pre-wrap; word-break: break-all; }
+.diag-select { max-width: 560px; }
+.diag-card { padding: 1.5rem; }
+.diag-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
+.diag-summary div { display: flex; flex-direction: column; padding: 0.7rem 0.8rem; border-radius: var(--radius-sm); background: var(--paper-bg); }
+.diag-summary span { color: var(--ink-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.diag-summary strong { color: var(--ink-primary); font-size: 0.82rem; margin-top: 0.2rem; word-break: break-word; }
+.diag-heading { font-size: 0.78rem; color: var(--ink-secondary); margin: 1.1rem 0 0.45rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.diag-json { max-height: 260px; overflow: auto; padding: 0.8rem 1rem; border-radius: var(--radius-sm); background: #1c1a17; color: #d8d0c4; font: 0.72rem/1.55 var(--font-mono); white-space: pre-wrap; }
+.diag-log-box { height: 52vh; }
+@media (max-width: 680px) { .diag-summary { grid-template-columns: 1fr; } }
 </style>

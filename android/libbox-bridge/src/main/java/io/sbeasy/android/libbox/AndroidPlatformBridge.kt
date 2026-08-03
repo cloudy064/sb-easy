@@ -31,6 +31,7 @@ import io.nekohasekai.libbox.RoutePrefixIterator
 import io.nekohasekai.libbox.StringIterator
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
+import io.sbeasy.android.core.ClientDiagnostics
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -43,7 +44,7 @@ internal class AndroidPlatformBridge(
     private val service: SbEasyVpnService,
 ) : PlatformInterface {
     private val connectivity = service.getSystemService(ConnectivityManager::class.java)
-    private val networkMonitor = UnderlyingNetworkMonitor(service)
+    private val networkMonitor = UnderlyingNetworkMonitor(service, service::onUnderlyingInterfaceChanged)
 
     fun start() = networkMonitor.start()
 
@@ -52,11 +53,14 @@ internal class AndroidPlatformBridge(
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
 
     override fun autoDetectInterfaceControl(fd: Int) {
-        check(service.protect(fd)) { "android: failed to protect outbound socket" }
+        val protected = service.protect(fd)
+        if (!protected) ClientDiagnostics.error(TAG, "failed to protect outbound socket fd=$fd")
+        check(protected) { "android: failed to protect outbound socket" }
     }
 
     override fun openTun(options: TunOptions): Int {
         check(VpnService.prepare(service) == null) { "android: missing VPN permission" }
+        ClientDiagnostics.info(TAG, "opening Android TUN mtu=${options.mtu} autoRoute=${options.autoRoute}")
 
         val builder = service.Builder()
             .setSession("sb-easy managed proxy")
@@ -80,6 +84,7 @@ internal class AndroidPlatformBridge(
         val descriptor = builder.establish()
             ?: error("android: VPN permission was revoked before TUN establishment")
         service.attachTun(descriptor)
+        ClientDiagnostics.info(TAG, "Android TUN established fd=${descriptor.fd}")
         return descriptor.fd
     }
 

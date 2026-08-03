@@ -36,6 +36,7 @@ object RuntimeObservability {
     fun appendLogs(value: List<RuntimeLog>) {
         if (value.isEmpty()) return
         mutableLogs.value = (mutableLogs.value + value).takeLast(800)
+        ClientDiagnostics.appendLibbox(value)
     }
 
     fun clearLogs() {

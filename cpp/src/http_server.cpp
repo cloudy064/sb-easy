@@ -559,6 +559,89 @@ void require_admin(const AuthClaims& claims) {
     return telemetry;
 }
 
+[[nodiscard]] std::string truncate_utf8(std::string value,
+                                        std::size_t max_bytes) {
+    if (value.size() <= max_bytes) {
+        return value;
+    }
+    auto end = max_bytes;
+    while (end > 0U &&
+           (static_cast<unsigned char>(value[end]) & 0xc0U) == 0x80U) {
+        --end;
+    }
+    value.resize(end);
+    return value;
+}
+
+[[nodiscard]] std::string diagnostic_string(const json& body, const char* field,
+                                            std::string fallback,
+                                            std::size_t max_bytes) {
+    const auto found = body.find(field);
+    if (found == body.end() || found->is_null()) {
+        return fallback;
+    }
+    if (!found->is_string()) {
+        throw ValidationError(std::string{field} + " must be a string");
+    }
+    return truncate_utf8(found->get<std::string>(), max_bytes);
+}
+
+[[nodiscard]] json diagnostic_object(const json& body, const char* field) {
+    const auto found = body.find(field);
+    if (found == body.end() || found->is_null()) {
+        return json::object();
+    }
+    if (!found->is_object()) {
+        throw ValidationError(std::string{field} + " must be a JSON object");
+    }
+    return *found;
+}
+
+[[nodiscard]] std::int64_t diagnostic_count(const json& body,
+                                            const char* field) {
+    const auto found = body.find(field);
+    if (found == body.end() || found->is_null()) {
+        return 0;
+    }
+    if (!found->is_number_integer() && !found->is_number_unsigned()) {
+        throw ValidationError(std::string{field} + " must be an integer");
+    }
+    const auto value = found->get<std::int64_t>();
+    if (value < 0) {
+        throw ValidationError(std::string{field} + " must not be negative");
+    }
+    return value;
+}
+
+[[nodiscard]] json normalize_diagnostic_report(const json& body) {
+    json logs = json::array();
+    if (const auto found = body.find("logs"); found != body.end()) {
+        if (!found->is_array()) {
+            throw ValidationError("logs must be an array");
+        }
+        const auto start = found->size() > 1'500U ? found->size() - 1'500U : 0U;
+        for (std::size_t index = start; index < found->size(); ++index) {
+            if (!(*found)[index].is_string()) {
+                throw ValidationError("logs must contain only strings");
+            }
+            logs.push_back(
+                truncate_utf8((*found)[index].get<std::string>(), 4'000U));
+        }
+    }
+    return {
+        {"reason", diagnostic_string(body, "reason", "manual", 80U)},
+        {"app_version", diagnostic_string(body, "app_version", "", 80U)},
+        {"core_version", diagnostic_string(body, "core_version", "", 120U)},
+        {"device", diagnostic_object(body, "device")},
+        {"vpn", diagnostic_object(body, "vpn")},
+        {"network", diagnostic_object(body, "network")},
+        {"config", diagnostic_object(body, "config")},
+        {"runtime_log_count", diagnostic_count(body, "runtime_log_count")},
+        {"connection_count", diagnostic_count(body, "connection_count")},
+        {"logs", std::move(logs)},
+    };
+}
+
 class TelemetryStore final {
   public:
     void put(const std::string& host_id, json telemetry) {
@@ -2383,6 +2466,14 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                                 },
                                 {drogon::Get});
     application.registerHandler(
+        "/api/hosts/{id}/diagnostics",
+        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
+                const std::string& id) {
+            handle(std::move(callback),
+                   [&] { return json(store->list_diagnostic_reports(id)); });
+        },
+        {drogon::Get});
+    application.registerHandler(
         "/api/hosts/{id}/commands",
         [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
                 const std::string& id) {
@@ -2669,6 +2760,27 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                     resolve_agent_host(*store, request, legacy_agent_token);
                 telemetry->put(host.id, normalize_telemetry(request_object(request)));
                 return json{{"ok", true}};
+            });
+        },
+        {drogon::Post});
+    application.registerHandler(
+        "/api/agent/diagnostics",
+        [store, legacy_agent_token](const drogon::HttpRequestPtr& request,
+                                    ResponseCallback&& callback) {
+            handle(std::move(callback), [&] {
+                if (request->body().size() > 1'000'000U) {
+                    throw ValidationError("Diagnostic report exceeds 1 MB");
+                }
+                const auto host =
+                    resolve_agent_host(*store, request, legacy_agent_token);
+                auto report =
+                    normalize_diagnostic_report(request_object(request));
+                if (report.dump().size() > 1'000'000U) {
+                    throw ValidationError("Diagnostic report exceeds 1 MB");
+                }
+                const auto report_id =
+                    store->save_diagnostic_report(host.id, report);
+                return json{{"ok", true}, {"report_id", report_id}};
             });
         },
         {drogon::Post});

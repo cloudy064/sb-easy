@@ -1228,6 +1228,85 @@ void Store::delete_host(const std::string& id) {
     transaction.commit();
 }
 
+std::string Store::save_diagnostic_report(const std::string& host_id,
+                                          const nlohmann::json& report) {
+    if (!report.is_object()) {
+        throw ValidationError("Diagnostic report must be a JSON object");
+    }
+    const auto id = uuid_v4();
+    const auto reason = report.value("reason", "manual");
+    const auto app_version = report.value("app_version", "");
+    const auto core_version = report.value("core_version", "");
+
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Transaction transaction{database_.handle_};
+    sqlite::Statement host{database_.handle_,
+                           "SELECT 1 FROM hosts WHERE id = ?1"};
+    host.bind(1, host_id);
+    if (!host.step_row()) {
+        throw NotFoundError("Host not found");
+    }
+
+    sqlite::Statement insert{
+        database_.handle_,
+        "INSERT INTO diagnostic_reports "
+        "(id, host_id, reason, app_version, core_version, payload, created_at) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, "
+        "strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"};
+    insert.bind(1, id);
+    insert.bind(2, host_id);
+    insert.bind(3, reason);
+    insert.bind(4, app_version);
+    insert.bind(5, core_version);
+    insert.bind(6, report.dump());
+    insert.step_done();
+
+    sqlite::Statement trim{
+        database_.handle_,
+        "DELETE FROM diagnostic_reports WHERE host_id = ?1 AND id NOT IN "
+        "(SELECT id FROM diagnostic_reports WHERE host_id = ?1 "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 20)"};
+    trim.bind(1, host_id);
+    trim.step_done();
+    transaction.commit();
+    return id;
+}
+
+std::vector<nlohmann::json>
+Store::list_diagnostic_reports(const std::string& host_id,
+                               std::size_t limit) const {
+    const std::scoped_lock lock{database_.mutex_};
+    sqlite::Statement host{database_.handle_,
+                           "SELECT 1 FROM hosts WHERE id = ?1"};
+    host.bind(1, host_id);
+    if (!host.step_row()) {
+        throw NotFoundError("Host not found");
+    }
+
+    sqlite::Statement statement{
+        database_.handle_,
+        "SELECT id, reason, app_version, core_version, payload, created_at "
+        "FROM diagnostic_reports WHERE host_id = ?1 "
+        "ORDER BY created_at DESC, rowid DESC LIMIT ?2"};
+    statement.bind(1, host_id);
+    statement.bind(
+        2, static_cast<std::int64_t>(std::min(limit, std::size_t{20U})));
+    std::vector<nlohmann::json> reports;
+    while (statement.step_row()) {
+        auto report = json::parse(statement.text(4), nullptr, false);
+        if (!report.is_object()) {
+            report = json{{"logs", json::array()}};
+        }
+        report["report_id"] = statement.text(0);
+        report["reason"] = statement.text(1);
+        report["app_version"] = statement.text(2);
+        report["core_version"] = statement.text(3);
+        report["created_at"] = statement.text(5);
+        reports.push_back(std::move(report));
+    }
+    return reports;
+}
+
 std::vector<std::string> Store::host_outbounds(const std::string& host_id) const {
     const std::scoped_lock lock{database_.mutex_};
     sqlite::Statement host{database_.handle_, "SELECT 1 FROM hosts WHERE id = ?1"};

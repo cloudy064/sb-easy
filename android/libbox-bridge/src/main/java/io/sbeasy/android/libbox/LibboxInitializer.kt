@@ -4,6 +4,7 @@ import android.content.Context
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
 import io.sbeasy.android.core.VpnRuntimeState
+import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ConfigValidator
 import io.sbeasy.android.core.RuntimeBridge
 import java.io.File
@@ -32,7 +33,10 @@ object LibboxInitializer {
                 debug = false
             },
         )
-        Libbox.redirectStderr(File(workingDirectory, "libbox-stderr.log").path)
+        val stderrFile = File(workingDirectory, "libbox-stderr.log")
+        Libbox.redirectStderr(stderrFile.path)
+        ClientDiagnostics.registerAdditionalLog("libbox-stderr", stderrFile)
+        ClientDiagnostics.info("LibboxInitializer", "libbox ${Libbox.version()} initialized")
         RuntimeBridge.validator = object : ConfigValidator {
             override fun validate(content: String) = Libbox.checkConfig(content)
         }

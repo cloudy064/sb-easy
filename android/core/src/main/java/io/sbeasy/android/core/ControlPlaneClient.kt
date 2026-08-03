@@ -109,6 +109,33 @@ class ControlPlaneClient(context: Context) {
         executeAuthenticated(enrollment, "/api/agent/telemetry", "POST", body).close()
     }
 
+    fun uploadDiagnostics(enrollment: Enrollment, body: JSONObject): String {
+        val response = executeAuthenticated(enrollment, "/api/agent/diagnostics", "POST", body)
+        response.use {
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) throw apiError(it.code, raw)
+            return requireJson(it.code, raw).getString("report_id")
+        }
+    }
+
+    fun networkSnapshot(): JSONObject {
+        val networks = JSONArray()
+        preferredUnderlyingNetworks().forEach { network ->
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            networks.put(
+                JSONObject()
+                    .put("network", network.toString())
+                    .put("interface", connectivity.getLinkProperties(network)?.interfaceName ?: JSONObject.NULL)
+                    .put("transport", transports(capabilities))
+                    .put("validated", capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true)
+                    .put("metered", capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false),
+            )
+        }
+        return JSONObject()
+            .put("active_network", connectivity.activeNetwork?.toString() ?: JSONObject.NULL)
+            .put("underlying_networks", networks)
+    }
+
     fun reportLatencies(enrollment: Enrollment, values: Map<String, Int?>) {
         val results = JSONObject()
         values.forEach { (tag, delay) -> results.put(tag, delay ?: JSONObject.NULL) }
@@ -154,17 +181,38 @@ class ControlPlaneClient(context: Context) {
     }
 
     private fun execute(server: String, request: Request): okhttp3.Response {
-        val network = preferredUnderlyingNetwork()
-        val client = if (network == null) baseClient else baseClient.newBuilder()
-            .socketFactory(network.socketFactory)
-            .dns(object : Dns {
-                override fun lookup(hostname: String) = network.getAllByName(hostname).toList()
-            })
-            .build()
-        return client.newCall(request).execute()
+        val networks = preferredUnderlyingNetworks()
+        var lastError: IOException? = null
+        networks.forEach { network ->
+            val client = baseClient.newBuilder()
+                .socketFactory(network.socketFactory)
+                .dns(object : Dns {
+                    override fun lookup(hostname: String) = network.getAllByName(hostname).toList()
+                })
+                .build()
+            try {
+                return client.newCall(request).execute()
+            } catch (error: IOException) {
+                lastError = error
+                ClientDiagnostics.warn(
+                    "ControlPlane",
+                    "${request.method} ${request.url.encodedPath} failed via ${networkLabel(network)}: ${error.message}",
+                )
+            }
+        }
+        if (networks.isNotEmpty()) throw lastError ?: IOException("No usable underlying network")
+        return try {
+            baseClient.newCall(request).execute()
+        } catch (error: IOException) {
+            ClientDiagnostics.warn(
+                "ControlPlane",
+                "${request.method} ${request.url.encodedPath} failed without an underlying network: ${error.message}",
+            )
+            throw error
+        }
     }
 
-    private fun preferredUnderlyingNetwork(): Network? = connectivity.allNetworks
+    private fun preferredUnderlyingNetworks(): List<Network> = connectivity.allNetworks
         .mapNotNull { network ->
             val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
             if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
@@ -179,8 +227,21 @@ class ControlPlaneClient(context: Context) {
                 }
             network to score
         }
-        .maxByOrNull { it.second }
-        ?.first
+        .sortedByDescending { it.second }
+        .map { it.first }
+
+    private fun networkLabel(network: Network): String {
+        val capabilities = connectivity.getNetworkCapabilities(network)
+        return "network=$network interface=${connectivity.getLinkProperties(network)?.interfaceName ?: "unknown"} " +
+            "transport=${transports(capabilities)} validated=${capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true}"
+    }
+
+    private fun transports(capabilities: NetworkCapabilities?): String = buildList {
+        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) add("wifi")
+        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true) add("cellular")
+        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true) add("ethernet")
+        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) add("vpn")
+    }.ifEmpty { listOf("other") }.joinToString("+")
 
     private fun requireJson(status: Int, raw: String?): JSONObject {
         if (status !in 200..299) throw apiError(status, raw.orEmpty())

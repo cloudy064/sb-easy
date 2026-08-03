@@ -245,6 +245,12 @@ class Store final {
     [[nodiscard]] Host create_host(Host host);
     [[nodiscard]] Host update_host(Host host);
     void delete_host(const std::string& id);
+    [[nodiscard]] std::string
+    save_diagnostic_report(const std::string& host_id,
+                           const nlohmann::json& report);
+    [[nodiscard]] std::vector<nlohmann::json>
+    list_diagnostic_reports(const std::string& host_id,
+                            std::size_t limit = 20U) const;
 
     [[nodiscard]] std::vector<std::string>
     host_outbounds(const std::string& host_id) const;

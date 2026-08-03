@@ -156,6 +156,55 @@ class AgentRepository internal constructor(
         withContext(Dispatchers.IO) { client.reportTelemetry(enrollment, body) }
     }
 
+    suspend fun uploadDiagnostics(appVersion: String, coreVersion: String): String {
+        val enrollment = requireNotNull(mutableState.value.enrollment) { "设备尚未注册" }
+        ClientDiagnostics.info("diagnostics", "manual diagnostic upload requested")
+        val vpn = VpnRuntimeState.state.value
+        val config = mutableState.value.config
+        val logs = JSONArray()
+        ClientDiagnostics.snapshotLines().forEach { line -> logs.put(line.take(4_000)) }
+        val body = JSONObject()
+            .put("reason", "manual")
+            .put("app_version", appVersion)
+            .put("core_version", coreVersion)
+            .put(
+                "device",
+                JSONObject()
+                    .put("manufacturer", Build.MANUFACTURER)
+                    .put("model", Build.MODEL)
+                    .put("sdk", Build.VERSION.SDK_INT)
+                    .put("release", Build.VERSION.RELEASE),
+            )
+            .put(
+                "vpn",
+                JSONObject()
+                    .put("phase", vpn.phase.name)
+                    .put("detail", vpn.detail)
+                    .put("started_at_ms", vpn.startedAtMillis ?: JSONObject.NULL)
+                    .put("error", vpn.error ?: JSONObject.NULL),
+            )
+            .put("network", client.networkSnapshot())
+            .put(
+                "config",
+                JSONObject()
+                    .put("profile_id", config?.profileId ?: JSONObject.NULL)
+                    .put("profile_name", config?.profileName ?: JSONObject.NULL)
+                    .put("etag", config?.etag?.take(80) ?: JSONObject.NULL)
+                    .put("rule_source", config?.ruleSource ?: JSONObject.NULL),
+            )
+            .put("runtime_log_count", RuntimeObservability.logs.value.size)
+            .put("connection_count", RuntimeObservability.connections.value.size)
+            .put("logs", logs)
+        return try {
+            val reportId = withContext(Dispatchers.IO) { client.uploadDiagnostics(enrollment, body) }
+            ClientDiagnostics.info("diagnostics", "diagnostic upload completed report=$reportId")
+            reportId
+        } catch (error: Throwable) {
+            ClientDiagnostics.error("diagnostics", "diagnostic upload failed", error)
+            throw error
+        }
+    }
+
     suspend fun selectOutbound(groupTag: String, outboundTag: String) {
         requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.selectOutbound(groupTag, outboundTag)
         RuntimeObservability.markSelection(groupTag, outboundTag)
@@ -202,6 +251,7 @@ class AgentRepository internal constructor(
     suspend fun clearRuntimeLogs() {
         RuntimeBridge.control?.clearLogs()
         RuntimeObservability.clearLogs()
+        ClientDiagnostics.clear()
     }
 
     fun forgetDevice() {

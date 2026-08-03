@@ -104,7 +104,8 @@ Implemented HTTP routes include:
 - `/api/hosts/profiles` and `/api/hosts/profiles/{id}`;
 - `/api/hosts/{id}/outbounds`;
 - `/api/hosts/{id}/config`;
-- `/api/hosts/{id}/commands` and `/api/hosts/{id}/telemetry`;
+- `/api/hosts/{id}/commands`, `/api/hosts/{id}/telemetry`, and persisted
+  `/api/hosts/{id}/diagnostics` reports;
 - token reveal and rotation routes used by the existing frontend.
 - `/api/proxy/nodes`, node detail CRUD, and outbound import;
 - `/api/subscriptions`, subscription detail CRUD, fetch, and fetch-all;
@@ -116,8 +117,8 @@ Implemented HTTP routes include:
 - `/api/settings/backup`, `/api/settings/restore`, and `/api/system/logs`;
 - `/api/wireguard/peers`, peer config/QR/toggle/one-time-link routes, stats,
   and sync;
-- bearer-authenticated `/api/agent/config`, status, commands, latency, and
-  telemetry routes.
+- bearer-authenticated `/api/agent/config`, status, commands, latency,
+  telemetry, and explicit diagnostic-upload routes.
 
 Subscription fetches accept HTTP(S), verify HTTPS certificates, follow at most
 five redirects, and cap response bodies at 8 MiB. Supported inputs are plain or

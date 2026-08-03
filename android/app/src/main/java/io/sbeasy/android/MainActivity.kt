@@ -89,6 +89,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import io.sbeasy.android.core.ConfigInspector
+import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ControlPlaneSnapshot
 import io.sbeasy.android.core.CoreGraph
 import io.sbeasy.android.core.EnrollmentUriParser
@@ -136,6 +137,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ClientDiagnostics.info("MainActivity", "activity created app=${BuildConfig.VERSION_NAME}")
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -242,6 +244,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestVpn() {
+        ClientDiagnostics.info("MainActivity", "VPN permission/start requested")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -252,6 +255,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startVpnService() {
+        ClientDiagnostics.info("MainActivity", "starting foreground VPN service")
         ContextCompat.startForegroundService(
             this,
             Intent(this, SbEasyVpnService::class.java).setAction(SbEasyVpnService.ACTION_START),
@@ -259,6 +263,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopVpnService() {
+        ClientDiagnostics.info("MainActivity", "stopping VPN service")
         startService(Intent(this, SbEasyVpnService::class.java).setAction(SbEasyVpnService.ACTION_STOP))
     }
 }
@@ -291,6 +296,7 @@ private fun SbEasyApp(
     val groups by RuntimeObservability.groups.collectAsStateWithLifecycle()
     val connections by RuntimeObservability.connections.collectAsStateWithLifecycle()
     val logs by RuntimeObservability.logs.collectAsStateWithLifecycle()
+    val diagnosticLogs by ClientDiagnostics.entries.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableIntStateOf(0) }
     var actionError by remember { mutableStateOf<String?>(null) }
@@ -346,7 +352,7 @@ private fun SbEasyApp(
                 when (selectedTab) {
                     0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, onConnect, onDisconnect)
                     1 -> ProxiesScreen(groups, vpn.phase)
-                    2 -> ToolsScreen(control.config, connections.size, logs, vpn.phase)
+                    2 -> ToolsScreen(control.config, connections.size, logs, diagnosticLogs, vpn.phase, vpn.coreVersion)
                     else -> SettingsScreen(control, vpn.coreVersion, vpn.phase, onDisconnect)
                 }
             }
@@ -745,14 +751,21 @@ private fun ProxiesScreen(groups: List<ProxyGroupSnapshot>, phase: VpnPhase) {
 }
 
 @Composable
-private fun ToolsScreen(config: ManagedConfig?, connectionCount: Int, logs: List<RuntimeLog>, phase: VpnPhase) {
+private fun ToolsScreen(
+    config: ManagedConfig?,
+    connectionCount: Int,
+    logs: List<RuntimeLog>,
+    diagnosticLogs: List<RuntimeLog>,
+    phase: VpnPhase,
+    coreVersion: String?,
+) {
     var section by remember { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize()) {
         SegmentTabs(listOf("路由测试", "运行配置", "日志"), section) { section = it }
         when (section) {
             0 -> RouteTestScreen(connectionCount, phase)
             1 -> ConfigurationScreen(config)
-            else -> LogsScreen(logs)
+            else -> LogsScreen(logs, diagnosticLogs, coreVersion)
         }
     }
 }
@@ -865,17 +878,48 @@ private fun ConfigurationScreen(config: ManagedConfig?) {
 }
 
 @Composable
-private fun LogsScreen(logs: List<RuntimeLog>) {
+private fun LogsScreen(logs: List<RuntimeLog>, diagnosticLogs: List<RuntimeLog>, coreVersion: String?) {
     val scope = rememberCoroutineScope()
+    var uploading by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("libbox 实时日志 · ${logs.size}", color = Muted, fontSize = 12.sp)
-            Spacer(Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text("本地诊断 · ${diagnosticLogs.size}", color = Ink, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text("libbox ${logs.size} 行 · App 私有目录持久保存", color = Muted, fontSize = 10.sp)
+            }
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        uploading = true
+                        message = null
+                        runCatching {
+                            CoreGraph.repository.uploadDiagnostics(BuildConfig.VERSION_NAME, coreVersion.orEmpty())
+                        }.onSuccess { reportId ->
+                            message = "上传成功 · 报告 ${reportId.take(8)}"
+                        }.onFailure { error ->
+                            message = "上传失败：${error.message ?: error.javaClass.simpleName}"
+                        }
+                        uploading = false
+                    }
+                },
+                enabled = !uploading,
+            ) { Text(if (uploading) "上传中…" else "上传诊断") }
             TextButton(onClick = { scope.launch { CoreGraph.repository.clearRuntimeLogs() } }) { Text("清空") }
         }
-        if (logs.isEmpty()) EmptyPanel("连接后将在这里显示 libbox 实时日志")
+        Text(
+            "上传内容包含网络切换、VPN 生命周期、脱敏后的 libbox 日志和设备环境；不会上传注册令牌或节点密码，日志可能包含故障相关的目标地址。",
+            color = Muted,
+            fontSize = 10.sp,
+            lineHeight = 15.sp,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp),
+        )
+        message?.let {
+            Text(it, color = if (it.startsWith("上传成功")) AccentDark else Warn, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp))
+        }
+        if (diagnosticLogs.isEmpty()) EmptyPanel("本地诊断尚无记录")
         else LazyColumn(Modifier.fillMaxSize().background(CodeBackground), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            items(logs.asReversed().take(500)) { line ->
+            items(diagnosticLogs.asReversed().take(800)) { line ->
                 Text(line.message, color = logColor(line.level), fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 15.sp)
             }
         }

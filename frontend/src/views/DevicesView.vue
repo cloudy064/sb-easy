@@ -305,6 +305,36 @@
             <span>{{ t('devices.qr.flow.authorize') }}</span><b>→</b>
             <span>{{ t('devices.qr.flow.sync') }}</span>
           </div>
+
+          <div class="singbox-enrollment-card">
+            <div class="qr-kind-label sb-easy-kind">{{ t('devices.qr.sbeasy.badge') }}</div>
+            <h5>{{ t('devices.qr.singbox.enroll.title') }}</h5>
+            <template v-if="qrTarget._t === 'host'">
+              <div v-if="qrEnrollment" class="qr-result-layout">
+                <img :src="qrEnrollmentSrc" :alt="t('device.enroll.qr.alt')" class="enrollment-qr" />
+                <div class="qr-result-copy">
+                  <div class="enrollment-meta">
+                    <span>{{ t('device.enroll.expires') }}</span>
+                    <strong>{{ enrollmentExpiry(qrEnrollment.expires_at) }}</strong>
+                  </div>
+                  <label class="text-sm">{{ t('device.enroll.manual') }}</label>
+                  <textarea readonly rows="4" :value="qrEnrollment.enrollment_uri"></textarea>
+                  <button class="btn-secondary btn-sm" @click="copyQrEnrollment">{{ t('action.copy') }}</button>
+                </div>
+              </div>
+              <div v-else class="qr-empty-action">
+                <p>{{ t('devices.qr.singbox.enroll.hint') }}</p>
+                <button class="btn-primary" :disabled="qrEnrollmentCreating" @click="createQrEnrollment">
+                  {{ qrEnrollmentCreating ? t('device.enroll.creating') : t('devices.qr.sbeasy.generate') }}
+                </button>
+              </div>
+            </template>
+            <div v-else class="qr-warning-card">
+              <strong>{{ t('devices.qr.sbeasy.wgonly.title') }}</strong>
+              <p>{{ t('devices.qr.singbox.wgonly.desc') }}</p>
+              <button class="btn-primary" @click="startManagedEnrollment">{{ t('devices.qr.sbeasy.wgonly.action') }}</button>
+            </div>
+          </div>
           <p class="text-sm qr-protocol-warning">{{ t('devices.qr.singbox.compat') }}</p>
         </section>
 
@@ -810,6 +840,9 @@ function formatBytes(b: number) {
 .qr-flow { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; margin: 1.2rem 0; }
 .qr-flow span { padding: .55rem .7rem; border: 1px solid var(--paper-border); border-radius: var(--radius-sm); background: var(--paper-bg); font-size: .76rem; font-weight: 650; }
 .qr-flow b { color: var(--ink-muted); }
+.singbox-enrollment-card { width: 100%; margin: .25rem 0 1rem; padding: 1rem; border: 1px solid var(--paper-border); border-radius: var(--radius-sm); background: var(--paper-surface); }
+.singbox-enrollment-card h5 { margin: .65rem 0 0; font-size: .92rem; }
+.singbox-enrollment-card .qr-result-layout { grid-template-columns: 220px 1fr; }
 .qr-error { width: 100%; margin-top: .8rem; color: var(--bad); }
 @media (max-width: 680px) {
   .enrollment-layout { grid-template-columns: 1fr; }
@@ -817,6 +850,7 @@ function formatBytes(b: number) {
   .qr-center-head { align-items: center; }
   .qr-tabs { grid-template-columns: 1fr; }
   .qr-result-layout { grid-template-columns: 1fr; }
+  .singbox-enrollment-card .qr-result-layout { grid-template-columns: 1fr; }
   .qr-flow { align-items: stretch; flex-direction: column; width: 100%; }
   .qr-flow b { transform: rotate(90deg); align-self: center; }
 }

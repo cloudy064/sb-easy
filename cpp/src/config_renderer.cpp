@@ -227,6 +227,10 @@ nlohmann::json ConfigRenderer::generate_outbounds(const std::vector<ProxyNode>& 
             {"outbounds", std::move(auto_tags)},
             {"url", "https://www.gstatic.com/generate_204"},
             {"interval", "24h"},
+            // libbox requires the test interval to be no greater than the idle
+            // timeout. Keep both long so mobile clients still effectively test
+            // once at startup without waking up for frequent background tests.
+            {"idle_timeout", "24h"},
         });
     }
     return outbounds;

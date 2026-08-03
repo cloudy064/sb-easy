@@ -151,7 +151,10 @@ pub fn generate_outbounds_array(nodes: &[ProxyNode]) -> Vec<Value> {
             "tag": "auto",
             "outbounds": auto_tags,
             "url": "https://www.gstatic.com/generate_204",
-            "interval": "24h"
+            "interval": "24h",
+            // libbox rejects URLTest groups whose interval exceeds the idle
+            // timeout. Matching the two preserves the low-frequency behavior.
+            "idle_timeout": "24h"
         }));
     }
 
@@ -313,6 +316,13 @@ mod tests {
         // simplified model: no selector / manual-switch group
         assert!(!tags.contains(&"Proxy"));
         assert_eq!(cfg["route"]["final"], "auto");
+        let automatic = cfg["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "auto")
+            .unwrap();
+        assert_eq!(automatic["interval"], automatic["idle_timeout"]);
     }
 
     #[test]

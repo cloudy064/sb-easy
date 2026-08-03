@@ -68,6 +68,17 @@ SB_EASY_TEST("duplicate proxy tags receive deterministic suffixes") {
                           "duplicate tag was not suffixed");
 }
 
+SB_EASY_TEST("URLTest interval has a compatible idle timeout") {
+    const auto outbounds =
+        sbeasy::ConfigRenderer::generate_outbounds({shadowsocks("hk")});
+    const auto& automatic = outbounds.back();
+    sbeasy::test::require(automatic["type"] == "urltest",
+                          "automatic outbound is not URLTest");
+    sbeasy::test::require(automatic["interval"] == "24h" &&
+                              automatic["idle_timeout"] == "24h",
+                          "URLTest interval must not exceed its idle timeout");
+}
+
 SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
     sbeasy::RenderRequest request;
     request.profile = {{"route", {{"final", "Proxy"}}}};

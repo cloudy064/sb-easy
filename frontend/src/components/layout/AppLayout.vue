@@ -2,10 +2,9 @@
   <div class="app-layout">
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="sidebar-brand">
-        <svg class="brand-mark" width="28" height="28" viewBox="0 0 28 28" fill="none">
-          <rect x="2" y="2" width="24" height="24" rx="6" stroke="currentColor" stroke-width="2"/>
-          <path d="M8 14l4 4 8-8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <span class="brand-icon" aria-hidden="true">
+          <img class="brand-mark" src="/sb-easy-mark.svg" alt="" />
+        </span>
         <span class="sidebar-title">sb-easy</span>
       </div>
 
@@ -162,10 +161,19 @@ function logout() {
   flex-shrink: 0;
 }
 
-.brand-mark {
-  color: var(--accent);
+.brand-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  border-radius: 9px;
+  background: #0b1118;
+  box-shadow: 0 1px 2px rgba(11, 17, 24, 0.22);
   flex-shrink: 0;
 }
+
+.brand-mark { width: 100%; height: 100%; display: block; }
 
 .sidebar-title {
   font-size: 1.05rem;

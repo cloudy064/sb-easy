@@ -38,4 +38,24 @@ class EnrollmentUriParserTest {
             )
         }
     }
+
+    @Test
+    fun rejectsWireGuardAndSingBoxConfigurationQrCodes() {
+        assertThrows(IllegalArgumentException::class.java) {
+            EnrollmentUriParser.parse(
+                """[Interface]
+PrivateKey = example
+Address = 10.59.32.4/24
+
+[Peer]
+PublicKey = example
+Endpoint = vpn.example.com:51820""",
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            EnrollmentUriParser.parse(
+                "sing-box://import-remote-profile?url=https%3A%2F%2Fexample.com%2Fprofile.json",
+            )
+        }
+    }
 }

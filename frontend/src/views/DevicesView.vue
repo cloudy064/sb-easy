@@ -8,7 +8,7 @@
       <div class="flex-center gap-3">
         <button class="btn-secondary btn-sm" @click="syncConfig">Sync Config</button>
         <button class="btn-secondary btn-sm" @click="showCreate = true">{{ t('devices.add.wireguard') }}</button>
-        <button class="btn-primary" @click="openEnrollment">{{ t('devices.add.device') }}</button>
+        <button class="btn-primary" @click="openEnrollment()">{{ t('devices.add.device') }}</button>
       </div>
     </div>
 
@@ -123,12 +123,13 @@
           <template v-if="d._t === 'client'">
             <button class="btn-ghost btn-sm" @click="editClient(d)">Edit</button>
             <button class="btn-ghost btn-sm" @click="wgStore.downloadConfig(d.id)">Download .conf</button>
-            <button class="btn-ghost btn-sm" @click="showQr(d)">QR Code</button>
+            <button class="btn-ghost btn-sm" @click="openQrCenter(d)">{{ t('devices.qr.open') }}</button>
             <button class="btn-danger btn-sm" @click="deleteTarget = d">Delete</button>
           </template>
           <template v-else>
             <button class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'reload')">{{ t('hosts.reload') }}</button>
             <button class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'restart')">{{ t('hosts.restart') }}</button>
+            <button v-if="!d.is_self" class="btn-ghost btn-sm" @click="openQrCenter(d)">{{ t('devices.qr.open') }}</button>
             <button class="btn-ghost btn-sm" @click="openManage(d)">{{ t('hosts.edit') }}</button>
             <button class="btn-danger btn-sm" :disabled="d.is_self" @click="deleteTarget = d">Delete</button>
           </template>
@@ -183,6 +184,7 @@
         <template v-else>
           <h3>{{ t('device.enroll.ready') }}</h3>
           <p class="text-sm text-muted enrollment-lead">{{ t('device.enroll.scan') }}</p>
+          <div class="qr-kind-label sb-easy-kind">{{ t('devices.qr.sbeasy.badge') }}</div>
           <div class="enrollment-layout">
             <img :src="deviceQrSrc" :alt="t('device.enroll.qr.alt')" class="enrollment-qr" />
             <div class="enrollment-info">
@@ -228,13 +230,85 @@
       </div>
     </div>
 
-    <!-- QR -->
-    <div v-if="qrPeer" class="modal-overlay" @click.self="closeQr">
-      <div class="modal" style="text-align:center">
-        <h3>QR Code &mdash; {{ qrPeer.name }}</h3>
-        <img v-if="qrSrc" :src="qrSrc" alt="QR Code" style="max-width:280px;margin:1rem auto;display:block" />
-        <div v-else class="spinner" style="margin:2rem auto"></div>
-        <button class="btn-secondary btn-sm" @click="closeQr">Close</button>
+    <!-- One QR center, with protocol-specific payloads kept explicit. -->
+    <div v-if="qrTarget" class="modal-overlay" @click.self="closeQrCenter">
+      <div class="modal qr-center-modal">
+        <div class="qr-center-head">
+          <div>
+            <h3>{{ t('devices.qr.title') }} &mdash; {{ qrTarget.name }}</h3>
+            <p class="text-sm text-muted">{{ t('devices.qr.subtitle') }}</p>
+          </div>
+          <button class="btn-ghost btn-sm" @click="closeQrCenter">{{ t('action.close') }}</button>
+        </div>
+
+        <div class="qr-tabs" role="tablist" :aria-label="t('devices.qr.title')">
+          <button class="qr-tab" :class="{ active: qrMode === 'sbeasy' }" role="tab" :aria-selected="qrMode === 'sbeasy'" @click="selectQrMode('sbeasy')">
+            {{ t('devices.qr.tab.sbeasy') }}
+          </button>
+          <button class="qr-tab" :class="{ active: qrMode === 'wireguard' }" role="tab" :aria-selected="qrMode === 'wireguard'" @click="selectQrMode('wireguard')">
+            {{ t('devices.qr.tab.wireguard') }}
+          </button>
+          <button class="qr-tab" :class="{ active: qrMode === 'singbox' }" role="tab" :aria-selected="qrMode === 'singbox'" @click="selectQrMode('singbox')">
+            {{ t('devices.qr.tab.singbox') }}
+          </button>
+        </div>
+
+        <section v-if="qrMode === 'sbeasy'" class="qr-panel">
+          <div class="qr-kind-label sb-easy-kind">{{ t('devices.qr.sbeasy.badge') }}</div>
+          <h4>{{ t('devices.qr.sbeasy.title') }}</h4>
+          <p class="text-sm text-muted qr-explanation">{{ t('devices.qr.sbeasy.desc') }}</p>
+
+          <template v-if="qrTarget._t === 'host'">
+            <div v-if="qrEnrollment" class="qr-result-layout">
+              <img :src="qrEnrollmentSrc" :alt="t('device.enroll.qr.alt')" class="enrollment-qr" />
+              <div class="qr-result-copy">
+                <div class="enrollment-meta">
+                  <span>{{ t('device.enroll.expires') }}</span>
+                  <strong>{{ enrollmentExpiry(qrEnrollment.expires_at) }}</strong>
+                </div>
+                <label class="text-sm">{{ t('device.enroll.manual') }}</label>
+                <textarea readonly rows="4" :value="qrEnrollment.enrollment_uri"></textarea>
+                <button class="btn-secondary btn-sm" @click="copyQrEnrollment">{{ t('action.copy') }}</button>
+              </div>
+            </div>
+            <div v-else class="qr-empty-action">
+              <p>{{ t('devices.qr.sbeasy.generate.hint') }}</p>
+              <button class="btn-primary" :disabled="qrEnrollmentCreating" @click="createQrEnrollment">
+                {{ qrEnrollmentCreating ? t('device.enroll.creating') : t('devices.qr.sbeasy.generate') }}
+              </button>
+            </div>
+          </template>
+          <div v-else class="qr-warning-card">
+            <strong>{{ t('devices.qr.sbeasy.wgonly.title') }}</strong>
+            <p>{{ t('devices.qr.sbeasy.wgonly.desc') }}</p>
+            <button class="btn-primary" @click="startManagedEnrollment">{{ t('devices.qr.sbeasy.wgonly.action') }}</button>
+          </div>
+        </section>
+
+        <section v-else-if="qrMode === 'wireguard'" class="qr-panel">
+          <div class="qr-kind-label wireguard-kind">WIREGUARD</div>
+          <h4>{{ t('devices.qr.wireguard.title') }}</h4>
+          <p class="text-sm qr-protocol-warning">{{ t('devices.qr.wireguard.warning') }}</p>
+          <template v-if="qrWireGuardPeer">
+            <img v-if="qrWireGuardSrc" :src="qrWireGuardSrc" :alt="t('devices.qr.wireguard.alt')" class="enrollment-qr qr-centered" />
+            <div v-else-if="!qrError" class="spinner qr-spinner"></div>
+          </template>
+          <div v-else class="qr-unavailable">{{ t('devices.qr.wireguard.unavailable') }}</div>
+        </section>
+
+        <section v-else class="qr-panel">
+          <div class="qr-kind-label singbox-kind">SING-BOX</div>
+          <h4>{{ t('devices.qr.singbox.title') }}</h4>
+          <p class="text-sm text-muted qr-explanation">{{ t('devices.qr.singbox.desc') }}</p>
+          <div class="qr-flow">
+            <span>{{ t('devices.qr.flow.scan') }}</span><b>→</b>
+            <span>{{ t('devices.qr.flow.authorize') }}</span><b>→</b>
+            <span>{{ t('devices.qr.flow.sync') }}</span>
+          </div>
+          <p class="text-sm qr-protocol-warning">{{ t('devices.qr.singbox.compat') }}</p>
+        </section>
+
+        <p v-if="qrError" class="text-sm qr-error">{{ qrError }}</p>
       </div>
     </div>
 
@@ -316,8 +390,13 @@ const deviceEnrollment = ref<AgentEnrollment | null>(null)
 const deviceHostId = ref<string | null>(null)
 const editTarget = ref<WireGuardPeer | null>(null)
 const deleteTarget = ref<DeviceRow | null>(null)
-const qrPeer = ref<WireGuardPeer | null>(null)
-const qrSrc = ref('')
+type QrMode = 'sbeasy' | 'wireguard' | 'singbox'
+const qrTarget = ref<DeviceRow | null>(null)
+const qrMode = ref<QrMode>('sbeasy')
+const qrWireGuardSrc = ref('')
+const qrEnrollment = ref<AgentEnrollment | null>(null)
+const qrEnrollmentCreating = ref(false)
+const qrError = ref('')
 
 const deviceQrSrc = computed(() => deviceEnrollment.value
   ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(deviceEnrollment.value.qr_svg)}`
@@ -325,10 +404,18 @@ const deviceQrSrc = computed(() => deviceEnrollment.value
 const enrollmentCommand = computed(() => deviceEnrollment.value
   ? `SB_EASY_SERVER=${deviceEnrollment.value.server} AGENT_ENROLLMENT_CODE=${deviceEnrollment.value.code} sb-easy-agent`
   : '')
+const qrEnrollmentSrc = computed(() => qrEnrollment.value
+  ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qrEnrollment.value.qr_svg)}`
+  : '')
+const qrWireGuardPeer = computed<WireGuardPeer | null>(() => {
+  const target = qrTarget.value
+  if (!target) return null
+  return target._t === 'client' ? target : target.wg
+})
 
-async function openEnrollment() {
+async function openEnrollment(initialName = '') {
   if (hostsStore.profiles.length === 0) await hostsStore.fetchProfiles()
-  deviceName.value = ''
+  deviceName.value = initialName
   deviceProfileId.value = hostsStore.profiles.some((profile) => profile.id === 'android-client')
     ? 'android-client'
     : (hostsStore.profiles[0]?.id ?? 'default')
@@ -377,14 +464,68 @@ async function copyEnrollment() {
   notify(t('action.copied'))
 }
 
-function showQr(d: WireGuardPeer) {
-  qrPeer.value = d
-  qrSrc.value = ''
-  wgStore.fetchQR(d.id).then(url => { qrSrc.value = url })
+function revokeWireGuardQr() {
+  if (!qrWireGuardSrc.value) return
+  window.URL.revokeObjectURL(qrWireGuardSrc.value)
+  qrWireGuardSrc.value = ''
 }
-function closeQr() {
-  if (qrSrc.value) { window.URL.revokeObjectURL(qrSrc.value); qrSrc.value = '' }
-  qrPeer.value = null
+function openQrCenter(target: DeviceRow) {
+  revokeWireGuardQr()
+  qrTarget.value = target
+  qrMode.value = 'sbeasy'
+  qrEnrollment.value = null
+  qrEnrollmentCreating.value = false
+  qrError.value = ''
+}
+function closeQrCenter() {
+  revokeWireGuardQr()
+  qrTarget.value = null
+  qrEnrollment.value = null
+  qrEnrollmentCreating.value = false
+  qrError.value = ''
+}
+function selectQrMode(mode: QrMode) {
+  qrMode.value = mode
+  qrError.value = ''
+  if (mode === 'wireguard') void loadWireGuardQr()
+}
+async function loadWireGuardQr() {
+  const peer = qrWireGuardPeer.value
+  if (!peer || qrWireGuardSrc.value) return
+  const requestedPeerId = peer.id
+  try {
+    const src = await wgStore.fetchQR(requestedPeerId)
+    if (qrWireGuardPeer.value?.id === requestedPeerId && qrMode.value === 'wireguard') {
+      qrWireGuardSrc.value = src
+    } else {
+      window.URL.revokeObjectURL(src)
+    }
+  } catch (error) {
+    qrError.value = error instanceof Error ? error.message : t('devices.qr.load.failed')
+  }
+}
+async function createQrEnrollment() {
+  const target = qrTarget.value
+  if (!target || target._t !== 'host' || qrEnrollmentCreating.value) return
+  qrEnrollmentCreating.value = true
+  qrError.value = ''
+  try {
+    qrEnrollment.value = await hostsStore.createEnrollment(target.id)
+  } catch (error) {
+    qrError.value = error instanceof Error ? error.message : t('device.enroll.failed')
+  } finally {
+    qrEnrollmentCreating.value = false
+  }
+}
+async function copyQrEnrollment() {
+  if (!qrEnrollment.value) return
+  await navigator.clipboard.writeText(qrEnrollment.value.enrollment_uri)
+  notify(t('action.copied'))
+}
+async function startManagedEnrollment() {
+  const suggestedName = qrTarget.value?.name ?? ''
+  closeQrCenter()
+  await openEnrollment(suggestedName)
 }
 const toast = ref('')
 const toastClass = ref('toast-success')
@@ -448,6 +589,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   if (refreshTimer) clearInterval(refreshTimer)
+  revokeWireGuardQr()
 })
 
 async function load(showLoading = true) {
@@ -629,8 +771,53 @@ function formatBytes(b: number) {
 .enrollment-meta { display: flex; flex-direction: column; gap: 0.15rem; }
 .enrollment-meta span { color: var(--ink-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: .04em; }
 .enrollment-meta strong { font-size: .82rem; overflow-wrap: anywhere; }
+.qr-kind-label {
+  display: inline-flex; width: fit-content; align-items: center; padding: .25rem .55rem;
+  border-radius: 999px; font-family: var(--font-mono); font-size: .62rem;
+  font-weight: 750; letter-spacing: .045em;
+}
+.sb-easy-kind { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.wireguard-kind { color: #3c6ea8; background: #e8f0fe; border: 1px solid #c7daf6; }
+.singbox-kind { color: #7952a8; background: #f0e9fa; border: 1px solid #ddcdf2; }
+.qr-center-modal { width: min(720px, calc(100vw - 2rem)); }
+.qr-center-head { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
+.qr-center-head p { margin-top: .35rem; line-height: 1.5; }
+.qr-tabs {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px;
+  margin: 1.25rem 0; padding: 4px; border: 1px solid var(--paper-border);
+  border-radius: var(--radius-sm); background: var(--paper-bg);
+}
+.qr-tab {
+  border: 0; border-radius: calc(var(--radius-sm) - 3px); padding: .65rem .7rem;
+  color: var(--ink-secondary); background: transparent; font-size: .78rem;
+  font-weight: 650; cursor: pointer;
+}
+.qr-tab.active { color: var(--accent); background: var(--paper-surface); box-shadow: var(--paper-shadow); }
+.qr-panel { min-height: 330px; display: flex; flex-direction: column; align-items: flex-start; }
+.qr-panel h4 { margin: .75rem 0 .4rem; font-size: 1.05rem; }
+.qr-explanation { line-height: 1.6; max-width: 620px; }
+.qr-result-layout { width: 100%; display: grid; grid-template-columns: 250px 1fr; gap: 1.35rem; margin-top: 1rem; align-items: start; }
+.qr-result-copy { display: flex; flex-direction: column; gap: .65rem; min-width: 0; }
+.qr-result-copy textarea { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: .72rem; }
+.qr-empty-action, .qr-warning-card, .qr-unavailable {
+  width: 100%; margin-top: 1rem; padding: 1rem; border: 1px solid var(--paper-border);
+  border-radius: var(--radius-sm); background: var(--paper-bg); line-height: 1.55;
+}
+.qr-empty-action p, .qr-warning-card p { margin: 0 0 .8rem; color: var(--ink-secondary); font-size: .82rem; }
+.qr-protocol-warning { width: 100%; margin: .4rem 0 1rem; padding: .7rem .8rem; border-radius: var(--radius-sm); color: #8b4a18; background: #fff3df; border: 1px solid #f1d6a7; line-height: 1.5; }
+.qr-centered { margin: .3rem auto 0; }
+.qr-spinner { margin: 3rem auto; }
+.qr-flow { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; margin: 1.2rem 0; }
+.qr-flow span { padding: .55rem .7rem; border: 1px solid var(--paper-border); border-radius: var(--radius-sm); background: var(--paper-bg); font-size: .76rem; font-weight: 650; }
+.qr-flow b { color: var(--ink-muted); }
+.qr-error { width: 100%; margin-top: .8rem; color: var(--bad); }
 @media (max-width: 680px) {
   .enrollment-layout { grid-template-columns: 1fr; }
   .enrollment-qr { margin: 0 auto; }
+  .qr-center-head { align-items: center; }
+  .qr-tabs { grid-template-columns: 1fr; }
+  .qr-result-layout { grid-template-columns: 1fr; }
+  .qr-flow { align-items: stretch; flex-direction: column; width: 100%; }
+  .qr-flow b { transform: rotate(90deg); align-self: center; }
 }
 </style>

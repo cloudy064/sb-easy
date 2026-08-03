@@ -41,6 +41,7 @@ internal class LibboxCommandMonitor(
         client?.let { runCatching { it.disconnect() } }
         client = null
         connections.clear()
+        RuntimeObservability.persistDomainRouteStats()
         RuntimeObservability.resetRuntime()
     }
 
@@ -170,6 +171,7 @@ internal class LibboxCommandMonitor(
         val cutoff = System.currentTimeMillis() - 5 * 60_000L
         connections.entries.removeAll { it.value.closedAt in 1 until cutoff }
         RuntimeObservability.updateConnections(connections.values.toList())
+        RuntimeObservability.refreshDomainRouteStats()
     }
 
     private fun Connection.toSnapshot(): ConnectionSnapshot {

@@ -6,6 +6,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace sbeasy {
@@ -146,6 +147,119 @@ void normalize_managed_dns_detours(
         const auto detour = server["detour"].get<std::string>();
         if (detour == "Proxy" || detour == "Auto") {
             server["detour"] = target;
+        }
+    }
+}
+
+constexpr std::string_view meta_rules_base{
+    "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/"};
+
+[[nodiscard]] bool rule_set_tag_matches(const json& value,
+                                        std::string_view tag) {
+    if (value.is_string()) {
+        return value.get_ref<const std::string&>() == tag;
+    }
+    if (!value.is_array()) {
+        return false;
+    }
+    return std::ranges::any_of(value, [tag](const json& item) {
+        return item.is_string() && item.get_ref<const std::string&>() == tag;
+    });
+}
+
+[[nodiscard]] bool has_rule_for_set(const json& rules, std::string_view tag) {
+    if (!rules.is_array()) {
+        return false;
+    }
+    return std::ranges::any_of(rules, [tag](const json& rule) {
+        const auto found = rule.is_object() ? rule.find("rule_set") : rule.end();
+        return found != rule.end() && rule_set_tag_matches(*found, tag);
+    });
+}
+
+[[nodiscard]] bool has_private_ip_rule(const json& rules) {
+    if (!rules.is_array()) {
+        return false;
+    }
+    return std::ranges::any_of(rules, [](const json& rule) {
+        return rule.is_object() && rule.value("ip_is_private", false);
+    });
+}
+
+void add_remote_rule_set(json& rule_sets, std::string tag,
+                         std::string relative_url) {
+    const bool exists = std::ranges::any_of(rule_sets, [&tag](const json& item) {
+        return item.is_object() && item.value("tag", "") == tag;
+    });
+    if (exists) {
+        return;
+    }
+    rule_sets.push_back({
+        {"type", "remote"},
+        {"tag", std::move(tag)},
+        {"format", "binary"},
+        {"url", std::string{meta_rules_base} + std::move(relative_url)},
+        {"download_detour", "direct"},
+        {"update_interval", "7d"},
+    });
+}
+
+void inject_managed_geo_policy(json& config) {
+    auto& route = config["route"];
+    if (route.is_null()) {
+        route = json::object();
+    }
+    if (!route.is_object()) {
+        throw std::invalid_argument("managed route must be a JSON object");
+    }
+    auto& rules = route["rules"];
+    if (rules.is_null()) {
+        rules = json::array();
+    }
+    if (!rules.is_array()) {
+        throw std::invalid_argument("managed route rules must be an array");
+    }
+    auto& rule_sets = route["rule_set"];
+    if (rule_sets.is_null()) {
+        rule_sets = json::array();
+    }
+    if (!rule_sets.is_array()) {
+        throw std::invalid_argument("managed route rule_set must be an array");
+    }
+
+    add_remote_rule_set(rule_sets, "geosite-private", "geosite/private.srs");
+    add_remote_rule_set(rule_sets, "geosite-cn", "geosite/cn.srs");
+    add_remote_rule_set(rule_sets, "geoip-cn", "geoip/cn.srs");
+
+    // Explicit Profile / QuickJS rules are already at the front of the list.
+    // Append the managed defaults so users can still override any destination.
+    if (!has_rule_for_set(rules, "geosite-private")) {
+        rules.push_back({{"rule_set", json::array({"geosite-private"})},
+                         {"outbound", "direct"}});
+    }
+    if (!has_private_ip_rule(rules)) {
+        rules.push_back({{"ip_is_private", true}, {"outbound", "direct"}});
+    }
+    if (!has_rule_for_set(rules, "geosite-cn")) {
+        rules.push_back({{"rule_set", json::array({"geosite-cn"})},
+                         {"outbound", "direct"}});
+    }
+    if (!has_rule_for_set(rules, "geoip-cn")) {
+        rules.push_back({{"rule_set", json::array({"geoip-cn"})},
+                         {"outbound", "direct"}});
+    }
+
+    auto& experimental = config["experimental"];
+    if (experimental.is_null()) {
+        experimental = json::object();
+    }
+    if (experimental.is_object()) {
+        auto& cache = experimental["cache_file"];
+        if (cache.is_null()) {
+            cache = json::object();
+        }
+        if (cache.is_object()) {
+            cache["enabled"] = true;
         }
     }
 }
@@ -305,11 +419,13 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
     }
 
     json config = request.profile;
+    bool managed_has_proxy = false;
     if (request.mode == ProfileMode::managed) {
         auto outbounds = generate_outbounds(request.nodes);
         const bool has_auto = std::ranges::any_of(outbounds, [](const auto& outbound) {
             return outbound.value("tag", "") == "auto";
         });
+        managed_has_proxy = has_auto;
         const auto capabilities =
             request.host_context.value("capabilities", json::object());
         const bool is_android = capabilities.is_object() &&
@@ -397,6 +513,10 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
         auto rules = scripts_.build_rules(*request.rule_script, context);
         validate_rule_tags(rules, allowed);
         config["route"]["rules"] = std::move(rules);
+    }
+
+    if (managed_has_proxy) {
+        inject_managed_geo_policy(config);
     }
 
     auto protected_rules = json::array();

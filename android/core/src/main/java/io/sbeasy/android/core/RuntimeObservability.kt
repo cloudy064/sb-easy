@@ -1,8 +1,13 @@
 package io.sbeasy.android.core
 
+import android.content.Context
+import android.util.AtomicFile
+import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 
 object RuntimeObservability {
     private data class DomainRouteKey(
@@ -31,14 +36,27 @@ object RuntimeObservability {
     private val mutableGroups = MutableStateFlow<List<ProxyGroupSnapshot>>(emptyList())
     private val mutableConnections = MutableStateFlow<List<ConnectionSnapshot>>(emptyList())
     private val mutableLogs = MutableStateFlow<List<RuntimeLog>>(emptyList())
+    private val mutableDomainRoutes = MutableStateFlow<List<DomainRouteStat>>(emptyList())
     private val routeStatsLock = Any()
+    private val routeStatsPersistenceLock = Any()
     private val routeStats = linkedMapOf<DomainRouteKey, MutableDomainRouteStat>()
     private val activeConnections = mutableMapOf<String, ActiveConnection>()
+    private var routeStatsFile: AtomicFile? = null
 
     val traffic: StateFlow<TrafficSnapshot> = mutableTraffic.asStateFlow()
     val groups: StateFlow<List<ProxyGroupSnapshot>> = mutableGroups.asStateFlow()
     val connections: StateFlow<List<ConnectionSnapshot>> = mutableConnections.asStateFlow()
     val logs: StateFlow<List<RuntimeLog>> = mutableLogs.asStateFlow()
+    val domainRoutes: StateFlow<List<DomainRouteStat>> = mutableDomainRoutes.asStateFlow()
+
+    fun initialize(context: Context) {
+        synchronized(routeStatsLock) {
+            if (routeStatsFile != null) return
+            routeStatsFile = AtomicFile(File(context.filesDir, "domain-route-stats.json"))
+            restoreDomainRouteStats()
+            mutableDomainRoutes.value = domainRouteStatsLocked(MAX_ROUTE_STATS)
+        }
+    }
 
     fun updateTraffic(value: TrafficSnapshot) {
         mutableTraffic.value = value
@@ -112,6 +130,48 @@ object RuntimeObservability {
     }
 
     fun domainRouteStats(limit: Int = 500): List<DomainRouteStat> = synchronized(routeStatsLock) {
+        domainRouteStatsLocked(limit)
+    }
+
+    fun refreshDomainRouteStats() {
+        mutableDomainRoutes.value = domainRouteStats(MAX_ROUTE_STATS)
+    }
+
+    fun persistDomainRouteStats() {
+        synchronized(routeStatsPersistenceLock) {
+            val target = synchronized(routeStatsLock) { routeStatsFile } ?: return
+            val payload = JSONArray()
+            domainRouteStats(MAX_ROUTE_STATS).forEach { stat ->
+                payload.put(
+                    JSONObject()
+                        .put("domain", stat.domain)
+                        .put("outbound", stat.outbound)
+                        .put("outbound_type", stat.outboundType)
+                        .put("rule", stat.rule)
+                        .put("chain", JSONArray(stat.chain))
+                        .put("connection_count", stat.connectionCount)
+                        .put("uplink_total", stat.uplinkTotal)
+                        .put("downlink_total", stat.downlinkTotal)
+                        .put("first_seen", stat.firstSeen)
+                        .put("last_seen", stat.lastSeen),
+                )
+            }
+            runCatching {
+                val output = target.startWrite()
+                try {
+                    output.write(payload.toString().toByteArray(Charsets.UTF_8))
+                    target.finishWrite(output)
+                } catch (error: Throwable) {
+                    target.failWrite(output)
+                    throw error
+                }
+            }.onFailure { error ->
+                ClientDiagnostics.warn("route-stats", "failed to persist domain routes: ${error.message.orEmpty()}")
+            }
+        }
+    }
+
+    private fun domainRouteStatsLocked(limit: Int): List<DomainRouteStat> =
         routeStats.entries
             .sortedWith(
                 compareByDescending<Map.Entry<DomainRouteKey, MutableDomainRouteStat>> { it.value.connectionCount }
@@ -133,11 +193,17 @@ object RuntimeObservability {
                     lastSeen = value.lastSeen,
                 )
             }
-    }
 
-    fun resetDomainRouteStats() = synchronized(routeStatsLock) {
-        routeStats.clear()
-        activeConnections.clear()
+    fun resetDomainRouteStats() {
+        val target = synchronized(routeStatsLock) {
+            routeStats.clear()
+            activeConnections.clear()
+            mutableDomainRoutes.value = emptyList()
+            routeStatsFile
+        }
+        synchronized(routeStatsPersistenceLock) {
+            target?.delete()
+        }
     }
 
     fun resetConnectionAccounting() {
@@ -230,6 +296,42 @@ object RuntimeObservability {
     }
 
     private fun eventTime(value: Long): Long = value.takeIf { it > 0 } ?: System.currentTimeMillis()
+
+    private fun restoreDomainRouteStats() {
+        val target = routeStatsFile ?: return
+        if (!target.baseFile.isFile) return
+        runCatching {
+            val payload = target.openRead().bufferedReader().use { JSONArray(it.readText()) }
+            for (index in 0 until minOf(payload.length(), MAX_ROUTE_STATS)) {
+                val item = payload.optJSONObject(index) ?: continue
+                val domain = item.optString("domain").trim().take(512)
+                if (domain.isEmpty()) continue
+                val chainJson = item.optJSONArray("chain") ?: JSONArray()
+                val chain = buildList {
+                    for (chainIndex in 0 until minOf(chainJson.length(), 16)) {
+                        chainJson.optString(chainIndex).trim().takeIf(String::isNotEmpty)
+                            ?.let { add(it.take(256)) }
+                    }
+                }
+                val key = DomainRouteKey(
+                    domain = domain,
+                    outbound = item.optString("outbound").take(256),
+                    outboundType = item.optString("outbound_type").take(80),
+                    rule = item.optString("rule").take(512),
+                    chain = chain,
+                )
+                routeStats[key] = MutableDomainRouteStat(
+                    connectionCount = item.optLong("connection_count").coerceAtLeast(0),
+                    uplinkTotal = item.optLong("uplink_total").coerceAtLeast(0),
+                    downlinkTotal = item.optLong("downlink_total").coerceAtLeast(0),
+                    firstSeen = item.optLong("first_seen").coerceAtLeast(0),
+                    lastSeen = item.optLong("last_seen").coerceAtLeast(0),
+                )
+            }
+        }.onFailure { error ->
+            ClientDiagnostics.warn("route-stats", "failed to restore domain routes: ${error.message.orEmpty()}")
+        }
+    }
 
     private const val MAX_ROUTE_STATS = 1_000
 }

@@ -19,6 +19,7 @@ object CoreGraph {
             if (initialized) return
             val application = context.applicationContext
             ClientDiagnostics.initialize(application)
+            RuntimeObservability.initialize(application)
             val plainPreferences = application.getSharedPreferences("sb_easy_local", Context.MODE_PRIVATE)
             val installId = plainPreferences.getString("install_id", null) ?: UUID.randomUUID().toString().also {
                 plainPreferences.edit().putString("install_id", it).apply()

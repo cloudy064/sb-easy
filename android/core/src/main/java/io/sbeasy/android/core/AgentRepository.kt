@@ -80,6 +80,10 @@ class AgentRepository internal constructor(
                             .validate(result.config.content)
                     }
                     val promoted = configStore.promoteCandidate()
+                    // Route observations describe one concrete generated config.
+                    // Do not mix historical decisions from an older rule set with
+                    // the newly applied policy.
+                    RuntimeObservability.resetDomainRouteStats()
                     mutableState.value = mutableState.value.copy(
                         config = promoted,
                         syncPhase = SyncPhase.CURRENT,
@@ -171,6 +175,7 @@ class AgentRepository internal constructor(
             .put("connections", JSONArray())
             .put("domain_stats", domainStats)
             .put("logs", logs)
+        RuntimeObservability.persistDomainRouteStats()
         withContext(Dispatchers.IO) { client.reportTelemetry(enrollment, body) }
     }
 
@@ -277,6 +282,7 @@ class AgentRepository internal constructor(
             VpnRuntimeState.state.value.phase == VpnPhase.ERROR) { "请先断开 VPN" }
         secureStore.clear()
         configStore.clear()
+        RuntimeObservability.resetDomainRouteStats()
         mutableState.value = ControlPlaneSnapshot()
     }
 

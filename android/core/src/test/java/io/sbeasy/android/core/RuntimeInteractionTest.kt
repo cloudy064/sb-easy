@@ -66,7 +66,9 @@ class RuntimeInteractionTest {
         RuntimeObservability.recordConnectionTraffic(proxy.id, 50, 400)
 
         val stats = RuntimeObservability.domainRouteStats()
+        RuntimeObservability.refreshDomainRouteStats()
         assertEquals(2, stats.size)
+        assertEquals(2, RuntimeObservability.domainRoutes.value.size)
         val directStat = stats.single { it.outbound == "direct" }
         assertEquals("example.com", directStat.domain)
         assertEquals(1L, directStat.connectionCount)

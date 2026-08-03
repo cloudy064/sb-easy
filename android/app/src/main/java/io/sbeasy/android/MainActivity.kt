@@ -92,6 +92,7 @@ import io.sbeasy.android.core.ConfigInspector
 import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ControlPlaneSnapshot
 import io.sbeasy.android.core.CoreGraph
+import io.sbeasy.android.core.DomainRouteStat
 import io.sbeasy.android.core.EnrollmentUriParser
 import io.sbeasy.android.core.ManagedConfig
 import io.sbeasy.android.core.ProxyGroupSnapshot
@@ -295,6 +296,7 @@ private fun SbEasyApp(
     val traffic by RuntimeObservability.traffic.collectAsStateWithLifecycle()
     val groups by RuntimeObservability.groups.collectAsStateWithLifecycle()
     val connections by RuntimeObservability.connections.collectAsStateWithLifecycle()
+    val domainRoutes by RuntimeObservability.domainRoutes.collectAsStateWithLifecycle()
     val logs by RuntimeObservability.logs.collectAsStateWithLifecycle()
     val diagnosticLogs by ClientDiagnostics.entries.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -352,7 +354,7 @@ private fun SbEasyApp(
                 when (selectedTab) {
                     0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, onConnect, onDisconnect)
                     1 -> ProxiesScreen(groups, vpn.phase)
-                    2 -> ToolsScreen(control.config, connections.size, logs, diagnosticLogs, vpn.phase, vpn.coreVersion)
+                    2 -> ToolsScreen(control.config, connections.size, domainRoutes, logs, diagnosticLogs, vpn.phase, vpn.coreVersion)
                     else -> SettingsScreen(control, vpn.coreVersion, vpn.phase, onDisconnect)
                 }
             }
@@ -754,6 +756,7 @@ private fun ProxiesScreen(groups: List<ProxyGroupSnapshot>, phase: VpnPhase) {
 private fun ToolsScreen(
     config: ManagedConfig?,
     connectionCount: Int,
+    domainRoutes: List<DomainRouteStat>,
     logs: List<RuntimeLog>,
     diagnosticLogs: List<RuntimeLog>,
     phase: VpnPhase,
@@ -761,13 +764,136 @@ private fun ToolsScreen(
 ) {
     var section by remember { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize()) {
-        SegmentTabs(listOf("路由测试", "运行配置", "日志"), section) { section = it }
+        SegmentTabs(listOf("路由测试", "路由记录", "运行配置", "日志"), section) { section = it }
         when (section) {
             0 -> RouteTestScreen(connectionCount, phase)
-            1 -> ConfigurationScreen(config)
+            1 -> DomainRouteStatsScreen(domainRoutes)
+            2 -> ConfigurationScreen(config)
             else -> LogsScreen(logs, diagnosticLogs, coreVersion)
         }
     }
+}
+
+@Composable
+private fun DomainRouteStatsScreen(stats: List<DomainRouteStat>) {
+    var query by remember { mutableStateOf("") }
+    val routeCounts = remember(stats) {
+        stats.groupBy { it.domain }.mapValues { (_, values) ->
+            values.map { "${it.outbound}\u0000${it.chain.joinToString("\u0000")}" }.toSet().size
+        }
+    }
+    val visible = remember(stats, query) {
+        val wanted = query.trim()
+        stats.filter { stat ->
+            wanted.isEmpty() || listOf(stat.domain, stat.outbound, stat.rule)
+                .plus(stat.chain)
+                .any { it.contains(wanted, ignoreCase = true) }
+        }
+    }
+    val totalConnections = stats.sumOf(DomainRouteStat::connectionCount)
+    val mixedDomains = routeCounts.count { it.value > 1 }
+
+    LazyColumn(
+        contentPadding = PaddingValues(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            AppCard {
+                Text("本地域名路由记录", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "保存在 App 私有目录，只读展示 sing-box 实际连接；HTTPS 内部的单次 HTTP 请求无法读取。",
+                    color = Muted,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    modifier = Modifier.padding(top = 5.dp),
+                )
+                HorizontalDivider(Modifier.padding(vertical = 13.dp), color = Line)
+                InfoRow("域名 / 目标", routeCounts.size.toString())
+                InfoRow("累计连接", totalConnections.toString())
+                InfoRow("多路径域名", mixedDomains.toString())
+            }
+        }
+        item {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("搜索域名、节点或规则") },
+                shape = RoundedCornerShape(14.dp),
+            )
+        }
+        if (stats.isEmpty()) {
+            item { EmptyPanel("还没有路由记录，连接 VPN 并访问一些网站后会自动出现") }
+        } else if (visible.isEmpty()) {
+            item { EmptyPanel("没有符合搜索条件的路由记录") }
+        } else {
+            items(
+                items = visible,
+                key = { stat ->
+                    "${stat.domain}\u0000${stat.outbound}\u0000${stat.chain.joinToString("\u0000")}\u0000${stat.rule}"
+                },
+            ) { stat ->
+                AppCard {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            stat.domain,
+                            color = Ink,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if ((routeCounts[stat.domain] ?: 0) > 1) {
+                            Text(
+                                "多路径",
+                                color = Warn,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(end = 7.dp),
+                            )
+                        }
+                        DomainRouteBadge(stat)
+                    }
+                    Text(
+                        stat.chain.filter(String::isNotBlank).joinToString(" → ")
+                            .ifBlank { stat.outbound.ifBlank { "未知路径" } },
+                        color = AccentDark,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 7.dp),
+                    )
+                    HorizontalDivider(Modifier.padding(vertical = 11.dp), color = Line)
+                    InfoRow("连接次数", stat.connectionCount.toString())
+                    InfoRow("下行 / 上行", "${formatBytes(stat.downlinkTotal)} / ${formatBytes(stat.uplinkTotal)}")
+                    InfoRow("命中规则", stat.rule.ifBlank { "默认规则" })
+                    InfoRow("最后出现", formatTime(stat.lastSeen))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DomainRouteBadge(stat: DomainRouteStat) {
+    val route = listOf(stat.outbound, stat.outboundType).plus(stat.chain)
+        .joinToString(" ").lowercase()
+    val (label, foreground, background) = when {
+        "direct" in route -> Triple("直连", Color(0xFF78B7FF), Color(0xFF172D43))
+        "block" in route || "reject" in route -> Triple("阻止", Danger, Color(0xFF3A2024))
+        route.isNotBlank() -> Triple("代理", AccentDark, AccentSoft)
+        else -> Triple("未知", Warn, Color(0xFF382F1E))
+    }
+    Text(
+        label,
+        color = foreground,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(background)
+            .padding(horizontal = 9.dp, vertical = 5.dp),
+    )
 }
 
 @Composable
@@ -802,7 +928,7 @@ private fun RouteTestScreen(connectionCount: Int, phase: VpnPhase) {
         result?.let { RouteResultCard(it) }
         AppCard(Modifier.padding(top = 14.dp)) {
             InfoRow("当前捕获的连接", "$connectionCount 条")
-            Text("测试不会保存 URL 查询参数；遥测只上传聚合流量，不上传访问域名。", color = Muted, fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 10.dp))
+            Text("测试不会保存 URL 查询参数；域名路由会在本机聚合保存，并同步到管理端用于核对分流。", color = Muted, fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 10.dp))
         }
     }
 }

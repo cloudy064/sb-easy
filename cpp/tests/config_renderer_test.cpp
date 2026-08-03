@@ -55,6 +55,18 @@ function buildRules(context) {
                           "legacy final was not normalized");
     sbeasy::test::require(config["route"]["rules"][0]["outbound"] == "hk",
                           "script rules were not installed");
+    sbeasy::test::require(
+        config["route"]["rules"][1]["rule_set"] ==
+                nlohmann::json::array({"geosite-private"}) &&
+            config["route"]["rules"][3]["rule_set"] ==
+                nlohmann::json::array({"geosite-cn"}) &&
+            config["route"]["rules"][4]["rule_set"] ==
+                nlohmann::json::array({"geoip-cn"}),
+        "managed geo policy should follow higher-priority QuickJS rules");
+    sbeasy::test::require(
+        config["route"]["rule_set"].size() == 3U &&
+            config["experimental"]["cache_file"]["enabled"] == true,
+        "managed rule sets should be installed and cached");
     sbeasy::test::require(config["experimental"]["clash_api"]["secret"] ==
                               "controller-secret",
                           "protected clash API was not injected");
@@ -112,6 +124,13 @@ SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
                           "Android traffic should enter the selector group");
     sbeasy::test::require(config["dns"]["servers"][1]["detour"] == "Proxy",
                           "secure DNS should follow the Android selector group");
+    sbeasy::test::require(
+        config["route"]["rules"].size() == 4U &&
+            config["route"]["rules"][2]["rule_set"] ==
+                nlohmann::json::array({"geosite-cn"}) &&
+            config["route"]["rules"][3]["rule_set"] ==
+                nlohmann::json::array({"geoip-cn"}),
+        "Android managed configs should direct private and mainland traffic");
 }
 
 SB_EASY_TEST("Android DNS follows a renamed selector when Proxy is a node tag") {
@@ -168,7 +187,7 @@ SB_EASY_TEST("server priority routes survive QuickJS rule replacement") {
     const sbeasy::ConfigRenderer renderer;
     const auto config = renderer.render(request);
     sbeasy::test::require(
-        config["route"]["rules"].size() == 2U &&
+        config["route"]["rules"].size() >= 6U &&
             config["route"]["rules"][0]["outbound"] == "sb-easy-network" &&
             config["route"]["rules"][1]["outbound"] == "hk",
         "managed network routes must remain ahead of script-generated rules");

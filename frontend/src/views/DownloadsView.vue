@@ -20,25 +20,16 @@
         <div class="download-actions">
           <a
             class="btn-primary download-button"
-            href="/downloads/sb-easy-android.apk"
-            download="sb-easy-android.apk"
+            href="https://github.com/cloudy064/sb-easy/releases"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8">
-              <path d="M9 2v9"/><path d="M5.5 8.5L9 12l3.5-3.5"/><path d="M3 15h12"/>
+              <path d="M6.5 3H3v12h12v-3.5"/><path d="M9 3h6v6"/><path d="M8 10L15 3"/>
             </svg>
-            {{ t('downloads.action.arm64') }}
+            {{ t('downloads.action.github') }}
           </a>
-          <a
-            class="btn-secondary download-button"
-            href="/downloads/sb-easy-android-universal.apk"
-            download="sb-easy-android-universal.apk"
-          >{{ t('downloads.action.universal') }}</a>
-          <a
-            class="release-link"
-            href="https://github.com/cloudy064/sb-easy/releases/tag/android-v1.0.2"
-            target="_blank"
-            rel="noopener"
-          >{{ t('downloads.action.release') }} ↗</a>
+          <span class="release-hint">{{ t('downloads.action.hint') }}</span>
         </div>
       </div>
 
@@ -116,8 +107,7 @@ const { t } = useI18n()
 .details strong { font-size: 0.82rem; font-weight: 650; }
 .download-button { display: inline-flex; align-items: center; gap: 0.55rem; text-decoration: none; }
 .download-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.7rem; }
-.release-link { color: var(--ink-muted); font-size: 0.78rem; font-weight: 650; text-decoration: none; }
-.release-link:hover { color: var(--accent); }
+.release-hint { color: var(--ink-muted); font-size: 0.78rem; line-height: 1.5; }
 .phone {
   width: 190px;
   height: 330px;
@@ -158,6 +148,6 @@ const { t } = useI18n()
   .details { grid-template-columns: 1fr; }
   .download-actions { align-items: stretch; flex-direction: column; }
   .download-button { width: 100%; justify-content: center; }
-  .release-link { text-align: center; padding: 0.4rem; }
+  .release-hint { text-align: center; padding: 0.4rem; }
 }
 </style>

@@ -84,11 +84,6 @@ class TemporaryStaticDirectory final {
             std::ofstream asset{path_ / "assets" / "contract.js"};
             asset << "window.sbEasyContract = true;\n";
         }
-        for (const auto name : {"sb-easy-android.apk",
-                                "sb-easy-android-universal.apk"}) {
-            std::ofstream apk{path_ / "downloads" / name};
-            apk << "sb-easy android contract artifact: " << name << '\n';
-        }
     }
 
     ~TemporaryStaticDirectory() {
@@ -676,28 +671,9 @@ void run_contract() {
     require(raw_request(client, "/assets/missing.js").status ==
                 drogon::k404NotFound,
             "missing frontend assets must not fall back to index.html");
-    const auto android_apk =
-        raw_request(client, "/downloads/sb-easy-android.apk");
-    require(android_apk.status == drogon::k200OK &&
-                android_apk.body.find("android contract artifact") !=
-                    std::string::npos &&
-                android_apk.content_type.starts_with(
-                    "application/vnd.android.package-archive") &&
-                android_apk.content_disposition.find(
-                    "filename=\"sb-easy-android.apk\"") !=
-                    std::string::npos,
-            "the Android APK must be served as a named download");
-    const auto universal_android_apk =
-        raw_request(client, "/downloads/sb-easy-android-universal.apk");
-    require(universal_android_apk.status == drogon::k200OK &&
-                universal_android_apk.body.find("sb-easy-android-universal.apk") !=
-                    std::string::npos &&
-                universal_android_apk.content_type.starts_with(
-                    "application/vnd.android.package-archive") &&
-                universal_android_apk.content_disposition.find(
-                    "filename=\"sb-easy-android-universal.apk\"") !=
-                    std::string::npos,
-            "the universal Android APK must be served as a named download");
+    require(raw_request(client, "/downloads/sb-easy-android.apk").status ==
+                drogon::k404NotFound,
+            "APK artifacts must not be served by the management server");
     require(raw_request(client, "/downloads/missing.apk").status ==
                 drogon::k404NotFound,
             "missing downloads must not fall back to the SPA");

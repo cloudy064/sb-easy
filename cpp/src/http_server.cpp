@@ -2616,33 +2616,6 @@ void register_http_routes(const std::shared_ptr<Store>& store,
                 true));
         },
         {drogon::Get, drogon::Head});
-    constexpr std::array android_downloads{
-        std::string_view{"sb-easy-android.apk"},
-        std::string_view{"sb-easy-android-arm64-v8a.apk"},
-        std::string_view{"sb-easy-android-armeabi-v7a.apk"},
-        std::string_view{"sb-easy-android-x86.apk"},
-        std::string_view{"sb-easy-android-x86_64.apk"},
-        std::string_view{"sb-easy-android-universal.apk"},
-    };
-    for (const auto name : android_downloads) {
-        const auto file_name = std::string{name};
-        application.registerHandler(
-            "/downloads/" + file_name,
-            [static_directory, file_name](const drogon::HttpRequestPtr&,
-                                          ResponseCallback&& callback) {
-                auto response = static_file_response(
-                    static_directory / "downloads" / file_name, false);
-                if (response->statusCode() == drogon::k200OK) {
-                    response->setContentTypeString(
-                        "application/vnd.android.package-archive");
-                    response->addHeader(
-                        "Content-Disposition",
-                        "attachment; filename=\"" + file_name + "\"");
-                }
-                callback(std::move(response));
-            },
-            {drogon::Get, drogon::Head});
-    }
     application.registerHandlerViaRegex(
         R"(^/api(?:/.*)?$)",
         [](const drogon::HttpRequestPtr&, ResponseCallback&& callback) {

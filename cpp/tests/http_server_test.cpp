@@ -1184,6 +1184,22 @@ function buildRules(context) {
                     no_auth)
                 .status == drogon::k200OK,
             "released Android apps should keep their enrollment alias");
+    const std::vector<std::pair<std::string, std::string>> embedded_agent_auth{
+        {"Authorization", "Bearer " + original_token},
+    };
+    const auto embedded_config = request(client, drogon::Get, "/api/agent/config",
+                                         std::nullopt, embedded_agent_auth);
+    require(embedded_config.status == drogon::k200OK &&
+                embedded_config.body.at("endpoints")[0].at("type") == "wireguard" &&
+                embedded_config.body.at("route").at("rules")[0].at("outbound") ==
+                    embedded_config.body.at("endpoints")[0].at("tag") &&
+                embedded_config.body.at("route").at("rules")[0].at("ip_cidr") ==
+                    json::array({"10.59.32.0/24"}),
+            "Android agents should receive their intranet endpoint through the same "
+            "authenticated config API");
+    const auto embedded_host = store->find_host(host_id);
+    require(embedded_host.has_value() && embedded_host->wg_address.has_value(),
+            "embedded network config should provision one device identity");
     const auto joined_wg = request(
         client, drogon::Put, "/api/hosts/" + host_id,
         json{{"capabilities",

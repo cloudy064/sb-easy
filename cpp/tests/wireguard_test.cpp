@@ -139,3 +139,59 @@ SB_EASY_TEST("WireGuard keys configs stats and peer repository are compatible") 
     sbeasy::test::require(fixture.store()->list_wireguard_peers().empty(),
                           "WireGuard peer deletion should persist");
 }
+
+SB_EASY_TEST("managed devices reuse standalone peers as sing-box endpoints") {
+    WireGuardFixture fixture;
+    sbeasy::Host host;
+    host.name = "Phone client";
+    host.capabilities = {
+        {"platform", "android"},
+        {"runs_singbox", true},
+    };
+    host = fixture.store()->create_host(std::move(host));
+
+    const auto keys = sbeasy::WireGuardService::generate_keypair();
+    auto peer = fixture.store()->create_wireguard_peer({
+        .id = {},
+        .name = host.name,
+        .private_key = keys.private_key,
+        .public_key = keys.public_key,
+        .preshared_key = sbeasy::WireGuardService::generate_preshared_key(),
+        .address = "10.59.32.4/24",
+        .dns = "10.59.32.1",
+        .enabled = true,
+        .persistent_keepalive = 25,
+        .allowed_ips = "0.0.0.0/0, ::/0",
+        .expire_at = std::nullopt,
+        .quota_bytes = 0,
+        .created_at = {},
+        .updated_at = {},
+        .notes = std::nullopt,
+        .host_id = std::nullopt,
+    });
+    sbeasy::WireGuardService service(fixture.store(),
+                                     {
+                                         .enabled = false,
+                                         .port = 51'820,
+                                         .address = "10.59.32.1/24",
+                                         .mtu = 1'420,
+                                         .external_hostname = "vpn.example.com",
+                                         .config_directory = fixture.directory(),
+                                     });
+
+    host = service.provision_host(std::move(host), false);
+    const auto peers = fixture.store()->list_wireguard_peers();
+    const auto endpoint = service.client_endpoint(host);
+    sbeasy::test::require(
+        peers.size() == 1U && peers.front().id == peer.id &&
+            peers.front().host_id == host.id &&
+            peers.front().allowed_ips == "10.59.32.0/24",
+        "unified enrollment should link the existing peer without changing keys");
+    sbeasy::test::require(
+        endpoint.has_value() && endpoint->at("type") == "wireguard" &&
+            endpoint->at("address") == nlohmann::json::array({"10.59.32.4/24"}) &&
+            endpoint->at("peers")[0]["address"] == "vpn.example.com" &&
+            endpoint->at("peers")[0]["allowed_ips"] ==
+                nlohmann::json::array({"10.59.32.0/24"}),
+        "sing-box endpoint should carry the linked peer and intranet route");
+}

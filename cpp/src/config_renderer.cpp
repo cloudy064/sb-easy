@@ -331,6 +331,19 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
         config["route"]["rules"] = std::move(rules);
     }
 
+    if (request.priority_route_rules.is_array() &&
+        !request.priority_route_rules.empty()) {
+        if (!config.contains("route") || !config["route"].is_object()) {
+            config["route"] = json::object();
+        }
+        auto& rules = config["route"]["rules"];
+        if (!rules.is_array()) {
+            rules = json::array();
+        }
+        rules.insert(rules.begin(), request.priority_route_rules.begin(),
+                     request.priority_route_rules.end());
+    }
+
     // These fields remain under server control even when scripting is enabled.
     inject_clash_api(config, request.clash_controller, request.clash_secret);
     disable_clash_dashboard(config);

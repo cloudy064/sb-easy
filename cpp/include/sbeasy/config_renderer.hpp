@@ -35,6 +35,9 @@ struct RenderRequest {
     std::vector<ProxyNode> nodes;
     nlohmann::json host_context = nlohmann::json::object();
     std::vector<std::string> external_route_tags;
+    // Server-owned routes that must survive user profile and QuickJS rule
+    // replacement, such as the managed sb-easy private network endpoint.
+    nlohmann::json priority_route_rules = nlohmann::json::array();
     std::optional<std::string> rule_script;
     std::string clash_controller;
     std::string clash_secret;

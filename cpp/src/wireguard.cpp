@@ -460,6 +460,40 @@ std::string WireGuardService::client_config(const WireGuardPeer& peer) {
     return config.str();
 }
 
+std::optional<json> WireGuardService::client_endpoint(const Host& host) {
+    const auto peers = store_->list_wireguard_peers();
+    const auto found = std::ranges::find(peers, std::optional<std::string>{host.id},
+                                         &WireGuardPeer::host_id);
+    if (found == peers.end() || !found->enabled || peer_expired(*found)) {
+        return std::nullopt;
+    }
+
+    const auto runtime = runtime_options();
+    json endpoint{
+        {"type", "wireguard"},
+        {"tag", "sb-easy-network"},
+        {"address", json::array({found->address})},
+        {"private_key", found->private_key},
+        {"peers",
+         json::array({
+             {
+                 {"address", runtime.external_hostname},
+                 {"port", runtime.port},
+                 {"public_key", server_public_key()},
+                 {"allowed_ips", json::array({subnet_cidr(runtime.address)})},
+                 {"persistent_keepalive_interval", found->persistent_keepalive},
+             },
+         })},
+    };
+    if (runtime.mtu > 0U) {
+        endpoint["mtu"] = runtime.mtu;
+    }
+    if (found->preshared_key.has_value() && !found->preshared_key->empty()) {
+        endpoint["peers"][0]["pre_shared_key"] = *found->preshared_key;
+    }
+    return endpoint;
+}
+
 std::string WireGuardService::qr_svg(const WireGuardPeer& peer) {
     return qr_svg_for_text(client_config(peer));
 }
@@ -509,28 +543,41 @@ Host WireGuardService::provision_host(Host host, bool set_default_clash) {
         peer = *found;
     } else {
         const auto runtime = runtime_options();
-        const auto keys = generate_keypair();
-        const auto allocated =
-            store_->next_wireguard_address(runtime.address);
-        const auto ip = peer_ip(allocated);
-        peer = store_->create_wireguard_peer({
-            .id = {},
-            .name = "host: " + host.name,
-            .private_key = keys.private_key,
-            .public_key = keys.public_key,
-            .preshared_key = generate_preshared_key(),
-            .address = ip + "/32",
-            .dns = "",
-            .enabled = true,
-            .persistent_keepalive = 25,
-            .allowed_ips = subnet_cidr(runtime.address),
-            .expire_at = std::nullopt,
-            .quota_bytes = 0,
-            .created_at = {},
-            .updated_at = {},
-            .notes = std::nullopt,
-            .host_id = host.id,
+        // A device may already have a standalone WireGuard identity created
+        // before unified enrollment existed. Reuse an exact-name, unlinked
+        // peer instead of silently allocating a second address and keypair.
+        found = std::ranges::find_if(existing, [&host](const auto& candidate) {
+            return !candidate.host_id.has_value() && candidate.name == host.name;
         });
+        if (found != existing.end()) {
+            peer = *found;
+            peer.host_id = host.id;
+            peer.allowed_ips = subnet_cidr(runtime.address);
+            peer.enabled = true;
+            peer = store_->update_wireguard_peer(std::move(peer));
+        } else {
+            const auto keys = generate_keypair();
+            const auto allocated = store_->next_wireguard_address(runtime.address);
+            const auto ip = peer_ip(allocated);
+            peer = store_->create_wireguard_peer({
+                .id = {},
+                .name = "host: " + host.name,
+                .private_key = keys.private_key,
+                .public_key = keys.public_key,
+                .preshared_key = generate_preshared_key(),
+                .address = ip + "/32",
+                .dns = "",
+                .enabled = true,
+                .persistent_keepalive = 25,
+                .allowed_ips = subnet_cidr(runtime.address),
+                .expire_at = std::nullopt,
+                .quota_bytes = 0,
+                .created_at = {},
+                .updated_at = {},
+                .notes = std::nullopt,
+                .host_id = host.id,
+            });
+        }
     }
     host.wg_address = peer.address;
     host.wg_public_key = peer.public_key;

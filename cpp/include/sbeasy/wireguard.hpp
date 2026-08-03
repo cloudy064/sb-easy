@@ -58,6 +58,10 @@ class WireGuardService final {
     [[nodiscard]] std::vector<WireGuardPeerStats> stats() const;
     [[nodiscard]] std::string
     client_config(const WireGuardPeer& peer);
+    /// Builds the in-process sing-box WireGuard endpoint for a managed device.
+    /// The endpoint uses the same peer identity as the standalone WireGuard
+    /// export, so one sb-easy enrollment grants one network identity.
+    [[nodiscard]] std::optional<nlohmann::json> client_endpoint(const Host& host);
     [[nodiscard]] std::string qr_svg(const WireGuardPeer& peer);
     [[nodiscard]] std::string server_config();
     [[nodiscard]] Host provision_host(Host host, bool set_default_clash);

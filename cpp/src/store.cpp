@@ -708,8 +708,8 @@ WireGuardPeer Store::update_wireguard_peer(WireGuardPeer peer) {
             database_.handle_,
             "UPDATE wireguard_peers SET name = ?1, enabled = ?2, dns = ?3, "
             "persistent_keepalive = ?4, allowed_ips = ?5, expire_at = ?6, "
-            "quota_bytes = ?7, updated_at = datetime('now'), notes = ?8 "
-            "WHERE id = ?9"};
+            "quota_bytes = ?7, updated_at = datetime('now'), notes = ?8, "
+            "host_id = ?9 WHERE id = ?10"};
         update.bind(1, peer.name);
         update.bind(2, peer.enabled);
         update.bind(3, peer.dns);
@@ -718,7 +718,8 @@ WireGuardPeer Store::update_wireguard_peer(WireGuardPeer peer) {
         update.bind(6, peer.expire_at);
         update.bind(7, peer.quota_bytes);
         update.bind(8, peer.notes);
-        update.bind(9, peer.id);
+        update.bind(9, peer.host_id);
+        update.bind(10, peer.id);
         update.step_done();
         if (sqlite3_changes(database_.handle_) == 0) {
             throw NotFoundError("Peer not found");

@@ -1022,6 +1022,63 @@ void sync_wireguard_best_effort(const std::shared_ptr<WireGuardService>& service
     }
 }
 
+[[nodiscard]] bool uses_embedded_managed_network(const Host& host) {
+    if (!host.capabilities.is_object()) {
+        return false;
+    }
+    return host.capabilities.value("embedded_wireguard", false) ||
+           host.capabilities.value("platform", "") == "android";
+}
+
+[[nodiscard]] RenderRequest managed_render_request(Store& store,
+                                                   WireGuardService& wireguard,
+                                                   Host& host,
+                                                   bool provision_network_identity) {
+    if (uses_embedded_managed_network(host) && provision_network_identity &&
+        !host.wg_address.has_value()) {
+        host = wireguard.provision_host(std::move(host), false);
+    }
+
+    auto request = store.render_request_for_host(host.id);
+    if (!uses_embedded_managed_network(host)) {
+        return request;
+    }
+    auto endpoint = wireguard.client_endpoint(host);
+    if (!endpoint.has_value()) {
+        return request;
+    }
+
+    auto& endpoints = request.profile["endpoints"];
+    if (!endpoints.is_array()) {
+        endpoints = json::array();
+    }
+    auto tag = endpoint->value("tag", "sb-easy-network");
+    const auto tag_in_use = [&request, &endpoints](const std::string& candidate) {
+        const auto in_endpoints =
+            std::ranges::any_of(endpoints, [&candidate](const auto& value) {
+                return value.is_object() && value.value("tag", "") == candidate;
+            });
+        const auto in_nodes =
+            std::ranges::any_of(request.nodes, [&candidate](const auto& node) {
+                return node.tag == candidate;
+            });
+        return in_endpoints || in_nodes;
+    };
+    while (tag_in_use(tag)) {
+        tag += " group";
+    }
+    (*endpoint)["tag"] = tag;
+    endpoints.push_back(std::move(*endpoint));
+    request.external_route_tags.push_back(tag);
+
+    const auto& allowed_ips = endpoints.back().at("peers").at(0).at("allowed_ips");
+    request.priority_route_rules.push_back({
+        {"ip_cidr", allowed_ips},
+        {"outbound", tag},
+    });
+    return request;
+}
+
 [[nodiscard]] std::string utc_after(std::chrono::minutes offset) {
     const auto time = std::chrono::system_clock::to_time_t(
         std::chrono::system_clock::now() + offset);
@@ -2366,11 +2423,13 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Put});
     application.registerHandler(
         "/api/hosts/{id}/config",
-        [store](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
-                const std::string& id) {
+        [store, wireguard](const drogon::HttpRequestPtr&, ResponseCallback&& callback,
+                           const std::string& id) {
             handle(std::move(callback), [&] {
+                auto host = require_host(*store, id);
                 const ConfigRenderer renderer;
-                return renderer.render(store->render_request_for_host(id));
+                return renderer.render(
+                    managed_render_request(*store, *wireguard, host, false));
             });
         },
         {drogon::Get});
@@ -2492,13 +2551,17 @@ void register_http_routes(const std::shared_ptr<Store>& store,
         {drogon::Post});
     application.registerHandler(
         "/api/agent/config",
-        [store, config_hash_seed, legacy_agent_token](
+        [store, wireguard, config_hash_seed, legacy_agent_token](
             const drogon::HttpRequestPtr& request, ResponseCallback&& callback) {
             handle_response(std::move(callback), [&] {
-                const auto host =
-                    resolve_agent_host(*store, request, legacy_agent_token);
+                auto host = resolve_agent_host(*store, request, legacy_agent_token);
+                const auto previous_wireguard_address = host.wg_address;
                 const ConfigRenderer renderer;
-                const auto render_input = store->render_request_for_host(host.id);
+                const auto render_input =
+                    managed_render_request(*store, *wireguard, host, true);
+                if (host.wg_address != previous_wireguard_address) {
+                    sync_wireguard_best_effort(wireguard);
+                }
                 const auto profile_id = host.profile_id.value_or("default");
                 const auto profile = require_profile(*store, profile_id);
                 const auto rule_source =

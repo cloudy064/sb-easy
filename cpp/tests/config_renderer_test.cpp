@@ -112,6 +112,30 @@ SB_EASY_TEST("generated rules cannot reference unknown outbounds") {
         "unknown outbound reference was accepted");
 }
 
+SB_EASY_TEST("server priority routes survive QuickJS rule replacement") {
+    sbeasy::RenderRequest request;
+    request.profile = {{"route", {{"rules", nlohmann::json::array()}}}};
+    request.nodes = {shadowsocks("hk")};
+    request.external_route_tags = {"sb-easy-network"};
+    request.priority_route_rules = nlohmann::json::array({
+        {
+            {"ip_cidr", nlohmann::json::array({"10.59.32.0/24"})},
+            {"outbound", "sb-easy-network"},
+        },
+    });
+    request.rule_script =
+        "function buildRules() { return [{ domain_suffix: ['.example.com'], "
+        "outbound: 'hk' }]; }";
+
+    const sbeasy::ConfigRenderer renderer;
+    const auto config = renderer.render(request);
+    sbeasy::test::require(
+        config["route"]["rules"].size() == 2U &&
+            config["route"]["rules"][0]["outbound"] == "sb-easy-network" &&
+            config["route"]["rules"][1]["outbound"] == "hk",
+        "managed network routes must remain ahead of script-generated rules");
+}
+
 SB_EASY_TEST("empty managed profiles fall back to direct") {
     sbeasy::RenderRequest request;
     request.profile = {{"route", {{"final", "auto"}}}};

@@ -1,6 +1,7 @@
 package io.sbeasy.android.core
 
 import java.net.URI
+import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -21,22 +22,36 @@ class RouteTester {
         require(uri.scheme == "http" || uri.scheme == "https") { "仅支持 HTTP/HTTPS URL" }
         require(uri.host != null && uri.userInfo == null) { "URL 格式无效，且不能包含账号信息" }
         val safeUrl = URI(uri.scheme, null, uri.host, uri.port, uri.path.ifEmpty { "/" }, null, null).toString()
+        val existingConnectionIds = RuntimeObservability.connections.value.mapTo(mutableSetOf()) { it.id }
+        val targetAddresses = withContext(Dispatchers.IO) {
+            runCatching { InetAddress.getAllByName(uri.host).mapNotNull { it.hostAddress }.toSet() }
+                .getOrDefault(emptySet())
+        }
+        client.connectionPool.evictAll()
         val startedAt = System.currentTimeMillis()
         var status: Int? = null
         var requestError: String? = null
         withContext(Dispatchers.IO) {
             runCatching {
-                val request = Request.Builder().url(uri.toString()).header("Range", "bytes=0-0").get().build()
+                val request = Request.Builder()
+                    .url(uri.toString())
+                    .header("Range", "bytes=0-0")
+                    .header("Cache-Control", "no-cache")
+                    .header("Connection", "close")
+                    .get()
+                    .build()
                 client.newCall(request).execute().use { status = it.code }
             }.onFailure { requestError = it.message ?: it.javaClass.simpleName }
+            client.connectionPool.evictAll()
         }
+        val requestElapsed = System.currentTimeMillis() - startedAt
 
         var connection: ConnectionSnapshot? = null
-        for (attempt in 0 until 15) {
-            connection = RuntimeObservability.connections.value.firstOrNull {
-                it.createdAt >= startedAt - 1_500 &&
-                    (it.domain.equals(uri.host, ignoreCase = true) || it.destination.startsWith(uri.host))
+        for (attempt in 0 until 50) {
+            val candidates = RuntimeObservability.connections.value.filter {
+                it.id !in existingConnectionIds
             }
+            connection = findRouteTestConnection(candidates, uri.host, targetAddresses)
             if (connection != null) break
             delay(100)
         }
@@ -61,9 +76,23 @@ class RouteTester {
             outbound = outbound,
             rule = matched?.rule.orEmpty(),
             chain = matched?.chain.orEmpty(),
-            latencyMillis = System.currentTimeMillis() - startedAt,
+            latencyMillis = requestElapsed,
             httpStatus = status,
             error = error,
         )
     }
 }
+
+internal fun findRouteTestConnection(
+    candidates: List<ConnectionSnapshot>,
+    host: String,
+    addresses: Set<String>,
+): ConnectionSnapshot? = candidates.firstOrNull {
+    it.domain.equals(host, ignoreCase = true) ||
+        it.destination.startsWith(host, ignoreCase = true) ||
+        addresses.any { address ->
+            it.destination == address ||
+                it.destination.startsWith("$address:") ||
+                it.destination.startsWith("[$address]:")
+        }
+} ?: candidates.singleOrNull { it.network.equals("tcp", ignoreCase = true) }

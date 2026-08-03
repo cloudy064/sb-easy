@@ -15,6 +15,8 @@ server, or administrator account is required on the phone.
   Quick Settings tile;
 - live libbox traffic, connections, proxy groups, node selection, URLTest, and logs;
 - a real HTTP/HTTPS route test correlated with libbox connection events;
+- an adaptive dark control surface with status/navigation/cutout safe areas and
+  dedicated compact-phone and wide-screen navigation;
 - readable config/routing views plus a redacted JSON view;
 - visible Profile/QuickJS source, config version, and sync state;
 - Agent status, commands, telemetry, and latency reporting.

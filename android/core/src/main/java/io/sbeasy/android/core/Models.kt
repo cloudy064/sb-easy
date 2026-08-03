@@ -58,6 +58,13 @@ data class ProxyGroupSnapshot(
     val items: List<ProxyItemSnapshot>,
 )
 
+data class GroupTestResult(
+    val groupTag: String,
+    val tested: Int,
+    val total: Int,
+    val elapsedMillis: Long,
+)
+
 data class ConnectionSnapshot(
     val id: String,
     val network: String,

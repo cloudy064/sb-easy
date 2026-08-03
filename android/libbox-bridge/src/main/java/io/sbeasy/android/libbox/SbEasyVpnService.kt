@@ -22,8 +22,10 @@ import io.nekohasekai.libbox.SystemProxyStatus
 import io.sbeasy.android.core.VpnRuntimeState
 import io.sbeasy.android.core.CoreGraph
 import io.sbeasy.android.core.ManagedConfig
+import io.sbeasy.android.core.ProxyGroupSnapshot
 import io.sbeasy.android.core.RuntimeBridge
 import io.sbeasy.android.core.RuntimeControl
+import io.sbeasy.android.core.RuntimeObservability
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +45,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private lateinit var platform: AndroidPlatformBridge
     private var commandServer: CommandServer? = null
     private var commandMonitor: LibboxCommandMonitor? = null
+    private val restoredSelectionGroups = mutableSetOf<String>()
     private var controlLoopJob: Job? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
 
@@ -133,6 +136,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         commandServer = null
         tunDescriptor?.close()
         tunDescriptor = null
+        restoredSelectionGroups.clear()
         if (::platform.isInitialized) platform.stop()
     }
 
@@ -146,6 +150,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         commandServer = null
         tunDescriptor?.close()
         tunDescriptor = null
+        restoredSelectionGroups.clear()
     }
 
     private fun startCore(config: ManagedConfig) {
@@ -159,7 +164,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
             throw error
         }
         commandServer = server
-        commandMonitor = LibboxCommandMonitor().also { it.connect() }
+        commandMonitor = LibboxCommandMonitor(::restoreRememberedSelections).also { it.connect() }
     }
 
     private fun startControlLoop() {
@@ -228,6 +233,10 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override suspend fun selectOutbound(groupTag: String, outboundTag: String) {
         commandMonitor?.selectOutbound(groupTag, outboundTag) ?: error("VPN 未运行")
+        getSharedPreferences(SELECTION_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putString(groupTag, outboundTag)
+            .apply()
     }
 
     override suspend fun urlTest(groupTag: String) {
@@ -247,6 +256,20 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override fun writeDebugMessage(message: String?) {
         Log.d(TAG, message.orEmpty())
+    }
+
+    private fun restoreRememberedSelections(groups: List<ProxyGroupSnapshot>) {
+        val preferences = getSharedPreferences(SELECTION_PREFERENCES, MODE_PRIVATE)
+        groups.filter { it.selectable }.forEach { group ->
+            if (!restoredSelectionGroups.add(group.tag)) return@forEach
+            val remembered = preferences.getString(group.tag, null) ?: return@forEach
+            if (remembered == group.selected || group.items.none { it.tag == remembered }) return@forEach
+            serviceScope.launch {
+                runCatching { commandMonitor?.selectOutbound(group.tag, remembered) }
+                    .onSuccess { RuntimeObservability.markSelection(group.tag, remembered) }
+                    .onFailure { Log.w(TAG, "Failed to restore ${group.tag} selection", it) }
+            }
+        }
     }
 
     private fun createNotificationChannel() {
@@ -301,5 +324,6 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         private const val TAG = "SbEasyVpnService"
         private const val NOTIFICATION_CHANNEL = "sb_easy_vpn"
         private const val NOTIFICATION_ID = 51822
+        private const val SELECTION_PREFERENCES = "sb_easy_proxy_selections"
     }
 }

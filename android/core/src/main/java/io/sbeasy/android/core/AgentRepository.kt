@@ -6,9 +6,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -156,21 +158,43 @@ class AgentRepository internal constructor(
 
     suspend fun selectOutbound(groupTag: String, outboundTag: String) {
         requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.selectOutbound(groupTag, outboundTag)
+        RuntimeObservability.markSelection(groupTag, outboundTag)
     }
 
-    suspend fun testGroup(groupTag: String) {
+    suspend fun testGroup(groupTag: String): GroupTestResult {
+        val before = RuntimeObservability.groups.value.find { it.tag == groupTag }
+            ?: error("测速组 $groupTag 尚未就绪")
+        val previousTimes = before.items.associate { it.tag to it.urlTestTime }
+        val startedAt = System.currentTimeMillis()
         requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.urlTest(groupTag)
-        delay(1_500)
-        val enrollment = mutableState.value.enrollment ?: return
-        val group = RuntimeObservability.groups.value.find { it.tag == groupTag } ?: return
-        withContext(Dispatchers.IO) {
-            client.reportLatencies(
-                enrollment,
-                group.items.associate { item ->
-                    item.tag to item.urlTestDelay.takeIf { it > 0 }
-                },
-            )
+        val updated = withTimeoutOrNull(45_000) {
+            RuntimeObservability.groups.first { groups ->
+                groups.find { it.tag == groupTag }?.items?.any { item ->
+                    item.urlTestTime > (previousTimes[item.tag] ?: 0L)
+                } == true
+            }.find { it.tag == groupTag }
+        } ?: error("节点测速超时，请检查当前网络后重试")
+        // libbox publishes results incrementally. Allow the current batch to
+        // settle briefly while the UI continues observing later updates.
+        delay(750)
+        val latest = RuntimeObservability.groups.value.find { it.tag == groupTag } ?: updated
+        val enrollment = mutableState.value.enrollment
+        if (enrollment != null) {
+            withContext(Dispatchers.IO) {
+                client.reportLatencies(
+                    enrollment,
+                    latest.items.associate { item ->
+                        item.tag to item.urlTestDelay.takeIf { it > 0 }
+                    },
+                )
+            }
         }
+        return GroupTestResult(
+            groupTag = groupTag,
+            tested = latest.items.count { it.urlTestDelay > 0 },
+            total = latest.items.size,
+            elapsedMillis = System.currentTimeMillis() - startedAt,
+        )
     }
 
     suspend fun testRoute(url: String): RouteTestResult = routeTester.test(url)

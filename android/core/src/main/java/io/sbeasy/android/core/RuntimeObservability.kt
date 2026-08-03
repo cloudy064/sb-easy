@@ -23,6 +23,12 @@ object RuntimeObservability {
         mutableGroups.value = value
     }
 
+    fun markSelection(groupTag: String, outboundTag: String) {
+        mutableGroups.value = mutableGroups.value.map { group ->
+            if (group.tag == groupTag) group.copy(selected = outboundTag) else group
+        }
+    }
+
     fun updateConnections(value: List<ConnectionSnapshot>) {
         mutableConnections.value = value.sortedByDescending { it.createdAt }.take(300)
     }

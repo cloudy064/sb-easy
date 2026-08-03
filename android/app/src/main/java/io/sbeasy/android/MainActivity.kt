@@ -11,12 +11,17 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,9 +31,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,7 +53,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -126,6 +136,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         acceptEnrollmentIntent(intent)
         setContent {
             SbEasyApp(
@@ -249,17 +263,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val Background = Color(0xFFF4F6F8)
-private val SurfaceColor = Color(0xFFFFFFFF)
-private val Ink = Color(0xFF18212B)
-private val Muted = Color(0xFF718096)
-private val Line = Color(0xFFE6EAF0)
-private val Accent = Color(0xFF2DBE8C)
-private val AccentDark = Color(0xFF168565)
-private val AccentSoft = Color(0xFFE5F8F1)
-private val Danger = Color(0xFFD95252)
-private val Warn = Color(0xFFF0A23B)
-private val CodeBackground = Color(0xFF17212B)
+private val Background = Color(0xFF090E13)
+private val SurfaceColor = Color(0xFF111920)
+private val SurfaceRaised = Color(0xFF172129)
+private val Ink = Color(0xFFEAF4F0)
+private val Muted = Color(0xFF8FA39B)
+private val Line = Color(0xFF26343A)
+private val Accent = Color(0xFF43D7A3)
+private val AccentDark = Color(0xFF83E9C5)
+private val AccentSoft = Color(0xFF16362E)
+private val Danger = Color(0xFFFF7D83)
+private val Warn = Color(0xFFFFC875)
+private val CodeBackground = Color(0xFF060A0E)
 
 @Composable
 private fun SbEasyApp(
@@ -287,8 +302,8 @@ private fun SbEasyApp(
     }
 
     MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = AccentDark,
+        colorScheme = darkColorScheme(
+            primary = Accent,
             secondary = Accent,
             background = Background,
             surface = SurfaceColor,
@@ -298,7 +313,10 @@ private fun SbEasyApp(
             onSurface = Ink,
         ),
     ) {
-        Surface(color = Background, modifier = Modifier.fillMaxSize()) {
+        Surface(
+            color = Background,
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding(),
+        ) {
             if (control.enrollment == null) {
                 EnrollmentScreen(
                     initialUri = initialEnrollmentUri,
@@ -320,39 +338,99 @@ private fun SbEasyApp(
                 return@Surface
             }
 
-            Scaffold(
-                containerColor = Background,
-                topBar = { AppHeader(control, vpn.phase) },
-                bottomBar = {
-                    NavigationBar(containerColor = SurfaceColor, tonalElevation = 0.dp) {
-                        listOf("⌂" to "首页", "◈" to "代理", "⌘" to "工具", "⚙" to "设置")
-                            .forEachIndexed { index, item ->
-                                NavigationBarItem(
-                                    selected = selectedTab == index,
-                                    onClick = { selectedTab = index },
-                                    icon = { Text(item.first, fontSize = 19.sp) },
-                                    label = { Text(item.second, fontSize = 11.sp) },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = AccentDark,
-                                        selectedTextColor = AccentDark,
-                                        indicatorColor = AccentSoft,
-                                        unselectedIconColor = Muted,
-                                        unselectedTextColor = Muted,
-                                    ),
-                                )
-                            }
+            AppShell(
+                selectedTab = selectedTab,
+                onSelectTab = { selectedTab = it },
+                header = { AppHeader(control, vpn.phase) },
+            ) {
+                when (selectedTab) {
+                    0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, onConnect, onDisconnect)
+                    1 -> ProxiesScreen(groups, vpn.phase)
+                    2 -> ToolsScreen(control.config, connections.size, logs, vpn.phase)
+                    else -> SettingsScreen(control, vpn.coreVersion, vpn.phase, onDisconnect)
+                }
+            }
+        }
+    }
+}
+
+private val destinations = listOf("总览", "代理", "诊断", "设置")
+
+@Composable
+private fun AppShell(
+    selectedTab: Int,
+    onSelectTab: (Int) -> Unit,
+    header: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        if (maxWidth >= 720.dp) {
+            Row(Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier.width(190.dp).fillMaxHeight().background(SurfaceColor).padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("SB / EASY", color = AccentDark, fontWeight = FontWeight.Black, fontSize = 15.sp, modifier = Modifier.padding(12.dp))
+                    destinations.forEachIndexed { index, label ->
+                        Text(
+                            label,
+                            color = if (selectedTab == index) AccentDark else Muted,
+                            fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Medium,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (selectedTab == index) AccentSoft else Color.Transparent)
+                                .clickable { onSelectTab(index) }
+                                .padding(horizontal = 14.dp, vertical = 13.dp),
+                        )
                     }
-                },
-            ) { padding ->
-                Box(Modifier.padding(padding).fillMaxSize()) {
-                    when (selectedTab) {
-                        0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, onConnect, onDisconnect)
-                        1 -> ProxiesScreen(groups, vpn.phase)
-                        2 -> ToolsScreen(control.config, connections.size, logs, vpn.phase)
-                        else -> SettingsScreen(control, vpn.coreVersion, vpn.phase, onDisconnect)
+                }
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    header()
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                        Box(Modifier.widthIn(max = 960.dp).fillMaxWidth().fillMaxHeight()) { content() }
                     }
                 }
             }
+        } else {
+            Scaffold(
+                containerColor = Background,
+                topBar = header,
+                bottomBar = { CompactNavigation(selectedTab, onSelectTab) },
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            ) { padding ->
+                Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                    Box(Modifier.widthIn(max = 960.dp).fillMaxWidth().fillMaxHeight()) { content() }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactNavigation(selectedTab: Int, onSelectTab: (Int) -> Unit) {
+    NavigationBar(containerColor = SurfaceColor, tonalElevation = 0.dp, windowInsets = WindowInsets(0, 0, 0, 0)) {
+        destinations.forEachIndexed { index, label ->
+            NavigationBarItem(
+                selected = selectedTab == index,
+                onClick = { onSelectTab(index) },
+                icon = {
+                    Box(
+                        Modifier
+                            .size(if (selectedTab == index) 7.dp else 5.dp)
+                            .clip(CircleShape)
+                            .background(if (selectedTab == index) Accent else Muted),
+                    )
+                },
+                label = { Text(label, fontSize = 11.sp) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Accent,
+                    selectedTextColor = AccentDark,
+                    indicatorColor = AccentSoft,
+                    unselectedIconColor = Muted,
+                    unselectedTextColor = Muted,
+                ),
+            )
         }
     }
 }
@@ -395,56 +473,58 @@ private fun EnrollmentScreen(
             onConsumed()
         }
     }
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Spacer(Modifier.height(38.dp))
-        Box(Modifier.size(68.dp).clip(RoundedCornerShape(22.dp)).background(Accent), contentAlignment = Alignment.Center) {
-            Text("S", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Black)
-        }
-        Text("连接到 sb-easy", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
-        Text("扫描管理端生成的一次性二维码，把这台手机加入你的代理网络。", color = Muted, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 8.dp))
-        Spacer(Modifier.height(28.dp))
-        AppCard {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth().fillMaxHeight().verticalScroll(rememberScrollState()).padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(38.dp))
+            Box(Modifier.size(68.dp).clip(RoundedCornerShape(22.dp)).background(Accent), contentAlignment = Alignment.Center) {
+                Text("S", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Black)
+            }
+            Text("连接到 sb-easy", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 22.dp))
+            Text("扫描管理端生成的一次性二维码，把这台手机加入你的代理网络。", color = Muted, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 8.dp))
+            Spacer(Modifier.height(28.dp))
+            AppCard {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = { onScan({ value = it; scanError = null }, { scanError = it }) },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White),
+                        shape = RoundedCornerShape(14.dp),
+                    ) { Text("相机扫码", fontWeight = FontWeight.SemiBold) }
+                    OutlinedButton(
+                        onClick = { onPickImage({ value = it; scanError = null }, { scanError = it }) },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) { Text("从相册选择", fontWeight = FontWeight.SemiBold) }
+                }
+                Row(Modifier.fillMaxWidth().padding(vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    HorizontalDivider(Modifier.weight(1f), color = Line)
+                    Text("或手动粘贴", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 10.dp))
+                    HorizontalDivider(Modifier.weight(1f), color = Line)
+                }
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("sbeasy:// 注册链接") },
+                    minLines = 3,
+                    shape = RoundedCornerShape(14.dp),
+                )
                 Button(
-                    onClick = { onScan({ value = it; scanError = null }, { scanError = it }) },
-                    modifier = Modifier.weight(1f).height(52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White),
+                    onClick = { onEnroll(value) },
+                    enabled = value.isNotBlank() && !syncing,
+                    modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
                     shape = RoundedCornerShape(14.dp),
-                ) { Text("相机扫码", fontWeight = FontWeight.SemiBold) }
-                OutlinedButton(
-                    onClick = { onPickImage({ value = it; scanError = null }, { scanError = it }) },
-                    modifier = Modifier.weight(1f).height(52.dp),
-                    shape = RoundedCornerShape(14.dp),
-                ) { Text("从相册选择", fontWeight = FontWeight.SemiBold) }
+                ) {
+                    if (syncing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
+                    else Text("注册并同步配置")
+                }
+                (scanError ?: error)?.let { ErrorText(it) }
             }
-            Row(Modifier.fillMaxWidth().padding(vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-                HorizontalDivider(Modifier.weight(1f), color = Line)
-                Text("或手动粘贴", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 10.dp))
-                HorizontalDivider(Modifier.weight(1f), color = Line)
-            }
-            OutlinedTextField(
-                value = value,
-                onValueChange = { value = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("sbeasy:// 注册链接") },
-                minLines = 3,
-                shape = RoundedCornerShape(14.dp),
-            )
-            Button(
-                onClick = { onEnroll(value) },
-                enabled = value.isNotBlank() && !syncing,
-                modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) {
-                if (syncing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
-                else Text("注册并同步配置")
-            }
-            (scanError ?: error)?.let { ErrorText(it) }
+            Text("凭据由 Android Keystore 加密 · sing-box $coreVersion", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 18.dp))
         }
-        Text("凭据由 Android Keystore 加密 · sing-box $coreVersion", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 18.dp))
     }
 }
 
@@ -462,28 +542,36 @@ private fun HomeScreen(
     val scope = rememberCoroutineScope()
     val connected = phase == VpnPhase.CONNECTED
     val busy = phase == VpnPhase.STARTING || phase == VpnPhase.STOPPING
-    val selectedProxy = groups.firstOrNull { it.selected.isNotBlank() }?.selected ?: "等待代理组数据"
+    val selectedProxy = groups.firstOrNull { it.selectable && it.selected.isNotBlank() }?.selected
+        ?: groups.firstOrNull { it.selected.isNotBlank() }?.selected
+        ?: "等待代理组数据"
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Card(
-                colors = CardDefaults.cardColors(containerColor = if (connected) Color(0xFF183F36) else Color(0xFF263341)),
-                shape = RoundedCornerShape(26.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceRaised),
+                shape = RoundedCornerShape(22.dp),
+                border = BorderStroke(1.dp, if (connected) Color(0xFF2C745F) else Line),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(Modifier.padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(if (connected) "安全连接已建立" else detail, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                    Text(selectedProxy, color = if (connected) Color(0xFFA9F0D6) else Color(0xFFB7C2CE), fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+                Column(Modifier.padding(20.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(if (connected) "网络已受保护" else detail, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            Text(selectedProxy, color = if (connected) AccentDark else Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp))
+                        }
+                        StatusChip(connected, if (connected) "运行中" else "已停止")
+                    }
                     Button(
                         onClick = if (connected) onDisconnect else onConnect,
                         enabled = !busy && control.config != null,
-                        modifier = Modifier.size(132.dp).padding(top = 18.dp),
-                        shape = CircleShape,
+                        modifier = Modifier.padding(top = 14.dp).fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (connected) Accent else Color(0xFF415064),
-                            contentColor = Color.White,
+                            containerColor = if (connected) Color(0xFF26343A) else Accent,
+                            contentColor = if (connected) Ink else Color(0xFF052018),
                         ),
-                    ) { Text(if (connected) "断开" else "连接", fontSize = 20.sp, fontWeight = FontWeight.Bold) }
-                    if (control.config == null) Text("先同步配置后才能连接", color = Color(0xFFFFD9A1), fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp))
+                    ) { Text(if (busy) "正在处理…" else if (connected) "断开 VPN" else "启动 VPN", fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                    if (control.config == null) Text("先同步配置后才能连接", color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp))
                 }
             }
         }
@@ -525,55 +613,131 @@ private fun HomeScreen(
 private fun ProxiesScreen(groups: List<ProxyGroupSnapshot>, phase: VpnPhase) {
     val scope = rememberCoroutineScope()
     var busyGroup by remember { mutableStateOf<String?>(null) }
+    var selectingTag by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
     if (groups.isEmpty()) {
         EmptyPanel(if (phase == VpnPhase.CONNECTED) "正在读取真实代理组…" else "连接 VPN 后可查看、切换和测速节点")
         return
     }
+    val selectableGroups = groups.filter { it.selectable }
+        .sortedWith(compareBy<ProxyGroupSnapshot> { it.tag != "Proxy" }.thenBy { it.tag })
+    val latencyGroup = groups.firstOrNull { it.type.equals("urltest", ignoreCase = true) }
+    val latencyByTag = latencyGroup?.items?.associateBy { it.tag }.orEmpty()
+    if (selectableGroups.isEmpty()) {
+        EmptyPanel("当前运行配置没有可手动选择的代理组，请立即同步配置后重连 VPN")
+        return
+    }
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        items(groups, key = { it.tag }) { group ->
+        item {
             AppCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(group.tag, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        Text("${group.type} · 当前 ${group.selected.ifBlank { "自动选择" }}", color = Muted, fontSize = 12.sp)
+                        Text("代理节点", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            latencyGroup?.let { "${it.items.size} 个节点 · 真实 libbox 延迟" } ?: "当前配置没有测速组",
+                            color = Muted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
                     }
                     OutlinedButton(
                         onClick = {
                             scope.launch {
-                                busyGroup = group.tag
+                                val target = latencyGroup ?: return@launch
+                                busyGroup = target.tag
                                 error = null
-                                runCatching { CoreGraph.repository.testGroup(group.tag) }
+                                message = null
+                                runCatching { CoreGraph.repository.testGroup(target.tag) }
+                                    .onSuccess {
+                                        message = "测速完成：${it.tested}/${it.total} 个节点返回结果 · ${it.elapsedMillis} ms"
+                                    }
                                     .onFailure { error = it.message }
                                 busyGroup = null
                             }
                         },
-                        enabled = busyGroup == null,
-                    ) { Text(if (busyGroup == group.tag) "测速中" else "全部测速") }
+                        enabled = phase == VpnPhase.CONNECTED && busyGroup == null && latencyGroup != null,
+                    ) { Text(if (busyGroup != null) "测速中…" else "全部测速") }
                 }
-                Spacer(Modifier.height(10.dp))
-                group.items.forEach { proxy ->
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("搜索节点") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                )
+                if (phase != VpnPhase.CONNECTED) {
+                    Text("请先连接 VPN，连接后才能切换或测速", color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp))
+                }
+                message?.let { Text(it, color = AccentDark, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp)) }
+                error?.let { ErrorText(it) }
+            }
+        }
+        items(selectableGroups, key = { it.tag }) { group ->
+            val visibleItems = group.items.filter { proxy ->
+                query.isBlank() || proxy.tag.contains(query.trim(), ignoreCase = true)
+            }
+            AppCard {
+                Text(group.tag, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "当前：${group.selected.ifBlank { "自动选择" }} · 点击整行即可切换",
+                    color = Muted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 3.dp, bottom = 10.dp),
+                )
+                visibleItems.forEach { proxy ->
+                    val selected = group.selected == proxy.tag
+                    val latency = latencyByTag[proxy.tag] ?: proxy
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clip(RoundedCornerShape(13.dp))
+                            .background(if (selected) AccentSoft else Color.Transparent)
+                            .clickable(enabled = phase == VpnPhase.CONNECTED && selectingTag == null) {
+                                scope.launch {
+                                    selectingTag = proxy.tag
+                                    error = null
+                                    message = null
+                                    runCatching { CoreGraph.repository.selectOutbound(group.tag, proxy.tag) }
+                                        .onSuccess { message = "已切换到 ${proxy.tag}" }
+                                        .onFailure { error = it.message }
+                                    selectingTag = null
+                                }
+                            }
+                            .padding(horizontal = 5.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
-                            selected = group.selected == proxy.tag,
-                            onClick = if (group.selectable) ({
-                                scope.launch {
-                                    error = null
-                                    runCatching { CoreGraph.repository.selectOutbound(group.tag, proxy.tag) }
-                                        .onFailure { error = it.message }
-                                }
-                            }) else null,
+                            selected = selected,
+                            onClick = null,
+                            enabled = phase == VpnPhase.CONNECTED,
                         )
                         Column(Modifier.weight(1f)) {
-                            Text(proxy.tag, color = Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(proxy.type, color = Muted, fontSize = 11.sp)
+                            Text(
+                                proxy.tag,
+                                color = if (selected) AccentDark else Ink,
+                                fontSize = 14.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                if (proxy.tag == "auto") "自动选择最低延迟" else proxy.type,
+                                color = Muted,
+                                fontSize = 11.sp,
+                            )
                         }
-                        DelayBadge(proxy.urlTestDelay)
+                        if (selectingTag == proxy.tag) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
+                        } else {
+                            DelayBadge(latency.urlTestDelay)
+                        }
                     }
                 }
+                if (visibleItems.isEmpty()) Text("没有匹配的节点", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
+                message?.let { Text(it, color = AccentDark, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp)) }
                 error?.let { ErrorText(it) }
             }
         }
@@ -634,7 +798,7 @@ private fun RouteTestScreen(connectionCount: Int, phase: VpnPhase) {
 private fun RouteResultCard(result: RouteTestResult) {
     val color = when (result.decision) {
         RouteDecision.PROXY -> AccentDark
-        RouteDecision.DIRECT -> Color(0xFF3478C2)
+        RouteDecision.DIRECT -> Color(0xFF78B7FF)
         RouteDecision.BLOCK -> Danger
         RouteDecision.UNKNOWN -> Warn
     }
@@ -781,14 +945,19 @@ private fun SegmentTabs(labels: List<String>, selected: Int, onSelect: (Int) -> 
 
 @Composable
 private fun AppCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = SurfaceColor), shape = RoundedCornerShape(18.dp), modifier = modifier.fillMaxWidth()) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SurfaceColor),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, Line),
+        modifier = modifier.fillMaxWidth(),
+    ) {
         Column(Modifier.padding(17.dp), content = content)
     }
 }
 
 @Composable
 private fun StatCard(label: String, value: String, modifier: Modifier = Modifier) {
-    Card(colors = CardDefaults.cardColors(containerColor = SurfaceColor), shape = RoundedCornerShape(16.dp), modifier = modifier) {
+    Card(colors = CardDefaults.cardColors(containerColor = SurfaceColor), shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Line), modifier = modifier) {
         Column(Modifier.padding(15.dp)) {
             Text(label, color = Muted, fontSize = 11.sp)
             Text(value, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 3.dp))
@@ -809,10 +978,10 @@ private fun SourceBadge(source: String?) {
     val quickJs = source == "quickjs"
     Text(
         if (quickJs) "QuickJS 生成" else "Profile",
-        color = if (quickJs) Color(0xFF7A4BC4) else AccentDark,
+        color = if (quickJs) Color(0xFFC7A6FF) else AccentDark,
         fontSize = 11.sp,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(if (quickJs) Color(0xFFF0E9FC) else AccentSoft).padding(horizontal = 9.dp, vertical = 5.dp),
+        modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(if (quickJs) Color(0xFF302440) else AccentSoft).padding(horizontal = 9.dp, vertical = 5.dp),
     )
 }
 
@@ -837,7 +1006,7 @@ private fun DelayBadge(delay: Int) {
 
 @Composable
 private fun ErrorText(message: String) {
-    Text(message, color = Danger, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFFFFEEEE)).padding(10.dp))
+    Text(message, color = Danger, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF351C22)).padding(10.dp))
 }
 
 @Composable

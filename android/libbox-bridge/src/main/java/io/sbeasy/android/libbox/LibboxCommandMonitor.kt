@@ -18,7 +18,9 @@ import io.sbeasy.android.core.RuntimeLog
 import io.sbeasy.android.core.RuntimeObservability
 import io.sbeasy.android.core.TrafficSnapshot
 
-internal class LibboxCommandMonitor : CommandClientHandler {
+internal class LibboxCommandMonitor(
+    private val onGroupsUpdated: (List<ProxyGroupSnapshot>) -> Unit = {},
+) : CommandClientHandler {
     private val connections = linkedMapOf<String, ConnectionSnapshot>()
     private var client: CommandClient? = null
 
@@ -123,6 +125,7 @@ internal class LibboxCommandMonitor : CommandClientHandler {
             }
         }
         RuntimeObservability.updateGroups(groups)
+        onGroupsUpdated(groups)
     }
 
     override fun initializeClashMode(modeList: StringIterator?, currentMode: String?) = Unit

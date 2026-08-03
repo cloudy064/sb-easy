@@ -144,6 +144,24 @@ class AgentRepository internal constructor(
         val traffic = RuntimeObservability.traffic.value
         val logs = JSONArray()
         RuntimeObservability.logs.value.takeLast(200).forEach { logs.put(it.message.take(2_000)) }
+        val domainStats = JSONArray()
+        RuntimeObservability.domainRouteStats().forEach { stat ->
+            val chain = JSONArray()
+            stat.chain.forEach(chain::put)
+            domainStats.put(
+                JSONObject()
+                    .put("domain", stat.domain)
+                    .put("outbound", stat.outbound)
+                    .put("outbound_type", stat.outboundType)
+                    .put("rule", stat.rule)
+                    .put("chain", chain)
+                    .put("connection_count", stat.connectionCount)
+                    .put("uplink_total", stat.uplinkTotal)
+                    .put("downlink_total", stat.downlinkTotal)
+                    .put("first_seen", stat.firstSeen)
+                    .put("last_seen", stat.lastSeen),
+            )
+        }
         val body = JSONObject()
             .put("up", traffic.uplink)
             .put("down", traffic.downlink)
@@ -151,6 +169,7 @@ class AgentRepository internal constructor(
             .put("down_total", traffic.downlinkTotal)
             .put("conn_count", traffic.connectionsIn + traffic.connectionsOut)
             .put("connections", JSONArray())
+            .put("domain_stats", domainStats)
             .put("logs", logs)
         withContext(Dispatchers.IO) { client.reportTelemetry(enrollment, body) }
     }

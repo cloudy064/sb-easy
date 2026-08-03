@@ -137,15 +137,21 @@ internal class LibboxCommandMonitor(
 
     override fun writeConnectionEvents(events: ConnectionEvents?) {
         if (events == null) return
-        if (events.reset) connections.clear()
+        if (events.reset) {
+            connections.clear()
+            RuntimeObservability.resetConnectionAccounting()
+        }
         val iterator = events.iterator()
         while (iterator.hasNext()) {
             val event = iterator.next()
             when (event.type.toLong()) {
                 Libbox.ConnectionEventNew -> event.connection?.let {
-                    connections[event.id] = it.toSnapshot()
+                    val snapshot = it.toSnapshot()
+                    connections[event.id] = snapshot
+                    RuntimeObservability.recordConnectionOpened(event.id, snapshot)
                 }
                 Libbox.ConnectionEventUpdate -> connections[event.id]?.let { current ->
+                    RuntimeObservability.recordConnectionTraffic(event.id, event.uplinkDelta, event.downlinkDelta)
                     connections[event.id] = current.copy(
                         uplink = event.uplinkDelta,
                         downlink = event.downlinkDelta,
@@ -155,6 +161,7 @@ internal class LibboxCommandMonitor(
                 }
                 Libbox.ConnectionEventClosed -> {
                     val closed = event.connection?.toSnapshot()
+                    RuntimeObservability.recordConnectionClosed(event.id, closed)
                     if (closed != null) connections[event.id] = closed
                     else connections[event.id]?.let { connections[event.id] = it.copy(closedAt = event.closedAt) }
                 }

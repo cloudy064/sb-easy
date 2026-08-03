@@ -16,6 +16,7 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -32,6 +33,21 @@ struct TrafficSample {
     std::int64_t upload_total{};
     std::int64_t download_total{};
     std::chrono::steady_clock::time_point at;
+};
+
+struct DomainRouteAccumulator {
+    json identity;
+    std::int64_t connection_count{};
+    std::int64_t uplink_total{};
+    std::int64_t downlink_total{};
+    std::int64_t first_seen{};
+    std::int64_t last_seen{};
+};
+
+struct ObservedConnection {
+    std::string route_key;
+    std::int64_t uplink_total{};
+    std::int64_t downlink_total{};
 };
 
 struct UrlTarget {
@@ -521,6 +537,7 @@ class AgentClashService::Impl final {
             connections = *found;
         }
         const auto connection_count = connections.is_array() ? connections.size() : 0U;
+        auto domain_stats = update_domain_route_stats(connections);
         return json{
             {"up", upload_rate},
             {"down", download_rate},
@@ -528,6 +545,7 @@ class AgentClashService::Impl final {
             {"down_total", download_total},
             {"conn_count", connection_count},
             {"connections", std::move(connections)},
+            {"domain_stats", std::move(domain_stats)},
             {"logs", json::array()},
         };
     }
@@ -567,9 +585,199 @@ class AgentClashService::Impl final {
     }
 
   private:
+    [[nodiscard]] json update_domain_route_stats(const json& connections) {
+        if (!connections.is_array()) {
+            observed_connections_.clear();
+            return json::array();
+        }
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        std::unordered_set<std::string> seen;
+        for (const auto& connection : connections) {
+            if (!connection.is_object()) {
+                continue;
+            }
+            const auto id_value = connection.find("id");
+            if (id_value == connection.end() || !id_value->is_string() ||
+                id_value->get_ref<const std::string&>().empty()) {
+                continue;
+            }
+            const auto id = id_value->get<std::string>();
+            seen.insert(id);
+            const auto identity = domain_route_identity(connection);
+            const auto route_key = identity.dump();
+            const auto uplink = nonnegative_connection_integer(connection, "upload");
+            const auto downlink = nonnegative_connection_integer(connection, "download");
+            const auto observed = observed_connections_.find(id);
+            if (observed == observed_connections_.end()) {
+                add_domain_route(identity, route_key, 1, uplink, downlink, now);
+                observed_connections_[id] = {route_key, uplink, downlink};
+                continue;
+            }
+            if (observed->second.route_key != route_key) {
+                subtract_domain_route(observed->second);
+                add_domain_route(identity, route_key, 1, uplink, downlink, now);
+                observed->second = {route_key, uplink, downlink};
+                continue;
+            }
+            add_domain_route(
+                identity, route_key, 0,
+                std::max<std::int64_t>(uplink - observed->second.uplink_total, 0),
+                std::max<std::int64_t>(downlink - observed->second.downlink_total, 0),
+                now);
+            observed->second.uplink_total =
+                std::max(observed->second.uplink_total, uplink);
+            observed->second.downlink_total =
+                std::max(observed->second.downlink_total, downlink);
+        }
+        std::erase_if(observed_connections_,
+                      [&seen](const auto& item) { return !seen.contains(item.first); });
+
+        std::vector<const DomainRouteAccumulator*> ordered;
+        ordered.reserve(domain_route_stats_.size());
+        for (const auto& [_, stat] : domain_route_stats_) {
+            ordered.push_back(&stat);
+        }
+        std::ranges::sort(ordered, [](const auto* left, const auto* right) {
+            if (left->connection_count != right->connection_count) {
+                return left->connection_count > right->connection_count;
+            }
+            return left->uplink_total + left->downlink_total >
+                   right->uplink_total + right->downlink_total;
+        });
+        json result = json::array();
+        for (const auto* stat : ordered) {
+            auto value = stat->identity;
+            value["connection_count"] = stat->connection_count;
+            value["uplink_total"] = stat->uplink_total;
+            value["downlink_total"] = stat->downlink_total;
+            value["first_seen"] = stat->first_seen;
+            value["last_seen"] = stat->last_seen;
+            result.push_back(std::move(value));
+        }
+        return result;
+    }
+
+    [[nodiscard]] static json domain_route_identity(const json& connection) {
+        const auto metadata_value = connection.find("metadata");
+        const auto* metadata = metadata_value != connection.end() &&
+                                       metadata_value->is_object()
+                                   ? &*metadata_value
+                                   : nullptr;
+        auto string_value = [](const json* value, const char* field) {
+            if (value == nullptr) {
+                return std::string{};
+            }
+            const auto found = value->find(field);
+            return found != value->end() && found->is_string()
+                       ? found->get<std::string>()
+                       : std::string{};
+        };
+        auto domain = string_value(metadata, "host");
+        if (domain.empty()) {
+            domain = string_value(metadata, "destinationIP");
+        }
+        if (domain.empty()) {
+            domain = "unknown";
+        }
+        while (domain.ends_with('.')) {
+            domain.pop_back();
+        }
+        std::ranges::transform(domain, domain.begin(), [](unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+        domain.resize(std::min<std::size_t>(domain.size(), 512U));
+
+        json chain = json::array();
+        if (const auto chains = connection.find("chains");
+            chains != connection.end() && chains->is_array()) {
+            for (const auto& tag : *chains) {
+                if (tag.is_string() && chain.size() < 16U) {
+                    auto value = tag.get<std::string>();
+                    value.resize(std::min<std::size_t>(value.size(), 256U));
+                    chain.push_back(std::move(value));
+                }
+            }
+        }
+        const auto outbound =
+            chain.empty() ? std::string{} : chain.back().get<std::string>();
+        auto route_text = outbound;
+        std::ranges::transform(route_text, route_text.begin(), [](unsigned char value) {
+            return static_cast<char>(std::tolower(value));
+        });
+        const auto outbound_type = route_text.find("direct") != std::string::npos
+                                       ? "direct"
+                                       : (route_text.empty() ? "" : "proxy");
+        auto rule = string_value(&connection, "rule");
+        const auto payload = string_value(&connection, "rulePayload");
+        if (!payload.empty()) {
+            rule += (rule.empty() ? "" : ": ") + payload;
+        }
+        rule.resize(std::min<std::size_t>(rule.size(), 512U));
+        return {
+            {"domain", std::move(domain)},
+            {"outbound", outbound},
+            {"outbound_type", outbound_type},
+            {"rule", std::move(rule)},
+            {"chain", std::move(chain)},
+        };
+    }
+
+    [[nodiscard]] static std::int64_t
+    nonnegative_connection_integer(const json& connection, const char* field) {
+        const auto value = connection.find(field);
+        if (value == connection.end() ||
+            !(value->is_number_integer() || value->is_number_unsigned())) {
+            return 0;
+        }
+        return std::max<std::int64_t>(value->get<std::int64_t>(), 0);
+    }
+
+    void add_domain_route(const json& identity, const std::string& route_key,
+                          std::int64_t connections, std::int64_t uplink,
+                          std::int64_t downlink, std::int64_t now) {
+        if (!domain_route_stats_.contains(route_key) &&
+            domain_route_stats_.size() >= 1'000U) {
+            const auto oldest = std::ranges::min_element(
+                domain_route_stats_, {},
+                [](const auto& item) { return item.second.last_seen; });
+            if (oldest != domain_route_stats_.end()) {
+                domain_route_stats_.erase(oldest);
+            }
+        }
+        auto found = domain_route_stats_
+                         .try_emplace(route_key,
+                                      DomainRouteAccumulator{identity, 0, 0, 0, now, now})
+                         .first;
+        found->second.connection_count += std::max<std::int64_t>(connections, 0);
+        found->second.uplink_total += std::max<std::int64_t>(uplink, 0);
+        found->second.downlink_total += std::max<std::int64_t>(downlink, 0);
+        found->second.last_seen = std::max(found->second.last_seen, now);
+    }
+
+    void subtract_domain_route(const ObservedConnection& observed) {
+        const auto found = domain_route_stats_.find(observed.route_key);
+        if (found == domain_route_stats_.end()) {
+            return;
+        }
+        found->second.connection_count =
+            std::max<std::int64_t>(found->second.connection_count - 1, 0);
+        found->second.uplink_total =
+            std::max<std::int64_t>(found->second.uplink_total - observed.uplink_total, 0);
+        found->second.downlink_total = std::max<std::int64_t>(
+            found->second.downlink_total - observed.downlink_total, 0);
+        if (found->second.connection_count == 0 &&
+            found->second.uplink_total == 0 && found->second.downlink_total == 0) {
+            domain_route_stats_.erase(found);
+        }
+    }
+
     std::filesystem::path config_path_;
     ClashClient client_;
     std::optional<TrafficSample> last_sample_;
+    std::unordered_map<std::string, ObservedConnection> observed_connections_;
+    std::unordered_map<std::string, DomainRouteAccumulator> domain_route_stats_;
 };
 
 AgentClashService::AgentClashService(std::filesystem::path config_path)

@@ -511,6 +511,7 @@ void require_admin(const AuthClaims& claims) {
         {"down_total", 0},
         {"conn_count", 0},
         {"connections", nullptr},
+        {"domain_stats", json::array()},
         {"logs", json::array()},
     };
 }
@@ -541,6 +542,75 @@ void require_admin(const AuthClaims& claims) {
     telemetry["conn_count"] = count;
     if (const auto connections = body.find("connections"); connections != body.end()) {
         telemetry["connections"] = *connections;
+    }
+    if (const auto stats = body.find("domain_stats"); stats != body.end()) {
+        if (!stats->is_array()) {
+            throw ValidationError("domain_stats must be an array");
+        }
+        if (stats->size() > 1'000U) {
+            throw ValidationError("domain_stats must contain at most 1000 entries");
+        }
+        const auto bounded_string = [](const json& entry, const char* field,
+                                       std::size_t maximum, bool required = false) {
+            const auto found = entry.find(field);
+            if (found == entry.end() || found->is_null()) {
+                if (required) {
+                    throw ValidationError(std::string{field} + " is required");
+                }
+                return std::string{};
+            }
+            if (!found->is_string()) {
+                throw ValidationError(std::string{field} + " must be a string");
+            }
+            const auto value = found->get<std::string>();
+            if ((required && value.empty()) || value.size() > maximum) {
+                throw ValidationError(std::string{field} + " has an invalid length");
+            }
+            return value;
+        };
+        json normalized_stats = json::array();
+        for (const auto& entry : *stats) {
+            if (!entry.is_object()) {
+                throw ValidationError("domain_stats must contain only objects");
+            }
+            json chain = json::array();
+            if (const auto value = entry.find("chain"); value != entry.end()) {
+                if (!value->is_array() || value->size() > 16U) {
+                    throw ValidationError(
+                        "domain_stats chain must be an array of at most 16 entries");
+                }
+                for (const auto& tag : *value) {
+                    if (!tag.is_string() ||
+                        tag.get_ref<const std::string&>().size() > 256U) {
+                        throw ValidationError(
+                            "domain_stats chain contains an invalid tag");
+                    }
+                    chain.push_back(tag);
+                }
+            }
+            const auto connection_count = integer_field(entry, "connection_count");
+            const auto uplink_total = integer_field(entry, "uplink_total");
+            const auto downlink_total = integer_field(entry, "downlink_total");
+            const auto first_seen = integer_field(entry, "first_seen");
+            const auto last_seen = integer_field(entry, "last_seen");
+            if (connection_count < 0 || uplink_total < 0 || downlink_total < 0 ||
+                first_seen < 0 || last_seen < 0) {
+                throw ValidationError("domain_stats counters must not be negative");
+            }
+            normalized_stats.push_back({
+                {"domain", bounded_string(entry, "domain", 512U, true)},
+                {"outbound", bounded_string(entry, "outbound", 256U)},
+                {"outbound_type", bounded_string(entry, "outbound_type", 80U)},
+                {"rule", bounded_string(entry, "rule", 512U)},
+                {"chain", std::move(chain)},
+                {"connection_count", connection_count},
+                {"uplink_total", uplink_total},
+                {"downlink_total", downlink_total},
+                {"first_seen", first_seen},
+                {"last_seen", last_seen},
+            });
+        }
+        telemetry["domain_stats"] = std::move(normalized_stats);
     }
     if (const auto logs = body.find("logs"); logs != body.end()) {
         if (!logs->is_array()) {

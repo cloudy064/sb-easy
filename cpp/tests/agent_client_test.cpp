@@ -161,7 +161,17 @@ class ClashFixture final {
                 {"uploadTotal", 4'096},
                 {"downloadTotal", 8'192},
                 {"connections",
-                 nlohmann::json::array({nlohmann::json{{"id", "agent-connection"}}})},
+                 nlohmann::json::array({nlohmann::json{
+                     {"id", "agent-connection"},
+                     {"metadata",
+                      {{"host", "Example.COM"},
+                       {"destinationIP", "203.0.113.1"}}},
+                     {"upload", 512},
+                     {"download", 2048},
+                     {"chains", nlohmann::json::array({"Proxy", "Agent Node"})},
+                     {"rule", "DomainSuffix"},
+                     {"rulePayload", "example.com"},
+                 }})},
             };
         }
         const auto serialized = body.dump();
@@ -420,7 +430,13 @@ void run_contract() {
     require(telemetry.has_value() && telemetry->at("up_total") == 4'096 &&
                 telemetry->at("down_total") == 8'192 &&
                 telemetry->at("conn_count") == 1 && telemetry->at("up") == 0 &&
-                telemetry->at("down") == 0,
+                telemetry->at("down") == 0 &&
+                telemetry->at("domain_stats").at(0).at("domain") ==
+                    "example.com" &&
+                telemetry->at("domain_stats").at(0).at("outbound") ==
+                    "Agent Node" &&
+                telemetry->at("domain_stats").at(0).at("connection_count") == 1 &&
+                telemetry->at("domain_stats").at(0).at("downlink_total") == 2'048,
             "agent Clash telemetry should expose totals and an initial zero rate");
 
     const auto unchanged = client.poll_config(config.etag);

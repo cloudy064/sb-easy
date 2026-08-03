@@ -1369,15 +1369,35 @@ function buildRules(context) {
                          {"down_total", 200},
                          {"conn_count", 1},
                          {"connections", json::array({json{{"id", "connection"}}})},
+                         {"domain_stats",
+                          json::array({json{{"domain", "example.com"},
+                                           {"outbound", "direct"},
+                                           {"outbound_type", "direct"},
+                                           {"rule", "domain_suffix=example.com"},
+                                           {"chain", json::array({"direct"})},
+                                           {"connection_count", 3},
+                                           {"uplink_total", 120},
+                                           {"downlink_total", 800},
+                                           {"first_seen", 1000},
+                                           {"last_seen", 2000}}})},
                          {"logs", std::move(logs)}},
                     agent_auth)
                     .status == drogon::k200OK,
             "agents should relay telemetry");
     const auto telemetry =
         request(client, drogon::Get, "/api/hosts/" + host_id + "/telemetry");
-    require(telemetry.body.at("up") == 10 && telemetry.body.at("logs").size() == 500U &&
-                telemetry.body.at("logs").at(0) == "2",
+    require(telemetry.body.at("up") == 10 &&
+                telemetry.body.at("logs").size() == 500U &&
+                telemetry.body.at("logs").at(0) == "2" &&
+                telemetry.body.at("domain_stats").at(0).at("domain") ==
+                    "example.com" &&
+                telemetry.body.at("domain_stats").at(0).at("connection_count") == 3,
             "telemetry should retain the latest snapshot and cap logs");
+    require(request(client, drogon::Post, "/api/agent/telemetry",
+                    json{{"domain_stats", json::array({json{{"domain", ""}}})}},
+                    agent_auth)
+                .status == drogon::k400BadRequest,
+            "domain telemetry should reject malformed entries");
 
     json diagnostic_logs = json::array();
     for (int index = 0; index < 1'502; ++index) {

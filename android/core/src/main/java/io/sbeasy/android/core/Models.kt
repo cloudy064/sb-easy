@@ -84,6 +84,19 @@ data class ConnectionSnapshot(
     val chain: List<String>,
 )
 
+data class DomainRouteStat(
+    val domain: String,
+    val outbound: String,
+    val outboundType: String,
+    val rule: String,
+    val chain: List<String>,
+    val connectionCount: Long,
+    val uplinkTotal: Long,
+    val downlinkTotal: Long,
+    val firstSeen: Long,
+    val lastSeen: Long,
+)
+
 data class RuntimeLog(
     val level: Int,
     val message: String,

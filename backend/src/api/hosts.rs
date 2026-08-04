@@ -33,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/wg-config", get(download_wg_config))
         .route("/{id}/config", get(host_config))
         .route("/{id}/telemetry", get(host_telemetry))
+        .route("/{id}/diagnostics", get(host_diagnostics))
         .route("/{id}/commands", get(list_commands).post(enqueue_command))
 }
 
@@ -52,6 +53,42 @@ async fn host_config(State(state): State<AppState>, Path(id): Path<String>) -> R
 async fn host_telemetry(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<serde_json::Value>> {
     let t = crate::services::telemetry::get(&state.telemetry, &id).unwrap_or_default();
     Ok(Json(serde_json::to_value(t).unwrap_or_default()))
+}
+
+/// GET /api/hosts/{id}/diagnostics — latest explicit diagnostic uploads.
+async fn host_diagnostics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>> {
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM hosts WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Host not found".into()));
+    }
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT id, reason, app_version, core_version, payload, created_at FROM diagnostic_reports WHERE host_id = ? ORDER BY created_at DESC LIMIT 20",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(report_id, reason, app_version, core_version, payload, created_at)| {
+                let mut value = serde_json::from_str::<serde_json::Value>(&payload)
+                    .unwrap_or_else(|_| json!({ "logs": [] }));
+                value["report_id"] = json!(report_id);
+                value["reason"] = json!(reason);
+                value["app_version"] = json!(app_version);
+                value["core_version"] = json!(core_version);
+                value["created_at"] = json!(created_at);
+                value
+            })
+            .collect(),
+    ))
 }
 
 /// Generate a fresh per-host agent token (64 hex chars).

@@ -2,10 +2,9 @@
   <div class="app-layout">
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="sidebar-brand">
-        <svg class="brand-mark" width="28" height="28" viewBox="0 0 28 28" fill="none">
-          <rect x="2" y="2" width="24" height="24" rx="6" stroke="currentColor" stroke-width="2"/>
-          <path d="M8 14l4 4 8-8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <span class="brand-icon" aria-hidden="true">
+          <img class="brand-mark" src="/sb-easy-mark.svg" alt="" />
+        </span>
         <span class="sidebar-title">sb-easy</span>
       </div>
 
@@ -59,6 +58,12 @@
             <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h4"/>
           </svg>
           {{ t('nav.serverlogs') }}
+        </router-link>
+        <router-link to="/downloads" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M9 2v9"/><path d="M5.5 8.5L9 12l3.5-3.5"/><path d="M3 15h12"/>
+          </svg>
+          {{ t('nav.downloads') }}
         </router-link>
         <router-link v-if="isAdmin" to="/users" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -156,10 +161,19 @@ function logout() {
   flex-shrink: 0;
 }
 
-.brand-mark {
-  color: var(--accent);
+.brand-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  border-radius: 9px;
+  background: #0b1118;
+  box-shadow: 0 1px 2px rgba(11, 17, 24, 0.22);
   flex-shrink: 0;
 }
+
+.brand-mark { width: 100%; height: 100%; display: block; }
 
 .sidebar-title {
   font-size: 1.05rem;

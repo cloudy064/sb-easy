@@ -30,18 +30,29 @@ services:
     volumes:
       - ./data:/app/data            # DB + generated sing-box config persist here
     environment:
+      - BIND_ADDR=${BIND_ADDR:-0.0.0.0:51821}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:/app/data/sb-easy.db?mode=rwc}
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CONFIG_HASH_SEED=${CONFIG_HASH_SEED:-}
       - EXTERNAL_HOSTNAME=${EXTERNAL_HOSTNAME:-127.0.0.1}
+      - SINGBOX_API_URL=${SINGBOX_API_URL:-http://127.0.0.1:9090}
       - SINGBOX_API_SECRET=${SINGBOX_API_SECRET:-}
+      - SINGBOX_MANAGED=${SINGBOX_MANAGED:-true}
+      - SELF_SINGBOX_CONFIG_PATH=${SELF_SINGBOX_CONFIG_PATH:-/app/data/sing-box.gen.json}
+      - SELF_SINGBOX_INTERVAL=${SELF_SINGBOX_INTERVAL:-10}
       - WG_ENABLED=${WG_ENABLED:-true}
-      - WG_PORT=51820
-      - WG_ADDRESS=10.59.32.1/24
-      - WG_DNS=10.59.32.1
-      # SINGBOX_MANAGED / SINGBOX_BIN / SINGBOX_API_URL default to managed mode
-      # via the image (see Dockerfile ENV); override here if needed.
+      - WG_INTERFACE=${WG_INTERFACE:-wg0}
+      - WG_PORT=${WG_PORT:-51820}
+      - WG_ADDRESS=${WG_ADDRESS:-10.59.32.1/24}
+      - WG_DNS=${WG_DNS:-10.59.32.1}
+      - WG_MTU=${WG_MTU:-1420}
+      - WG_EGRESS=${WG_EGRESS:-eth0}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:51821/api/system/status"]
+      test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${BIND_ADDR##*:}/api/system/status\""]
       interval: 30s
       timeout: 5s
       retries: 3

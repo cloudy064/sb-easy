@@ -1,0 +1,314 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "sbeasy/config_renderer.hpp"
+#include "sbeasy/database.hpp"
+#include "sbeasy/proxy_parser.hpp"
+
+namespace sbeasy {
+
+class StoreError : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+class NotFoundError final : public StoreError {
+  public:
+    using StoreError::StoreError;
+};
+
+class ValidationError final : public StoreError {
+  public:
+    using StoreError::StoreError;
+};
+
+class ConflictError final : public StoreError {
+  public:
+    using StoreError::StoreError;
+};
+
+struct UserAccount {
+    std::string id;
+    std::string username;
+    std::string password_hash;
+    std::string role;
+    std::string created_at;
+};
+
+/// Serializes a user without exposing the password hash.
+void to_json(nlohmann::json& value, const UserAccount& user);
+
+struct AuditEntry {
+    std::int64_t id{};
+    std::string timestamp;
+    std::string actor;
+    std::string action;
+    std::optional<std::string> target;
+};
+
+void to_json(nlohmann::json& value, const AuditEntry& entry);
+
+struct WireGuardPeer {
+    std::string id;
+    std::string name;
+    std::string private_key;
+    std::string public_key;
+    std::optional<std::string> preshared_key;
+    std::string address;
+    std::string dns{"10.59.32.1"};
+    bool enabled{true};
+    std::int32_t persistent_keepalive{25};
+    std::string allowed_ips{"0.0.0.0/0, ::/0"};
+    std::optional<std::string> expire_at;
+    std::int64_t quota_bytes{};
+    std::string created_at;
+    std::string updated_at;
+    std::optional<std::string> notes;
+    std::optional<std::string> host_id;
+};
+
+void to_json(nlohmann::json& value, const WireGuardPeer& peer);
+
+struct ConfigProfile {
+    std::string id;
+    std::string name;
+    nlohmann::json profile = nlohmann::json::object();
+    ProfileMode mode{ProfileMode::managed};
+    std::string rule_script;
+    bool rule_script_enabled{false};
+    std::string created_at;
+    std::string updated_at;
+};
+
+void to_json(nlohmann::json& value, const ConfigProfile& profile);
+
+struct Host {
+    std::string id;
+    std::string name;
+    std::string agent_token;
+    nlohmann::json capabilities = nlohmann::json::object();
+    std::optional<std::string> profile_id;
+    std::optional<std::string> wg_address;
+    std::optional<std::string> wg_public_key;
+    std::optional<std::string> wg_endpoint;
+    std::optional<std::string> clash_api;
+    std::string clash_secret;
+    std::optional<std::string> last_seen;
+    std::optional<std::string> singbox_state;
+    bool enabled{true};
+    std::string created_at;
+    std::string updated_at;
+    std::size_t assigned_outbounds{};
+};
+
+/// Serializes the public host representation. Agent and Clash secrets are
+/// deliberately omitted.
+void to_json(nlohmann::json& value, const Host& host);
+
+struct HostCommand {
+    std::string id;
+    std::string host_id;
+    std::string command;
+    std::string status;
+    std::optional<std::string> result;
+    std::string created_at;
+    std::optional<std::string> acked_at;
+};
+
+void to_json(nlohmann::json& value, const HostCommand& command);
+
+struct AgentEnrollment {
+    std::string id;
+    std::string host_id;
+    std::string code;
+    std::string expires_at;
+};
+
+struct AgentEnrollmentResult {
+    std::string host_id;
+    std::string host_name;
+    std::string agent_token;
+    std::string profile_id;
+    std::string profile_name;
+};
+
+struct ProxyRecord {
+    std::string id;
+    std::string tag;
+    std::string node_type;
+    bool enabled{true};
+    std::string server;
+    std::uint16_t server_port{};
+    nlohmann::json protocol_config = nlohmann::json::object();
+    std::optional<std::string> subscription_id;
+    std::string fingerprint;
+    std::optional<double> latency;
+    std::optional<std::string> last_latency_test;
+    std::string created_at;
+    std::string updated_at;
+};
+
+void to_json(nlohmann::json& value, const ProxyRecord& node);
+
+struct Subscription {
+    std::string id;
+    std::string name;
+    std::string url;
+    bool enabled{true};
+    std::int64_t refresh_interval{3'600};
+    std::optional<std::string> last_fetched_at;
+    std::optional<std::string> last_fetch_result;
+    std::string created_at;
+    std::string updated_at;
+};
+
+void to_json(nlohmann::json& value, const Subscription& subscription);
+
+struct ProxyUpsertResult {
+    std::size_t added{};
+    std::size_t updated{};
+    std::vector<std::string> errors;
+};
+
+struct SubscriptionFetchResult {
+    std::size_t added{};
+    std::size_t updated{};
+    std::size_t skipped{};
+    std::size_t found{};
+    std::vector<std::string> errors;
+};
+
+void to_json(nlohmann::json& value, const SubscriptionFetchResult& result);
+
+/// Repository facade for the first C++ parity slice.
+///
+/// It deliberately uses the existing schema and query semantics instead of
+/// introducing a new ORM-owned data model.
+class Store final {
+  public:
+    Store(const std::filesystem::path& database_path,
+          const std::filesystem::path& migration_directory);
+
+    void ensure_default_admin(const std::string& password);
+    [[nodiscard]] std::vector<UserAccount> list_users() const;
+    [[nodiscard]] std::optional<UserAccount>
+    find_user_by_username(const std::string& username) const;
+    [[nodiscard]] UserAccount create_user(const std::string& username,
+                                          const std::string& password_hash,
+                                          const std::string& role);
+    void delete_user(const std::string& actor_id, const std::string& user_id);
+    void reset_user_password(const std::string& user_id,
+                             const std::string& password_hash);
+    void record_audit(const std::string& actor, const std::string& action,
+                      const std::optional<std::string>& target);
+    [[nodiscard]] std::vector<AuditEntry> list_audit(std::size_t limit = 200U) const;
+    [[nodiscard]] nlohmann::json app_settings() const;
+    void update_app_settings(const nlohmann::json& sections);
+    [[nodiscard]] std::optional<nlohmann::json>
+    app_setting(const std::string& key) const;
+    void set_app_setting(const std::string& key, const nlohmann::json& value);
+
+    [[nodiscard]] std::vector<WireGuardPeer> list_wireguard_peers() const;
+    [[nodiscard]] std::optional<WireGuardPeer>
+    find_wireguard_peer(const std::string& id) const;
+    [[nodiscard]] WireGuardPeer create_wireguard_peer(WireGuardPeer peer);
+    [[nodiscard]] WireGuardPeer update_wireguard_peer(WireGuardPeer peer);
+    void delete_wireguard_peer(const std::string& id);
+    void set_wireguard_peer_enabled(const std::string& id, bool enabled);
+    [[nodiscard]] std::string
+    next_wireguard_address(const std::string& server_address) const;
+    void create_one_time_link(const std::string& token,
+                              const std::string& peer_id,
+                              const std::string& expires_at);
+    [[nodiscard]] nlohmann::json export_backup() const;
+    [[nodiscard]] nlohmann::json
+    restore_backup(const nlohmann::json& backup);
+
+    [[nodiscard]] std::vector<ConfigProfile> list_profiles() const;
+    [[nodiscard]] std::optional<ConfigProfile>
+    find_profile(const std::string& id) const;
+    [[nodiscard]] ConfigProfile create_profile(ConfigProfile profile);
+    [[nodiscard]] ConfigProfile update_profile(ConfigProfile profile);
+    void delete_profile(const std::string& id);
+
+    [[nodiscard]] std::vector<Host> list_hosts() const;
+    [[nodiscard]] std::optional<Host> find_host(const std::string& id) const;
+    [[nodiscard]] Host create_host(Host host);
+    [[nodiscard]] Host update_host(Host host);
+    void delete_host(const std::string& id);
+    [[nodiscard]] std::string
+    save_diagnostic_report(const std::string& host_id,
+                           const nlohmann::json& report);
+    [[nodiscard]] std::vector<nlohmann::json>
+    list_diagnostic_reports(const std::string& host_id,
+                            std::size_t limit = 20U) const;
+
+    [[nodiscard]] std::vector<std::string>
+    host_outbounds(const std::string& host_id) const;
+    void set_host_outbounds(const std::string& host_id,
+                            const std::vector<std::string>& node_ids);
+    [[nodiscard]] std::string rotate_agent_token(const std::string& host_id);
+    [[nodiscard]] AgentEnrollment
+    create_agent_enrollment(const std::string& host_id);
+    [[nodiscard]] AgentEnrollmentResult
+    redeem_agent_enrollment(const std::string& code,
+                            const nlohmann::json& device);
+
+    [[nodiscard]] std::optional<Host>
+    find_enabled_host_by_token(const std::string& token) const;
+    void touch_host(const std::string& host_id);
+    void update_agent_status(const std::string& host_id, const nlohmann::json& state);
+
+    [[nodiscard]] HostCommand enqueue_host_command(const std::string& host_id,
+                                                   const std::string& command);
+    [[nodiscard]] std::vector<HostCommand>
+    list_host_commands(const std::string& host_id, bool pending_only = false) const;
+    [[nodiscard]] bool
+    acknowledge_host_command(const std::string& host_id, const std::string& command_id,
+                             const std::string& status,
+                             const std::optional<std::string>& result);
+
+    [[nodiscard]] std::size_t update_proxy_latencies(const nlohmann::json& results);
+    void update_proxy_latency(const std::string& id,
+                              const std::optional<double>& latency);
+
+    [[nodiscard]] std::vector<ProxyRecord> list_proxy_nodes() const;
+    [[nodiscard]] std::optional<ProxyRecord>
+    find_proxy_node(const std::string& id) const;
+    [[nodiscard]] ProxyRecord create_proxy_node(ProxyRecord node);
+    [[nodiscard]] ProxyRecord update_proxy_node(ProxyRecord node);
+    void delete_proxy_node(const std::string& id);
+    [[nodiscard]] ProxyUpsertResult
+    upsert_proxy_nodes(const std::vector<ParsedProxyNode>& nodes,
+                       const std::optional<std::string>& subscription_id);
+
+    [[nodiscard]] std::vector<Subscription> list_subscriptions() const;
+    [[nodiscard]] std::optional<Subscription>
+    find_subscription(const std::string& id) const;
+    [[nodiscard]] Subscription create_subscription(Subscription subscription);
+    [[nodiscard]] Subscription update_subscription(Subscription subscription);
+    void delete_subscription(const std::string& id);
+    void record_subscription_fetch(const std::string& id,
+                                   const SubscriptionFetchResult& result);
+
+    [[nodiscard]] RenderRequest
+    render_request_for_host(const std::string& host_id) const;
+
+    [[nodiscard]] Database& database() noexcept {
+        return database_;
+    }
+
+  private:
+    Database database_;
+};
+
+} // namespace sbeasy

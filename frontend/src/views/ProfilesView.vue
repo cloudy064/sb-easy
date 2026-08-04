@@ -14,14 +14,15 @@
         <div class="flex-between">
           <div>
             <h3 class="profile-name">{{ p.name }}</h3>
-            <span class="profile-id">{{ p.id }}<span v-if="p.id === 'default'" class="badge badge-gray" style="margin-left:.5rem">{{ t('profiles.builtin') }}</span></span>
+            <span class="profile-id">{{ p.id }}<span v-if="p.id === 'default'" class="badge badge-gray" style="margin-left:.5rem">{{ t('profiles.builtin') }}</span><span v-if="p.rule_script_enabled" class="badge script-badge" style="margin-left:.5rem">{{ t('profiles.script.badge') }}</span></span>
           </div>
           <div class="flex-center gap-2">
+            <button class="btn-ghost btn-sm quickjs-entry" @click="openScript(p)">QuickJS</button>
             <button class="btn-ghost btn-sm" @click="openEdit(p)">{{ t('profiles.edit') }}</button>
             <button v-if="p.id !== 'default'" class="btn-danger btn-sm" @click="deleteTarget = p">{{ t('action.delete') }}</button>
           </div>
         </div>
-        <p class="profile-summary text-xs text-muted">{{ summarize(p.template) }}</p>
+        <p class="profile-summary text-xs text-muted">{{ summarize(p) }}</p>
       </article>
     </div>
 
@@ -33,6 +34,10 @@
 
         <div class="tabs">
           <button :class="['tab', { active: editor.mode === 'form' }]" @click="switchMode('form')">{{ t('profiles.tab.form') }}</button>
+          <button :class="['tab', 'script-tab', { active: editor.mode === 'script' }]" @click="switchMode('script')">
+            {{ t('profiles.tab.script') }}
+            <span :class="['script-tab-state', { enabled: editor.ruleScriptEnabled }]">{{ editor.ruleScriptEnabled ? 'ON' : 'OFF' }}</span>
+          </button>
           <button :class="['tab', { active: editor.mode === 'raw' }]" @click="switchMode('raw')">{{ t('profiles.tab.raw') }}</button>
         </div>
 
@@ -86,6 +91,7 @@
           <!-- Route -->
           <div class="section-block">
             <h4>{{ t('profiles.route') }}</h4>
+            <div v-if="editor.ruleScriptEnabled" class="script-route-note">{{ t('profiles.script.route.input') }}</div>
             <div class="row-grid">
               <input v-model="model.route.final" placeholder="final (auto)" list="re-ob-suggest" />
               <label class="chk"><input type="checkbox" v-model="model.route.auto_detect_interface" /> auto_detect_interface</label>
@@ -97,13 +103,37 @@
           </div>
         </div>
 
+        <!-- QUICKJS MODE -->
+        <div v-else-if="editor.mode === 'script'" class="script-tab-panel">
+          <div class="section-block script-block">
+            <div class="flex-between script-title-row">
+              <div><h4>{{ t('profiles.script.title') }}</h4><p class="text-xs text-muted">{{ t('profiles.script.hint') }}</p></div>
+              <label class="script-toggle"><input v-model="editor.ruleScriptEnabled" type="checkbox" @change="onScriptToggle" /><span>{{ t('profiles.script.enabled') }}</span></label>
+            </div>
+            <div class="script-context"><span v-for="item in ['host','outboundTags','currentRules']" :key="item"><code>context.{{ item }}</code></span></div>
+            <template v-if="editor.ruleScriptEnabled">
+              <div class="form-group script-source"><label>{{ t('profiles.script.source') }}</label><textarea v-model="editor.ruleScript" class="script-editor" spellcheck="false" @input="clearScriptResult"></textarea></div>
+              <div class="flex-between script-actions"><p class="text-xs" :class="editor.scriptError ? 'json-err' : 'text-muted'">{{ editor.scriptError || t('profiles.script.context') }}</p><button class="btn-secondary btn-sm" :disabled="editor.scriptTesting" @click="testRuleScript">{{ editor.scriptTesting ? t('profiles.script.testing') : t('profiles.script.test') }}</button></div>
+              <div v-if="editor.scriptResult" class="script-result">
+                <div class="flex-between"><strong>{{ t('profiles.script.result') }}</strong><span class="badge badge-gray">{{ editor.scriptResult.length }}</span></div>
+                <div v-if="editor.scriptResult.length" class="script-result-list"><div v-for="(rule, index) in editor.scriptResult" :key="index" class="script-result-row"><span class="script-result-index">{{ index + 1 }}</span><code>{{ scriptRuleCondition(rule) }}</code><span class="script-result-arrow">→</span><strong>{{ scriptRuleTarget(rule) }}</strong></div></div>
+                <p v-else class="text-xs text-muted" style="margin-top:.6rem">{{ t('profiles.script.empty') }}</p>
+              </div>
+            </template>
+            <div v-else class="script-disabled">
+              <strong>{{ t('profiles.script.disabled.title') }}</strong>
+              <p>{{ t('profiles.script.disabled.hint') }}</p>
+            </div>
+          </div>
+        </div>
+
         <!-- RAW MODE -->
-        <div v-else class="form-group">
+        <div v-else-if="editor.mode === 'raw'" class="form-group">
           <label>{{ t('profiles.template') }}</label>
           <textarea v-model="editor.rawText" class="json-editor" spellcheck="false" @input="editor.error = ''"></textarea>
         </div>
 
-        <p class="text-xs" :class="editor.error ? 'json-err' : 'text-muted'">{{ editor.error || t('profiles.template.hint') }}</p>
+        <p v-if="editor.error || editor.mode !== 'script'" class="text-xs" :class="editor.error ? 'json-err' : 'text-muted'">{{ editor.error || t('profiles.template.hint') }}</p>
         <div class="modal-actions">
           <button class="btn-secondary" @click="editor.open = false">{{ t('action.cancel') }}</button>
           <button class="btn-primary" @click="save">{{ t('action.save') }}</button>
@@ -130,6 +160,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useProxyNodesStore } from '../stores/proxyNodes'
+import client from '../api/client'
 import RulesEditor from '../components/RulesEditor.vue'
 import type { ConfigProfile } from '../types'
 
@@ -145,7 +176,38 @@ const outboundSuggestions = computed(() => [
 const loading = ref(true)
 const deleteTarget = ref<ConfigProfile | null>(null)
 
-const editor = ref({ open: false, id: '', name: '', mode: 'form' as 'form' | 'raw', rawText: '', error: '' })
+interface EditorState {
+  open: boolean
+  id: string
+  name: string
+  mode: 'form' | 'script' | 'raw'
+  rawText: string
+  error: string
+  ruleScript: string
+  ruleScriptEnabled: boolean
+  scriptTesting: boolean
+  scriptError: string
+  scriptResult: any[] | null
+}
+
+function editorState(values: Partial<EditorState> = {}): EditorState {
+  return {
+    open: false,
+    id: '',
+    name: '',
+    mode: 'form',
+    rawText: '',
+    error: '',
+    ruleScript: '',
+    ruleScriptEnabled: false,
+    scriptTesting: false,
+    scriptError: '',
+    scriptResult: null,
+    ...values,
+  }
+}
+
+const editor = ref<EditorState>(editorState())
 
 // Structured working copy used by the form. Normalised so the template always
 // has the sections the form binds to; the raw tab edits the same data as JSON.
@@ -192,12 +254,12 @@ onMounted(async () => {
   loading.value = false
 })
 
-function summarize(template: string): string {
+function summarize(profile: ConfigProfile): string {
   try {
-    const t = JSON.parse(template)
-    const inbounds = (t.inbounds || []).map((i: any) => i.type).join(', ')
-    const rules = (t.route?.rules || []).length
-    return `inbounds: ${inbounds || '—'} · route rules: ${rules} · final: ${t.route?.final ?? '—'}`
+    const template = JSON.parse(profile.template)
+    const inbounds = (template.inbounds || []).map((i: any) => i.type).join(', ')
+    const rules = (template.route?.rules || []).length
+    return `inbounds: ${inbounds || '—'} · route rules: ${profile.rule_script_enabled ? 'QuickJS' : rules} · final: ${template.route?.final ?? '—'}`
   } catch {
     return 'invalid template'
   }
@@ -206,33 +268,47 @@ function summarize(template: string): string {
 function openCreate() {
   setModel(emptyModel())
   model.inbounds.push({ type: 'mixed', tag: 'mixed-in', listen: '0.0.0.0', listen_port: 7890 })
-  editor.value = { open: true, id: '', name: '', mode: 'form', rawText: '', error: '' }
+  editor.value = editorState({ open: true })
 }
 function openEdit(p: ConfigProfile) {
   let obj: any = {}
   try { obj = JSON.parse(p.template) } catch { /* fall back to empty */ }
   setModel(obj)
-  editor.value = { open: true, id: p.id, name: p.name, mode: 'form', rawText: '', error: '' }
+  editor.value = editorState({
+    open: true,
+    id: p.id,
+    name: p.name,
+    ruleScript: p.rule_script || '',
+    ruleScriptEnabled: !!p.rule_script_enabled,
+  })
 }
 
-function switchMode(mode: 'form' | 'raw') {
+function openScript(profile: ConfigProfile) {
+  openEdit(profile)
+  editor.value.mode = 'script'
+}
+
+function switchMode(mode: 'form' | 'script' | 'raw') {
   if (mode === editor.value.mode) return
   if (mode === 'raw') {
     editor.value.rawText = JSON.stringify(model, null, 2)
     editor.value.error = ''
     editor.value.mode = 'raw'
-  } else {
-    // Parse raw back into the form; stay on raw if it's invalid.
+    return
+  }
+  if (editor.value.mode === 'raw') {
+    // Keep form/script input in sync with edits made in raw JSON.
     try {
       const parsed = JSON.parse(editor.value.rawText)
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object')
       setModel(parsed)
       editor.value.error = ''
-      editor.value.mode = 'form'
     } catch (e: any) {
       editor.value.error = t('profiles.template.invalid') + ': ' + e.message
+      return
     }
   }
+  editor.value.mode = mode
 }
 
 async function save() {
@@ -252,12 +328,91 @@ async function save() {
     return
   }
   try {
-    if (editor.value.id) await store.updateProfile(editor.value.id, editor.value.name, payload)
-    else await store.createProfile(editor.value.name, payload)
+    if (editor.value.ruleScriptEnabled && !editor.value.ruleScript.trim()) {
+      editor.value.scriptError = t('profiles.script.required')
+      editor.value.mode = 'script'
+      return
+    }
+    if (editor.value.id) {
+      await store.updateProfile(
+        editor.value.id,
+        editor.value.name,
+        payload,
+        editor.value.ruleScript,
+        editor.value.ruleScriptEnabled,
+      )
+    } else {
+      await store.createProfile(
+        editor.value.name,
+        payload,
+        editor.value.ruleScript,
+        editor.value.ruleScriptEnabled,
+      )
+    }
     editor.value.open = false
   } catch (e: any) {
     editor.value.error = e?.response?.data?.error || 'Save failed'
   }
+}
+
+const defaultRuleScript = `function buildRules(context) {
+  // context.host: 当前主机信息
+  // context.outboundTags: 可用出站 tag
+  // context.currentRules: 表单中配置的规则
+  return context.currentRules;
+}`
+
+function onScriptToggle() {
+  if (editor.value.ruleScriptEnabled && !editor.value.ruleScript.trim()) {
+    editor.value.ruleScript = defaultRuleScript
+  }
+  clearScriptResult()
+}
+
+function clearScriptResult() {
+  editor.value.scriptError = ''
+  editor.value.scriptResult = null
+}
+
+function previewRules(): any[] {
+  return Array.isArray(model.route?.rules) ? JSON.parse(JSON.stringify(model.route.rules)) : []
+}
+
+async function testRuleScript() {
+  editor.value.scriptError = ''
+  editor.value.scriptResult = null
+  if (!editor.value.ruleScript.trim()) {
+    editor.value.scriptError = t('profiles.script.required')
+    return
+  }
+  editor.value.scriptTesting = true
+  try {
+    const { data } = await client.post('/hosts/rule-script/test', {
+      rule_script: editor.value.ruleScript,
+      context: {
+        host: { id: 'preview', name: editor.value.name || 'Preview', capabilities: {} },
+        outboundTags: outboundSuggestions.value,
+        currentRules: previewRules(),
+      },
+    })
+    editor.value.scriptResult = Array.isArray(data.rules) ? data.rules : []
+  } catch (e: any) {
+    editor.value.scriptError = e?.response?.data?.error || t('profiles.script.failed')
+  } finally {
+    editor.value.scriptTesting = false
+  }
+}
+
+function scriptRuleCondition(rule: any): string {
+  const entries = Object.entries(rule || {}).filter(([key]) => !['outbound', 'action'].includes(key))
+  if (!entries.length) return t('profiles.script.all')
+  return entries.map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(', ') : String(value)}`).join(' · ')
+}
+
+function scriptRuleTarget(rule: any): string {
+  if (rule?.outbound) return `${t('profiles.script.go')} ${rule.outbound}`
+  if (rule?.action) return rule.action
+  return t('profiles.script.fallthrough')
 }
 
 function addInbound() {
@@ -278,6 +433,34 @@ async function doDelete() {
 .profile-card { padding: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
 .profile-name { font-size: 0.95rem; font-weight: 640; color: var(--ink-primary); }
 .profile-id { font-family: var(--font-mono); font-size: 0.7rem; color: var(--ink-muted); }
+.quickjs-entry { color:#81adf5;border-color:rgba(91,156,255,.35); }
+.script-badge { background:rgba(91,156,255,.14);border:1px solid rgba(91,156,255,.38);color:#81adf5; }
+.script-block { border-color:rgba(91,156,255,.35);background:rgba(55,91,143,.08); }
+.script-tab-panel { max-height:56vh;overflow-y:auto;padding-right:.25rem; }
+.script-tab { display:flex;align-items:center;gap:.45rem; }
+.script-tab-state { padding:.08rem .35rem;border-radius:999px;background:var(--paper-bg);color:var(--ink-muted);font:600 .58rem/1.4 var(--font-mono); }
+.script-tab-state.enabled { background:rgba(91,156,255,.18);color:#81adf5; }
+.script-title-row { align-items:flex-start;gap:1rem; }
+.script-title-row p { margin-top:.2rem;max-width:580px; }
+.script-toggle { display:flex;align-items:center;gap:.45rem;white-space:nowrap;font-size:.75rem;font-weight:600;color:var(--ink-secondary);cursor:pointer; }
+.script-route-note { margin:.55rem 0 .7rem;padding:.55rem .7rem;border:1px solid rgba(91,156,255,.28);border-radius:var(--radius-sm);background:rgba(91,156,255,.08);color:var(--ink-secondary);font-size:.72rem; }
+.script-context { display:flex;gap:.4rem;flex-wrap:wrap;margin:.8rem 0; }
+.script-context span { border:1px solid var(--paper-border);border-radius:999px;padding:.18rem .55rem;background:var(--paper-bg);font-size:.68rem; }
+.script-source { margin-bottom:.5rem; }
+.script-editor { min-height:190px;font-family:var(--font-mono);font-size:.73rem;line-height:1.55;tab-size:2; }
+.script-actions { align-items:center;gap:1rem; }
+.script-actions p { margin:0; }
+.script-result { margin-top:.8rem;border:1px solid var(--paper-border);border-radius:var(--radius-sm);padding:.8rem;background:var(--paper-surface); }
+.script-result-list { display:flex;flex-direction:column;gap:.4rem;margin-top:.65rem; }
+.script-result-row { display:grid;grid-template-columns:1.3rem minmax(0,1fr) 1rem minmax(90px,.35fr);align-items:center;gap:.45rem;padding:.45rem .55rem;border-radius:var(--radius-sm);background:var(--paper-bg);font-size:.7rem; }
+.script-result-row code { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-secondary); }
+.script-result-index { color:var(--ink-muted);text-align:center; }
+.script-result-arrow { color:var(--ink-muted); }
+.script-result-row strong { color:#78aaf7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.script-disabled { margin-top:.9rem;padding:1rem;border:1px dashed rgba(91,156,255,.35);border-radius:var(--radius-sm);background:var(--paper-bg); }
+.script-disabled strong { display:block;color:var(--ink-primary);font-size:.82rem; }
+.script-disabled p { margin:.25rem 0 0;color:var(--ink-muted);font-size:.72rem; }
+@media(max-width:700px){.script-title-row,.script-actions{align-items:flex-start;flex-direction:column}.script-result-row{grid-template-columns:1.3rem minmax(0,1fr)}.script-result-arrow{display:none}.script-result-row strong{grid-column:2}.script-toggle{white-space:normal}}
 .profile-summary { font-family: var(--font-mono); }
 .modal-wide { max-width: 760px; width: 94vw; }
 

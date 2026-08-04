@@ -134,7 +134,7 @@ async fn fetch_all(State(state): State<AppState>) -> Result<Json<Vec<serde_json:
     let mut results = Vec::new();
     for sub in subs {
         match sub_svc::fetch_subscription(&state.db, &sub.id, &sub.url).await {
-            Ok(result) => results.push(json!({"id": sub.id, "name": sub.name, "added": result.added, "updated": result.updated, "errors": result.errors})),
+            Ok(result) => results.push(json!({"id": sub.id, "name": sub.name, "added": result.added, "updated": result.updated, "found": result.found, "errors": result.errors})),
             Err(e) => results.push(json!({"id": sub.id, "name": sub.name, "error": e.to_string()})),
         }
     }

@@ -18,6 +18,7 @@ export interface WireGuardPeer {
   transfer_tx?: number
   expired?: boolean
   kind?: 'agent' | 'wg'
+  host_id?: string | null
   host_name?: string | null
 }
 
@@ -26,6 +27,20 @@ export interface HostCapabilities {
   is_wg_member: boolean
   is_wg_hub: boolean
   is_self: boolean
+  platform?: string
+  app_version?: string
+  core_version?: string
+  install_id?: string
+  model?: string
+}
+
+export interface AgentEnrollment {
+  host_id: string
+  server: string
+  code: string
+  expires_at: string
+  enrollment_uri: string
+  qr_svg: string
 }
 
 export interface Host {
@@ -52,6 +67,9 @@ export interface ConfigProfile {
   id: string
   name: string
   template: string
+  mode: 'managed' | 'full'
+  rule_script: string
+  rule_script_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -88,6 +106,7 @@ export interface FetchResult {
   added: number
   updated: number
   skipped: number
+  found?: number
   errors: string[]
 }
 

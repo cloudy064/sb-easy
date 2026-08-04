@@ -1,0 +1,37 @@
+{
+  "mode": "managed",
+  "profile": {
+    "log": {
+      "level": "info",
+      "timestamp": true
+    },
+    "route": {
+      "rules": [],
+      "final": "Proxy",
+      "auto_detect_interface": true
+    }
+  },
+  "host": {
+    "id": "edge-1",
+    "name": "Shanghai edge"
+  },
+  "nodes": [
+    {
+      "id": "node-hk",
+      "tag": "hk",
+      "type": "shadowsocks",
+      "enabled": true,
+      "server": "192.0.2.10",
+      "server_port": 443,
+      "protocol_config": {
+        "method": "aes-256-gcm",
+        "password": "replace-me"
+      }
+    }
+  ],
+  "rule_script": "function buildRules(context) {\n  return [{ domain_suffix: ['.example.com'], outbound: context.outboundTags.includes('hk') ? 'hk' : 'direct' }];\n}",
+  "clash": {
+    "controller": "0.0.0.0:9090",
+    "secret": ""
+  }
+}

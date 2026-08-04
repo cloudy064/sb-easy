@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
+  <title id="title">sb-easy route mark</title>
+  <desc id="desc">Two interlocking routes form an abstract S and meet at a switching point.</desc>
+  <path fill="#43D7A3" d="M856 217H505c-128 0-224 98-224 228s97 236 222 236h14c14 0 26 6 36 17l51 61v-74c0-11 4-20 11-28l45-43-49-49c-9-10-21-16-34-16h-72c-57 0-98-44-98-104 0-58 42-101 98-101h351c39 0 67-27 67-63 0-37-28-64-67-64Z"/>
+  <path fill="#55BFEF" d="M640 549h128c131 0 218 96 218 231 0 134-87 233-214 233H376c-37 0-64-28-64-65 0-36 27-65 64-65h396c54 0 87-42 87-103 0-63-33-99-91-99h-48c-13 0-24 5-33 16l-48 62v-75c0-11 4-21 12-29l42-41-43-45c-8-8-11-14-10-20Z"/>
+</svg>

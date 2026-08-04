@@ -1,4 +1,5 @@
 /target
+/build
 
 # Node / Vue
 frontend/node_modules/
@@ -29,3 +30,14 @@ cutover-backup-*/
 
 # Local agent runtime data
 /agent-data/
+
+# Android
+/android/.gradle/
+/android/local.properties
+/android/**/build/
+/android/libbox-bridge/libs/*.aar
+/android/.libbox-src/
+
+# Downloadable release artifacts
+/downloads/*.apk
+/downloads/*.sha256

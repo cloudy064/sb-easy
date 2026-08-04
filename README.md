@@ -5,14 +5,17 @@ spirit of wg-easy. One central server manages many hosts, their proxies, configs
 and clients — and can run/supervise sing-box itself, so there's nothing extra to
 install.
 
-- **Backend**: Rust (axum + sqlx/SQLite + tokio), embedded Vue frontend.
+- **Backend**: C++20 (Drogon + SQLite + QuickJS), serving the Vue frontend.
 - **Data plane**: sing-box (supervised in-process by sb-easy when managed).
 - **Frontend**: Vue 3 + TS + Pinia.
 
 ## Features
 - Multi-host central management: register hosts, assign proxies, edit config
   profiles (managed = panel-built, or **full** = paste a complete config).
-- Per-host agent token; one binary acts as panel (`sb-easy`) or node (`sb-easy agent`).
+- Profile-scoped QuickJS rule generation with an enable switch, bounded
+  server-side test run, readable output preview, and Agent result provenance.
+- Per-host agent token; the image runs the panel as `sb-easy` and preserves
+  `sb-easy agent` as a compatibility alias for the dedicated C++ agent.
 - Managed sing-box: spawn / reload-on-change / respawn-on-crash; Clash API
   exposed for live monitoring.
 - WireGuard hub + clients (keys, QR, quota, expiry); optional host mesh.
@@ -45,7 +48,7 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 > Behind a registry mirror (no Docker Hub access), pass base images, e.g.:
 > ```sh
 > docker build \
->   --build-arg RUST_IMAGE=docker.1ms.run/library/rust:1.96-slim-bookworm \
+>   --build-arg CXX_IMAGE=docker.1ms.run/library/debian:bookworm-slim \
 >   --build-arg NODE_IMAGE=docker.1ms.run/library/node:20-alpine \
 >   --build-arg DEBIAN_IMAGE=docker.1ms.run/library/debian:bookworm-slim \
 >   -t sb-easy:latest .
@@ -72,9 +75,22 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 | `SINGBOX_API_URL` / `SINGBOX_API_SECRET` | `http://127.0.0.1:9090` / — | Clash API the panel talks to |
 | `WG_ENABLED` | `true` | manage the WireGuard interface |
 | `AGENT_TOKEN` | — | legacy global agent token (per-host tokens preferred) |
+| `CORS_ORIGINS` | empty | comma-separated exact origins; empty/`*` is permissive |
+| `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`, or `fatal` |
 
-Node mode: run the same binary as `sb-easy agent` with `SB_EASY_SERVER` +
-`AGENT_TOKEN` (see `agent/.env.example`).
+Node mode in the production image remains `sb-easy agent`; it dispatches to the
+dedicated C++ agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
+`agent/.env.example`). The agent supervises the bundled sing-box process and
+preserves the Rust node-local egress/override environment variables. Set a
+separate `AGENT_UI_PASSWORD` to enable its local management page on
+`0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
+The page shows live Clash API traffic plus runtime/config status, persists
+node-local outbound settings, and queues refresh/reload/restart operations
+without exposing the Agent token. Runtime configuration is split into focused
+tabs for overview, network/DNS, routing, QuickJS, outbounds, and raw JSON. The
+QuickJS tab is always visible and links directly to the central Profile editor.
+The routing tab can open a short-lived test connection for a URL and reports the
+actual sing-box rule, selector chain, and final proxy/direct decision.
 
 ## Backup & restore
 - DB lives at `./data/sb-easy.db`. Online backup with rotation:
@@ -93,9 +109,11 @@ Node mode: run the same binary as `sb-easy agent` with `SB_EASY_SERVER` +
 
 ## Development
 ```sh
-cargo build && cargo test            # backend (Rust)
+cmake -S cpp -B build/cpp -DSB_EASY_WARNINGS_AS_ERRORS=ON
+cmake --build build/cpp --parallel 2
+ctest --test-dir build/cpp --output-on-failure
 cd frontend && npm ci && npm run build
+scripts/check-cpp-parity.sh           # C++ vs legacy Rust shadow rendering
 ```
-CI (GitHub Actions) builds + tests backend, type-checks + builds frontend, and
-builds the Docker image. (An experimental Go rewrite that embeds sing-box as a
-library lives on the `feat/go-rewrite` branch.)
+CI builds and tests the C++ backend, keeps the Rust rollback implementation
+tested for parity, type-checks/builds the frontend, and builds the Docker image.

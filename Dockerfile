@@ -1,34 +1,41 @@
+# syntax=docker/dockerfile:1
+
 # Base images are parameterized so environments behind a registry mirror can
-# override them, e.g. --build-arg RUST_IMAGE=docker.1ms.run/library/rust:1.96-slim-bookworm
-ARG RUST_IMAGE=rust:1.96-slim-bookworm
+# override them.
+ARG CXX_IMAGE=debian:bookworm-slim
 ARG NODE_IMAGE=node:20-alpine
 ARG DEBIAN_IMAGE=debian:bookworm-slim
 
-# ===== Stage 1: Build Rust Backend =====
-FROM ${RUST_IMAGE} AS backend-builder
-# Resilient crate fetches over a flaky proxy: retry transient failures and use
-# HTTP/1.1 (proxied connections handle multiplexing poorly).
-ENV CARGO_NET_RETRY=10 CARGO_HTTP_MULTIPLEXING=false
+# ===== Stage 1: Build C++ server and polling agent =====
+FROM ${CXX_IMAGE} AS backend-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    cmake \
+    g++ \
+    git \
+    libjsoncpp-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    make \
+    uuid-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
-COPY backend/Cargo.toml backend/
-COPY agent/Cargo.toml agent/
-RUN mkdir -p backend/src agent/src && \
-    echo 'fn main() {}' > backend/src/main.rs && \
-    echo 'fn main() {}' > agent/src/main.rs
-RUN cargo build --release -p sb-easy 2>/dev/null || true
-
-COPY backend/src backend/src/
-COPY migrations migrations/
-# Bust cargo's mtime-based fingerprint: COPY may set source mtimes older than the
-# dummy build, making cargo skip the real rebuild and ship the stub binary.
-RUN find backend/src -name '*.rs' -exec touch {} + && \
-    cargo build --release -p sb-easy && \
-    cp target/release/sb-easy /sb-easy && \
-    test "$(stat -c%s /sb-easy)" -gt 1000000   # sanity: real binary, not the stub
+WORKDIR /src
+COPY cpp /src/cpp
+COPY migrations /src/migrations
+RUN --mount=type=cache,target=/src/build \
+    cmake -S cpp -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DSB_EASY_WARNINGS_AS_ERRORS=ON \
+    && cmake --build build \
+        --target sb-easy-cpp sb-easy-cpp-server sb-easy-cpp-agent \
+        --parallel 2 \
+    && install -d /out \
+    && install -m 0755 build/sb-easy-cpp /out/sb-easy-cpp \
+    && install -m 0755 build/sb-easy-cpp-server /out/sb-easy-cpp-server \
+    && install -m 0755 build/sb-easy-cpp-agent /out/sb-easy-cpp-agent
 
 # ===== Stage 1b: Bundle sing-box binary =====
 # So the image ships one artifact: sb-easy can supervise sing-box itself
@@ -38,19 +45,34 @@ ARG SINGBOX_VERSION=1.13.12
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/sb-easy-download set -eux; \
     case "${TARGETARCH:-amd64}" in \
       amd64) A=amd64 ;; \
       arm64) A=arm64 ;; \
       arm) A=armv7 ;; \
-      *) A=amd64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${A}.tar.gz" -o /tmp/sb.tgz; \
-    tar -xzf /tmp/sb.tgz -C /tmp; \
+    ARCHIVE="/var/cache/sb-easy-download/sing-box-${SINGBOX_VERSION}-${A}.tgz"; \
+    if ! tar -tzf "${ARCHIVE}" >/dev/null 2>&1 \
+        && tar -tzf /var/cache/sb-easy-download/sb.tgz >/dev/null 2>&1; then \
+      cp /var/cache/sb-easy-download/sb.tgz "${ARCHIVE}"; \
+    fi; \
+    if ! tar -tzf "${ARCHIVE}" >/dev/null 2>&1; then \
+      if ! tar -tzf "${ARCHIVE}.part" >/dev/null 2>&1; then \
+        curl --http1.1 --retry 5 --retry-all-errors --retry-delay 2 \
+          --retry-max-time 600 --connect-timeout 15 --max-time 180 \
+          --speed-time 30 --speed-limit 1024 --continue-at - -fsSL \
+          "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${A}.tar.gz" \
+          -o "${ARCHIVE}.part"; \
+      fi; \
+      tar -tzf "${ARCHIVE}.part" >/dev/null; \
+      mv "${ARCHIVE}.part" "${ARCHIVE}"; \
+    fi; \
+    tar -xzf "${ARCHIVE}" -C /tmp; \
     install -m 0755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-${A}/sing-box" /usr/local/bin/sing-box; \
     /usr/local/bin/sing-box version
 
-# ===== Stage 2: Build Frontend =====
+# ===== Stage 2: Build frontend =====
 FROM ${NODE_IMAGE} AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* frontend/pnpm-lock.yaml* ./
@@ -72,25 +94,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     ca-certificates \
     curl \
+    libbrotli1 \
+    libjsoncpp25 \
+    libsqlite3-0 \
+    libssl3 \
+    libstdc++6 \
+    libuuid1 \
+    libzstd1 \
+    procps \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=backend-builder /sb-easy /usr/local/bin/sb-easy
+COPY --from=backend-builder /out/sb-easy-cpp-server /usr/local/bin/sb-easy
+COPY --from=backend-builder /out/sb-easy-cpp-agent /usr/local/bin/sb-easy-agent
+COPY --from=backend-builder /out/sb-easy-cpp /usr/local/bin/sb-easy-cpp
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 COPY migrations /app/migrations
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-# Managed sing-box by default: the image supervises the bundled sing-box in
-# process — no separate sing-box install needed. Override any of these at run.
+# Managed sing-box by default: the C++ server supervises the bundled process.
 ENV BIND_ADDR=0.0.0.0:51821 \
     DATABASE_URL=sqlite:/app/data/sb-easy.db?mode=rwc \
+    MIGRATIONS_DIR=/app/migrations \
+    STATIC_DIR=/app/frontend/dist \
     SINGBOX_MANAGED=true \
     SINGBOX_BIN=/usr/local/bin/sing-box \
     SELF_SINGBOX_CONFIG_PATH=/app/data/sing-box.gen.json \
     SINGBOX_API_URL=http://127.0.0.1:9090 \
-    RUST_LOG=info
+    LOG_LEVEL=info
 
 EXPOSE 51821
 ENTRYPOINT ["/docker-entrypoint.sh"]

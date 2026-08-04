@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
         .route("/commands/{cmd_id}/ack", post(agent_command_ack))
         .route("/proxy-latency", post(agent_proxy_latency))
         .route("/telemetry", post(agent_telemetry))
+        .route("/diagnostics", post(agent_diagnostics))
         .route("/health", get(agent_health))
 }
 
@@ -41,6 +42,55 @@ async fn agent_telemetry(
     t.at = Utc::now().to_rfc3339();
     crate::services::telemetry::put(&state.telemetry, &host.id, t);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /api/agent/diagnostics — persist an explicit, user-triggered diagnostic
+/// bundle. Unlike rolling telemetry this survives backend restarts and can be
+/// inspected from the device detail page.
+async fn agent_diagnostics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut report): Json<crate::services::telemetry::DiagnosticUpload>,
+) -> Result<Json<serde_json::Value>> {
+    const MAX_REPORT_BYTES: usize = 1_000_000;
+    const MAX_REPORTS_PER_HOST: i64 = 20;
+
+    let host = resolve_host(&state, &headers).await?;
+    report.clamp();
+    let payload = serde_json::to_string(&report)?;
+    if payload.len() > MAX_REPORT_BYTES {
+        return Err(AppError::BadRequest("Diagnostic report exceeds 1 MB".into()));
+    }
+
+    let report_id = uuid::Uuid::new_v4().to_string();
+    let created_at = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO diagnostic_reports (id, host_id, reason, app_version, core_version, payload, created_at) VALUES (?,?,?,?,?,?,?)",
+    )
+    .bind(&report_id)
+    .bind(&host.id)
+    .bind(&report.reason)
+    .bind(&report.app_version)
+    .bind(&report.core_version)
+    .bind(payload)
+    .bind(&created_at)
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM diagnostic_reports WHERE host_id = ? AND id NOT IN (SELECT id FROM diagnostic_reports WHERE host_id = ? ORDER BY created_at DESC LIMIT ?)",
+    )
+    .bind(&host.id)
+    .bind(&host.id)
+    .bind(MAX_REPORTS_PER_HOST)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "report_id": report_id,
+        "created_at": created_at,
+    })))
 }
 
 /// POST /api/agent/proxy-latency — an agent reports delay-test results from its

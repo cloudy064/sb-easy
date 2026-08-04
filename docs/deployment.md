@@ -58,7 +58,8 @@ services:
     ports:
       - "51821:51821/tcp"   # 面板
       - "51820:51820/udp"   # WireGuard
-    volumes: [ ./data:/app/data ]
+    volumes:
+      - ./data:/app/data
     env_file: [ .env ]
     environment:
       - SINGBOX_MANAGED=false        # 服务器只做面板 + WG hub
@@ -72,25 +73,38 @@ services:
 cd /root/workspace/sb-easy && docker compose up -d
 ```
 面板：`http://SERVER:51821`（admin / 你设的密码）。
+
+Android APK 不由管理服务器托管。请将 APK 与校验值发布到项目的 GitHub
+Releases；管理端“Android 客户端”页面会引导用户前往：
+
+`https://github.com/cloudy064/sb-easy/releases`
 > 若服务器在跑 wg-easy，先停掉（占用 51820/51821）：`docker stop wg-easy && docker update --restart=no wg-easy`。
 
 ## 二、加一个 agent 端点
 
-1. **面板里建主机**：Hosts → 添加 → 勾选"运行 sing-box"+"WG 成员"。保存后它会自动分配一个
-   WG 内网地址（10.59.32.x）和 per-host token。给它分配一个**配置画像（Profile）**。
-2. **拿 token**：主机卡片 → 安装命令，复制 `AGENT_TOKEN`。
+1. **面板里添加设备**：Devices → 添加设备，填写名称并选择**配置画像（Profile）**。
+2. **拿一次性授权码**：复制页面给出的 `AGENT_ENROLLMENT_CODE` 安装命令。Android App 扫描同一个二维码，授权逻辑完全一致。
 3. **端点上跑 agent**（Docker，同一镜像）：
    ```sh
+   AGENT_UI_PASSWORD=$(openssl rand -hex 24)
    docker run -d --name sb-easy-agent --restart unless-stopped \
      --network host --cap-add NET_ADMIN --device /dev/net/tun \
      -e SB_EASY_SERVER=http://SERVER:51821 \
-     -e AGENT_TOKEN=<该主机 token> \
+     -e AGENT_ENROLLMENT_CODE=<一次性设备授权码> \
+     -e AGENT_UI_PASSWORD="$AGENT_UI_PASSWORD" \
      -v "$PWD/agent-data:/app/data" \
      sb-easy:latest sb-easy agent
    ```
    注意命令是 `sb-easy agent`（容器 CMD 整体替换，需带上 `sb-easy`）。
+   agent 首次启动会换取并在挂载的数据目录中保存长期设备凭据，后续重启不再使用一次性授权码。已有 `AGENT_TOKEN` 部署仍兼容。
 4. agent 启动后从服务器拉配置、跑 sing-box；sing-box 的配置里含一条连服务器的 WireGuard
    `endpoint` → 自动进内网。面板 Hosts 页该主机变在线。
+
+Agent 本地管理页默认监听 `0.0.0.0:51822`，访问
+`http://AGENT_IP:51822`，用户名默认 `admin`，密码为上面的
+`AGENT_UI_PASSWORD`，在独立登录页完成登录。可通过
+`AGENT_UI_BIND`/`AGENT_UI_USERNAME` 调整。
+该端口是明文 HTTP，只应通过可信 LAN/VPN 访问或放到 TLS 反向代理后，并用防火墙限制来源。
 
 ### agent 的 sing-box 如何连内网（WireGuard endpoint）
 在该主机的 Profile（full 模式）配置里放一条 sing-box endpoint：

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import client from '../api/client'
-import type { Host, ConfigProfile, HostCapabilities } from '../types'
+import type { Host, ConfigProfile, HostCapabilities, AgentEnrollment } from '../types'
 
 export interface CreateHostBody {
   name: string
@@ -33,14 +33,35 @@ export const useHostsStore = defineStore('hosts', () => {
     profiles.value = Array.isArray(data) ? data : []
   }
 
-  async function createProfile(name: string, template: unknown): Promise<ConfigProfile> {
-    const { data } = await client.post('/hosts/profiles', { name, template })
+  async function createProfile(
+    name: string,
+    template: unknown,
+    ruleScript = '',
+    ruleScriptEnabled = false,
+  ): Promise<ConfigProfile> {
+    const { data } = await client.post('/hosts/profiles', {
+      name,
+      template,
+      rule_script: ruleScript,
+      rule_script_enabled: ruleScriptEnabled,
+    })
     await fetchProfiles()
     return data
   }
 
-  async function updateProfile(id: string, name: string, template: unknown): Promise<ConfigProfile> {
-    const { data } = await client.put(`/hosts/profiles/${id}`, { name, template })
+  async function updateProfile(
+    id: string,
+    name: string,
+    template: unknown,
+    ruleScript: string,
+    ruleScriptEnabled: boolean,
+  ): Promise<ConfigProfile> {
+    const { data } = await client.put(`/hosts/profiles/${id}`, {
+      name,
+      template,
+      rule_script: ruleScript,
+      rule_script_enabled: ruleScriptEnabled,
+    })
     await fetchProfiles()
     return data
   }
@@ -68,16 +89,6 @@ export const useHostsStore = defineStore('hosts', () => {
     hosts.value = hosts.value.filter(h => h.id !== id)
   }
 
-  async function revealToken(id: string): Promise<{ agent_token: string; server: string }> {
-    const { data } = await client.get(`/hosts/${id}/token`)
-    return data
-  }
-
-  async function rotateToken(id: string): Promise<string> {
-    const { data } = await client.post(`/hosts/${id}/rotate-token`)
-    return data.agent_token
-  }
-
   async function getOutbounds(id: string): Promise<string[]> {
     const { data } = await client.get(`/hosts/${id}/outbounds`)
     return data.node_ids
@@ -90,6 +101,11 @@ export const useHostsStore = defineStore('hosts', () => {
 
   async function enqueueCommand(id: string, command: 'reload' | 'restart') {
     const { data } = await client.post(`/hosts/${id}/commands`, { command })
+    return data
+  }
+
+  async function createEnrollment(id: string): Promise<AgentEnrollment> {
+    const { data } = await client.post(`/devices/${id}/enrollment-codes`)
     return data
   }
 
@@ -106,7 +122,8 @@ export const useHostsStore = defineStore('hosts', () => {
   return {
     hosts, profiles, loading,
     fetchHosts, fetchProfiles, createHost, updateHost, deleteHost,
-    revealToken, rotateToken, getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
+    getOutbounds, setOutbounds, downloadWgConfig, enqueueCommand,
+    createEnrollment,
     createProfile, updateProfile, deleteProfile,
   }
 })

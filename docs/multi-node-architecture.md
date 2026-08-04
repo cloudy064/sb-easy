@@ -202,8 +202,8 @@ CREATE TABLE config_profiles (
 把 agent 从"配置拉取器"升级为"有身份的受管代理"。
 
 ### 6.1 注册（Enrollment）
-- 中心生成一次性 `enroll_token`（或在 UI 点"添加主机"得到一行安装命令）。
-- agent 首次启动携带 enroll_token 调 `POST /api/agent/enroll`，换取**永久 per-host `agent_token` + host_id**，落到本地。
+- 中心在统一的“添加设备”入口生成一次性 `enroll_token`；Android 与原生 agent 使用同一份授权协议。
+- 设备首次启动携带 enroll_token 调 `POST /api/devices/enroll`，换取**永久 per-device `agent_token` + host_id**，落到本地安全存储。
 - 解决现状"全局共享 AGENT_TOKEN，一泄全泄"的问题。
 
 ### 6.2 配置同步（每机一份）

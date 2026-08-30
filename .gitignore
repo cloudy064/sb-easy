@@ -1,10 +1,14 @@
 /target
 /build
+/dist/
 
 # Node / Vue
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+agent-ui/node_modules/
+agent-ui/dist/
+agent-ui/*.tsbuildinfo
 
 # Environment
 .env

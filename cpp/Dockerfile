@@ -1,5 +1,13 @@
 ARG BUILD_IMAGE=debian:bookworm-slim
+ARG NODE_IMAGE=node:20-alpine
 ARG RUNTIME_IMAGE=debian:bookworm-slim
+
+FROM ${NODE_IMAGE} AS agent-ui-builder
+WORKDIR /src/agent-ui
+COPY agent-ui/package.json agent-ui/package-lock.json ./
+RUN npm ci
+COPY agent-ui/ .
+RUN npm run check && npm run build
 
 FROM ${BUILD_IMAGE} AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -41,6 +49,9 @@ COPY --from=builder /src/build/sb-easy-cpp /usr/local/bin/sb-easy-cpp
 COPY --from=builder /src/build/sb-easy-cpp-server /usr/local/bin/sb-easy-cpp-server
 COPY --from=builder /src/build/sb-easy-cpp-agent /usr/local/bin/sb-easy-cpp-agent
 COPY --from=builder /src/migrations /usr/share/sb-easy/migrations
+COPY --from=agent-ui-builder /src/agent-ui/dist /usr/share/sb-easy/agent-ui
+
+ENV AGENT_UI_PATH=/usr/share/sb-easy/agent-ui
 
 # Incremental parity image; the production entrypoint remains Rust for now.
 ENTRYPOINT ["sb-easy-cpp"]

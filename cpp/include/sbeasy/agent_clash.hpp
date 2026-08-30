@@ -40,6 +40,14 @@ class AgentClashService final {
     /// does not expose a Clash controller.
     [[nodiscard]] std::optional<nlohmann::json> sample_telemetry();
 
+    /// Returns the live Clash proxy/group model from the locally running core.
+    /// Unlike the installed config, this includes each selector's current choice.
+    [[nodiscard]] nlohmann::json proxies();
+
+    /// Selects an outbound in a live selector group and returns the chosen pair.
+    [[nodiscard]] nlohmann::json select_proxy(const std::string& group,
+                                              const std::string& proxy);
+
     /// Opens a short-lived CONNECT tunnel through the installed local HTTP/mixed
     /// inbound and returns the actual Clash connection chain selected by sing-box.
     [[nodiscard]] nlohmann::json test_route(const std::string& url);

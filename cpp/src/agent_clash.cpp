@@ -418,6 +418,17 @@ void replace_all(std::string& value, std::string_view from, std::string_view to)
     return response.status >= 200 && response.status < 300;
 }
 
+[[nodiscard]] std::string response_error(const ClashResponse& response) {
+    for (const auto* field : {"message", "error"}) {
+        const auto found = response.body.find(field);
+        if (found != response.body.end() && found->is_string() &&
+            !found->get_ref<const std::string&>().empty()) {
+            return found->get<std::string>();
+        }
+    }
+    return "HTTP " + std::to_string(response.status);
+}
+
 [[nodiscard]] std::int64_t integer_or_zero(const json& body, const char* field) {
     const auto found = body.find(field);
     if (found == body.end() ||
@@ -547,6 +558,39 @@ class AgentClashService::Impl final {
             {"connections", std::move(connections)},
             {"domain_stats", std::move(domain_stats)},
             {"logs", json::array()},
+        };
+    }
+
+    [[nodiscard]] json proxies() {
+        const auto target = *read_target(config_path_, true);
+        const auto response = client_.get(target, "/proxies");
+        if (!successful(response)) {
+            throw std::runtime_error("读取本地代理组失败：" +
+                                     response_error(response));
+        }
+        const auto found = response.body.find("proxies");
+        if (!response.body.is_object() || found == response.body.end() ||
+            !found->is_object()) {
+            throw std::runtime_error("本地 Clash API 返回了无效的代理组数据");
+        }
+        return response.body;
+    }
+
+    [[nodiscard]] json select_proxy(const std::string& group,
+                                    const std::string& proxy) {
+        if (group.empty() || proxy.empty()) {
+            throw std::invalid_argument("策略组和节点名称不能为空");
+        }
+        const auto target = *read_target(config_path_, true);
+        const auto response = client_.put(
+            target, "/proxies/" + encode_component(group), {{"name", proxy}});
+        if (!successful(response)) {
+            throw std::runtime_error("切换节点失败：" + response_error(response));
+        }
+        return {
+            {"success", true},
+            {"group", group},
+            {"name", proxy},
         };
     }
 
@@ -798,6 +842,15 @@ AgentClashService::test_proxies(const std::optional<std::vector<std::string>>& t
 
 std::optional<nlohmann::json> AgentClashService::sample_telemetry() {
     return implementation_->sample_telemetry();
+}
+
+nlohmann::json AgentClashService::proxies() {
+    return implementation_->proxies();
+}
+
+nlohmann::json AgentClashService::select_proxy(const std::string& group,
+                                               const std::string& proxy) {
+    return implementation_->select_proxy(group, proxy);
 }
 
 nlohmann::json AgentClashService::test_route(const std::string& url) {

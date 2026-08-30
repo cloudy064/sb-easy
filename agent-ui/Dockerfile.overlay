@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+
+ARG NODE_IMAGE=node:20-alpine
+ARG BASE_IMAGE=sb-easy:unified-glibc-cachefix-20260810
+
+FROM ${NODE_IMAGE} AS ui-builder
+WORKDIR /src/agent-ui
+COPY agent-ui/package.json agent-ui/package-lock.json ./
+RUN npm ci
+COPY agent-ui/ ./
+RUN npm run check && npm run build
+
+FROM ${BASE_IMAGE}
+COPY --from=ui-builder /src/agent-ui/dist /usr/share/sb-easy/agent-ui

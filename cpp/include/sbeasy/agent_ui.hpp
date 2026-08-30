@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -15,6 +16,8 @@ struct AgentUiCallbacks {
     std::function<nlohmann::json(const nlohmann::json&)> update_settings;
     std::function<nlohmann::json()> config;
     std::function<nlohmann::json()> proxies;
+    std::function<nlohmann::json(const std::string&, const std::string&)>
+        select_proxy;
     std::function<nlohmann::json(const std::string&)> test_route;
     std::function<void(const std::string&)> request_action;
 };
@@ -24,9 +27,10 @@ struct AgentLocalUiOptions {
     std::uint16_t port{51822};
     std::string username{"admin"};
     std::string password;
+    std::filesystem::path ui_directory;
 };
 
-/// A password-protected management surface embedded in the Agent process.
+/// Password-protected Agent API with an optional external static UI directory.
 ///
 /// Drogon owns a process-global application object, so only one AgentLocalUi
 /// may be active in a process.

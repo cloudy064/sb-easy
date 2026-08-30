@@ -86,6 +86,14 @@ RUN if [ -f pnpm-lock.yaml ]; then \
 COPY frontend/ .
 RUN npm run build
 
+# ===== Stage 2b: Build the standalone Svelte Agent UI =====
+FROM ${NODE_IMAGE} AS agent-ui-builder
+WORKDIR /app/agent-ui
+COPY agent-ui/package.json agent-ui/package-lock.json ./
+RUN npm ci
+COPY agent-ui/ .
+RUN npm run check && npm run build
+
 # ===== Stage 3: Runtime =====
 FROM ${DEBIAN_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -111,6 +119,7 @@ COPY --from=backend-builder /out/sb-easy-cpp-agent /usr/local/bin/sb-easy-agent
 COPY --from=backend-builder /out/sb-easy-cpp /usr/local/bin/sb-easy-cpp
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+COPY --from=agent-ui-builder /app/agent-ui/dist /usr/share/sb-easy/agent-ui
 COPY migrations /app/migrations
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
@@ -120,6 +129,7 @@ ENV BIND_ADDR=0.0.0.0:51821 \
     DATABASE_URL=sqlite:/app/data/sb-easy.db?mode=rwc \
     MIGRATIONS_DIR=/app/migrations \
     STATIC_DIR=/app/frontend/dist \
+    AGENT_UI_PATH=/usr/share/sb-easy/agent-ui \
     SINGBOX_MANAGED=true \
     SINGBOX_BIN=/usr/local/bin/sing-box \
     SELF_SINGBOX_CONFIG_PATH=/app/data/sing-box.gen.json \

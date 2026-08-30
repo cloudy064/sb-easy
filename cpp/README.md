@@ -61,10 +61,31 @@ Dependencies are pinned and fetched by CMake:
 - yaml-cpp `0.8.0`.
 - Nayuki QR Code generator `v1.8.0`.
 
-QuickJS and yaml-cpp are linked statically. The std/os libraries and module
-loader are not linked into the rule engine. SQLite and OpenSSL are system build
-dependencies; OpenSSL SHA-384 is used to produce the same migration checksums
-as SQLx.
+QuickJS and yaml-cpp are linked statically in normal builds. SQLite and OpenSSL
+are system build dependencies; OpenSSL SHA-384 is used to produce the same
+migration checksums as SQLx.
+
+For a unified Linux Agent, build the glibc target. The C++ executable embeds the
+official sing-box engine through a build-time C ABI, so the deployed node has
+one service process and does not need Go, GCC, or a separate sing-box program:
+
+```sh
+docker build -f cpp/Dockerfile.unified --target artifacts \
+  --output type=local,dest=dist/sb-easy-unified-glibc .
+file dist/sb-easy-unified-glibc/sb-easy
+```
+
+This intentionally keeps two kinds of files: `sb-easy` is the unified core
+service, while `agent-ui/` is the replaceable Svelte build selected through
+`AGENT_UI_PATH`. Keeping them separate preserves the core/UI boundary instead
+of compiling HTML into C++. The executable targets glibc and ordinary runtime
+libraries; the ready-to-run Debian image contains those libraries but no build
+toolchain:
+
+```sh
+docker build -f cpp/Dockerfile.unified --target runtime \
+  -t sb-easy:unified-agent .
+```
 
 ## Try the renderer
 
@@ -141,6 +162,7 @@ export SINGBOX_CONFIG_PATH='/etc/sing-box/config.d/90-generated.json'
 export SINGBOX_BIN='sing-box'
 export SINGBOX_MANAGED=true
 export AGENT_UI_PASSWORD='<independent strong local password>'
+export AGENT_UI_PATH='/usr/share/sb-easy/agent-ui'
 build/cpp/sb-easy-cpp-agent
 ```
 
@@ -157,21 +179,24 @@ panel commands, and respawns it after unexpected exits. Set
 service manager owns sing-box; those commands are parsed into argument vectors
 and executed directly without a shell.
 
-With a non-empty `AGENT_UI_PASSWORD`, the Agent also starts a lightweight local
-management page on `0.0.0.0:51822`. Its standalone login page uses
-`AGENT_UI_USERNAME=admin` by default and creates a 12-hour HttpOnly,
+With a non-empty `AGENT_UI_PASSWORD`, the Agent also starts its local API and
+static-file service on `0.0.0.0:51822`. The UI is a separate Svelte build—not
+HTML compiled into the C++ executable—and `AGENT_UI_PATH` selects its static
+directory, following Clash's external-UI model. Without that variable the
+service runs API-only. The bundled image installs its default UI at
+`/usr/share/sb-easy/agent-ui` and sets the variable, while operators can
+replace it without rebuilding the Agent. `AGENT_UI_USERNAME=admin` is the
+default login name and successful login creates a 12-hour HttpOnly,
 SameSite=Strict session cookie. `AGENT_UI_BIND` changes the listener, and
-`AGENT_UI_ENABLED=false` disables it explicitly. The authenticated page
+`AGENT_UI_ENABLED=false` disables it explicitly. The authenticated Svelte UI
 provides live Clash API traffic and connection metrics, a searchable current
-config/proxy summary, durable node-local outbound settings, and queued
-refresh/reload/restart actions. The runtime configuration separates overview,
-network/DNS, routing, QuickJS, outbounds/endpoints, and complete JSON into tabs.
-The QuickJS tab remains visible when the assigned Profile has scripting disabled
-and links to the central Profile editor; when enabled it identifies the final
-generated rules shown by the Agent. The routing tab includes a live URL test: the
-Agent opens a short-lived CONNECT tunnel through its current mixed/http inbound
-and correlates the source port with Clash API connections to report the actual
-rule, selector chain, and final proxy/direct outbound. Settings default to
+config summary, selector-group node switching, durable node-local outbound
+settings, and queued
+refresh/reload/restart actions. The configuration view shows the complete
+running JSON and includes a live URL test: the Agent opens a short-lived CONNECT
+tunnel through its current mixed/http inbound and correlates the source port
+with Clash API connections to report the actual rule, selector chain, and final
+proxy/direct outbound. Settings default to
 `agent-ui-settings.json` next to the generated sing-box config and can be moved
 with `AGENT_UI_SETTINGS_PATH`. The Agent token is never returned by the UI.
 Because the listener is plain HTTP on every interface, restrict port 51822 to a

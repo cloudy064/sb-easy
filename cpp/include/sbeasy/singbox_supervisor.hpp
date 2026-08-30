@@ -18,10 +18,8 @@ struct SingBoxSupervisorOptions {
     std::chrono::milliseconds shutdown_timeout{2'000};
 };
 
-/// Owns one `sing-box run -c <path>` child and its validated atomic config.
-///
-/// This class is framework-independent. Call ensure_alive() from the owning
-/// service's timer to reap and respawn an unexpectedly exited child.
+/// Owns a sing-box runtime and its validated atomic config. Normal builds use
+/// a supervised child; SB_EASY_EMBED_SINGBOX builds run the engine in-process.
 class SingBoxSupervisor final {
   public:
     explicit SingBoxSupervisor(SingBoxSupervisorOptions options);
@@ -52,7 +50,11 @@ class SingBoxSupervisor final {
     void start(bool ignore_backoff);
 
     SingBoxSupervisorOptions options_;
+#if defined(SB_EASY_EMBED_SINGBOX)
+    bool running_{false};
+#else
     pid_t child_{-1};
+#endif
     bool has_started_{false};
     std::chrono::steady_clock::time_point next_start_{};
     std::optional<std::string> last_error_;

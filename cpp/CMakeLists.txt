@@ -7,6 +7,27 @@ include(CTest)
 # yaml-cpp 0.8.0 still declares compatibility with pre-3.5 CMake. CMake 4
 # requires consumers to state the oldest policy set they permit for subprojects.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+option(SB_EASY_WARNINGS_AS_ERRORS "Treat sb-easy C++ warnings as errors" OFF)
+option(SB_EASY_BUILD_HTTP "Build the Drogon HTTP server" ON)
+option(SB_EASY_STATIC "Build fully static Linux executables" OFF)
+option(SB_EASY_EMBED_SINGBOX "Link the sing-box engine into the service" OFF)
+set(SB_EASY_SINGBOX_BRIDGE_LIBRARY "" CACHE FILEPATH
+    "Path to the sing-box Go c-archive")
+set(SB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR "" CACHE PATH
+    "Directory containing the generated sing-box bridge header")
+
+if(SB_EASY_STATIC)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "SB_EASY_STATIC currently supports Linux only")
+    endif()
+    # Resolve every system dependency to its archive before imported targets are
+    # created. The resulting musl binary has no interpreter or DT_NEEDED entries.
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+    add_link_options(-static)
+endif()
+
 find_package(OpenSSL REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
@@ -16,12 +37,28 @@ else()
     set(SB_EASY_SQLITE_TARGET SQLite::SQLite3)
 endif()
 
+if(SB_EASY_EMBED_SINGBOX)
+    if(NOT EXISTS "${SB_EASY_SINGBOX_BRIDGE_LIBRARY}")
+        message(FATAL_ERROR
+            "SB_EASY_EMBED_SINGBOX requires SB_EASY_SINGBOX_BRIDGE_LIBRARY")
+    endif()
+    if(NOT EXISTS "${SB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR}/libsb_easy_singbox.h")
+        message(FATAL_ERROR
+            "SB_EASY_EMBED_SINGBOX requires the generated bridge header")
+    endif()
+    add_library(sb_easy_singbox_bridge STATIC IMPORTED GLOBAL)
+    set_target_properties(sb_easy_singbox_bridge PROPERTIES
+        IMPORTED_LOCATION "${SB_EASY_SINGBOX_BRIDGE_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR}"
+    )
+    target_link_libraries(sb_easy_singbox_bridge INTERFACE
+        Threads::Threads ${CMAKE_DL_LIBS} m resolv
+    )
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-option(SB_EASY_WARNINGS_AS_ERRORS "Treat sb-easy C++ warnings as errors" OFF)
-option(SB_EASY_BUILD_HTTP "Build the Drogon HTTP server" ON)
 
 function(sb_easy_enable_warnings target)
     target_compile_options(${target} PRIVATE
@@ -128,6 +165,12 @@ if(SB_EASY_BUILD_HTTP)
     set(BUILD_TESTING ${SB_EASY_PROJECT_BUILD_TESTING} CACHE BOOL "" FORCE)
 endif()
 
+if(SB_EASY_EMBED_SINGBOX)
+    set(SB_EASY_SINGBOX_SUPERVISOR_SOURCE src/singbox_supervisor_embedded.cpp)
+else()
+    set(SB_EASY_SINGBOX_SUPERVISOR_SOURCE src/singbox_supervisor.cpp)
+endif()
+
 add_library(sb_easy_core
     src/atomic_file.cpp
     src/auth.cpp
@@ -136,10 +179,14 @@ add_library(sb_easy_core
     src/database.cpp
     src/proxy_parser.cpp
     src/script_engine.cpp
-    src/singbox_supervisor.cpp
+    ${SB_EASY_SINGBOX_SUPERVISOR_SOURCE}
     src/store.cpp
     src/wireguard.cpp
 )
+if(SB_EASY_EMBED_SINGBOX)
+    target_link_libraries(sb_easy_core PRIVATE sb_easy_singbox_bridge)
+    target_compile_definitions(sb_easy_core PUBLIC SB_EASY_EMBED_SINGBOX=1)
+endif()
 add_library(sb-easy::core ALIAS sb_easy_core)
 
 target_include_directories(sb_easy_core
@@ -266,4 +313,12 @@ if(BUILD_TESTING)
         add_test(NAME sb-easy-agent-ui-tests COMMAND sb-easy-agent-ui-tests)
         set_tests_properties(sb-easy-agent-ui-tests PROPERTIES TIMEOUT 15)
     endif()
+endif()
+
+if(SB_EASY_EMBED_SINGBOX)
+    add_executable(sb-easy-singbox-embedded-smoke
+        tests/singbox_embedded_smoke.cpp
+    )
+    target_link_libraries(sb-easy-singbox-embedded-smoke PRIVATE sb-easy::core)
+    sb_easy_enable_warnings(sb-easy-singbox-embedded-smoke)
 endif()

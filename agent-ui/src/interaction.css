@@ -1,0 +1,14 @@
+/* Interaction states live separately from the visual theme so a disabled
+   control is not mistaken for an operation that is still running. */
+button:disabled {
+  cursor: not-allowed;
+}
+
+button.busy:disabled {
+  cursor: progress;
+}
+
+.proxy-node.current:disabled {
+  cursor: default;
+  opacity: 1;
+}

@@ -17,7 +17,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <spawn.h>
 #include <stdexcept>
 #include <string>
@@ -284,6 +283,7 @@ resolve_agent_identity(const std::filesystem::path& credential_path) {
         .port = parse_port(port, "AGENT_UI_BIND"),
         .username = environment("AGENT_UI_USERNAME", "admin"),
         .password = environment("AGENT_UI_PASSWORD"),
+        .ui_directory = environment("AGENT_UI_PATH"),
     };
 }
 
@@ -347,6 +347,34 @@ resolve_agent_identity(const std::filesystem::path& credential_path) {
     return overrides;
 }
 
+[[nodiscard]] nlohmann::json
+local_route_rules(const std::filesystem::path& singbox_config_path) {
+    auto path_value = environment("SINGBOX_LOCAL_ROUTE_RULES_FILE");
+    const auto path = path_value.empty()
+                          ? singbox_config_path.parent_path() / "local-route-rules.json"
+                          : std::filesystem::path{std::move(path_value)};
+    std::ifstream input{path, std::ios::binary};
+    if (!input) {
+        if (!std::filesystem::exists(path)) {
+            return nlohmann::json::array();
+        }
+        throw std::runtime_error("cannot read local route rules file: " +
+                                 path.string());
+    }
+    const auto parsed = nlohmann::json::parse(input);
+    if (!parsed.is_array()) {
+        throw std::invalid_argument(
+            "SINGBOX_LOCAL_ROUTE_RULES_FILE must contain a JSON array");
+    }
+    for (const auto& rule : parsed) {
+        if (!rule.is_object()) {
+            throw std::invalid_argument(
+                "local route rules file must contain JSON objects");
+        }
+    }
+    return parsed;
+}
+
 [[nodiscard]] sbeasy::AgentConfigTransformOptions transform_options() {
     auto default_outbound = environment("SINGBOX_DEFAULT_PROXY_OUTBOUND");
     return {
@@ -357,6 +385,7 @@ resolve_agent_identity(const std::filesystem::path& credential_path) {
             default_outbound.empty()
                 ? std::nullopt
                 : std::optional<std::string>{std::move(default_outbound)},
+        .local_route_rules = local_route_rules(config_path()),
     };
 }
 
@@ -592,6 +621,10 @@ class AgentRuntime final {
                 },
             .config = [this] { return ui_config(); },
             .proxies = [this] { return ui_proxies(); },
+            .select_proxy = [this](const std::string& group,
+                                   const std::string& proxy) {
+                return clash_.select_proxy(group, proxy);
+            },
             .test_route =
                 [this](const std::string& url) { return clash_.test_route(url); },
             .request_action =
@@ -827,6 +860,11 @@ class AgentRuntime final {
 
     [[nodiscard]] nlohmann::json ui_status() const {
         std::lock_guard lock{state_mutex_};
+#if defined(SB_EASY_EMBED_SINGBOX)
+        constexpr std::string_view singbox_mode{"embedded"};
+#else
+        constexpr std::string_view singbox_mode{"external"};
+#endif
         return {
             {"service", "sb-easy-cpp-agent"},
             {"version", sbeasy::application_version},
@@ -834,6 +872,7 @@ class AgentRuntime final {
             {"config_path", config_path_.string()},
             {"settings_path", settings_path_.string()},
             {"singbox_managed", singbox_managed_},
+            {"singbox_mode", singbox_mode},
             {"running", running_.has_value() ? nlohmann::json(*running_)
                                              : nlohmann::json(nullptr)},
             {"etag", last_etag_.has_value() ? nlohmann::json(*last_etag_)
@@ -883,44 +922,44 @@ class AgentRuntime final {
         return nlohmann::json::parse(*contents);
     }
 
-    [[nodiscard]] nlohmann::json ui_proxies() const {
-        const auto config = ui_config();
-        const auto outbounds = config.find("outbounds");
-        if (outbounds == config.end() || !outbounds->is_array()) {
-            return nlohmann::json::array();
-        }
-        std::set<std::string> selected;
-        if (const auto route = config.find("route");
-            route != config.end() && route->is_object()) {
-            if (const auto final = route->find("final");
-                final != route->end() && final->is_string()) {
-                selected.emplace(final->get<std::string>());
+    [[nodiscard]] nlohmann::json ui_proxies() {
+        try {
+            return clash_.proxies();
+        } catch (const std::exception& error) {
+            // Keep the proxy page useful when the controller is temporarily down:
+            // show the configured groups, but surface why live selection is absent.
+            auto fallback = nlohmann::json{
+                {"proxies", nlohmann::json::object()},
+                {"error", error.what()},
+            };
+            auto& proxies = fallback["proxies"];
+            const auto config = ui_config();
+            const auto outbounds = config.find("outbounds");
+            if (outbounds == config.end() || !outbounds->is_array()) {
+                return fallback;
             }
-        }
-        for (const auto& outbound : *outbounds) {
-            if (outbound.is_object()) {
-                if (const auto value = outbound.find("default");
-                    value != outbound.end() && value->is_string()) {
-                    selected.emplace(value->get<std::string>());
+            for (const auto& outbound : *outbounds) {
+                if (!outbound.is_object()) {
+                    continue;
                 }
+                const auto tag = outbound.value("tag", std::string{});
+                if (tag.empty()) {
+                    continue;
+                }
+                auto proxy = nlohmann::json{
+                    {"type", outbound.value("type", std::string{"unknown"})},
+                };
+                const auto type = outbound.value("type", std::string{});
+                if (type == "selector" || type == "urltest") {
+                    proxy["type"] = type == "selector" ? "Selector" : "URLTest";
+                    proxy["all"] = outbound.value("outbounds",
+                                                  nlohmann::json::array());
+                    proxy["now"] = outbound.value("default", std::string{});
+                }
+                proxies[tag] = std::move(proxy);
             }
+            return fallback;
         }
-        auto proxies = nlohmann::json::array();
-        for (const auto& outbound : *outbounds) {
-            if (!outbound.is_object()) {
-                continue;
-            }
-            const auto tag = outbound.value("tag", std::string{});
-            if (tag.empty()) {
-                continue;
-            }
-            proxies.push_back({
-                {"tag", tag},
-                {"type", outbound.value("type", std::string{"unknown"})},
-                {"default", selected.contains(tag)},
-            });
-        }
-        return proxies;
     }
 
     void queue_action(const std::string& action) {
@@ -977,7 +1016,7 @@ void usage(const char* executable) {
               << "Enrolled credentials default beside the sing-box config; "
                  "override with AGENT_CREDENTIAL_PATH\n"
               << "Local UI: set AGENT_UI_PASSWORD; bind defaults to "
-                 "0.0.0.0:51822\n";
+                 "0.0.0.0:51822; set AGENT_UI_PATH to serve a static app\n";
 }
 
 } // namespace

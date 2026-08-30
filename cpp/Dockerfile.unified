@@ -1,0 +1,99 @@
+# syntax=docker/dockerfile:1
+
+ARG BUILD_IMAGE=debian:bookworm-slim
+ARG GO_IMAGE=golang:1.24-bookworm
+ARG NODE_IMAGE=node:20-alpine
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+
+FROM ${NODE_IMAGE} AS agent-ui-builder
+WORKDIR /src/agent-ui
+COPY agent-ui/package.json agent-ui/package-lock.json ./
+RUN npm ci
+COPY agent-ui/ ./
+RUN npm run check && npm run build
+
+FROM ${GO_IMAGE} AS singbox-bridge-builder
+ARG SINGBOX_VERSION=1.13.12
+ARG SINGBOX_REVISION=1086ab2563320e0da0c23b3a491d8dfa0939dff4
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates gcc git libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone --depth 1 --branch "v${SINGBOX_VERSION}" \
+        https://github.com/SagerNet/sing-box.git sing-box \
+    && test "$(git -C sing-box rev-parse HEAD)" = "${SINGBOX_REVISION}"
+COPY singbox-bridge/main.go /src/sing-box/cmd/sb-easy-bridge/main.go
+WORKDIR /src/sing-box
+RUN --mount=type=cache,target=/go/pkg/mod,id=sb-easy-singbox-go-mod-glibc \
+    --mount=type=cache,target=/root/.cache/go-build,id=sb-easy-singbox-go-build-glibc \
+    export GOTOOLCHAIN=local CGO_ENABLED=1; \
+    go build \
+        -buildmode=c-archive \
+        -trimpath \
+        -tags 'with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
+        -ldflags "-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${SINGBOX_VERSION}" \
+        -o /out/libsb_easy_singbox.a \
+        ./cmd/sb-easy-bridge \
+    && test -s /out/libsb_easy_singbox.a \
+    && test -s /out/libsb_easy_singbox.h
+
+FROM ${BUILD_IMAGE} AS service-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils \
+        ca-certificates \
+        cmake \
+        file \
+        g++ \
+        git \
+        libjsoncpp-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        make \
+        uuid-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY cpp /src/cpp
+COPY migrations /src/migrations
+COPY --from=singbox-bridge-builder /out /opt/sb-easy-singbox
+RUN --mount=type=cache,target=/src/build-unified,id=sb-easy-agent-glibc-build \
+    cmake -S cpp -B build-unified \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DSB_EASY_EMBED_SINGBOX=ON \
+        -DSB_EASY_SINGBOX_BRIDGE_LIBRARY=/opt/sb-easy-singbox/libsb_easy_singbox.a \
+        -DSB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR=/opt/sb-easy-singbox \
+        -DSB_EASY_WARNINGS_AS_ERRORS=ON \
+    && cmake --build build-unified \
+        --target sb-easy-cpp-agent sb-easy-singbox-embedded-smoke --parallel 2 \
+    && build-unified/sb-easy-singbox-embedded-smoke \
+    && install -D -m 0755 build-unified/sb-easy-cpp-agent /out/sb-easy \
+    && strip /out/sb-easy \
+    && file /out/sb-easy \
+    && readelf -d /out/sb-easy | grep -F '(NEEDED)'
+
+# The executable and replaceable Svelte UI intentionally remain separate.
+FROM scratch AS artifacts
+COPY --from=service-builder /out/sb-easy /sb-easy
+COPY --from=agent-ui-builder /src/agent-ui/dist /agent-ui
+
+FROM ${RUNTIME_IMAGE} AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libjsoncpp25 \
+        libsqlite3-0 \
+        libssl3 \
+        libstdc++6 \
+        libuuid1 \
+        zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -m 0755 /var/lib/sing-box
+COPY --from=service-builder /out/sb-easy /usr/local/bin/sb-easy
+COPY --from=agent-ui-builder /src/agent-ui/dist /usr/share/sb-easy/agent-ui
+ENV AGENT_UI_PATH=/usr/share/sb-easy/agent-ui
+EXPOSE 51822
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
+    CMD status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9090/version)" \
+        && { [ "$status" = "200" ] || [ "$status" = "401" ]; }
+ENTRYPOINT ["/usr/local/bin/sb-easy"]

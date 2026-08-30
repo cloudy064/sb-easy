@@ -84,13 +84,31 @@ dedicated C++ agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
 preserves the Rust node-local egress/override environment variables. Set a
 separate `AGENT_UI_PASSWORD` to enable its local management page on
 `0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
-The page shows live Clash API traffic plus runtime/config status, persists
+The local console is an independent Svelte build served from `AGENT_UI_PATH`;
+the image sets it to `/usr/share/sb-easy/agent-ui`, while a bare Agent can run
+API-only when it is unset. The C++ service contains no embedded HTML and another
+compatible UI can be substituted without rebuilding it. The
+page shows live Clash API traffic plus runtime/config status, supports live
+selector-group node switching, persists
 node-local outbound settings, and queues refresh/reload/restart operations
-without exposing the Agent token. Runtime configuration is split into focused
-tabs for overview, network/DNS, routing, QuickJS, outbounds, and raw JSON. The
-QuickJS tab is always visible and links directly to the central Profile editor.
-The routing tab can open a short-lived test connection for a URL and reports the
+without exposing the Agent token. The configuration view exposes the current
+raw JSON and can open a short-lived test connection for a URL to report the
 actual sing-box rule, selector chain, and final proxy/direct decision.
+
+The unified managed-node build keeps the C++ Agent as the host executable and
+links the official sing-box engine into that same process. Go is used only in
+the disposable build stage; the deployed machine needs neither Go/GCC nor a
+separate `sing-box` executable. The Svelte UI remains replaceable on disk:
+
+```sh
+docker build -f cpp/Dockerfile.unified --target artifacts \
+  --output type=local,dest=dist/sb-easy-unified-glibc .
+```
+
+The output contains one glibc-linked `sb-easy` service executable plus the
+replaceable `agent-ui/` directory. A Debian-based runtime image with all runtime
+libraries can be built using `--target runtime`; no compiler is installed in
+that image.
 
 ## Backup & restore
 - DB lives at `./data/sb-easy.db`. Online backup with rotation:

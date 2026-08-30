@@ -15,6 +15,10 @@ struct AgentConfigTransformOptions {
     std::map<std::string, std::string> outbound_server_overrides;
     std::map<std::string, nlohmann::json> outbound_overrides;
     std::optional<std::string> default_proxy_outbound;
+    // Node-local route rules are prepended after the panel config is rendered.
+    // They are intentionally kept outside the Agent UI settings so a panel
+    // refresh cannot discard local policy.
+    nlohmann::json local_route_rules = nlohmann::json::array();
 };
 
 /// Apply node-local adjustments to a panel-rendered sing-box configuration.

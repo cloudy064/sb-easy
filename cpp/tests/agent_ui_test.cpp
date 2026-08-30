@@ -1,7 +1,11 @@
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #if defined(__GNUC__)
@@ -23,6 +27,33 @@
 namespace {
 
 using json = nlohmann::json;
+
+class TemporaryUiDirectory final {
+  public:
+    TemporaryUiDirectory()
+        : path_(std::filesystem::temp_directory_path() /
+                ("sb-easy-agent-ui-" +
+                 std::to_string(std::random_device{}()))) {
+        std::filesystem::create_directories(path_ / "assets");
+        std::ofstream{path_ / "index.html"}
+            << "<!doctype html><title>External Agent UI</title>"
+               "<main>sb-easy Svelte UI fixture</main>";
+        std::ofstream{path_ / "assets" / "app.js"}
+            << "document.documentElement.dataset.ui='external';";
+    }
+
+    ~TemporaryUiDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+  private:
+    std::filesystem::path path_;
+};
 
 struct Response {
     drogon::HttpStatusCode status;
@@ -75,9 +106,12 @@ void require(bool condition, const char* message) {
 }
 
 void run_contract() {
+    const TemporaryUiDirectory ui_directory;
     auto settings = sbeasy::agent_config_transform_options_to_json({});
     std::string requested_action;
     std::string tested_url;
+    std::string selected_group;
+    std::string selected_proxy;
     const json config{
         {"outbounds", json::array({
                           {{"tag", "Proxy"},
@@ -116,9 +150,31 @@ void run_contract() {
         .config = [&config] { return config; },
         .proxies =
             [] {
-                return json::array(
-                    {{{"tag", "node-a"}, {"type", "shadowsocks"}, {"default", true}}});
+                return json{
+                    {"proxies",
+                     {
+                         {"Proxy",
+                          {{"type", "Selector"},
+                           {"now", "node-a"},
+                           {"all", json::array({"node-a", "Auto"})}}},
+                         {"Auto",
+                          {{"type", "URLTest"},
+                           {"now", "node-a"},
+                           {"all", json::array({"node-a"})}}},
+                         {"node-a",
+                          {{"type", "Shadowsocks"},
+                           {"history",
+                            json::array({{{"time", "2026-08-10T00:00:00Z"},
+                                          {"delay", 36}}})}}},
+                     }},
+                };
             },
+        .select_proxy = [&selected_group, &selected_proxy](const std::string& group,
+                                                           const std::string& proxy) {
+            selected_group = group;
+            selected_proxy = proxy;
+            return json{{"success", true}, {"group", group}, {"name", proxy}};
+        },
         .test_route =
             [&tested_url](const std::string& url) {
                 tested_url = url;
@@ -143,6 +199,7 @@ void run_contract() {
             .port = 0,
             .username = "local-admin",
             .password = "contract-password",
+            .ui_directory = ui_directory.path(),
         },
         std::move(callbacks));
     require(ui.port() != 0, "Agent UI should expose its bound ephemeral port");
@@ -156,15 +213,26 @@ void run_contract() {
             "Agent UI health endpoint should remain available without credentials");
 
     const auto unauthorized = request(client, drogon::Get, "/");
-    require(unauthorized.status == drogon::k303SeeOther &&
-                unauthorized.location == "/login" && unauthorized.authenticate.empty(),
-            "Agent UI should redirect browsers to a dedicated login page");
+    require(unauthorized.status == drogon::k200OK &&
+                unauthorized.body.find("sb-easy Svelte UI fixture") !=
+                    std::string::npos,
+            "Agent should serve the external UI shell without embedding it");
+
+    const auto unauthorized_api = request(client, drogon::Get, "/api/status");
+    require(unauthorized_api.status == drogon::k401Unauthorized,
+            "Agent APIs should still require a local session");
 
     const auto login_page = request(client, drogon::Get, "/login");
     require(login_page.status == drogon::k200OK &&
                 login_page.content_type.find("text/html") != std::string::npos &&
-                login_page.body.find("欢迎回来") != std::string::npos,
-            "Agent UI should render its standalone login form");
+                login_page.body.find("sb-easy Svelte UI fixture") !=
+                    std::string::npos,
+            "SPA routes should fall back to the configured external index");
+
+    const auto static_asset = request(client, drogon::Get, "/assets/app.js");
+    require(static_asset.status == drogon::k200OK &&
+                static_asset.body.find("dataset.ui='external'") != std::string::npos,
+            "Agent should serve assets from the configured UI path");
 
     const auto invalid_login =
         request(client, drogon::Post, "/api/login",
@@ -184,23 +252,9 @@ void run_contract() {
     const auto root = request(client, drogon::Get, "/");
     require(root.status == drogon::k200OK &&
                 root.content_type.find("text/html") != std::string::npos &&
-                root.body.find("sb-easy Agent") != std::string::npos &&
-                root.body.find("data-view=\"proxies\"") != std::string::npos &&
-                root.body.find("/api/proxies") != std::string::npos &&
-                root.body.find("/api/settings") != std::string::npos &&
-                root.body.find("traffic-chart") != std::string::npos &&
-                root.body.find("data-config-mode=\"overview\"") != std::string::npos &&
-                root.body.find("data-config-mode=\"network\"") != std::string::npos &&
-                root.body.find("data-config-mode=\"routing\"") != std::string::npos &&
-                root.body.find("data-config-mode=\"quickjs\"") != std::string::npos &&
-                root.body.find("data-config-mode=\"outbounds\"") != std::string::npos &&
-                root.body.find("config-route-rules") != std::string::npos &&
-                root.body.find("URL 实际路由测试") != std::string::npos &&
-                root.body.find("/api/route-test") != std::string::npos &&
-                root.body.find("config-quickjs-panel") != std::string::npos &&
-                root.body.find("前往中心端配置 QuickJS") != std::string::npos &&
+                root.body.find("sb-easy Svelte UI fixture") != std::string::npos &&
                 root.frame_options == "DENY",
-            "authenticated users should receive the secured Agent UI");
+            "authenticated users should receive the secured external UI shell");
 
     const auto status = request(client, drogon::Get, "/api/status");
     require(status.status == drogon::k200OK &&
@@ -236,6 +290,26 @@ void run_contract() {
                 json::parse(raw_config.body) == config,
             "Agent UI should expose the current local config to authenticated users");
 
+    const auto proxies = request(client, drogon::Get, "/api/proxies");
+    require(proxies.status == drogon::k200OK &&
+                json::parse(proxies.body)
+                        .at("proxies")
+                        .at("Proxy")
+                        .at("now") == "node-a",
+            "Agent UI should expose live proxy groups and their current selection");
+
+    const auto switched = request(client, drogon::Put, "/api/proxies",
+                                  json{{"group", "Proxy"}, {"name", "Auto"}}.dump());
+    require(switched.status == drogon::k200OK &&
+                json::parse(switched.body).at("success") == true &&
+                selected_group == "Proxy" && selected_proxy == "Auto",
+            "Agent UI should pass proxy group selections to the local Clash callback");
+
+    const auto invalid_switch =
+        request(client, drogon::Put, "/api/proxies", json{{"group", "Proxy"}}.dump());
+    require(invalid_switch.status == drogon::k400BadRequest,
+            "Agent UI should reject a proxy switch without a node name");
+
     const auto route_test = request(client, drogon::Post, "/api/route-test",
                                     json{{"url", "https://example.com/path"}}.dump());
     require(route_test.status == drogon::k200OK &&
@@ -253,9 +327,11 @@ void run_contract() {
     require(logout.status == drogon::k200OK,
             "Agent UI should accept an authenticated logout");
     const auto after_logout = request(client, drogon::Get, "/");
-    require(after_logout.status == drogon::k303SeeOther &&
-                after_logout.location == "/login",
-            "Agent UI logout should revoke the local session");
+    require(after_logout.status == drogon::k200OK,
+            "external UI shell should remain available after logout");
+    const auto api_after_logout = request(client, drogon::Get, "/api/status");
+    require(api_after_logout.status == drogon::k401Unauthorized,
+            "Agent UI logout should revoke the local API session");
 }
 
 } // namespace

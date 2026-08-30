@@ -146,14 +146,19 @@ class ClashFixture final {
         line >> method >> target;
 
         nlohmann::json body = nlohmann::json::object();
+        auto status = std::string{"200 OK"};
         if (target == "/proxies") {
             body["proxies"] = {
                 {"Agent Node", {{"type", "Shadowsocks"}}},
-                {"Agent Group",
+                {"Agent / Group",
                  {{"type", "Selector"},
+                  {"now", "Agent Node"},
                   {"all", nlohmann::json::array({"Agent Node"})}}},
                 {"direct", {{"type", "Direct"}}},
             };
+        } else if (method == "PUT" &&
+                   target == "/proxies/Agent%20%2F%20Group") {
+            body = {{"selected", true}};
         } else if (target.find("/delay?") != std::string::npos) {
             body["delay"] = 33;
         } else if (target == "/connections") {
@@ -173,9 +178,12 @@ class ClashFixture final {
                      {"rulePayload", "example.com"},
                  }})},
             };
+        } else {
+            status = "404 Not Found";
         }
         const auto serialized = body.dump();
-        const auto response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        const auto response = "HTTP/1.1 " + status +
+                              "\r\nContent-Type: application/json\r\n"
                               "Content-Length: " +
                               std::to_string(serialized.size()) +
                               "\r\nConnection: close\r\n\r\n" + serialized;
@@ -293,6 +301,19 @@ void run_config_transform_contract() {
                 transformed.at("dns").at("servers").at(1).at("detour") == "Proxy" &&
                 transformed.at("dns").at("rules").at(0).at("server") == "proxy-dns",
             "agent transform should install proxy-routed OpenAI DNS");
+
+    auto local_rules = options;
+    local_rules.local_route_rules = nlohmann::json::array({
+        {{"domain_suffix", nlohmann::json::array({"google.com", "googleapis.com"})},
+         {"outbound", "🇭🇰 自动"}},
+    });
+    const auto with_local_rules = nlohmann::json::parse(
+        sbeasy::prepare_agent_config(input.dump(), local_rules));
+    require(with_local_rules.at("route").at("rules").at(0).at("outbound") ==
+                "🇭🇰 自动" &&
+                with_local_rules.at("route").at("rules").at(1).at("outbound") ==
+                    "local-node-b",
+            "agent transform should prepend node-local route rules");
 
     auto disabled = options;
     disabled.local_proxy_egress = false;
@@ -418,6 +439,15 @@ void run_contract() {
         }
             .dump());
     sbeasy::AgentClashService clash{clash_config_path};
+    const auto live_proxies = clash.proxies();
+    require(live_proxies.at("proxies").at("Agent / Group").at("now") ==
+                "Agent Node",
+            "agent Clash integration should return live selector state");
+    const auto selected = clash.select_proxy("Agent / Group", "Agent Node");
+    require(selected.at("success") == true &&
+                selected.at("group") == "Agent / Group" &&
+                selected.at("name") == "Agent Node",
+            "agent Clash integration should encode special selector names");
     std::vector<nlohmann::json> latency_reports;
     const auto tested =
         clash.test_proxies(std::nullopt, [&](const nlohmann::json& report) {

@@ -77,8 +77,16 @@ outbound_overrides_from_json(const json& value) {
 
 std::string prepare_agent_config(std::string_view body,
                                  const AgentConfigTransformOptions& options) {
-    if (!options.local_proxy_egress) {
+    if (!options.local_proxy_egress && options.local_route_rules.empty()) {
         return std::string{body};
+    }
+    if (!options.local_route_rules.is_array()) {
+        throw std::invalid_argument("local_route_rules must be a JSON array");
+    }
+    for (const auto& rule : options.local_route_rules) {
+        if (!rule.is_object()) {
+            throw std::invalid_argument("local route rules must be JSON objects");
+        }
     }
 
     auto config = json::parse(body);
@@ -201,7 +209,8 @@ std::string prepare_agent_config(std::string_view body,
             proxy_detour = final->get<std::string>();
         }
     }
-    if (proxy_detour.has_value() && dns != config.end() && dns->is_object()) {
+    if (options.local_proxy_egress && proxy_detour.has_value() &&
+        dns != config.end() && dns->is_object()) {
         auto servers = dns->find("servers");
         if (servers != dns->end() && servers->is_array()) {
             bool present = false;
@@ -247,6 +256,26 @@ std::string prepare_agent_config(std::string_view body,
                 ++changes;
             }
         }
+    }
+
+    if (!options.local_route_rules.empty()) {
+        auto& local_route = config["route"];
+        if (local_route.is_null()) {
+            local_route = json::object();
+        }
+        if (!local_route.is_object()) {
+            throw std::invalid_argument("route must be a JSON object");
+        }
+        auto& rules = local_route["rules"];
+        if (rules.is_null()) {
+            rules = json::array();
+        }
+        if (!rules.is_array()) {
+            throw std::invalid_argument("route rules must be a JSON array");
+        }
+        rules.insert(rules.begin(), options.local_route_rules.begin(),
+                     options.local_route_rules.end());
+        ++changes;
     }
 
     return changes == 0U ? std::string{body} : config.dump(2);

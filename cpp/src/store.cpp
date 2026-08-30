@@ -164,8 +164,9 @@ using nlohmann::json;
 }
 
 [[nodiscard]] bool supported_proxy_type(const std::string& type) {
-    static constexpr std::array<std::string_view, 6> supported{
-        "shadowsocks", "vmess", "vless", "trojan", "hysteria2", "tuic"};
+    static constexpr std::array<std::string_view, 7> supported{
+        "shadowsocks", "vmess", "vless", "trojan", "hysteria2", "tuic",
+        "http"};
     return std::ranges::find(supported, type) != supported.end();
 }
 

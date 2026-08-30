@@ -301,6 +301,9 @@ parse_structured_uri(std::string_view uri, std::string_view scheme,
         return has_nonempty_string(node.protocol_config, "uuid") &&
                has_nonempty_string(node.protocol_config, "password");
     }
+    if (node.node_type == "http") {
+        return true;
+    }
     return false;
 }
 
@@ -830,6 +833,20 @@ parse_structured_uri(std::string_view uri, std::string_view scheme,
              string_value(proxy, "udp-relay-mode").value_or("native")},
             {"tls", *clash_tls(proxy, true)},
         };
+    } else if (type == "http") {
+        config = json::object();
+        if (const auto username = string_value(proxy, "username");
+            username.has_value() && !username->empty()) {
+            config["username"] = *username;
+        }
+        if (const auto password = string_value(proxy, "password");
+            password.has_value() && !password->empty()) {
+            config["password"] = *password;
+        }
+        if (const auto tls = clash_tls(proxy, boolean_value(proxy, "tls"));
+            tls.has_value()) {
+            config["tls"] = *tls;
+        }
     } else {
         return std::nullopt;
     }
@@ -917,6 +934,13 @@ parse_structured_uri(std::string_view uri, std::string_view scheme,
         if (outbound.contains("udp_relay_mode")) {
             config["udp_relay_mode"] = outbound["udp_relay_mode"];
         }
+    } else if (type == "http") {
+        if (outbound.contains("username")) {
+            config["username"] = outbound["username"];
+        }
+        if (outbound.contains("password")) {
+            config["password"] = outbound["password"];
+        }
     } else {
         return std::nullopt;
     }
@@ -948,6 +972,9 @@ std::string ParsedProxyNode::fingerprint() const {
         key_material = protocol_config.value("uuid", "");
     } else if (node_type == "tuic") {
         key_material = protocol_config.value("uuid", "") + ":" +
+                       protocol_config.value("password", "");
+    } else if (node_type == "http") {
+        key_material = protocol_config.value("username", "") + ":" +
                        protocol_config.value("password", "");
     }
     const auto raw = server + ":" + std::to_string(server_port) + ":" + node_type +
@@ -1046,8 +1073,9 @@ ProxyImport parse_outbound_config(const nlohmann::json& config) {
         return {};
     }
 
-    static const std::array<std::string_view, 6> supported{
-        "shadowsocks", "vmess", "vless", "trojan", "hysteria2", "tuic"};
+    static const std::array<std::string_view, 7> supported{
+        "shadowsocks", "vmess", "vless", "trojan", "hysteria2", "tuic",
+        "http"};
     ProxyImport result;
     for (const auto& outbound : *outbounds) {
         const auto type = outbound.is_object() ? outbound.value("type", "") : "";

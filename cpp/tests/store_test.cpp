@@ -529,10 +529,16 @@ SB_EASY_TEST("subscription repository records source attribution and fetch resul
     subscription.refresh_interval = 1'800;
     const auto created = store.create_subscription(std::move(subscription));
     const auto parsed = sbeasy::parse_subscription_body(
-        "trojan://secret@trojan.example.com:443#Provider-Trojan");
+        R"YAML(proxies:
+  - name: Provider HTTP
+    type: http
+    server: http.example.com
+    port: 443
+    tls: true
+)YAML");
     const auto imported = store.upsert_proxy_nodes(parsed, created.id);
     sbeasy::test::require(imported.added == 1U,
-                          "subscription import should insert its node");
+                          "subscription import should insert its HTTP node");
 
     const sbeasy::SubscriptionFetchResult result{
         .added = imported.added,
@@ -552,7 +558,8 @@ SB_EASY_TEST("subscription repository records source attribution and fetch resul
                           "fetch metadata should retain parsed total");
     const auto nodes = store.list_proxy_nodes();
     sbeasy::test::require(nodes.size() == 1U &&
-                              nodes.front().subscription_id == created.id,
+                              nodes.front().subscription_id == created.id &&
+                              nodes.front().node_type == "http",
                           "imported nodes should retain source attribution");
 
     auto disabled = *reloaded;

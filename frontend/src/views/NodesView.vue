@@ -33,6 +33,7 @@
         <option value="vless">VLESS</option>
         <option value="hysteria2">Hysteria2</option>
         <option value="tuic">TUIC</option>
+        <option value="http">HTTP</option>
       </select>
       <select v-model="filterSource" style="max-width:170px">
         <option value="">All sources</option>
@@ -101,6 +102,7 @@
               <option value="vless">VLESS</option>
               <option value="hysteria2">Hysteria2</option>
               <option value="tuic">TUIC</option>
+              <option value="http">HTTP</option>
             </select>
           </div>
           <div style="display:grid;grid-template-columns:2fr 1fr;gap:1rem">
@@ -123,10 +125,18 @@
             <div class="form-group"><label>Password</label><input v-model="trConfig.password" placeholder="password" /></div>
           </template>
 
+          <!-- HTTP proxy fields -->
+          <template v-if="createForm.node_type === 'http'">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+              <div class="form-group"><label>Username (optional)</label><input v-model="httpConfig.username" placeholder="username" /></div>
+              <div class="form-group"><label>Password (optional)</label><input v-model="httpConfig.password" placeholder="password" /></div>
+            </div>
+          </template>
+
           <!-- Advanced: TLS / transport (not for shadowsocks) -->
           <template v-if="createForm.node_type !== 'shadowsocks'">
             <button type="button" class="btn-ghost btn-sm adv-toggle" @click="showAdvanced = !showAdvanced">
-              {{ showAdvanced ? '▾' : '▸' }} Advanced (TLS / Reality / Transport)
+              {{ showAdvanced ? '▾' : '▸' }} Advanced (TLS{{ createForm.node_type === 'http' ? '' : ' / Reality / Transport' }})
             </button>
             <div v-if="showAdvanced" class="adv-box">
               <label class="adv-check">
@@ -141,12 +151,12 @@
                   <div class="form-group"><label>ALPN (comma-sep)</label><input v-model="adv.alpn" placeholder="h2,http/1.1" /></div>
                   <label class="adv-check" style="align-self:center"><input type="checkbox" v-model="adv.insecure" /> Allow insecure</label>
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                <div v-if="createForm.node_type !== 'http'" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
                   <div class="form-group"><label>Reality public_key</label><input v-model="adv.realityPbk" placeholder="optional" /></div>
                   <div class="form-group"><label>Reality short_id</label><input v-model="adv.realitySid" placeholder="optional" /></div>
                 </div>
               </template>
-              <div class="form-group"><label>Transport</label>
+              <div v-if="createForm.node_type !== 'http'" class="form-group"><label>Transport</label>
                 <select v-model="adv.transport">
                   <option value="">None (TCP)</option>
                   <option value="ws">WebSocket</option>
@@ -315,6 +325,7 @@ const createForm = ref({ tag: '', node_type: 'shadowsocks', server: '', server_p
 const ssConfig = ref({ method: 'aes-256-gcm', password: '' })
 const vmConfig = ref({ uuid: '' })
 const trConfig = ref({ password: '' })
+const httpConfig = ref({ username: '', password: '' })
 const editForm = ref({ tag: '', server: '', server_port: 443 })
 
 const showAdvanced = ref(false)
@@ -359,6 +370,7 @@ function resetForm() {
   ssConfig.value = { method: 'aes-256-gcm', password: '' }
   vmConfig.value = { uuid: '' }
   trConfig.value = { password: '' }
+  httpConfig.value = { username: '', password: '' }
   showAdvanced.value = false
   adv.value = {
     tlsEnabled: false, sni: '', fingerprint: '', alpn: '', insecure: false,
@@ -476,10 +488,10 @@ function notify(msg: string) {
 }
 
 function protocolLabel(t: string) {
-  return { shadowsocks:'SS', vmess:'VMess', trojan:'Trojan', vless:'VLESS', hysteria2:'HY2', tuic:'TUIC' }[t] || t
+  return { shadowsocks:'SS', vmess:'VMess', trojan:'Trojan', vless:'VLESS', hysteria2:'HY2', tuic:'TUIC', http:'HTTP' }[t] || t
 }
 function protocolBadge(t: string) {
-  return { shadowsocks:'proto-ss', vmess:'proto-vmess', trojan:'proto-trojan', vless:'proto-vless', hysteria2:'proto-hy2', tuic:'proto-tuic' }[t] || 'proto-default'
+  return { shadowsocks:'proto-ss', vmess:'proto-vmess', trojan:'proto-trojan', vless:'proto-vless', hysteria2:'proto-hy2', tuic:'proto-tuic', http:'proto-http' }[t] || 'proto-default'
 }
 function latencyColor(ms: number) {
   if (ms < 200) return 'latency-good'
@@ -495,11 +507,12 @@ async function doCreate() {
   else if (type === 'vless') config = { uuid: vmConfig.value.uuid, flow: '', packet_encoding: 'xudp' }
   else if (type === 'trojan') config = { password: trConfig.value.password }
   else if (type === 'hysteria2') config = { password: trConfig.value.password }
+  else if (type === 'http') config = { ...httpConfig.value }
 
   if (type !== 'shadowsocks') {
     const tls = buildTls()
-    const transport = buildTransport()
     if (tls) config.tls = tls
+    const transport = type === 'http' ? undefined : buildTransport()
     if (transport) config.transport = transport
   }
 
@@ -597,6 +610,7 @@ async function toggleNode(node: ProxyNode) {
 .proto-vless   { background: #faeceb; color: #9c4a44; }
 .proto-hy2     { background: var(--paper-border); color: #6b6259; }
 .proto-tuic    { background: #ecf4f7; color: #4a6c7c; }
+.proto-http    { background: #edf0fb; color: #515e9b; }
 .proto-default { background: #f3f0ea; color: var(--ink-muted); }
 
 .adv-toggle { padding-left: 0; margin-bottom: 0.5rem; color: var(--accent); }

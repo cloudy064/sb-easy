@@ -371,6 +371,16 @@ nlohmann::json ConfigRenderer::generate_outbound(const ProxyNode& node) {
             {"udp_relay_mode", string_or(config, "udp_relay_mode", "native")},
         };
         copy_if_present(outbound, config, "tls");
+    } else if (node.type == "http") {
+        outbound = {
+            {"type", "http"},
+            {"tag", node.tag},
+            {"server", node.server},
+            {"server_port", node.server_port},
+        };
+        copy_if_present(outbound, config, "username");
+        copy_if_present(outbound, config, "password");
+        copy_if_present(outbound, config, "tls");
     } else {
         outbound = {{"type", "direct"}, {"tag", node.tag}};
     }

@@ -26,7 +26,7 @@ struct ProxyImport {
 };
 
 /// Parse one supported proxy URI:
-/// ss, vmess, trojan, vless, hysteria2/hy2, or tuic.
+/// ss, vmess, trojan, vless, hysteria2/hy2, or tuic. HTTP is config-only.
 [[nodiscard]] std::optional<ParsedProxyNode> parse_proxy_uri(std::string_view uri);
 
 /// Parse a subscription response as Clash YAML, a base64-encoded URI list, or

@@ -77,7 +77,7 @@ export interface ConfigProfile {
 export interface ProxyNode {
   id: string
   tag: string
-  node_type: 'shadowsocks' | 'vmess' | 'trojan' | 'vless' | 'hysteria2' | 'tuic'
+  node_type: 'shadowsocks' | 'vmess' | 'trojan' | 'vless' | 'hysteria2' | 'tuic' | 'http'
   enabled: boolean
   server: string
   server_port: number

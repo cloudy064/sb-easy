@@ -15,6 +15,28 @@ class NetworkHandoverTest {
     private fun wifi(id: Long, links: String = "address=192.168.1.2") = UnderlyingNetwork(id, "wlan0", 25, links)
     private fun cellular() = UnderlyingNetwork(113, "rmnet_data3", 24, "mobile")
 
+    @Test fun `watchdog can force recovery on an unchanged network`() = runTest {
+        var calls = 0
+        val handover = NetworkHandover(this) { _, _ -> calls++; true }
+        handover.changed(wifi(1)); advanceTimeBy(1_200); runCurrent()
+        handover.changed(wifi(1), force = true); advanceTimeBy(1_200); runCurrent()
+        assertEquals(2, calls)
+    }
+
+    @Test fun `pending protection covers debounce and is released on loss or completion`() = runTest {
+        val protection = mutableListOf<Boolean>()
+        val handover = NetworkHandover(this, onPendingChanged = { protection.add(it) }) { _, _ -> true }
+        handover.changed(wifi(1))
+        assertTrue(handover.pending)
+        handover.changed(null)
+        assertFalse(handover.pending)
+        runCurrent()
+        assertEquals(listOf(true, false), protection)
+        handover.changed(wifi(2)); advanceTimeBy(1_200); runCurrent()
+        assertFalse(handover.pending)
+        assertEquals(listOf(true, false, true, false), protection)
+    }
+
     @Test fun `loss cancels the queued restart for a disappeared wifi`() = runTest {
         val calls = mutableListOf<UnderlyingNetwork>()
         val handover = NetworkHandover(this) { network, _ -> calls.add(network); true }

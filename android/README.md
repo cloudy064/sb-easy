@@ -102,3 +102,25 @@ physical-network fallbacks as well as failures.
 
 Version 1.1.7 requires an on-device Wi-Fi/cellular, Wi-Fi/Wi-Fi, airplane-mode and
 rapid-toggle acceptance pass; JVM tests cannot reproduce Android/vendor routing.
+
+## Background recovery (1.1.8)
+
+A service-owned watchdog reconciles physical networks and probes the configured
+URL-test endpoint every 30 seconds and after handovers/power-state events. The
+probe has a 10-second caller deadline including DNS and does not wait for UI
+connection observations. Two consecutive failures request recovery, limited to
+one watchdog restart per 60 seconds. Network generation checks discard stale
+results. No configured endpoint means only core/network presence is checked.
+
+Network callbacks run on a dedicated handler thread. Timed partial wake locks
+cover handover debounce/restarts (45 seconds maximum) and individual health
+checks (20 seconds maximum), and are released on completion/cancellation; the
+service does not keep a permanent wake lock. Power state, blocked-network events,
+Activity resume/pause and background probe outcomes are included in diagnostics.
+
+Android Doze and vendor battery restrictions may suspend network access or the
+process despite a foreground VPN service. The settings screen links to battery
+optimization and app settings. On Xiaomi/HyperOS, allow background execution and
+set the app battery policy to unrestricted. This is a system/user setting; the app
+cannot silently grant itself an exemption. Test screen-off Wi-Fi/cellular changes,
+airplane-mode recovery, background-only browsing, and forced Doze on a device.

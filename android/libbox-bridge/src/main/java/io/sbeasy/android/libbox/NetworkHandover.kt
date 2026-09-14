@@ -32,26 +32,37 @@ internal class NetworkHandover(
     private val scope: CoroutineScope,
     private val debounceMillis: Long = 1_200,
     private val retryMillis: Long = 2_000,
+    private val onPendingChanged: (Boolean) -> Unit = {},
     private val restart: suspend (UnderlyingNetwork, () -> Boolean) -> Boolean,
 ) {
+    @Volatile var pending: Boolean = false
+        private set
     private var generation = 0L
     private var current: UnderlyingNetwork? = null
     private var job: Job? = null
 
     @Synchronized
-    fun changed(network: UnderlyingNetwork?) {
-        if (current == network) return
+    fun changed(network: UnderlyingNetwork?, force: Boolean = false) {
+        if (current == network && !force) return
         current = network
         val revision = ++generation
         job?.cancel()
         job = null
+        pending = network != null
+        onPendingChanged(pending)
         if (network == null) return
         job = scope.launch {
-            delay(debounceMillis)
-            repeat(3) { attempt ->
-                if (!isCurrent(revision, network)) return@launch
-                if (restart(network) { isCurrent(revision, network) }) return@launch
-                if (attempt < 2) delay(retryMillis)
+            try {
+                delay(debounceMillis)
+                repeat(3) { attempt ->
+                    if (!isCurrent(revision, network)) return@launch
+                    if (restart(network) { isCurrent(revision, network) }) return@launch
+                    if (attempt < 2) delay(retryMillis)
+                }
+            } finally {
+                synchronized(this@NetworkHandover) {
+                    if (generation == revision) { pending = false; onPendingChanged(false) }
+                }
             }
         }
     }
@@ -60,6 +71,8 @@ internal class NetworkHandover(
     fun close() {
         ++generation
         current = null
+        pending = false
+        onPendingChanged(false)
         job?.cancel()
         job = null
     }

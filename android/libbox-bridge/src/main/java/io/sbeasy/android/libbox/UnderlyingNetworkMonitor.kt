@@ -8,7 +8,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import io.sbeasy.android.core.ClientDiagnostics
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import java.net.NetworkInterface
@@ -18,12 +18,14 @@ internal class UnderlyingNetworkMonitor(
     private val onDefaultNetworkChanged: (UnderlyingNetwork?) -> Unit = {},
 ) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
-    private val handler = Handler(Looper.getMainLooper())
+    private var eventThread: HandlerThread? = null
+    private var handler: Handler? = null
     private val lock = Any()
     private var listener: InterfaceUpdateListener? = null
     private var registered = false
     private var callback: ConnectivityManager.NetworkCallback? = null
-    private var published: UnderlyingNetwork? = null
+    @Volatile private var published: UnderlyingNetwork? = null
+    val snapshot: UnderlyingNetwork? get() = published
     private data class Facts(
         var capabilities: NetworkCapabilities? = null,
         var links: LinkProperties? = null,
@@ -44,6 +46,8 @@ internal class UnderlyingNetworkMonitor(
     fun start() = synchronized(lock) {
         if (registered) return@synchronized
         registered = true
+        eventThread = HandlerThread("sb-easy-network").also { it.start() }
+        handler = Handler(requireNotNull(eventThread).looper)
         // Synchronous reads are startup-only. Callbacks below use their ordered arguments.
         connectivity.allNetworks.forEach { network ->
             val caps = connectivity.getNetworkCapabilities(network)
@@ -71,13 +75,14 @@ internal class UnderlyingNetworkMonitor(
             }
             override fun onBlockedStatusChanged(network: Network, blocked: Boolean) = update {
                 networks[network]?.blocked = blocked
+                ClientDiagnostics.info(TAG, "network blocked status: network=$network blocked=$blocked")
             }
         }
         callback = events
         try {
             // Track all eligible networks so losing Wi-Fi can immediately select live cellular.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                connectivity.registerNetworkCallback(request, events, handler)
+                connectivity.registerNetworkCallback(request, events, requireNotNull(handler))
             } else {
                 connectivity.registerNetworkCallback(request, events)
             }
@@ -86,6 +91,9 @@ internal class UnderlyingNetworkMonitor(
             registered = false
             callback = null
             networks.clear()
+            eventThread?.quitSafely()
+            eventThread = null
+            handler = null
             throw error
         }
     }
@@ -95,12 +103,31 @@ internal class UnderlyingNetworkMonitor(
         registered = false
         callback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
         callback = null
-        handler.removeCallbacksAndMessages(null)
+        handler?.removeCallbacksAndMessages(null)
+        eventThread?.quitSafely()
+        eventThread = null
+        handler = null
         networks.clear()
         currentNetwork = null
         published = null
         listener = null
         ClientDiagnostics.info(TAG, "default network monitor stopped")
+    }
+
+    /** Watchdog reconciliation runs outside callbacks, so synchronous snapshots are safe here. */
+    fun reconcile() = synchronized(lock) {
+        if (!registered) return@synchronized
+        val live = connectivity.allNetworks.toSet()
+        networks.keys.retainAll(live)
+        live.forEach { network ->
+            val caps = connectivity.getNetworkCapabilities(network)
+            if (usable(caps)) {
+                val facts = networks.getOrPut(network) { Facts() }
+                facts.capabilities = caps
+                facts.links = connectivity.getLinkProperties(network)
+            } else networks.remove(network)
+        }
+        publish()
     }
 
     fun setListener(value: InterfaceUpdateListener?) = synchronized(lock) {
@@ -144,7 +171,7 @@ internal class UnderlyingNetworkMonitor(
         }
         if (missingInterface && attempt < 10) {
             val registration = callback
-            handler.postDelayed({ synchronized(lock) {
+            handler?.postDelayed({ synchronized(lock) {
                 if (registered && callback === registration) publish(attempt = attempt + 1)
             } }, 100)
         }

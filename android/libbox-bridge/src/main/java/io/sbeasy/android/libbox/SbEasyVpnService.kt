@@ -6,6 +6,16 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
+import android.os.PowerManager
+import android.os.SystemClock
+import androidx.core.content.ContextCompat
+import io.sbeasy.android.core.ConnectivityProbe
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.TimeoutCancellationException
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -45,14 +55,32 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
     private lateinit var platform: AndroidPlatformBridge
-    private var commandServer: CommandServer? = null
+    @Volatile private var commandServer: CommandServer? = null
     private var commandMonitor: LibboxCommandMonitor? = null
     private val restoredSelectionGroups = mutableSetOf<String>()
     private var controlLoopJob: Job? = null
     private var networkHealthJob: Job? = null
+    private val healthSignals = Channel<Unit>(Channel.CONFLATED)
+    private val connectivityProbe = ConnectivityProbe()
+    private val recoveryPolicy = BackgroundRecoveryPolicy()
+    private lateinit var handoverWakeLock: PowerManager.WakeLock
+    private var powerReceiverRegistered = false
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            ClientDiagnostics.info(TAG, "power event=${intent?.action} ${powerState()}")
+            healthSignals.trySend(Unit)
+        }
+    }
+    @Volatile private var recoveryEpoch = 0L
     @Volatile private var runtimeWanted = false
     @Volatile private var appliedNetwork: UnderlyingNetwork? = null
-    private val handover = NetworkHandover(serviceScope) { network, isCurrent ->
+    private val handover = NetworkHandover(serviceScope, onPendingChanged = { pending ->
+        if (pending) recoveryEpoch++ else healthSignals.trySend(Unit)
+        if (::handoverWakeLock.isInitialized) {
+            if (pending) handoverWakeLock.acquire(45_000)
+            else if (handoverWakeLock.isHeld) handoverWakeLock.release()
+        }
+    }) { network, isCurrent ->
         recoverNetwork(network, isCurrent)
     }
     private var tunDescriptor: ParcelFileDescriptor? = null
@@ -62,6 +90,15 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         LibboxInitializer.initialize(this)
         platform = AndroidPlatformBridge(this)
         createNotificationChannel()
+        handoverWakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sb-easy:handover")
+            .apply { setReferenceCounted(false) }
+        ContextCompat.registerReceiver(this, powerReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        }, ContextCompat.RECEIVER_NOT_EXPORTED)
+        powerReceiverRegistered = true
         ClientDiagnostics.info(TAG, "VPN service created")
     }
 
@@ -94,6 +131,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         handover.close()
         runBlocking(Dispatchers.IO) { lifecycleMutex.withLock { closeResources() } }
         serviceScope.cancel()
+        if (powerReceiverRegistered) { unregisterReceiver(powerReceiver); powerReceiverRegistered = false }
+        healthSignals.close()
         super.onDestroy()
     }
 
@@ -105,8 +144,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     internal fun onUnderlyingNetworkChanged(network: UnderlyingNetwork?) {
         if (!runtimeWanted) return
         handover.changed(network)
-        networkHealthJob?.cancel()
-        networkHealthJob = null
+        healthSignals.trySend(Unit)
+        ClientDiagnostics.info(TAG, "handover callback ${powerState()}")
         if (network == null) {
             appliedNetwork = null
             ClientDiagnostics.warn(TAG, "no usable underlying network; pending handover canceled")
@@ -142,39 +181,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 false
             }
         }
-        if (recovered && runtimeWanted && isCurrent() && appliedNetwork == network) {
-            networkHealthJob?.cancel()
-            networkHealthJob = serviceScope.launch {
-                try {
-                    CoreGraph.repository.syncConfiguration()
-                    if (!runtimeWanted || !isCurrent()) return@launch
-                    ClientDiagnostics.info(TAG, "control-plane verified after handover network=${network.handle}")
-                    val config = CoreGraph.repository.activeConfig() ?: return@launch
-                    val outbounds = org.json.JSONObject(config.content).optJSONArray("outbounds")
-                    val probeUrl = (0 until (outbounds?.length() ?: 0)).asSequence()
-                        .mapNotNull { outbounds?.optJSONObject(it) }
-                        .firstOrNull { it.optString("type") == "urltest" }
-                        ?.optString("url")?.takeIf { it.isNotBlank() }
-                    if (probeUrl != null) {
-                        val result = CoreGraph.repository.testRoute(probeUrl)
-                        check(result.httpStatus in 200..399) {
-                            "代理连通性验证失败: ${result.error ?: result.httpStatus}"
-                        }
-                    }
-                    if (!runtimeWanted || !isCurrent()) return@launch
-                    VpnRuntimeState.connected(config)
-                    startForegroundNotification("${config.profileName} · 网络已恢复")
-                    ClientDiagnostics.info(TAG, "network recovery verified network=${network.handle} proxyProbe=${probeUrl != null}")
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Exception) {
-                    if (!runtimeWanted || !isCurrent()) return@launch
-                    ClientDiagnostics.warn(TAG, "network verification failed: ${error.message}")
-                    VpnRuntimeState.runtimeWarning("网络验证失败: ${error.message}")
-                    startForegroundNotification("代理已启动，但网络验证失败")
-                }
-            }
-        }
+        if (recovered && runtimeWanted && isCurrent()) healthSignals.trySend(Unit)
         return recovered
     }
 
@@ -190,10 +197,12 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 ClientDiagnostics.info(TAG, "starting libbox runtime")
                 platform.start()
                 startCore(config)
+                appliedNetwork = platform.underlyingNetwork
                 RuntimeBridge.control = this
                 VpnRuntimeState.connected(config)
                 startForegroundNotification("${config.profileName} · 代理运行中")
                 startControlLoop()
+                startNetworkWatchdog()
                 ClientDiagnostics.info(TAG, "libbox runtime connected profile=${config.profileName}")
             }
         } catch (error: Throwable) {
@@ -262,6 +271,83 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         }
         commandServer = server
         commandMonitor = LibboxCommandMonitor(::restoreRememberedSelections).also { it.connect() }
+    }
+
+    private fun powerState(): String {
+        val power = getSystemService(PowerManager::class.java)
+        return "interactive=${power.isInteractive} idle=${power.isDeviceIdleMode} " +
+            "powerSave=${power.isPowerSaveMode} batteryExempt=${power.isIgnoringBatteryOptimizations(packageName)}"
+    }
+
+    /** Owned by the foreground VPN service; never depends on an Activity collector. */
+    private fun startNetworkWatchdog() {
+        if (networkHealthJob?.isActive == true) return
+        networkHealthJob = serviceScope.launch {
+            healthSignals.trySend(Unit)
+            while (currentCoroutineContext().isActive && runtimeWanted) {
+                withTimeoutOrNull(30_000) { healthSignals.receive() }
+                if (!runtimeWanted) break
+                val wakeLock = getSystemService(PowerManager::class.java)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sb-easy:health-check")
+                wakeLock.acquire(20_000)
+                try {
+                    platform.reconcileNetworks()
+                    val network = platform.underlyingNetwork
+                    if (network == null) {
+                        recoveryPolicy.record(null, false, SystemClock.elapsedRealtime())
+                        continue
+                    }
+                    if (handover.pending) continue
+                    val epoch = recoveryEpoch
+                    val config = CoreGraph.repository.activeConfig() ?: continue
+                    val started = SystemClock.elapsedRealtime()
+                    val outbounds = org.json.JSONObject(config.content).optJSONArray("outbounds")
+                    val url = (0 until (outbounds?.length() ?: 0)).asSequence()
+                        .mapNotNull { outbounds?.optJSONObject(it) }
+                        .firstOrNull { it.optString("type") == "urltest" }
+                        ?.optString("url")?.takeIf { it.isNotBlank() }
+                    var failure: String? = null
+                    val healthy = if (appliedNetwork != network || commandServer == null) false else try {
+                        if (url != null) {
+                            val status = connectivityProbe.check(url)
+                            check(status in 200..399) { "HTTP $status" }
+                        }
+                        true
+                    } catch (error: TimeoutCancellationException) {
+                        failure = "connectivity probe exceeded 10s deadline"
+                        false
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        failure = error.message ?: error.javaClass.simpleName
+                        false
+                    }
+                    // Never apply a result for a network that disappeared during the request.
+                    if (!runtimeWanted || platform.underlyingNetwork != network || recoveryEpoch != epoch) continue
+                    ClientDiagnostics.info(TAG, "background health network=${network.handle} ok=$healthy " +
+                        "probe=${url != null} elapsedMs=${SystemClock.elapsedRealtime() - started} " +
+                        "error=$failure ${powerState()}")
+                    if (healthy) {
+                        VpnRuntimeState.connected(config)
+                        startForegroundNotification(if (url == null) "代理运行中（未配置检测地址）" else "${config.profileName} · 网络已恢复")
+                    } else {
+                        VpnRuntimeState.runtimeWarning("后台检测连接异常，正在自动恢复")
+                        startForegroundNotification("后台检测连接异常，正在自动恢复")
+                    }
+                    if (recoveryPolicy.record(network, healthy, SystemClock.elapsedRealtime())) {
+                        ClientDiagnostics.warn(TAG, "background watchdog requesting repair network=${network.handle}")
+                        appliedNetwork = null
+                        handover.changed(network, force = true)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    ClientDiagnostics.error(TAG, "background watchdog check failed", error)
+                } finally {
+                    if (wakeLock.isHeld) wakeLock.release()
+                }
+            }
+        }
     }
 
     private fun startControlLoop() {

@@ -50,6 +50,10 @@ internal class AndroidPlatformBridge(
 
     fun stop() = networkMonitor.stop()
 
+    val underlyingNetwork: UnderlyingNetwork? get() = networkMonitor.snapshot
+
+    fun reconcileNetworks() = networkMonitor.reconcile()
+
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
 
     override fun autoDetectInterfaceControl(fd: Int) {

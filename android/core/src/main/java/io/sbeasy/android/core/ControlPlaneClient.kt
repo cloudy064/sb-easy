@@ -22,6 +22,7 @@ sealed interface ConfigFetchResult {
 }
 
 class ControlPlaneClient(context: Context) {
+    private val appContext = context.applicationContext
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private val baseClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -132,6 +133,13 @@ class ControlPlaneClient(context: Context) {
             )
         }
         return JSONObject()
+            .put("power", android.os.PowerManager::class.java.let { type ->
+                val power = appContext.getSystemService(type)
+                JSONObject().put("interactive", power.isInteractive)
+                    .put("idle", power.isDeviceIdleMode)
+                    .put("power_save", power.isPowerSaveMode)
+                    .put("battery_exempt", power.isIgnoringBatteryOptimizations(appContext.packageName))
+            })
             .put("active_network", connectivity.activeNetwork?.toString() ?: JSONObject.NULL)
             .put("underlying_networks", networks)
     }

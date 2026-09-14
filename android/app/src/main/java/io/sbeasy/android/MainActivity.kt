@@ -156,6 +156,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        val power = getSystemService(android.os.PowerManager::class.java)
+        ClientDiagnostics.info("MainActivity", "activity resumed interactive=${power.isInteractive} idle=${power.isDeviceIdleMode} batteryExempt=${power.isIgnoringBatteryOptimizations(packageName)}")
+    }
+
+    override fun onPause() {
+        ClientDiagnostics.info("MainActivity", "activity paused")
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -1056,6 +1067,12 @@ private fun LogsScreen(logs: List<RuntimeLog>, diagnosticLogs: List<RuntimeLog>,
 private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, phase: VpnPhase, onDisconnect: () -> Unit) {
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var batteryExempt by remember { mutableStateOf(false) }
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+        batteryExempt = context.getSystemService(android.os.PowerManager::class.java)
+            .isIgnoringBatteryOptimizations(context.packageName)
+    }
     var message by remember { mutableStateOf<String?>(null) }
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
@@ -1082,6 +1099,18 @@ private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, 
         }
         item {
             AppCard {
+                Text("后台恢复", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(if (batteryExempt) "系统电池优化：已豁免" else "系统电池优化：尚未豁免，休眠时可能暂停网络", color = if (batteryExempt) AccentDark else Warn, fontSize = 12.sp)
+                Text("VPN 服务会在后台定期检测连接并自动恢复。小米/HyperOS 请将本应用的省电策略设为“不限制”，并允许后台运行；系统强制暂停应用时，检测也会暂停。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 7.dp))
+                OutlinedButton(onClick = {
+                    runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                        .onFailure { message = "无法打开电池设置，请从系统设置中操作" }
+                }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("电池优化设置") }
+                OutlinedButton(onClick = {
+                    runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))) }
+                        .onFailure { message = "无法打开应用设置" }
+                }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("应用后台与省电设置") }
+                Spacer(Modifier.height(12.dp))
                 Text("系统 VPN", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
                 Text("支持 Android Always-on VPN；可在系统的 VPN 设置中启用。网络切换时会自动选择已验证的 Wi‑Fi、以太网或蜂窝网络。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 7.dp))
                 if (phase == VpnPhase.CONNECTED) OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("断开 VPN", color = Danger) }

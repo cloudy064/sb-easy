@@ -124,3 +124,14 @@ optimization and app settings. On Xiaomi/HyperOS, allow background execution and
 set the app battery policy to unrestricted. This is a system/user setting; the app
 cannot silently grant itself an exemption. Test screen-off Wi-Fi/cellular changes,
 airplane-mode recovery, background-only browsing, and forced Doze on a device.
+
+## Tiered network recovery (1.1.9)
+
+A handover now uses the existing libbox CommandServer.resetNetwork() to reset
+connections and DNS transports while retaining the Android TUN. This closes old
+connections; it is not seamless migration. Same-interface reconnects also reset.
+The background probe verifies actual connectivity afterward. Two consecutive
+probe failures escalate to a full core/TUN rebuild with the existing cooldown;
+missing cores and reset exceptions also rebuild. Stale generations and service
+cancellation cannot report recovery or start an obsolete fallback. No permanent
+wake lock is added. Device acceptance remains necessary.

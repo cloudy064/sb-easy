@@ -74,6 +74,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     @Volatile private var recoveryEpoch = 0L
     @Volatile private var runtimeWanted = false
     @Volatile private var appliedNetwork: UnderlyingNetwork? = null
+    @Volatile private var rebuildRequestedFor: UnderlyingNetwork? = null
     private val handover = NetworkHandover(serviceScope, onPendingChanged = { pending ->
         if (pending) recoveryEpoch++ else healthSignals.trySend(Unit)
         if (::handoverWakeLock.isInitialized) {
@@ -143,6 +144,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     internal fun onUnderlyingNetworkChanged(network: UnderlyingNetwork?) {
         if (!runtimeWanted) return
+        rebuildRequestedFor = null
         handover.changed(network)
         healthSignals.trySend(Unit)
         ClientDiagnostics.info(TAG, "handover callback ${powerState()}")
@@ -158,17 +160,24 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         val recovered = lifecycleMutex.withLock {
             if (!runtimeWanted || !isCurrent()) return@withLock true
             val config = CoreGraph.repository.activeConfig() ?: return@withLock false
-            if (commandServer != null && appliedNetwork == network) return@withLock true
+            if (commandServer != null && appliedNetwork == network && rebuildRequestedFor != network) return@withLock true
             ClientDiagnostics.info(TAG, "recovering libbox network=${network.handle} interface=${network.interfaceName}")
             try {
-                closeCore()
-                startCore(config)
-                // A callback may have invalidated this restart during synchronous native startup.
-                if (!runtimeWanted || !isCurrent()) return@withLock true
+                val result = recoverCoreNetwork(
+                    hasCore = commandServer != null,
+                    rebuildRequired = rebuildRequestedFor == network,
+                    isCurrent = { runtimeWanted && isCurrent() },
+                    reset = { requireNotNull(commandServer).resetNetwork() },
+                    rebuild = { closeCore(); startCore(config) },
+                    onResetFailure = { ClientDiagnostics.error(TAG, "network reset failed; rebuilding core", it) },
+                )
+                if (result == NetworkRecoveryResult.OBSOLETE) return@withLock true
+                ClientDiagnostics.info(TAG, "network recovery action=$result network=${network.handle}")
+                rebuildRequestedFor = null
                 appliedNetwork = network
                 RuntimeBridge.control = this@SbEasyVpnService
                 VpnRuntimeState.connected(config)
-                VpnRuntimeState.runtimeWarning("内核已恢复，正在验证网络")
+                VpnRuntimeState.runtimeWarning("网络状态已更新，正在验证连接")
                 startForegroundNotification("正在验证切换后的网络")
                 true
             } catch (error: CancellationException) {
@@ -243,6 +252,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         restoredSelectionGroups.clear()
         if (::platform.isInitialized) platform.stop()
         appliedNetwork = null
+        rebuildRequestedFor = null
         ClientDiagnostics.info(TAG, "VPN runtime resources closed")
     }
 
@@ -335,7 +345,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                         startForegroundNotification("后台检测连接异常，正在自动恢复")
                     }
                     if (recoveryPolicy.record(network, healthy, SystemClock.elapsedRealtime())) {
-                        ClientDiagnostics.warn(TAG, "background watchdog requesting repair network=${network.handle}")
+                        ClientDiagnostics.warn(TAG, "background watchdog escalating to core rebuild network=${network.handle}")
+                        rebuildRequestedFor = network
                         appliedNetwork = null
                         handover.changed(network, force = true)
                     }

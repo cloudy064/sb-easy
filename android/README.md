@@ -13,6 +13,8 @@ server, or administrator account is required on the phone.
 - candidate/active/rollback atomic configuration snapshots and libbox validation;
 - Android `VpnService`, foreground notification, Always-on recovery, and a
   Quick Settings tile;
+- debounced, Network-identity-aware Wi-Fi/cellular recovery with bounded restart
+  retries and post-handover control-plane/proxy probes;
 - live libbox traffic, connections, proxy groups, node selection, URLTest, and logs;
 - a real HTTP/HTTPS route test correlated with libbox connection events;
 - an adaptive dark control surface with status/navigation/cutout safe areas and
@@ -85,3 +87,18 @@ The embedded sing-box/libbox core is GPL-3.0-or-later. See
 redistributing the APK outside controlled testing. GitHub releases include the
 exact `sing-box-1.13.12-source.tar.gz` corresponding-source archive alongside
 the APKs.
+
+## Network handover recovery
+
+The monitor retains callback-provided capabilities and link properties for every
+eligible physical network. Validated networks outrank unvalidated ones; blocked
+networks are excluded. Network handles, interface indexes, addresses, routes and
+DNS changes identify a handover, including reconnects that still use `wlan0`.
+Loss cancels pending work. Recovery rechecks its generation before and after native
+startup, retries failed startup at most three times, and never reports an obsolete
+restart as recovered. The notification distinguishes a running core from successful
+control-plane and configured URL-test connectivity. Diagnostics record successful
+physical-network fallbacks as well as failures.
+
+Version 1.1.7 requires an on-device Wi-Fi/cellular, Wi-Fi/Wi-Fi, airplane-mode and
+rapid-toggle acceptance pass; JVM tests cannot reproduce Android/vendor routing.

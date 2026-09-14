@@ -44,7 +44,7 @@ internal class AndroidPlatformBridge(
     private val service: SbEasyVpnService,
 ) : PlatformInterface {
     private val connectivity = service.getSystemService(ConnectivityManager::class.java)
-    private val networkMonitor = UnderlyingNetworkMonitor(service, service::onUnderlyingInterfaceChanged)
+    private val networkMonitor = UnderlyingNetworkMonitor(service, service::onUnderlyingNetworkChanged)
 
     fun start() = networkMonitor.start()
 

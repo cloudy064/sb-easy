@@ -198,7 +198,7 @@ class ControlPlaneClient(context: Context) {
         // A direct physical-network retry is useful only while our own VPN is
         // active and may be the reason the normal route failed. Outside that
         // state it creates noisy, vendor-specific EPERM failures.
-        if (VpnRuntimeState.state.value.phase != VpnPhase.CONNECTED) {
+        if (RuntimeBridge.control == null) {
             throw primaryError
         }
         val networks = preferredUnderlyingNetworks()
@@ -210,7 +210,9 @@ class ControlPlaneClient(context: Context) {
                 })
                 .build()
             try {
-                return client.newCall(request).execute()
+                val response = client.newCall(request).execute()
+                ClientDiagnostics.info("ControlPlane", "physical fallback reached server via ${networkLabel(network)} status=${response.code}")
+                return response
             } catch (error: IOException) {
                 primaryError.addSuppressed(error)
                 ClientDiagnostics.warn(

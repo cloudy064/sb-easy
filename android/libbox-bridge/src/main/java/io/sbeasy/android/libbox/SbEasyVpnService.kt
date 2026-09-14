@@ -27,6 +27,7 @@ import io.sbeasy.android.core.RuntimeBridge
 import io.sbeasy.android.core.RuntimeControl
 import io.sbeasy.android.core.RuntimeLog
 import io.sbeasy.android.core.RuntimeObservability
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,9 +49,13 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private var commandMonitor: LibboxCommandMonitor? = null
     private val restoredSelectionGroups = mutableSetOf<String>()
     private var controlLoopJob: Job? = null
-    private var networkRestartJob: Job? = null
+    private var networkHealthJob: Job? = null
+    @Volatile private var runtimeWanted = false
+    @Volatile private var appliedNetwork: UnderlyingNetwork? = null
+    private val handover = NetworkHandover(serviceScope) { network, isCurrent ->
+        recoverNetwork(network, isCurrent)
+    }
     private var tunDescriptor: ParcelFileDescriptor? = null
-    private var lastActiveUnderlyingInterface: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -62,11 +67,14 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            runtimeWanted = false
+            handover.close()
             ClientDiagnostics.info(TAG, "stop requested")
             serviceScope.launch { stopRuntime(stopService = true) }
             return Service.START_NOT_STICKY
         }
 
+        runtimeWanted = true
         startForegroundNotification("正在同步受管配置")
         ClientDiagnostics.info(TAG, "start requested")
         serviceScope.launch { startRuntime() }
@@ -76,11 +84,15 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
     override fun onRevoke() {
+        runtimeWanted = false
+        handover.close()
         serviceScope.launch { stopRuntime(stopService = true) }
     }
 
     override fun onDestroy() {
-        runBlocking(Dispatchers.IO) { closeResources() }
+        runtimeWanted = false
+        handover.close()
+        runBlocking(Dispatchers.IO) { lifecycleMutex.withLock { closeResources() } }
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -90,37 +102,80 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         tunDescriptor = descriptor
     }
 
-    internal fun onUnderlyingInterfaceChanged(interfaceName: String?) {
-        if (interfaceName == null) {
-            ClientDiagnostics.warn(TAG, "no usable underlying interface")
-            return
+    internal fun onUnderlyingNetworkChanged(network: UnderlyingNetwork?) {
+        if (!runtimeWanted) return
+        handover.changed(network)
+        networkHealthJob?.cancel()
+        networkHealthJob = null
+        if (network == null) {
+            appliedNetwork = null
+            ClientDiagnostics.warn(TAG, "no usable underlying network; pending handover canceled")
+            VpnRuntimeState.runtimeWarning("底层网络不可用，等待网络恢复")
+            startForegroundNotification("等待网络恢复")
         }
-        val previous = lastActiveUnderlyingInterface
-        lastActiveUnderlyingInterface = interfaceName
-        ClientDiagnostics.info(TAG, "underlying interface $previous -> $interfaceName")
-        if (previous == null || previous == interfaceName) return
+    }
 
-        networkRestartJob?.cancel()
-        networkRestartJob = serviceScope.launch {
-            delay(NETWORK_RESTART_DEBOUNCE_MS)
-            lifecycleMutex.withLock {
-                val config = CoreGraph.repository.activeConfig()
-                if (commandServer == null || config == null) return@withLock
-                ClientDiagnostics.info(TAG, "restarting libbox after network handover $previous -> $interfaceName")
+    private suspend fun recoverNetwork(network: UnderlyingNetwork, isCurrent: () -> Boolean): Boolean {
+        val recovered = lifecycleMutex.withLock {
+            if (!runtimeWanted || !isCurrent()) return@withLock true
+            val config = CoreGraph.repository.activeConfig() ?: return@withLock false
+            if (commandServer != null && appliedNetwork == network) return@withLock true
+            ClientDiagnostics.info(TAG, "recovering libbox network=${network.handle} interface=${network.interfaceName}")
+            try {
+                closeCore()
+                startCore(config)
+                // A callback may have invalidated this restart during synchronous native startup.
+                if (!runtimeWanted || !isCurrent()) return@withLock true
+                appliedNetwork = network
+                RuntimeBridge.control = this@SbEasyVpnService
+                VpnRuntimeState.connected(config)
+                VpnRuntimeState.runtimeWarning("内核已恢复，正在验证网络")
+                startForegroundNotification("正在验证切换后的网络")
+                true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                appliedNetwork = null
+                ClientDiagnostics.error(TAG, "network recovery failed; will retry", error)
+                VpnRuntimeState.failed(error.message ?: error.javaClass.simpleName)
+                startForegroundNotification("网络恢复失败，等待重试")
+                false
+            }
+        }
+        if (recovered && runtimeWanted && isCurrent() && appliedNetwork == network) {
+            networkHealthJob?.cancel()
+            networkHealthJob = serviceScope.launch {
                 try {
-                    closeCore()
-                    startCore(config)
-                    RuntimeBridge.control = this@SbEasyVpnService
+                    CoreGraph.repository.syncConfiguration()
+                    if (!runtimeWanted || !isCurrent()) return@launch
+                    ClientDiagnostics.info(TAG, "control-plane verified after handover network=${network.handle}")
+                    val config = CoreGraph.repository.activeConfig() ?: return@launch
+                    val outbounds = org.json.JSONObject(config.content).optJSONArray("outbounds")
+                    val probeUrl = (0 until (outbounds?.length() ?: 0)).asSequence()
+                        .mapNotNull { outbounds?.optJSONObject(it) }
+                        .firstOrNull { it.optString("type") == "urltest" }
+                        ?.optString("url")?.takeIf { it.isNotBlank() }
+                    if (probeUrl != null) {
+                        val result = CoreGraph.repository.testRoute(probeUrl)
+                        check(result.httpStatus in 200..399) {
+                            "代理连通性验证失败: ${result.error ?: result.httpStatus}"
+                        }
+                    }
+                    if (!runtimeWanted || !isCurrent()) return@launch
                     VpnRuntimeState.connected(config)
-                    startForegroundNotification("${config.profileName} · 网络已切换")
-                    ClientDiagnostics.info(TAG, "libbox network handover restart completed")
-                } catch (error: Throwable) {
-                    ClientDiagnostics.error(TAG, "libbox network handover restart failed", error)
-                    VpnRuntimeState.failed(error.message ?: error.javaClass.simpleName)
-                    startForegroundNotification("网络切换失败，请上传诊断日志")
+                    startForegroundNotification("${config.profileName} · 网络已恢复")
+                    ClientDiagnostics.info(TAG, "network recovery verified network=${network.handle} proxyProbe=${probeUrl != null}")
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (!runtimeWanted || !isCurrent()) return@launch
+                    ClientDiagnostics.warn(TAG, "network verification failed: ${error.message}")
+                    VpnRuntimeState.runtimeWarning("网络验证失败: ${error.message}")
+                    startForegroundNotification("代理已启动，但网络验证失败")
                 }
             }
         }
+        return recovered
     }
 
     private suspend fun startRuntime() {
@@ -130,8 +185,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 "尚未取得可用配置，请先在 App 中完成设备注册"
             }
             lifecycleMutex.withLock {
-            if (commandServer != null) return
-            VpnRuntimeState.starting()
+                if (!runtimeWanted || commandServer != null) return
+                VpnRuntimeState.starting()
                 ClientDiagnostics.info(TAG, "starting libbox runtime")
                 platform.start()
                 startCore(config)
@@ -160,8 +215,10 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeResources() {
-        networkRestartJob?.cancel()
-        networkRestartJob = null
+        runtimeWanted = false
+        handover.close()
+        networkHealthJob?.cancel()
+        networkHealthJob = null
         controlLoopJob?.cancel()
         controlLoopJob = null
         if (RuntimeBridge.control === this) RuntimeBridge.control = null
@@ -176,7 +233,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         tunDescriptor = null
         restoredSelectionGroups.clear()
         if (::platform.isInitialized) platform.stop()
-        lastActiveUnderlyingInterface = null
+        appliedNetwork = null
         ClientDiagnostics.info(TAG, "VPN runtime resources closed")
     }
 
@@ -368,6 +425,5 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         private const val NOTIFICATION_CHANNEL = "sb_easy_vpn"
         private const val NOTIFICATION_ID = 51822
         private const val SELECTION_PREFERENCES = "sb_easy_proxy_selections"
-        private const val NETWORK_RESTART_DEBOUNCE_MS = 1_200L
     }
 }

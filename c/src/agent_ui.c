@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #ifndef SB_EASY_VERSION
@@ -223,19 +224,53 @@ static char *session_cookie(const char *value, int maximum_age_seconds) {
                        value, maximum_age_seconds);
 }
 
-/* Drogon getCookie(): "" when absent. malloc'd. */
+static bool c_space(unsigned char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
+
+/* Drogon HttpRequestImpl::addHeader() cookie parsing: every Cookie header is
+ * trimmed and split on ';', names and values are left-trimmed, names compare
+ * case-sensitively and the last occurrence wins. Returns the session cookie
+ * value ("" when absent), malloc'd. */
 static char *request_cookie(const request *req) {
-    const char *header = mg_get_header(req->conn, "Cookie");
-    if (!header) return sb_strdup("");
-    size_t size = strlen(header) + 1;
-    char *value = sb_xmalloc(size);
-    if (mg_get_cookie(header, SESSION_COOKIE_NAME, value, size) < 0) value[0] = '\0';
-    return value;
+    const struct mg_request_info *info = mg_get_request_info(req->conn);
+    const size_t name_size = strlen(SESSION_COOKIE_NAME);
+    char *found = NULL;
+    for (int i = 0; i < info->num_headers; ++i) {
+        if (strcasecmp(info->http_headers[i].name, "Cookie") != 0) continue;
+        const char *value = info->http_headers[i].value ? info->http_headers[i].value : "";
+        while (*value && c_space((unsigned char)*value)) ++value;
+        size_t remaining = strlen(value);
+        while (remaining > 0 && c_space((unsigned char)value[remaining - 1])) --remaining;
+        const char *p = value;
+        const char *end = value + remaining;
+        while (p < end) {
+            const char *semi = memchr(p, ';', (size_t)(end - p));
+            const char *segment_end = semi ? semi : end;
+            const char *eq = memchr(p, '=', (size_t)(segment_end - p));
+            if (eq) {
+                const char *name = p;
+                while (name < eq && c_space((unsigned char)*name)) ++name;
+                const char *cookie = eq + 1;
+                while (cookie < segment_end && c_space((unsigned char)*cookie)) ++cookie;
+                if ((size_t)(eq - name) == name_size && memcmp(name, SESSION_COOKIE_NAME, name_size) == 0) {
+                    free(found);
+                    found = sb_strndup(cookie, (size_t)(segment_end - cookie));
+                }
+            }
+            if (!semi) break;
+            p = semi + 1;
+        }
+    }
+    return found ? found : sb_strdup("");
 }
 
+/* Drogon getHeader(): the first header of that name, trimmed. */
 static bool ui_header_present(const request *req) {
     const char *value = mg_get_header(req->conn, "x-sb-easy-ui");
-    return value && strcmp(value, "1") == 0;
+    if (!value) return false;
+    while (*value && c_space((unsigned char)*value)) ++value;
+    size_t len = strlen(value);
+    while (len > 0 && c_space((unsigned char)value[len - 1])) --len;
+    return len == 1 && value[0] == '1';
 }
 
 /* nlohmann json::parse(body) error text (parse_error.101). */
@@ -777,9 +812,12 @@ static int begin_request(struct mg_connection *conn) {
     req.head = strcmp(info->request_method, "HEAD") == 0;
     req.method = req.head ? "GET" : info->request_method;
 
-    /* Drogon clientMaxBodySize (512 KiB) is enforced by the parser. */
+    /* Drogon clientMaxBodySize (512 KiB) is enforced by its request parser,
+     * which answers with a bare status line and closes the connection. */
+    static const char too_large[] =
+        "HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n";
     if (info->content_length > (long long)MAXIMUM_SETTINGS_BODY_SIZE) {
-        mg_send_http_error(conn, 413, "%s", "");
+        mg_write(conn, too_large, sizeof too_large - 1);
         return 413;
     }
     sb_buf body = {0};
@@ -789,7 +827,7 @@ static int begin_request(struct mg_connection *conn) {
         sb_buf_append(&body, chunk, (size_t)count);
         if (body.len > MAXIMUM_SETTINGS_BODY_SIZE) {
             sb_buf_free(&body);
-            mg_send_http_error(conn, 413, "%s", "");
+            mg_write(conn, too_large, sizeof too_large - 1);
             return 413;
         }
     }

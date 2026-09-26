@@ -111,6 +111,9 @@ int sb_json_required_string_array(const sbj *body, const char *field, sb_strvec 
 int sb_json_integer_field(const sbj *body, const char *field, int64_t *out, sb_err *err);
 /* require_admin(): SB_ERR_FORBIDDEN "Admin role required". */
 int sb_require_admin(const sb_http_req *req, sb_err *err);
+/* request_claims(): the claims set by the auth advice, or NULL with
+ * SB_ERR_AUTH "Invalid or expired token" (added by the core). */
+const sb_auth_claims *sb_req_claims(const sb_http_req *req, sb_err *err);
 
 /* Store lookups shared by several route groups (C++ require_host,
  * require_profile, require_proxy). `out` must be initialised by the caller.
@@ -169,6 +172,12 @@ struct sb_http_server {
     pthread_t self_singbox_thread;
     bool self_singbox_running;
     volatile int stopping;
+
+    /* Added by the core (private to http_server.c). */
+    uint16_t bound_port;              /* actual listening port after start */
+    pthread_mutex_t self_singbox_mutex; /* managed sing-box stop signalling */
+    pthread_cond_t self_singbox_wakeup;
+    bool self_singbox_stop;
 };
 
 /* default_telemetry(), normalize_telemetry(), normalize_diagnostic_report(). */

@@ -50,6 +50,30 @@ static const char *stream_kind(const char *path) {
     return NULL;
 }
 
+/* The request path as Drogon routes it: civetweb runs with decode_url=no, so
+ * local_uri is still percent-encoded; Drogon's urlDecode also maps '+'. */
+static const char *request_stream_kind(const struct mg_connection *conn) {
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    const char *raw = ri && ri->local_uri ? ri->local_uri : "";
+    char *path = sb_xmalloc(strlen(raw) + 1);
+    size_t o = 0;
+    for (size_t i = 0; raw[i]; ++i) {
+        if (raw[i] == '+') {
+            path[o++] = ' ';
+        } else if (raw[i] == '%' && isxdigit((unsigned char)raw[i + 1]) && isxdigit((unsigned char)raw[i + 2])) {
+            char hex[3] = {raw[i + 1], raw[i + 2], 0};
+            path[o++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        } else {
+            path[o++] = raw[i];
+        }
+    }
+    path[o] = '\0';
+    const char *kind = strlen(path) == o ? stream_kind(path) : NULL; /* no embedded NUL */
+    free(path);
+    return kind;
+}
+
 /* A request view over a civetweb connection so the shared request helpers
  * (query decoding, headers) apply exactly as for the HTTP routes. */
 static void request_view(sb_http_server *srv, const struct mg_connection *conn, sb_http_req *req) {
@@ -281,7 +305,7 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata) {
     sb_http_req req;
     request_view(srv, conn, &req);
     bool authorized = false;
-    if (stream_kind(req.path)) {
+    if (request_stream_kind(conn)) {
         char *raw = sb_req_query_param(&req, "token");
         char *token = sb_http_trim(raw ? raw : "");
         free(raw);
@@ -292,9 +316,8 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata) {
         }
         free(token);
     }
-    /* Paths matched only case-insensitively are not Clash stream paths for
-     * the C++ advice; browsers cannot send the Bearer header it would then
-     * require, so they are rejected the same way. */
+    /* The core only lets upgrades of exact Clash stream paths reach civetweb's
+     * WebSocket dispatch, so the kind check is a safety net. */
     if (authorized) return 0;
     reject_unauthorized(srv, conn);
     return 1;
@@ -861,7 +884,7 @@ static void ws_ready(struct mg_connection *conn, void *cbdata) {
     sb_http_server *srv = cbdata;
     sb_http_req req;
     request_view(srv, conn, &req);
-    const char *kind = stream_kind(req.path);
+    const char *kind = request_stream_kind(conn);
     ws_bridge *b = sb_xcalloc(1, sizeof *b);
     b->key = conn;
     b->browser = conn;
@@ -917,12 +940,12 @@ static void ws_close(const struct mg_connection *conn, void *cbdata) {
     bridge_free(b);
 }
 
+/* The core's begin_request answers every request itself except WebSocket
+ * upgrades of the exact (decoded, case-sensitive) Clash stream paths, which it
+ * leaves to civetweb's WebSocket dispatch. civetweb matches handlers against
+ * the still-encoded URI, so the handler covers every URI ("**") and derives
+ * the stream kind from the decoded path. */
 void sb_http_register_clash_websocket(sb_http_server *srv) {
     if (!srv || !srv->mg) return;
-    for (size_t i = 0; i < sizeof stream_kinds / sizeof stream_kinds[0]; ++i) {
-        /* "$" anchors civetweb's prefix matching to the exact path. */
-        char *uri = sb_asprintf("%s%s$", websocket_prefix, stream_kinds[i]);
-        mg_set_websocket_handler(srv->mg, uri, ws_connect, ws_ready, ws_data, ws_close, srv);
-        free(uri);
-    }
+    mg_set_websocket_handler(srv->mg, "**", ws_connect, ws_ready, ws_data, ws_close, srv);
 }

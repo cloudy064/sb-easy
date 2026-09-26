@@ -24,20 +24,24 @@ void sb_proxy_import_free(sb_proxy_import *imp);
 
 /* Parse one supported proxy URI:
  * ss, vmess, trojan, vless, hysteria2/hy2, or tuic. HTTP is config-only.
- * Returns 1 and fills *out (initialised by the callee) when parsed, 0 when the
- * URI is unsupported or invalid (std::nullopt). */
+ * Returns 1 and fills *out when parsed, 0 when the URI is unsupported or
+ * invalid (std::nullopt). *out needs no prior init; it owns memory only when
+ * 1 is returned (sb_parsed_node_free is harmless either way). */
 int sb_parse_proxy_uri(const char *uri, sb_parsed_node *out);
 
 /* Same, but reports the exceptions the C++ version can throw (nlohmann
  * type_error for vmess JSON with mistyped fields, e.g. a string "aid") as
  * SB_ERR_GENERIC with the nlohmann message. Returns 1 parsed, 0 nullopt,
- * -1 error. `uri` may contain NULs (len is exact). */
+ * -1 error. `uri` may contain NULs (len is exact). Note that node_type, tag
+ * and server are C strings: a NUL decoded into them (e.g. "#a%00b")
+ * truncates them, unlike the C++ std::string. */
 int sb_parse_proxy_uri_ex(const char *uri, size_t len, sb_parsed_node *out, sb_err *err);
 
 /* Parse a subscription response as Clash YAML, a base64-encoded URI list, or
- * a plain newline-separated URI list. On an exception the C++ version would
- * throw, the partial result is discarded and an empty vector is returned; use
- * the _ex variant to observe the error. */
+ * a plain newline-separated URI list. The C++ version can throw from the URI
+ * list path (vmess type errors, see sb_parse_proxy_uri_ex) and callers such
+ * as the subscription refresh let that propagate; this variant then returns
+ * an empty vector, so use the _ex variant where the error matters. */
 sb_parsed_node_vec sb_parse_subscription_body(const char *body, size_t len);
 /* Returns 0 and fills *out, or -1 (out left empty) with err set. */
 int sb_parse_subscription_body_ex(const char *body, size_t len, sb_parsed_node_vec *out,

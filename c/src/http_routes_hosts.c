@@ -116,7 +116,7 @@ static int profile_mode(const sbj *body, sb_profile_mode *out, sb_err *err) {
     const sbj *found = NULL;
     const char *mode = NULL;
     if (json_value_string(body, "mode", "managed", &found, &mode, err) != 0) return -1;
-    *out = (found ? json_string_is(found, "full") : false) ? SB_PROFILE_FULL : SB_PROFILE_MANAGED;
+    *out = found && json_string_is(found, "full") ? SB_PROFILE_FULL : SB_PROFILE_MANAGED;
     return 0;
 }
 
@@ -631,10 +631,11 @@ static int handle_list_host_commands(sb_http_req *req, sb_http_resp *resp, sb_er
 }
 
 /* normalized_command(): trim + ASCII lowercase of required "command"; only
- * "reload" / "restart". Returns the command (malloc'd) or NULL. When the
- * "Unknown command: ..." message cannot travel through sb_err unchanged
- * (embedded NUL or longer than the buffer), the 400 response is written
- * directly to *resp and *responded is set. */
+ * "reload" / "restart". Returns the command (malloc'd) or NULL. The C++
+ * ValidationError("Unknown command: " + command) reaches the client through
+ * what(), i.e. cut at the first NUL but otherwise unbounded; when that text
+ * does not fit sb_err's buffer the 400 response is written directly to
+ * *resp and *responded is set. */
 static char *normalized_command(const sbj *body, sb_http_resp *resp, bool *responded, sb_err *err) {
     *responded = false;
     if (!sb_json_required_string(body, "command", err)) return NULL;
@@ -647,14 +648,11 @@ static char *normalized_command(const sbj *body, sb_http_resp *resp, bool *respo
     if ((len == 6 && memcmp(command, "reload", 6) == 0) || (len == 7 && memcmp(command, "restart", 7) == 0))
         return command;
     static const char prefix[] = "Unknown command: ";
-    if (memchr(command, '\0', len) || sizeof prefix - 1 + len >= sizeof err->msg) {
-        sb_buf message = {0};
-        sb_buf_append(&message, prefix, sizeof prefix - 1);
-        sb_buf_append(&message, command, len);
-        sbj *out = sbj_object();
-        sbj_set(out, "error", sbj_strn(message.p, message.len));
-        sb_buf_free(&message);
-        sb_resp_json(resp, 400, out);
+    size_t shown = strlen(command); /* what() stops at the first NUL */
+    if (sizeof prefix - 1 + shown >= sizeof err->msg) {
+        char *message = sb_asprintf("%s%s", prefix, command);
+        sb_resp_error(resp, 400, message);
+        free(message);
         *responded = true;
     } else {
         sb_fail(err, SB_ERR_VALIDATION, "%s%s", prefix, command);

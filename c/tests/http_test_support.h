@@ -126,7 +126,8 @@ SB_TEST_UNUSED static int sb_test_server_start_ex(sb_test_server *t, sb_test_pre
         fprintf(stderr, "server creation failed: %s\n", err.msg);
         return -1;
     }
-    if (sb_http_server_start(t->server, &err) != 0) {
+    /* sb_http_server_start returns the bound port (> 0) or -1. */
+    if (sb_http_server_start(t->server, &err) < 0) {
         fprintf(stderr, "server start failed: %s\n", err.msg);
         return -1;
     }

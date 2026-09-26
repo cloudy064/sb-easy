@@ -625,13 +625,15 @@ static int parse_tuic(sv uri, sb_parsed_node *out) {
 int sb_parse_proxy_uri_ex(const char *uri, size_t len, sb_parsed_node *out, sb_err *err) {
     sb_parsed_node_init(out);
     sv v = sv_trim((sv){uri ? uri : "", uri ? len : 0});
-    if (sv_starts(v, "ss://")) return parse_shadowsocks(v, out);
-    if (sv_starts(v, "vmess://")) return parse_vmess(v, out, err);
-    if (sv_starts(v, "trojan://")) return parse_trojan(v, out);
-    if (sv_starts(v, "vless://")) return parse_vless(v, out);
-    if (sv_starts(v, "hysteria2://") || sv_starts(v, "hy2://")) return parse_hysteria2(v, out);
-    if (sv_starts(v, "tuic://")) return parse_tuic(v, out);
-    return 0;
+    int r = 0;
+    if (sv_starts(v, "ss://")) r = parse_shadowsocks(v, out);
+    else if (sv_starts(v, "vmess://")) r = parse_vmess(v, out, err);
+    else if (sv_starts(v, "trojan://")) r = parse_trojan(v, out);
+    else if (sv_starts(v, "vless://")) r = parse_vless(v, out);
+    else if (sv_starts(v, "hysteria2://") || sv_starts(v, "hy2://")) r = parse_hysteria2(v, out);
+    else if (sv_starts(v, "tuic://")) r = parse_tuic(v, out);
+    if (r != 1) sb_parsed_node_free(out); /* nothing owned; freeing again is harmless */
+    return r;
 }
 
 int sb_parse_proxy_uri(const char *uri, sb_parsed_node *out) {
@@ -644,10 +646,22 @@ int sb_parse_proxy_uri(const char *uri, sb_parsed_node *out) {
  * node tree through yaml_to_json(): scalars become JSON strings, null nodes
  * become null, maps keep only scalar keys (last duplicate wins) and only the
  * first document is read. yaml-cpp implements neither merge keys ("<<" is an
- * ordinary key) nor implicit typing, and neither does this loader. libyaml is
- * stricter than yaml-cpp in a few places; the preprocessing below restores
- * yaml-cpp's behaviour for input encodings, raw bytes and a trailing
- * colon-less key line. */
+ * ordinary key) nor implicit typing, and neither does this loader.
+ *
+ * libyaml and yaml-cpp disagree on some inputs. This loader follows yaml-cpp
+ * (verified against it with a differential corpus) for: encoding detection
+ * and transcoding, raw bytes / control characters / invalid UTF-8, NUL in
+ * plain scalars, the \' escape, ':'-leading plain scalars and empty keys or
+ * entries in flow context, '?' inside flow plain scalars, unterminated quoted
+ * scalars at the end of the input, tabs between tokens, anchor names outside
+ * [0-9A-Za-z_-], a colon-less last key line, the 500-level depth limit and
+ * scanner errors in the token after the document. It does not reproduce
+ * yaml-cpp's raw-byte results for the \N and \_ escapes, its handling of
+ * lone CR line breaks, 0x04 bytes, malformed directives or tags, anchor names
+ * containing ':', or its crash on recursive aliases (null here). Most
+ * differences are handled by rewrite-and-retry: when libyaml reports an error
+ * at a construct yaml-cpp accepts, the text is rewritten to an equivalent
+ * form libyaml accepts and parsed again. */
 
 enum { Y_NULL, Y_SCALAR, Y_SEQ, Y_MAP };
 
@@ -676,6 +690,9 @@ typedef struct {
     size_t nanchors;
     yopen *open;
     size_t nopen, capopen;
+    const char *text; /* input of the current attempt */
+    size_t len;
+    size_t cur_char, cur_byte; /* incremental char-index -> byte cursor */
     bool sanitized;
     char *buffer; /* preprocessed input, if any */
     char *fixed;  /* input of the latest rewrite-and-retry round, if any */
@@ -1027,16 +1044,40 @@ static size_t yaml_unsanitize(char *s, size_t n) {
 
 /* -- events -> tree ------------------------------------------------------- */
 
-/* yaml-cpp's DepthGuard<500>. */
+/* yaml-cpp's DepthGuard<500> throws when the node depth reaches 500. */
 #define YAML_MAX_DEPTH 500
 
 static bool scalar_has_nul(const ynode *n) { return memchr(n->s, '\0', n->slen) != NULL; }
+
+/* Byte offset of libyaml mark index `index` (marks count characters) in the
+ * current input; amortised O(1) because event marks only move forward. */
+static size_t yl_byte_at(yload *L, size_t index) {
+    if (index < L->cur_char) L->cur_char = L->cur_byte = 0;
+    while (L->cur_char < index && L->cur_byte < L->len) {
+        ++L->cur_byte;
+        while (L->cur_byte < L->len && ((unsigned char)L->text[L->cur_byte] & 0xC0) == 0x80) ++L->cur_byte;
+        ++L->cur_char;
+    }
+    return L->cur_byte;
+}
+
+/* Indentation column of a block collection. The event's end mark is the
+ * zero-width BLOCK-*-START token at the first key or '-', except for an
+ * indentless sequence, whose mark is just past its first '-'. */
+static size_t block_column(yload *L, const yaml_event_t *ev, bool is_seq) {
+    size_t col = ev->end_mark.column;
+    if (is_seq && col > 0) {
+        size_t b = yl_byte_at(L, ev->end_mark.index);
+        if (!(b < L->len && L->text[b] == '-')) --col;
+    }
+    return col;
+}
 
 /* Consumes the node starting at *ev (this function deletes the event).
  * Returns NULL on error. */
 static ynode *yparse_node(yload *L, yaml_event_t *ev, int depth) {
     ynode *node = NULL;
-    if (depth > YAML_MAX_DEPTH) {
+    if (depth >= YAML_MAX_DEPTH) {
         yaml_event_delete(ev);
         return NULL;
     }
@@ -1072,6 +1113,14 @@ static ynode *yparse_node(yload *L, yaml_event_t *ev, int depth) {
                 yaml_event_delete(ev);
                 return NULL;
             }
+            /* In flow context yaml-cpp ends a plain scalar at '?' and then
+             * fails ("unknown token"), e.g. {path: /ws?ed=2048}; libyaml
+             * keeps the '?' in the scalar. */
+            if (style == YAML_PLAIN_SCALAR_STYLE && L->nopen && L->open[L->nopen - 1].flow &&
+                memchr(node->s, '?', node->slen)) {
+                yaml_event_delete(ev);
+                return NULL;
+            }
         }
         yanchor(L, ev->data.scalar.anchor, node);
         yaml_event_delete(ev);
@@ -1091,7 +1140,7 @@ static ynode *yparse_node(yload *L, yaml_event_t *ev, int depth) {
             L->capopen = L->capopen ? L->capopen * 2 : 16;
             L->open = sb_xrealloc(L->open, L->capopen * sizeof *L->open);
         }
-        L->open[L->nopen++] = (yopen){!is_seq, flow, ev->start_mark.column};
+        L->open[L->nopen++] = (yopen){!is_seq, flow, flow ? ev->start_mark.column : block_column(L, ev, is_seq)};
         yaml_event_delete(ev);
         for (;;) {
             yaml_event_t child;
@@ -1112,11 +1161,31 @@ static ynode *yparse_node(yload *L, yaml_event_t *ev, int depth) {
     }
 }
 
+/* Byte offset of character number `index` (libyaml marks count characters)
+ * in valid UTF-8 text. */
+static size_t char_to_byte(const char *t, size_t n, size_t index) {
+    size_t b = 0;
+    while (index > 0 && b < n) {
+        ++b;
+        while (b < n && ((unsigned char)t[b] & 0xC0) == 0x80) ++b;
+        --index;
+    }
+    return b;
+}
+
+static bool problem_is(const yaml_parser_t *p, const char *problem, const char *context) {
+    return p->problem && !strcmp(p->problem, problem) &&
+           (!context || (p->context && !strcmp(p->context, context)));
+}
+
 /* Parses the first document of text. */
 static ynode *yload_attempt(yload *L, const char *text, size_t len, bool *ok) {
     *ok = false;
     if (!yaml_parser_initialize(&L->parser)) return NULL;
     L->parser_live = true;
+    L->text = text;
+    L->len = len;
+    L->cur_char = L->cur_byte = 0;
     yaml_parser_set_encoding(&L->parser, YAML_UTF8_ENCODING);
     yaml_parser_set_input_string(&L->parser, (const unsigned char *)text, len);
     yaml_event_t ev;
@@ -1136,21 +1205,25 @@ static ynode *yload_attempt(yload *L, const char *text, size_t len, bool *ok) {
      * scanner error right after the document (e.g. a stray ':') still fails
      * the load; libyaml does the same when producing DOCUMENT-END. */
     if (!yaml_parser_parse(&L->parser, &ev)) return NULL;
+    /* ... and a ']' or '}' there is "illegal flow end" for yaml-cpp, while
+     * libyaml just ends the document. */
+    size_t next = char_to_byte(text, len, ev.start_mark.index);
+    bool explicit_end = ev.type == YAML_DOCUMENT_END_EVENT && !ev.data.document_end.implicit;
     yaml_event_delete(&ev);
+    if (next < len && (text[next] == ']' || text[next] == '}')) return NULL;
+    /* After an explicit "..." yaml-cpp also scans the following token, so a
+     * scanner error there fails the load. libyaml additionally insists on
+     * "---" before another document; that parser-level complaint is not an
+     * error for yaml-cpp. */
+    if (explicit_end) {
+        if (!yaml_parser_parse(&L->parser, &ev)) {
+            if (!problem_is(&L->parser, "did not find expected <document start>", NULL)) return NULL;
+        } else {
+            yaml_event_delete(&ev);
+        }
+    }
     *ok = true;
     return root;
-}
-
-/* Byte offset of character number `index` (libyaml marks count characters)
- * in valid UTF-8 text. */
-static size_t char_to_byte(const char *t, size_t n, size_t index) {
-    size_t b = 0;
-    while (index > 0 && b < n) {
-        ++b;
-        while (b < n && ((unsigned char)t[b] & 0xC0) == 0x80) ++b;
-        --index;
-    }
-    return b;
 }
 
 static bool is_blank_c(char c) { return c == ' ' || c == '\t'; }
@@ -1297,6 +1370,9 @@ static char *trailing_key_fix(const yload *L, const char *t, size_t n, size_t *o
     size_t K = p->context_mark.column;
     size_t kb = char_to_byte(t, n, p->context_mark.index);
     if (kb >= n) return NULL;
+    /* A raw NUL in the key makes yaml-cpp fail (see yparse_node). */
+    for (size_t i = kb; i + 3 < n && !is_break_c(t[i]); ++i)
+        if (!memcmp(t + i, "\xF3\xB0\x80\x80", 4)) return NULL;
     size_t depth = L->nopen;
     for (size_t i = 0; i < depth; ++i)
         if (L->open[i].flow) return NULL;
@@ -1375,19 +1451,37 @@ static char *quote_escape_fix(const yaml_parser_t *p, const char *t, size_t n, s
     return sb_buf_detach(&b);
 }
 
+static char *splice(const char *t, size_t n, size_t at, size_t del, const char *ins, size_t ins_n,
+                    size_t *out_n) {
+    sb_buf b = {0};
+    sb_buf_append(&b, t, at);
+    sb_buf_append(&b, ins, ins_n);
+    sb_buf_append(&b, t + at + del, n - at - del);
+    *out_n = b.len;
+    return b.p ? sb_buf_detach(&b) : sb_strdup("");
+}
+
 /* In flow context yaml-cpp starts a plain scalar at ':' when the next
  * character is not a blank, a break or ",[]{}?" (e.g. {server: ::1}); libyaml
  * treats every ':' in flow context as a value indicator ("did not find
  * expected node content"). The scalar (to yaml-cpp's in-flow scalar end on
- * that line) is rewritten as an equivalent double-quoted scalar. */
+ * that line) is rewritten as an equivalent double-quoted scalar. A ':' where
+ * a node was expected but that ends right away is an empty key ({: x}),
+ * which yaml-cpp reads as a null key, and a ',' there is an empty entry,
+ * which yaml-cpp reads as a null node; "~" is inserted in both cases. */
 static char *flow_colon_fix(const yload *L, const char *t, size_t n, size_t *out_n) {
     const yaml_parser_t *p = &L->parser;
     if (!p->problem || strcmp(p->problem, "did not find expected node content") != 0) return NULL;
     if (!L->nopen || !L->open[L->nopen - 1].flow) return NULL;
     size_t at = char_to_byte(t, n, p->problem_mark.index);
-    if (at + 1 >= n || t[at] != ':' || is_blank_c(t[at + 1]) || is_break_c(t[at + 1]) ||
-        strchr(",[]{}?", t[at + 1]))
-        return NULL;
+    if (at < n && t[at] == ',') /* empty entry ([a,,b]): a null node for yaml-cpp */
+        return splice(t, n, at, 0, "~", 1, out_n);
+    if (at >= n || t[at] != ':') return NULL;
+    /* A ':' ending the node (blank, break, end, or ",]}") is a value
+     * indicator with an empty key for yaml-cpp ({: x} = {~: x}). */
+    if (at + 1 == n || is_blank_c(t[at + 1]) || is_break_c(t[at + 1]) || strchr(",]}", t[at + 1]))
+        return splice(t, n, at, 0, "~", 1, out_n);
+    if (strchr("[{?", t[at + 1])) return NULL;
     size_t e = at + 1;
     while (e < n && !is_break_c(t[e]) && !strchr(",?[]{}", t[e])) {
         if (t[e] == ':' && (e + 1 == n || is_blank_c(t[e + 1]) || is_break_c(t[e + 1]) ||
@@ -1408,21 +1502,6 @@ static char *flow_colon_fix(const yload *L, const char *t, size_t n, size_t *out
     sb_buf_append(&b, t + e, n - e);
     *out_n = b.len;
     return sb_buf_detach(&b);
-}
-
-static char *splice(const char *t, size_t n, size_t at, size_t del, const char *ins, size_t ins_n,
-                    size_t *out_n) {
-    sb_buf b = {0};
-    sb_buf_append(&b, t, at);
-    sb_buf_append(&b, ins, ins_n);
-    sb_buf_append(&b, t + at + del, n - at - del);
-    *out_n = b.len;
-    return b.p ? sb_buf_detach(&b) : sb_strdup("");
-}
-
-static bool problem_is(const yaml_parser_t *p, const char *problem, const char *context) {
-    return p->problem && !strcmp(p->problem, problem) &&
-           (!context || (p->context && !strcmp(p->context, context)));
 }
 
 /* yaml-cpp accepts a quoted scalar left open at the end of the input (a
@@ -1483,34 +1562,105 @@ static char *tab_fix(const yaml_parser_t *p, const char *t, size_t n, size_t *ou
  * blanks, breaks and "[]{},"; libyaml only allows [0-9A-Za-z_-]. A name
  * libyaml rejects is renamed (deterministically, so its aliases match) and
  * the parse retried. */
-static char *anchor_fix(const yaml_parser_t *p, const char *t, size_t n, size_t *out_n) {
-    if (!problem_is(p, "did not find expected alphabetic or numeric character", NULL) ||
-        !p->context ||
-        (strcmp(p->context, "while scanning an anchor") != 0 &&
-         strcmp(p->context, "while scanning an alias") != 0))
+static bool anchor_name_end(char c) { return is_blank_c(c) || is_break_c(c) || strchr("[]{},", c); }
+
+/* Replaces the name of the anchor/alias token at t[at] ('&' or '*') with a
+ * deterministic libyaml-safe one. In bulk mode every other "&name"/"*name"
+ * token with the same name is renamed too (one parse round for all of them);
+ * yload_first verifies afterwards that no scalar was touched. */
+static char *anchor_fix(const yaml_parser_t *p, const char *t, size_t n, bool bulk, size_t *out_n) {
+    size_t at;
+    if (problem_is(p, "did not find expected alphabetic or numeric character", NULL) && p->context &&
+        (!strcmp(p->context, "while scanning an anchor") ||
+         !strcmp(p->context, "while scanning an alias"))) {
+        at = char_to_byte(t, n, p->context_mark.index);
+    } else if (problem_is(p, "found character that cannot start any token", NULL)) {
+        /* libyaml ends a name at '%', '@' or '`' and then fails there. */
+        size_t e = char_to_byte(t, n, p->problem_mark.index);
+        if (e >= n || !strchr("%@`", t[e])) return NULL;
+        at = e;
+        while (at > 0 && !is_blank_c(t[at - 1]) && !is_break_c(t[at - 1]) && !strchr("[]{},", t[at - 1]))
+            --at;
+    } else {
         return NULL;
-    size_t at = char_to_byte(t, n, p->context_mark.index);
+    }
     if (at >= n || (t[at] != '&' && t[at] != '*')) return NULL;
     size_t e = at + 1;
-    while (e < n && !is_blank_c(t[e]) && !is_break_c(t[e]) && !strchr("[]{},", t[e])) ++e;
+    while (e < n && !anchor_name_end(t[e])) ++e;
     if (e == at + 1 || (e < n && (t[e] == '[' || t[e] == '{'))) return NULL; /* yaml-cpp fails too */
     static const char hex[] = "0123456789abcdef";
-    sb_buf name = {0};
-    sb_buf_putc(&name, t[at]);
-    sb_buf_puts(&name, "__sbx_");
-    for (size_t i = at + 1; i < e; ++i) {
-        sb_buf_putc(&name, hex[(unsigned char)t[i] >> 4]);
-        sb_buf_putc(&name, hex[(unsigned char)t[i] & 15]);
+    const char *name = t + at + 1;
+    size_t name_n = e - at - 1;
+    sb_buf renamed = {0};
+    sb_buf_puts(&renamed, "__sbx_");
+    for (size_t i = 0; i < name_n; ++i) {
+        sb_buf_putc(&renamed, hex[(unsigned char)name[i] >> 4]);
+        sb_buf_putc(&renamed, hex[(unsigned char)name[i] & 15]);
     }
-    char *r = splice(t, n, at, e - at, name.p, name.len, out_n);
-    sb_buf_free(&name);
-    return r;
+    sb_buf b = {0};
+    size_t copied = 0;
+    for (size_t i = bulk ? 0 : at; i < n; ++i) {
+        if (i != at) {
+            if (!bulk) break;
+            if ((t[i] != '&' && t[i] != '*') || n - i - 1 < name_n || memcmp(t + i + 1, name, name_n) != 0 ||
+                (i + 1 + name_n < n && !anchor_name_end(t[i + 1 + name_n])) ||
+                (i > 0 && !is_blank_c(t[i - 1]) && !is_break_c(t[i - 1]) && !strchr("[{,", t[i - 1])))
+                continue;
+        }
+        sb_buf_append(&b, t + copied, i + 1 - copied); /* through the indicator */
+        sb_buf_append(&b, renamed.p, renamed.len);
+        copied = i + 1 + name_n;
+        i = copied - 1;
+    }
+    sb_buf_append(&b, t + copied, n - copied);
+    sb_buf_free(&renamed);
+    *out_n = b.len;
+    return sb_buf_detach(&b);
 }
 
 /* Bounds on rewrite-and-retry rounds (each fixes one construct libyaml
  * rejects but yaml-cpp accepts) and on the total bytes re-parsed. */
 #define YAML_MAX_FIX_ROUNDS 1024
 #define YAML_MAX_FIX_BYTES ((size_t)256 * 1024 * 1024)
+
+/* Runs parse rounds on text, applying the rewrites above on failure. */
+static ynode *yload_rounds(yload *L, const char *text, size_t len, bool bulk_anchors, bool *ok,
+                           bool *renamed) {
+    size_t work = 0;
+    *renamed = false;
+    for (int round = 0;; ++round) {
+        ynode *root = yload_attempt(L, text, len, ok);
+        if (*ok) return root;
+        work += len;
+        if (round == YAML_MAX_FIX_ROUNDS || work > YAML_MAX_FIX_BYTES) return NULL;
+        const yaml_parser_t *p = &L->parser;
+        size_t flen = 0;
+        char *fixed = quote_escape_fix(p, text, len, &flen);
+        if (!fixed) fixed = flow_colon_fix(L, text, len, &flen);
+        if (!fixed) fixed = unterminated_quote_fix(p, text, len, &flen);
+        if (!fixed) fixed = empty_key_fix(p, text, len, &flen);
+        if (!fixed) fixed = tab_fix(p, text, len, &flen);
+        if (!fixed && (fixed = anchor_fix(p, text, len, bulk_anchors, &flen))) *renamed = true;
+        if (!fixed) fixed = trailing_key_fix(L, text, len, &flen);
+        if (!fixed) return NULL;
+        yload_clear(L);
+        free(L->fixed);
+        L->fixed = fixed;
+        text = fixed;
+        len = flen;
+    }
+}
+
+/* True if a bulk anchor rename leaked into a scalar value. */
+static bool rename_leaked(const yload *L) {
+    for (size_t i = 0; i < L->nall; ++i) {
+        const ynode *n = L->all[i];
+        if (n->kind != Y_SCALAR) continue;
+        for (size_t k = 0; k + 6 <= n->slen; ++k)
+            if (!memcmp(n->s + k, "__sbx_", 6)) return true;
+    }
+    return false;
+}
 
 /* YAML::Load: the first document only; *ok=false where yaml-cpp throws. */
 static ynode *yload_first(yload *L, const char *text, size_t len, bool *ok) {
@@ -1535,28 +1685,13 @@ static ynode *yload_first(yload *L, const char *text, size_t len, bool *ok) {
         text = sanitized;
         len = slen;
     }
-    size_t work = 0;
-    for (int round = 0;; ++round) {
-        ynode *root = yload_attempt(L, text, len, ok);
-        if (*ok) return root;
-        work += len;
-        if (round == YAML_MAX_FIX_ROUNDS || work > YAML_MAX_FIX_BYTES) return NULL;
-        const yaml_parser_t *p = &L->parser;
-        size_t flen = 0;
-        char *fixed = quote_escape_fix(p, text, len, &flen);
-        if (!fixed) fixed = flow_colon_fix(L, text, len, &flen);
-        if (!fixed) fixed = unterminated_quote_fix(p, text, len, &flen);
-        if (!fixed) fixed = empty_key_fix(p, text, len, &flen);
-        if (!fixed) fixed = tab_fix(p, text, len, &flen);
-        if (!fixed) fixed = anchor_fix(p, text, len, &flen);
-        if (!fixed) fixed = trailing_key_fix(L, text, len, &flen);
-        if (!fixed) return NULL;
+    bool renamed;
+    ynode *root = yload_rounds(L, text, len, true, ok, &renamed);
+    if (*ok && renamed && rename_leaked(L)) { /* redo, renaming one token per round */
         yload_clear(L);
-        free(L->fixed);
-        L->fixed = fixed;
-        text = fixed;
-        len = flen;
+        root = yload_rounds(L, text, len, false, ok, &renamed);
     }
+    return *ok ? root : NULL;
 }
 
 /* Conversion limits: yaml-cpp's yaml_to_json recursed through alias cycles

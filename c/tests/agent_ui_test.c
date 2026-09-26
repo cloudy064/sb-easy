@@ -655,6 +655,37 @@ TEST(agent_ui_request_rules) {
     CHECK_STR(index.cache_control, "no-cache");
     ui_response_free(&index);
 
+    /* Cookies are parsed like Drogon: no space after ';', several Cookie
+     * headers (last wins), case-sensitive names. */
+    char *cookie_request = sb_asprintf(
+        "GET /api/status HTTP/1.1\r\nHost: x\r\nCookie: a=1;sb_easy_agent_session=%s\r\n\r\n",
+        c.cookie);
+    char *cookie_response = raw_request(c.port, cookie_request);
+    CHECK(cookie_response && sb_starts_with(cookie_response, "HTTP/1.1 200 "));
+    free(cookie_response);
+    free(cookie_request);
+    cookie_request = sb_asprintf("GET /api/status HTTP/1.1\r\nHost: x\r\n"
+                                 "Cookie: sb_easy_agent_session=stale\r\n"
+                                 "Cookie: other=2; sb_easy_agent_session=%s \r\n\r\n",
+                                 c.cookie);
+    cookie_response = raw_request(c.port, cookie_request);
+    CHECK(cookie_response && sb_starts_with(cookie_response, "HTTP/1.1 200 "));
+    free(cookie_response);
+    free(cookie_request);
+    cookie_request = sb_asprintf(
+        "GET /api/status HTTP/1.1\r\nHost: x\r\nCookie: SB_EASY_AGENT_SESSION=%s\r\n\r\n",
+        c.cookie);
+    cookie_response = raw_request(c.port, cookie_request);
+    CHECK(cookie_response && sb_starts_with(cookie_response, "HTTP/1.1 401 "));
+    free(cookie_response);
+    free(cookie_request);
+
+    /* Oversized bodies get Drogon's bare parser response. */
+    char *oversized = raw_request(c.port, "PUT /api/settings HTTP/1.1\r\nHost: x\r\n"
+                                          "Content-Length: 600000\r\n\r\n{}");
+    CHECK_STR(oversized, "HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n");
+    free(oversized);
+
     /* A revoked session cannot be replayed. */
     ui_response logout = request(&c, "POST", "/api/logout", NULL);
     CHECK_EQ_INT(logout.status, 200);

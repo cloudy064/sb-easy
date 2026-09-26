@@ -4,7 +4,9 @@
  * See http_internal.h for the contract shared with the route groups. */
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +19,9 @@
 #include "civetweb.h"
 #include "http_internal.h"
 #include "sb/clash_client.h"
+#include "sb/config_etag.h"
+#include "sb/config_renderer.h"
+#include "sb/singbox_supervisor.h"
 #include "sb/subscription_fetcher.h"
 #include "sb/wireguard.h"
 
@@ -105,6 +110,7 @@ void sb_http_server_options_copy(sb_http_server_options *dst, const sb_http_serv
 }
 
 static char *ascii_lower_dup(const char *s, size_t len);
+static void self_singbox_join(sb_http_server *srv);
 
 /* ---- small helpers (C++ anonymous namespace) -------------------------- */
 
@@ -397,8 +403,16 @@ int sb_json_integer_field(const sbj *body, const char *field, int64_t *out, sb_e
     return 0;
 }
 
+const sb_auth_claims *sb_req_claims(const sb_http_req *req, sb_err *err) {
+    if (!req || !req->claims) {
+        sb_fail(err, SB_ERR_AUTH, "Invalid or expired token");
+        return NULL;
+    }
+    return req->claims;
+}
+
 int sb_require_admin(const sb_http_req *req, sb_err *err) {
-    if (!req->claims) return sb_fail(err, SB_ERR_AUTH, "Invalid or expired token");
+    if (!req || !req->claims) return sb_fail(err, SB_ERR_AUTH, "Invalid or expired token");
     if (!sb_streq(req->claims->role, "admin")) return sb_fail(err, SB_ERR_FORBIDDEN, "Admin role required");
     return 0;
 }
@@ -447,16 +461,212 @@ sbj *sb_http_default_telemetry(void) {
     return t;
 }
 
-sbj *sb_http_normalize_telemetry(const sbj *body, sb_err *err) {
-    (void)body;
-    sb_fail(err, SB_ERR_GENERIC, "not implemented");
+/* nlohmann get<int64_t>() on an integer value (unsigned wraps like static_cast). */
+static int64_t json_int64(const sbj *v) { return v->type == SBJ_UINT ? (int64_t)v->v.u : v->v.i; }
+
+/* bounded_string() lambda of normalize_telemetry(). */
+static int bounded_string(const sbj *entry, const char *field, size_t maximum, bool required, sbj *out,
+                          sb_err *err) {
+    const sbj *found = sbj_get(entry, field);
+    if (!found || found->type == SBJ_NULL) {
+        if (required) return sb_fail(err, SB_ERR_VALIDATION, "%s is required", field);
+        sbj_set_str(out, field, "");
+        return 0;
+    }
+    if (!sbj_is_string(found)) return sb_fail(err, SB_ERR_VALIDATION, "%s must be a string", field);
+    if ((required && found->v.str.len == 0) || found->v.str.len > maximum)
+        return sb_fail(err, SB_ERR_VALIDATION, "%s has an invalid length", field);
+    sbj_set(out, field, sbj_strn(found->v.str.ptr, found->v.str.len));
+    return 0;
+}
+
+static sbj *normalize_domain_stats(const sbj *stats, sb_err *err) {
+    if (!sbj_is_array(stats)) {
+        sb_fail(err, SB_ERR_VALIDATION, "domain_stats must be an array");
+        return NULL;
+    }
+    if (sbj_arr_len(stats) > 1000) {
+        sb_fail(err, SB_ERR_VALIDATION, "domain_stats must contain at most 1000 entries");
+        return NULL;
+    }
+    sbj *normalized = sbj_array();
+    const sbj *entry;
+    SBJ_ARR_FOREACH(stats, i, entry) {
+        if (!sbj_is_object(entry)) {
+            sb_fail(err, SB_ERR_VALIDATION, "domain_stats must contain only objects");
+            goto fail;
+        }
+        sbj *chain = sbj_array();
+        const sbj *value = sbj_get(entry, "chain");
+        if (value) {
+            if (!sbj_is_array(value) || sbj_arr_len(value) > 16) {
+                sbj_free(chain);
+                sb_fail(err, SB_ERR_VALIDATION, "domain_stats chain must be an array of at most 16 entries");
+                goto fail;
+            }
+            const sbj *tag;
+            SBJ_ARR_FOREACH(value, t, tag) {
+                if (!sbj_is_string(tag) || tag->v.str.len > 256) {
+                    sbj_free(chain);
+                    sb_fail(err, SB_ERR_VALIDATION, "domain_stats chain contains an invalid tag");
+                    goto fail;
+                }
+                sbj_arr_push(chain, sbj_clone(tag));
+            }
+        }
+        static const char *const counters[] = {"connection_count", "uplink_total", "downlink_total", "first_seen",
+                                               "last_seen"};
+        int64_t values[5];
+        for (size_t c = 0; c < 5; ++c) {
+            if (sb_json_integer_field(entry, counters[c], &values[c], err) != 0) {
+                sbj_free(chain);
+                goto fail;
+            }
+        }
+        for (size_t c = 0; c < 5; ++c) {
+            if (values[c] < 0) {
+                sbj_free(chain);
+                sb_fail(err, SB_ERR_VALIDATION, "domain_stats counters must not be negative");
+                goto fail;
+            }
+        }
+        sbj *item = sbj_object();
+        if (bounded_string(entry, "domain", 512, true, item, err) != 0 ||
+            bounded_string(entry, "outbound", 256, false, item, err) != 0 ||
+            bounded_string(entry, "outbound_type", 80, false, item, err) != 0 ||
+            bounded_string(entry, "rule", 512, false, item, err) != 0) {
+            sbj_free(item);
+            sbj_free(chain);
+            goto fail;
+        }
+        sbj_set(item, "chain", chain);
+        for (size_t c = 0; c < 5; ++c) sbj_set_int(item, counters[c], values[c]);
+        sbj_arr_push(normalized, item);
+    }
+    return normalized;
+fail:
+    sbj_free(normalized);
     return NULL;
 }
 
-sbj *sb_http_normalize_diagnostic_report(const sbj *body, sb_err *err) {
-    (void)body;
-    sb_fail(err, SB_ERR_GENERIC, "not implemented");
+/* Keeps the last `limit` entries of a string array ("<field> must be an
+ * array" / "<field> must contain only strings"); truncates when max > 0. */
+static sbj *tail_strings(const sbj *array, size_t limit, size_t max_bytes, sb_err *err) {
+    if (!sbj_is_array(array)) {
+        sb_fail(err, SB_ERR_VALIDATION, "logs must be an array");
+        return NULL;
+    }
+    sbj *out = sbj_array();
+    size_t len = sbj_arr_len(array);
+    for (size_t i = len > limit ? len - limit : 0; i < len; ++i) {
+        const sbj *item = sbj_arr_at(array, i);
+        if (!sbj_is_string(item)) {
+            sbj_free(out);
+            sb_fail(err, SB_ERR_VALIDATION, "logs must contain only strings");
+            return NULL;
+        }
+        if (max_bytes) sbj_arr_push(out, sbj_str_take(sb_http_truncate_utf8(item->v.str.ptr, max_bytes)));
+        else sbj_arr_push(out, sbj_clone(item));
+    }
+    return out;
+}
+
+sbj *sb_http_normalize_telemetry(const sbj *body, sb_err *err) {
+    sbj *telemetry = sb_http_default_telemetry();
+    sbj_set(telemetry, "at", sbj_str_take(sb_http_utc_now()));
+    static const char *const fields[] = {"up", "down", "up_total", "down_total"};
+    for (size_t i = 0; i < 4; ++i) {
+        int64_t value = 0;
+        if (sb_json_integer_field(body, fields[i], &value, err) != 0) goto fail;
+        sbj_set_int(telemetry, fields[i], value);
+    }
+    int64_t count = 0;
+    if (sb_json_integer_field(body, "conn_count", &count, err) != 0) goto fail;
+    if (count < 0) {
+        sb_fail(err, SB_ERR_VALIDATION, "conn_count must not be negative");
+        goto fail;
+    }
+    sbj_set_int(telemetry, "conn_count", count);
+    const sbj *connections = sbj_get(body, "connections");
+    if (connections) sbj_set(telemetry, "connections", sbj_clone(connections));
+    const sbj *stats = sbj_get(body, "domain_stats");
+    if (stats) {
+        sbj *normalized = normalize_domain_stats(stats, err);
+        if (!normalized) goto fail;
+        sbj_set(telemetry, "domain_stats", normalized);
+    }
+    const sbj *logs = sbj_get(body, "logs");
+    if (logs) {
+        sbj *normalized = tail_strings(logs, 500, 0, err);
+        if (!normalized) goto fail;
+        sbj_set(telemetry, "logs", normalized);
+    }
+    return telemetry;
+fail:
+    sbj_free(telemetry);
     return NULL;
+}
+
+/* diagnostic_string(): absent/null -> fallback; else truncated string. */
+static int diagnostic_string(const sbj *body, const char *field, const char *fallback, size_t max_bytes, sbj *out,
+                             sb_err *err) {
+    const sbj *found = sbj_get(body, field);
+    if (!found || found->type == SBJ_NULL) {
+        sbj_set_str(out, field, fallback);
+        return 0;
+    }
+    if (!sbj_is_string(found)) return sb_fail(err, SB_ERR_VALIDATION, "%s must be a string", field);
+    sbj_set(out, field, sbj_str_take(sb_http_truncate_utf8(found->v.str.ptr, max_bytes)));
+    return 0;
+}
+
+static int diagnostic_object(const sbj *body, const char *field, sbj *out, sb_err *err) {
+    const sbj *found = sbj_get(body, field);
+    if (!found || found->type == SBJ_NULL) {
+        sbj_set(out, field, sbj_object());
+        return 0;
+    }
+    if (!sbj_is_object(found)) return sb_fail(err, SB_ERR_VALIDATION, "%s must be a JSON object", field);
+    sbj_set(out, field, sbj_clone(found));
+    return 0;
+}
+
+static int diagnostic_count(const sbj *body, const char *field, sbj *out, sb_err *err) {
+    const sbj *found = sbj_get(body, field);
+    if (!found || found->type == SBJ_NULL) {
+        sbj_set_int(out, field, 0);
+        return 0;
+    }
+    if (!sbj_is_integer(found)) return sb_fail(err, SB_ERR_VALIDATION, "%s must be an integer", field);
+    int64_t value = json_int64(found);
+    if (value < 0) return sb_fail(err, SB_ERR_VALIDATION, "%s must not be negative", field);
+    sbj_set_int(out, field, value);
+    return 0;
+}
+
+sbj *sb_http_normalize_diagnostic_report(const sbj *body, sb_err *err) {
+    sbj *logs = NULL;
+    const sbj *found = sbj_get(body, "logs");
+    if (found) {
+        logs = tail_strings(found, 1500, 4000, err);
+        if (!logs) return NULL;
+    } else {
+        logs = sbj_array();
+    }
+    sbj *report = sbj_object();
+    if (diagnostic_string(body, "reason", "manual", 80, report, err) != 0 ||
+        diagnostic_string(body, "app_version", "", 80, report, err) != 0 ||
+        diagnostic_string(body, "core_version", "", 120, report, err) != 0 ||
+        diagnostic_object(body, "device", report, err) != 0 || diagnostic_object(body, "vpn", report, err) != 0 ||
+        diagnostic_object(body, "network", report, err) != 0 || diagnostic_object(body, "config", report, err) != 0 ||
+        diagnostic_count(body, "runtime_log_count", report, err) != 0 ||
+        diagnostic_count(body, "connection_count", report, err) != 0) {
+        sbj_free(report);
+        sbj_free(logs);
+        return NULL;
+    }
+    sbj_set(report, "logs", logs);
+    return report;
 }
 
 void sb_http_telemetry_put(sb_http_server *srv, const char *host_id, sbj *telemetry) {
@@ -1417,6 +1627,18 @@ static bool drogon_is_websocket(const http_exchange *ex, int original_method) {
     return yes;
 }
 
+/* civetweb's should_switch_to_protocol() == websocket: some Connection
+ * header contains "upgrade" and Upgrade contains "websocket". */
+static bool civetweb_websocket_upgrade(const http_exchange *ex) {
+    const struct mg_request_info *ri = ex->ri;
+    bool upgrade = false;
+    for (int i = 0; i < ri->num_headers && !upgrade; ++i)
+        if (strcasecmp(ri->http_headers[i].name, "Connection") == 0 && strcasestr(ri->http_headers[i].value, "upgrade"))
+            upgrade = true;
+    const char *to = mg_get_header(ex->conn, "Upgrade");
+    return upgrade && to && strcasestr(to, "websocket");
+}
+
 /* Everything after parsing for a plain HTTP request: advices, routing,
  * handler, static fallback. Returns true when a handler wrote directly. */
 static bool dispatch_http(http_exchange *ex, wire_response *w) {
@@ -1536,6 +1758,25 @@ static void write_response(const http_exchange *ex, const wire_response *w) {
     fclose(f);
 }
 
+/* Makes civetweb close the connection after this request, as Drogon does
+ * after a parser error: should_keep_alive() then sees "Connection: close"
+ * (the request header array is civetweb's public request_info), and the
+ * caller returns -1 from begin_request so no unread body is drained. */
+static void force_close(http_exchange *ex) {
+    struct mg_request_info *ri = (struct mg_request_info *)mg_get_request_info(ex->conn);
+    for (int i = 0; i < ri->num_headers; ++i) {
+        if (strcasecmp(ri->http_headers[i].name, "Connection") == 0) {
+            ri->http_headers[i].value = "close";
+            return;
+        }
+    }
+    if (ri->num_headers < (int)(sizeof ri->http_headers / sizeof ri->http_headers[0])) {
+        ri->http_headers[ri->num_headers].name = "Connection";
+        ri->http_headers[ri->num_headers].value = "close";
+        ri->num_headers++;
+    }
+}
+
 static void exchange_free(http_exchange *ex) {
     for (size_t i = 0; i < ex->header_count; ++i) free(ex->header_values[i]);
     for (size_t i = 0; i < 8; ++i) free(ex->params[i]);
@@ -1582,8 +1823,14 @@ static int exchange_read_body(http_exchange *ex) {
     if (expect && *expect) {
         if (strcmp(expect, "100-continue") == 0 && !ex->http10) {
             if (content_length <= 0) return 400;
-            static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
-            conn_write(ex->conn, cont, sizeof cont - 1);
+            /* Drogon renders the interim response like any other one. */
+            char date[64];
+            http_date(time(NULL), date, sizeof date);
+            char *cont = sb_asprintf("HTTP/1.1 100 Continue\r\ncontent-type: text/html; charset=utf-8\r\n"
+                                     "date: %s\r\n\r\n",
+                                     date);
+            conn_write(ex->conn, cont, strlen(cont));
+            free(cont);
         } else if (strcmp(expect, "100-continue") != 0) {
             return 417;
         }
@@ -1646,26 +1893,31 @@ static int begin_request(struct mg_connection *conn) {
         if (parse_error) {
             w.status = parse_error;
             w.raw_close = true;
+        } else if (original == M_GET && civetweb_websocket_upgrade(ex) && clash_websocket_path(ex->path)) {
+            /* The Clash bridge (clash_websocket.c) authenticates ?token=
+             * itself and performs the upgrade. */
+            pass_to_civetweb = true;
         } else if (drogon_is_websocket(ex, original)) {
+            /* Drogon routes other upgrade requests to its WebSocket
+             * controllers only: after the advices they end in a 404 page. */
             if (auth_advice(ex, &w)) {
-                if (clash_websocket_path(ex->path) && *exchange_header(ex, "sec-websocket-key")) {
-                    pass_to_civetweb = true;
-                } else {
-                    wire_not_found_page(&w);
-                    ex->keep_alive = false;
-                }
+                wire_not_found_page(&w);
+                ex->keep_alive = false;
             }
-            if (!pass_to_civetweb) cors_apply(ex, &w);
+            cors_apply(ex, &w);
         } else {
             handled = dispatch_http(ex, &w);
         }
     }
     int status = w.status > 0 ? w.status : 200;
     if (!handled && !pass_to_civetweb) write_response(ex, &w);
+    bool close_now = w.raw_close;
+    if (close_now) force_close(ex);
     wire_free(&w);
     exchange_free(ex);
     free(ex);
-    return pass_to_civetweb ? 0 : status;
+    if (pass_to_civetweb) return 0;
+    return close_now ? -1 : status;
 }
 
 static int log_civetweb_message(const struct mg_connection *conn, const char *message) {
@@ -1774,6 +2026,12 @@ sb_http_server *sb_http_server_new(sb_store *store, const sb_http_server_options
     pthread_mutex_init(&srv->telemetry_mutex, NULL);
     srv->telemetry = sbj_object();
     pthread_mutex_init(&srv->log_mutex, NULL);
+    pthread_mutex_init(&srv->self_singbox_mutex, NULL);
+    pthread_condattr_t cond_attributes;
+    pthread_condattr_init(&cond_attributes);
+    pthread_condattr_setclock(&cond_attributes, CLOCK_MONOTONIC);
+    pthread_cond_init(&srv->self_singbox_wakeup, &cond_attributes);
+    pthread_condattr_destroy(&cond_attributes);
     router *r = sb_xcalloc(1, sizeof *r);
     pthread_rwlock_init(&r->lock, NULL);
     srv->routes = r;
@@ -1870,6 +2128,7 @@ void sb_http_server_stop(sb_http_server *srv) {
 void sb_http_server_free(sb_http_server *srv) {
     if (!srv) return;
     sb_http_server_stop(srv);
+    self_singbox_join(srv);
     pthread_mutex_lock(&g_sink_owner_mutex);
     if (g_sink_owner == srv) {
         sb_log_set_sink(NULL, NULL);
@@ -1884,6 +2143,8 @@ void sb_http_server_free(sb_http_server *srv) {
     pthread_mutex_destroy(&srv->telemetry_mutex);
     sb_strvec_free(&srv->log_lines);
     pthread_mutex_destroy(&srv->log_mutex);
+    pthread_mutex_destroy(&srv->self_singbox_mutex);
+    pthread_cond_destroy(&srv->self_singbox_wakeup);
     sb_strvec_free(&srv->cors_origins);
     free(srv->enrollment_server);
     free(srv->legacy_agent_token);
@@ -1891,8 +2152,226 @@ void sb_http_server_free(sb_http_server *srv) {
     free(srv);
 }
 
+/* ---- managed self sing-box (run_self_singbox) ------------------------------ */
+
+static bool self_singbox_stop_requested(sb_http_server *srv) {
+    pthread_mutex_lock(&srv->self_singbox_mutex);
+    bool stop = srv->self_singbox_stop;
+    pthread_mutex_unlock(&srv->self_singbox_mutex);
+    return stop;
+}
+
+/* capabilities.value("runs_singbox", false) with nlohmann's type errors. */
+static int capability_flag(const sbj *capabilities, const char *key, bool *out, sb_err *err) {
+    if (!sbj_is_object(capabilities))
+        return sb_fail(err, SB_ERR_BAD_JSON, "[json.exception.type_error.306] cannot use value() with %s",
+                       sbj_type_name(capabilities));
+    const sbj *value = sbj_get(capabilities, key);
+    if (!value) {
+        *out = false;
+        return 0;
+    }
+    if (!sbj_is_bool(value))
+        return sb_fail(err, SB_ERR_BAD_JSON, "[json.exception.type_error.302] type must be boolean, but is %s",
+                       sbj_type_name(value));
+    *out = value->v.b;
+    return 0;
+}
+
+/* One iteration of the C++ loop body up to (not including) ensure_alive().
+ * Returns -1 with err set where the C++ code would throw. */
+static int self_singbox_render(sb_http_server *srv, sb_singbox_supervisor *supervisor, char **last_etag,
+                               sb_err *err) {
+    sb_host host;
+    sb_host_init(&host);
+    int found = sb_store_find_host(srv->store, "self", &host, err);
+    int rc = found < 0 ? -1 : 0;
+    bool runs = false;
+    if (found == 1 && host.enabled && capability_flag(host.capabilities, "runs_singbox", &runs, err) != 0) rc = -1;
+    if (rc == 0 && found == 1 && host.enabled && runs) {
+        sb_render_request request;
+        sb_render_request_init(&request);
+        sb_config_renderer renderer;
+        sbj *config = NULL;
+        char *body = NULL, *etag = NULL;
+        rc = -1;
+        if (sb_store_render_request_for_host(srv->store, "self", &request, err) == 0) {
+            free(request.clash_controller);
+            request.clash_controller = sb_http_clash_controller_address(srv->opts.clash_api_url);
+            sb_str_set(&request.clash_secret, srv->opts.clash_api_secret);
+            if (sb_config_renderer_init(&renderer, NULL, err) == 0 &&
+                (config = sb_config_renderer_render(&renderer, &request, err)) != NULL) {
+                body = sbj_dump(config, 2);
+                etag = sb_config_etag("self", body, srv->opts.config_hash_seed);
+                if (!etag) {
+                    sb_fail(err, SB_ERR_GENERIC, "config ETag hashing failed");
+                } else if (*last_etag && strcmp(*last_etag, etag) == 0) {
+                    rc = 0;
+                } else if (sb_singbox_supervisor_apply_config(supervisor, body, strlen(body), err) == 0) {
+                    free(*last_etag);
+                    *last_etag = sb_strdup(etag);
+                    SB_INFO("managed sing-box config applied: %s", etag);
+                    rc = 0;
+                }
+            }
+        }
+        free(etag);
+        free(body);
+        sbj_free(config);
+        sb_render_request_free(&request);
+    }
+    sb_host_free(&host);
+    return rc;
+}
+
+static void *self_singbox_main(void *arg) {
+    sb_http_server *srv = arg;
+    const sb_http_server_options *o = &srv->opts;
+    char *config_path = sb_http_trim(o->self_singbox_config_path);
+    if (!*config_path) sb_str_set(&config_path, "data/sing-box.gen.json");
+    sb_singbox_supervisor_options so;
+    sb_singbox_supervisor_options_init(&so);
+    so.binary = o->singbox_binary;
+    so.config_path = config_path;
+    so.validate_config = o->singbox_validate_config;
+    sb_err e = {0};
+    sb_singbox_supervisor *supervisor = sb_singbox_supervisor_new(&so, &e);
+    if (!supervisor) {
+        /* C++ would terminate here (exception escaping the jthread). */
+        SB_ERROR("managed sing-box cycle failed: %s", e.msg);
+        free(config_path);
+        return NULL;
+    }
+    uint64_t interval = o->self_singbox_interval_seconds < 2 ? 2 : o->self_singbox_interval_seconds;
+    SB_INFO("managed sing-box enabled: binary=%s config=%s interval=%llus", o->singbox_binary, config_path,
+            (unsigned long long)interval);
+    char *last_etag = NULL, *logged_error = NULL;
+    while (!self_singbox_stop_requested(srv)) {
+        sb_err_clear(&e);
+        if (self_singbox_render(srv, supervisor, &last_etag, &e) == 0) {
+            sb_singbox_supervisor_ensure_alive(supervisor);
+            const char *last_error = sb_singbox_supervisor_last_error(supervisor);
+            if (last_error && !sb_streq(last_error, logged_error)) {
+                SB_ERROR("%s", last_error);
+                sb_str_set(&logged_error, last_error);
+            } else if (!last_error) {
+                free(logged_error);
+                logged_error = NULL;
+            }
+        } else if (!sb_streq(logged_error, e.msg)) {
+            SB_ERROR("managed sing-box cycle failed: %s", e.msg);
+            sb_str_set(&logged_error, e.msg);
+        }
+        struct timespec deadline;
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec += (time_t)interval;
+        pthread_mutex_lock(&srv->self_singbox_mutex);
+        while (!srv->self_singbox_stop &&
+               pthread_cond_timedwait(&srv->self_singbox_wakeup, &srv->self_singbox_mutex, &deadline) != ETIMEDOUT) {
+        }
+        pthread_mutex_unlock(&srv->self_singbox_mutex);
+    }
+    sb_singbox_supervisor_stop(supervisor);
+    sb_singbox_supervisor_free(supervisor);
+    free(last_etag);
+    free(logged_error);
+    free(config_path);
+    return NULL;
+}
+
+static int self_singbox_start(sb_http_server *srv, sb_err *err) {
+    srv->self_singbox_stop = false;
+    if (pthread_create(&srv->self_singbox_thread, NULL, self_singbox_main, srv) != 0)
+        return sb_fail(err, SB_ERR_GENERIC, "could not start the managed sing-box thread");
+    srv->self_singbox_running = true;
+    return 0;
+}
+
+static void self_singbox_request_stop(sb_http_server *srv) {
+    if (!srv->self_singbox_running) return;
+    pthread_mutex_lock(&srv->self_singbox_mutex);
+    srv->self_singbox_stop = true;
+    pthread_cond_broadcast(&srv->self_singbox_wakeup);
+    pthread_mutex_unlock(&srv->self_singbox_mutex);
+}
+
+static void self_singbox_join(sb_http_server *srv) {
+    if (!srv->self_singbox_running) return;
+    self_singbox_request_stop(srv);
+    pthread_join(srv->self_singbox_thread, NULL);
+    srv->self_singbox_running = false;
+}
+
+/* ---- run_http_server ---------------------------------------------------------- */
+
+static int g_signal_pipe[2] = {-1, -1};
+
+static void on_termination_signal(int signo) {
+    int saved = errno;
+    char c = (char)signo;
+    if (g_signal_pipe[1] >= 0 && write(g_signal_pipe[1], &c, 1) < 0) {
+    }
+    errno = saved;
+}
+
+/* Blocks until SIGINT or SIGTERM (Drogon's app().run() quits on both). */
+static void wait_for_termination(void) {
+    if (pipe(g_signal_pipe) != 0) {
+        SB_ERROR("could not create the signal pipe: %s", strerror(errno));
+        pause();
+        return;
+    }
+    fcntl(g_signal_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(g_signal_pipe[1], F_SETFD, FD_CLOEXEC);
+    fcntl(g_signal_pipe[1], F_SETFL, O_NONBLOCK);
+    struct sigaction action, old_int, old_term;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = on_termination_signal;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &action, &old_int);
+    sigaction(SIGTERM, &action, &old_term);
+    char c = 0;
+    for (;;) {
+        ssize_t n = read(g_signal_pipe[0], &c, 1);
+        if (n == 1 || (n < 0 && errno != EINTR)) break;
+    }
+    sigaction(SIGINT, &old_int, NULL);
+    sigaction(SIGTERM, &old_term, NULL);
+    close(g_signal_pipe[0]);
+    close(g_signal_pipe[1]);
+    g_signal_pipe[0] = g_signal_pipe[1] = -1;
+    SB_INFO("received %s, shutting down", c == SIGINT ? "SIGINT" : "SIGTERM");
+}
+
 int sb_http_server_run(sb_store *store, const sb_http_server_options *options, sb_err *err) {
-    (void)store;
-    (void)options;
-    return sb_fail(err, SB_ERR_GENERIC, "HTTP server run not implemented yet");
+    if (!store || !options) return sb_fail(err, SB_ERR_VALIDATION, "HTTP store is required");
+    /* The C++ code starts WireGuard with its own WireGuardService instance. */
+    sb_wireguard_options wg_options;
+    wireguard_options_from(options, &wg_options);
+    sb_wireguard *wireguard = sb_wireguard_new(store, &wg_options);
+    sb_wireguard_options_free(&wg_options);
+    if (!wireguard) return sb_fail(err, SB_ERR_GENERIC, "WireGuard service could not be created");
+    if (sb_wireguard_startup(wireguard, err) != 0) {
+        sb_wireguard_free(wireguard);
+        return -1;
+    }
+    sb_http_server *srv = sb_http_server_new(store, options, err);
+    int rc = -1;
+    if (srv) {
+        if ((!options->singbox_managed || self_singbox_start(srv, err) == 0) && sb_http_server_start(srv, err) >= 0) {
+            SB_INFO("sb-easy C HTTP server listening on %s:%u", srv->opts.address, (unsigned)srv->bound_port);
+            wait_for_termination();
+            rc = 0;
+        }
+        sb_http_server_stop(srv);
+        self_singbox_request_stop(srv);
+    }
+    sb_wireguard_shutdown(wireguard);
+    if (srv) {
+        self_singbox_join(srv);
+        sb_http_server_free(srv);
+    }
+    sb_wireguard_free(wireguard);
+    return rc;
 }

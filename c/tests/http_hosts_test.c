@@ -192,6 +192,14 @@ TEST(hosts_contract) {
     r = call_as(&t, "", "GET", "/api/hosts", NULL);
     CHECK_EQ_INT(r.status, 401); /* administrative APIs must reject requests without a JWT */
     sb_test_response_free(&r);
+    {
+        const char *preflight[] = {"Origin: https://allowed.example", "Access-Control-Request-Method: GET",
+                                   "Access-Control-Request-Headers: authorization,content-type", NULL};
+        sb_test_request_ex(&t, "OPTIONS", "/api/hosts", NULL, NULL, preflight, &r);
+        CHECK_EQ_INT(r.status, 204); /* CORS preflight completes before JWT authentication */
+        CHECK_STR(r.allow_origin, "https://allowed.example");
+        sb_test_response_free(&r);
+    }
 
     r = call(&t, "GET", "/api/hosts/profiles", NULL);
     CHECK_EQ_INT(r.status, 200);
@@ -565,5 +573,1082 @@ TEST(hosts_contract) {
     free(original_token);
     free(host_id);
     free(profile_id);
+    sb_test_server_stop(&t);
+}
+
+/* ---- profiles / rule-script preview ------------------------------------- */
+
+TEST(profile_validation) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    static const struct {
+        const char *body;
+        const char *error;
+    } cases[] = {
+        {"", "Request body must be a JSON object"},
+        {"[]", "Request body must be a JSON object"},
+        {"{\"template\":{}}", "name must be a non-empty string"},
+        {"{\"name\":\"\"}", "name must be a non-empty string"},
+        {"{\"name\":5,\"template\":{}}", "name must be a non-empty string"},
+        {"{\"name\":\"x\"}", "template must be a JSON object"},
+        {"{\"name\":\"x\",\"template\":[]}", "template must be a JSON object"},
+        {"{\"name\":\"x\",\"template\":{},\"mode\":5}",
+         "Invalid JSON request: [json.exception.type_error.302] type must be string, but is number"},
+        {"{\"name\":\"x\",\"template\":{},\"mode\":null}",
+         "Invalid JSON request: [json.exception.type_error.302] type must be string, but is null"},
+        {"{\"name\":\"x\",\"template\":{},\"rule_script\":5}", "rule_script must be a string"},
+        {"{\"name\":\"x\",\"template\":{},\"rule_script\":null}", "rule_script must be a string"},
+        {"{\"name\":\"x\",\"template\":{},\"rule_script_enabled\":\"yes\"}", "rule_script_enabled must be a boolean"},
+        {"{\"name\":\"x\",\"template\":{},\"rule_script_enabled\":true}",
+         "rule_script must not be empty when rule_script_enabled is true"},
+        {"{\"name\":\"x\",\"template\":{},\"rule_script\":\" \\n\\t \",\"rule_script_enabled\":true}",
+         "rule_script must not be empty when rule_script_enabled is true"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        sb_test_response r = call(&t, "POST", "/api/hosts/profiles", cases[i].body);
+        CHECK_ERROR(r, 400, cases[i].error);
+        sb_test_response_free(&r);
+    }
+
+    /* A NUL is not whitespace: the script counts as non-empty. Unknown modes
+     * fall back to managed. */
+    sb_test_response r = call(&t, "POST", "/api/hosts/profiles",
+                              "{\"name\":\"x\",\"template\":{},\"rule_script\":\"\\u0000\",\"rule_script_enabled\":true,"
+                              "\"mode\":\"x\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "mode"), "managed");
+    CHECK_EQ_INT(jbool(r.json, "rule_script_enabled"), 1);
+    sb_test_response_free(&r);
+
+    r = call(&t, "POST", "/api/hosts/profiles",
+             "{\"name\":\"Full one\",\"template\":{\"a\":[1,2.5,null,true]},\"mode\":\"full\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "mode"), "full");
+    CHECK_STR(jstr(r.json, "template"), "{\"a\":[1,2.5,null,true]}");
+    CHECK_STR(jstr(r.json, "rule_script"), "");
+    CHECK_EQ_INT(jbool(r.json, "rule_script_enabled"), 0);
+    char *full_id = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+
+    /* PUT keeps omitted fields but re-validates the stored script. */
+    char *path = sb_asprintf("/api/hosts/profiles/%s", full_id);
+    r = call(&t, "PUT", path, "{\"name\":\"Renamed\",\"template\":{\"b\":1}}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "mode"), "managed"); /* mode is not optional: absent -> managed */
+    CHECK_STR(jstr(r.json, "template"), "{\"b\":1}");
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    CHECK_STR(jstr(r.json, "name"), "Renamed");
+    sb_test_response_free(&r);
+    r = call(&t, "DELETE", path, NULL);
+    CHECK_EQ_INT(jbool(r.json, "success"), 1);
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    CHECK_ERROR(r, 404, "Profile not found");
+    sb_test_response_free(&r);
+    free(path);
+    free(full_id);
+
+    r = call(&t, "PUT", "/api/hosts/profiles/missing", "{\"name\":\"x\",\"template\":{}}");
+    CHECK_ERROR(r, 404, "Profile not found");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", "/api/hosts/profiles/default", "{\"name\":\"x\"}");
+    CHECK_ERROR(r, 400, "template must be a JSON object");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", "/api/hosts/profiles/default",
+             "{\"name\":\"Default renamed\",\"template\":{},\"rule_script_enabled\":true}");
+    CHECK_ERROR(r, 400, "rule_script must not be empty when rule_script_enabled is true");
+    sb_test_response_free(&r);
+    r = call(&t, "DELETE", "/api/hosts/profiles/missing", NULL);
+    CHECK_ERROR(r, 404, "Profile not found");
+    sb_test_response_free(&r);
+    r = call(&t, "DELETE", "/api/hosts/profiles/default", NULL);
+    CHECK_ERROR(r, 400, "Cannot delete the default profile");
+    sb_test_response_free(&r);
+    r = call(&t, "GET", "/api/hosts/profiles/default", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "name"), "Default (tun + mixed)");
+    CHECK(sbj_is_string(jpath(r.json, "template")));
+    sb_test_response_free(&r);
+
+    /* Deleting a profile moves its hosts back to the default profile. */
+    r = call(&t, "POST", "/api/hosts/profiles", "{\"name\":\"Temp\",\"template\":{}}");
+    char *temp_id = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    char *body = sb_asprintf("{\"name\":\"On temp\",\"capabilities\":{},\"profile_id\":\"%s\"}", temp_id);
+    char *host_id = create_host(&t, body);
+    free(body);
+    REQUIRE(host_id);
+    path = sb_asprintf("/api/hosts/profiles/%s", temp_id);
+    r = call(&t, "DELETE", path, NULL);
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    free(path);
+    path = sb_asprintf("/api/hosts/%s", host_id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_STR(jstr(r.json, "profile_id"), "default");
+    sb_test_response_free(&r);
+    free(path);
+    free(host_id);
+    free(temp_id);
+    sb_test_server_stop(&t);
+}
+
+TEST(rule_script_preview) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    static const struct {
+        const char *body;
+        const char *error;
+    } invalid[] = {
+        {"{}", "rule_script must be a non-empty string"},
+        {"{\"rule_script\":\"\"}", "rule_script must be a non-empty string"},
+        {"{\"rule_script\":\"x\",\"context\":[]}", "context must be a JSON object"},
+        {"{\"rule_script\":\"x\",\"context\":null}", "context must be a JSON object"},
+        {"{\"rule_script\":\"x\",\"context\":{\"host\":null}}", "context host/outboundTags/currentRules have invalid types"},
+        {"{\"rule_script\":\"x\",\"context\":{\"outboundTags\":\"x\"}}",
+         "context host/outboundTags/currentRules have invalid types"},
+        {"{\"rule_script\":\"x\",\"context\":{\"currentRules\":{}}}",
+         "context host/outboundTags/currentRules have invalid types"},
+    };
+    for (size_t i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+        sb_test_response r = call(&t, "POST", "/api/hosts/rule-script/test", invalid[i].body);
+        CHECK_ERROR(r, 400, invalid[i].error);
+        sb_test_response_free(&r);
+    }
+    /* Missing context members get the C++ defaults. */
+    sb_test_response r = call(&t, "POST", "/api/hosts/rule-script/test",
+                              "{\"rule_script\":\"function buildRules(c) { return [{domain: [c.host.id, c.host.name, "
+                              "String(Object.keys(c.host.capabilities).length)], outbound: c.outboundTags.join(','), "
+                              "rule_set: [String(c.currentRules.length)]}]; }\",\"context\":{\"extra\":1}}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jint(r.json, "count"), 1);
+    CHECK_JSON(r.json, "rules.0.domain", "[\"preview\",\"QuickJS preview\",\"0\"]");
+    CHECK_STR(jstr(r.json, "rules.0.outbound"), "Proxy,direct,block");
+    CHECK_JSON(r.json, "rules.0.rule_set", "[\"0\"]");
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts/rule-script/test", "{\"rule_script\":\"function buildRules(c) { return {}; }\"}");
+    CHECK_ERROR(r, 422, "buildRules(context) must return an array");
+    CHECK_STR(jstr(r.json, "kind"), "rule_script");
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts/rule-script/test", "{\"rule_script\":\"function buildRules(c) { return [1]; }\"}");
+    CHECK_ERROR(r, 422, "each generated rule must be a JSON object");
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts/rule-script/test", "{\"rule_script\":\"function buildRules(c) { return []; }\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.body, "{\"count\":0,\"rules\":[],\"success\":true}");
+    sb_test_response_free(&r);
+    sb_test_server_stop(&t);
+}
+
+/* ---- hosts --------------------------------------------------------------- */
+
+static size_t host_count(sb_test_server *t) {
+    sb_host_vec hosts = {0};
+    sb_err err = {0};
+    size_t count = sb_store_list_hosts(t->store, &hosts, &err) == 0 ? hosts.len : (size_t)-1;
+    sb_host_vec_free(&hosts);
+    return count;
+}
+
+TEST(host_validation_and_provisioning) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    static const struct {
+        const char *body;
+        int status;
+        const char *error;
+    } invalid[] = {
+        {"{}", 400, "name must be a non-empty string"},
+        {"{\"name\":\"\"}", 400, "name must be a non-empty string"},
+        {"{\"name\":\"n\",\"capabilities\":[]}", 400, "capabilities must be a JSON object"},
+        {"{\"name\":\"n\",\"profile_id\":5}", 400, "profile_id must be a string"},
+        {"{\"name\":\"n\",\"capabilities\":{},\"wg_address\":1}", 400, "wg_address must be a string"},
+        {"{\"name\":\"n\",\"capabilities\":{},\"wg_endpoint\":true}", 400, "wg_endpoint must be a string"},
+        {"{\"name\":\"n\",\"capabilities\":{},\"clash_api\":{}}", 400, "clash_api must be a string"},
+        {"{\"name\":\"n\",\"capabilities\":{},\"clash_secret\":1}", 400, "clash_secret must be a string"},
+        {"{\"name\":\"n\",\"capabilities\":{},\"profile_id\":\"missing-profile\"}", 500, "Internal server error"},
+    };
+    for (size_t i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+        sb_test_response r = call(&t, "POST", "/api/hosts", invalid[i].body);
+        CHECK_ERROR(r, invalid[i].status, invalid[i].error);
+        sb_test_response_free(&r);
+    }
+    CHECK_EQ_INT(host_count(&t), 1); /* only self */
+
+    /* The membership check runs after the insert: the host exists anyway. */
+    sb_test_response r = call(&t, "POST", "/api/hosts", "{\"name\":\"n\",\"capabilities\":{\"is_wg_member\":\"yes\"}}");
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be boolean, but is string");
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts", "{\"name\":\"n\",\"capabilities\":{\"is_wg_member\":null}}");
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be boolean, but is null");
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(host_count(&t), 3);
+
+    /* Nulls leave defaults; an empty wg_endpoint is dropped on create. */
+    r = call(&t, "POST", "/api/hosts",
+             "{\"name\":\"plain\",\"capabilities\":{},\"wg_endpoint\":\"\",\"clash_secret\":null,\"profile_id\":null,"
+             "\"clash_api\":\"http://x:9090\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK(sbj_is_null(jpath(r.json, "wg_endpoint")));
+    CHECK_STR(jstr(r.json, "profile_id"), "default");
+    CHECK_STR(jstr(r.json, "clash_api"), "http://x:9090");
+    CHECK_EQ_INT(jbool(r.json, "has_token"), 1);
+    CHECK_EQ_INT(jint(r.json, "assigned_outbounds"), 0);
+    CHECK(sbj_is_null(jpath(r.json, "last_seen")));
+    CHECK(!sbj_has(r.json, "agent_token") && !sbj_has(r.json, "clash_secret"));
+    sb_test_response_free(&r);
+
+    /* Default capabilities make the host a WireGuard member: it gets a peer
+     * and a default Clash API on its intranet address... */
+    r = call(&t, "POST", "/api/hosts", "{\"name\":\"Default caps host\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_JSON(r.json, "capabilities",
+               "{\"is_self\":false,\"is_wg_hub\":false,\"is_wg_member\":true,\"runs_singbox\":true}");
+    CHECK_STR(jstr(r.json, "wg_address"), "10.59.32.2/32");
+    CHECK_STR(jstr(r.json, "clash_api"), "http://10.59.32.2:9090");
+    CHECK(jstr(r.json, "wg_public_key") != NULL);
+    sb_test_response_free(&r);
+    /* ...unless the request mentions clash_api at all (even as null). */
+    r = call(&t, "POST", "/api/hosts", "{\"name\":\"Clash null host\",\"clash_api\":null}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "wg_address"), "10.59.32.3/32");
+    CHECK(sbj_is_null(jpath(r.json, "clash_api")));
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts",
+             "{\"name\":\"Endpoint host\",\"capabilities\":{\"is_wg_member\":true},\"wg_endpoint\":\"203.0.113.5:51820\","
+             "\"clash_api\":\"http://custom:9090\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "wg_endpoint"), "203.0.113.5:51820");
+    CHECK_STR(jstr(r.json, "clash_api"), "http://custom:9090");
+    char *endpoint_host = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(peer_count(&t), 3);
+
+    /* Updates. */
+    char *plain = create_host(&t, "{\"name\":\"Plain\",\"capabilities\":{}}");
+    REQUIRE(plain);
+    char *path = sb_asprintf("/api/hosts/%s", plain);
+    static const struct {
+        const char *body;
+        const char *error;
+    } bad_updates[] = {
+        {"x", "Request body must be a JSON object"},
+        {"{\"name\":\"\"}", "name must be a non-empty string"},
+        {"{\"name\":5}", "name must be a non-empty string"},
+        {"{\"capabilities\":\"x\"}", "capabilities must be a JSON object"},
+        {"{\"enabled\":\"no\"}", "enabled must be a boolean"},
+        {"{\"wg_public_key\":5}", "wg_public_key must be a string"},
+        {"{\"clash_secret\":5}", "clash_secret must be a string"},
+    };
+    for (size_t i = 0; i < sizeof bad_updates / sizeof *bad_updates; ++i) {
+        r = call(&t, "PUT", path, bad_updates[i].body);
+        CHECK_ERROR(r, 400, bad_updates[i].error);
+        sb_test_response_free(&r);
+    }
+    r = call(&t, "PUT", path, "{\"name\":null,\"capabilities\":null,\"enabled\":null}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "name"), "Plain");
+    sb_test_response_free(&r);
+    /* Update keeps an empty wg_endpoint (no create-time normalisation). */
+    r = call(&t, "PUT", path, "{\"wg_endpoint\":\"\",\"clash_api\":\"http://changed\",\"wg_public_key\":\"pk\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "wg_endpoint"), "");
+    CHECK_STR(jstr(r.json, "wg_public_key"), "pk");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", path, "{\"profile_id\":\"missing-profile\"}");
+    CHECK_ERROR(r, 500, "Internal server error");
+    sb_test_response_free(&r);
+    /* A malformed membership flag is persisted before the check fails, and
+     * then blocks further updates (the stored value is read first). */
+    r = call(&t, "PUT", path, "{\"capabilities\":{\"is_wg_member\":\"x\"}}");
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be boolean, but is string");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", path, "{\"enabled\":false}");
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be boolean, but is string");
+    sb_test_response_free(&r);
+    sb_host host;
+    sb_host_init(&host);
+    CHECK(find_host(&t, plain, &host) == 1 && host.enabled);
+    CHECK_STR(sbj_get_str(host.capabilities, "is_wg_member", NULL), "x");
+    sb_host_free(&host);
+    free(path);
+
+    r = call(&t, "PUT", "/api/hosts/missing", "{\"name\":\"x\"}");
+    CHECK_ERROR(r, 404, "Host not found");
+    sb_test_response_free(&r);
+    /* self never gets provisioned, even when it becomes a member. */
+    r = call(&t, "PUT", "/api/hosts/self", "{\"name\":\"Renamed self\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "name"), "Renamed self");
+    CHECK(sbj_is_null(jpath(r.json, "wg_address")));
+    CHECK_EQ_INT(jbool(r.json, "has_token"), 0);
+    sb_test_response_free(&r);
+    r = call(&t, "DELETE", "/api/hosts/self", NULL);
+    CHECK_ERROR(r, 400, "Cannot delete the built-in self host");
+    sb_test_response_free(&r);
+    r = call(&t, "DELETE", "/api/hosts/missing", NULL);
+    CHECK_ERROR(r, 404, "Host not found");
+    sb_test_response_free(&r);
+
+    /* Deleting a member host removes its peer. */
+    path = sb_asprintf("/api/hosts/%s", endpoint_host);
+    r = call(&t, "DELETE", path, NULL);
+    CHECK_STR(r.body, "{\"success\":true}");
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(peer_count(&t), 2);
+    r = call(&t, "GET", path, NULL);
+    CHECK_ERROR(r, 404, "Host not found");
+    sb_test_response_free(&r);
+    free(path);
+    free(endpoint_host);
+    free(plain);
+    sb_test_server_stop(&t);
+}
+
+TEST(host_subresources) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    static const char *const missing[][2] = {
+        {"GET", "/telemetry"},  {"GET", "/diagnostics"}, {"GET", "/commands"},   {"POST", "/commands"},
+        {"GET", "/outbounds"},  {"PUT", "/outbounds"},   {"GET", "/config"},     {"GET", "/wg-config"},
+        {"GET", "/token"},      {"POST", "/rotate-token"}, {"POST", "/enrollment-codes"},
+    };
+    for (size_t i = 0; i < sizeof missing / sizeof *missing; ++i) {
+        char *path = sb_asprintf("/api/hosts/missing%s", missing[i][1]);
+        const char *body = strcmp(missing[i][0], "GET") ? "{\"command\":\"reload\",\"node_ids\":[]}" : NULL;
+        sb_test_response r = call(&t, missing[i][0], path, body);
+        CHECK_ERROR(r, 404, "Host not found");
+        sb_test_response_free(&r);
+        free(path);
+    }
+    sb_test_response r = call(&t, "POST", "/api/devices/missing/enrollment-codes", NULL);
+    CHECK_ERROR(r, 404, "Host not found");
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/devices/self/enrollment-codes", NULL);
+    CHECK_ERROR(r, 400, "Enrollment requires an enabled remote host");
+    sb_test_response_free(&r);
+
+    char *id = create_host(&t, "{\"name\":\"Sub host\",\"capabilities\":{}}");
+    REQUIRE(id);
+    char *path = sb_asprintf("/api/hosts/%s/telemetry", id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_STR(r.body, "{\"at\":\"\",\"conn_count\":0,\"connections\":null,\"domain_stats\":[],\"down\":0,"
+                      "\"down_total\":0,\"logs\":[],\"up\":0,\"up_total\":0}");
+    sb_test_response_free(&r);
+    free(path);
+    path = sb_asprintf("/api/hosts/%s/diagnostics", id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_STR(r.body, "[]");
+    sb_test_response_free(&r);
+    free(path);
+
+    /* commands */
+    path = sb_asprintf("/api/hosts/%s/commands", id);
+    static const struct {
+        const char *body;
+        const char *error;
+    } bad_commands[] = {
+        {"", "Request body must be a JSON object"},
+        {"{}", "command must be a non-empty string"},
+        {"{\"command\":5}", "command must be a non-empty string"},
+        {"{\"command\":\"\"}", "command must be a non-empty string"},
+        {"{\"command\":\"Stop\"}", "Unknown command: stop"},
+        {"{\"command\":\"   \"}", "Unknown command: "},
+        /* only ASCII whitespace is trimmed; U+00A0 survives */
+        {"{\"command\":\"\\tRELOAD\\u00a0\"}", "Unknown command: reload\xc2\xa0"},
+        /* what() stops at an embedded NUL */
+        {"{\"command\":\"x\\u0000y\"}", "Unknown command: x"},
+    };
+    for (size_t i = 0; i < sizeof bad_commands / sizeof *bad_commands; ++i) {
+        r = call(&t, "POST", path, bad_commands[i].body);
+        CHECK_ERROR(r, 400, bad_commands[i].error);
+        sb_test_response_free(&r);
+    }
+    /* Long unknown commands are echoed in full. */
+    sb_buf longer = {0};
+    sb_buf_puts(&longer, "{\"command\":\"");
+    for (int i = 0; i < 3000; ++i) sb_buf_putc(&longer, 'Z');
+    sb_buf_puts(&longer, "\"}");
+    r = call(&t, "POST", path, longer.p);
+    sb_buf_free(&longer);
+    CHECK_EQ_INT(r.status, 400);
+    CHECK(jstr(r.json, "error") && strlen(jstr(r.json, "error")) == 17 + 3000);
+    CHECK(sb_starts_with(jstr(r.json, "error"), "Unknown command: zzzz"));
+    sb_test_response_free(&r);
+    r = call(&t, "POST", path, "{\"command\":\" ReStArT\\n\"}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "command"), "restart");
+    CHECK_STR(jstr(r.json, "status"), "pending");
+    CHECK_EQ_INT(sbj_obj_len(r.json), 3);
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(jlen(r.json, NULL), 1);
+    CHECK_STR(jstr(r.json, "0.command"), "restart");
+    CHECK(sbj_is_null(jpath(r.json, "0.result")) && sbj_is_null(jpath(r.json, "0.acked_at")));
+    CHECK_STR(jstr(r.json, "0.host_id"), id);
+    sb_test_response_free(&r);
+    free(path);
+
+    /* outbounds: the PUT echoes the request order, GET reads the stored set */
+    path = sb_asprintf("/api/hosts/%s/outbounds", id);
+    r = call(&t, "PUT", path, "{}");
+    CHECK_ERROR(r, 400, "node_ids must be an array");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", path, "{\"node_ids\":\"x\"}");
+    CHECK_ERROR(r, 400, "node_ids must be an array");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", path, "{\"node_ids\":[1]}");
+    CHECK_ERROR(r, 400, "node_ids must contain only strings");
+    sb_test_response_free(&r);
+    REQUIRE(execute_sql(&t, "INSERT INTO proxy_nodes (id, tag, node_type, server, server_port, fingerprint) VALUES "
+                            "('a', 'A', 'shadowsocks', 'a.example', 1, 'fa'), "
+                            "('b', 'B', 'shadowsocks', 'b.example', 1, 'fb')") == 0);
+    r = call(&t, "PUT", path, "{\"node_ids\":[\"b\",\"a\",\"b\"]}");
+    CHECK_EQ_INT(r.status, 200);
+    char *expected = sb_asprintf("{\"host_id\":\"%s\",\"node_ids\":[\"b\",\"a\",\"b\"]}", id);
+    CHECK_STR(r.body, expected);
+    free(expected);
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    expected = sb_asprintf("{\"host_id\":\"%s\",\"node_ids\":[\"a\",\"b\"],\"uses_all_when_empty\":true}", id);
+    CHECK_STR(r.body, expected);
+    free(expected);
+    sb_test_response_free(&r);
+    free(path);
+    path = sb_asprintf("/api/hosts/%s", id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(jint(r.json, "assigned_outbounds"), 2);
+    sb_test_response_free(&r);
+    free(path);
+
+    /* token reveal / rotation */
+    path = sb_asprintf("/api/hosts/%s/token", id);
+    char *token = host_token(&t, id);
+    r = call(&t, "GET", path, NULL);
+    expected = sb_asprintf("{\"agent_token\":\"%s\",\"host_id\":\"%s\",\"server\":\"https://panel.example.com\"}",
+                           token, id);
+    CHECK_STR(r.body, expected);
+    free(expected);
+    sb_test_response_free(&r);
+    free(path);
+    path = sb_asprintf("/api/hosts/%s/rotate-token", id);
+    r = call(&t, "POST", path, NULL);
+    char *rotated = host_token(&t, id);
+    expected = sb_asprintf("{\"agent_token\":\"%s\",\"host_id\":\"%s\"}", rotated, id);
+    CHECK_STR(r.body, expected);
+    CHECK(strlen(rotated) == 64 && strcmp(rotated, token) != 0);
+    free(expected);
+    sb_test_response_free(&r);
+    free(path);
+    free(rotated);
+    free(token);
+
+    /* wg-config needs a peer */
+    path = sb_asprintf("/api/hosts/%s/wg-config", id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_ERROR(r, 404, "Host has no WireGuard peer");
+    sb_test_response_free(&r);
+    free(path);
+
+    /* enrollment codes need an enabled remote host */
+    path = sb_asprintf("/api/hosts/%s", id);
+    r = call(&t, "PUT", path, "{\"enabled\":false}");
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    free(path);
+    path = sb_asprintf("/api/devices/%s/enrollment-codes", id);
+    r = call(&t, "POST", path, NULL);
+    CHECK_ERROR(r, 400, "Enrollment requires an enabled remote host");
+    sb_test_response_free(&r);
+    free(path);
+
+    /* viewers read, but cannot mutate */
+    char *viewer = sb_test_token(&t, "viewer-id", "viewer", "viewer");
+    r = call_as(&t, viewer, "GET", "/api/hosts", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    r = call_as(&t, viewer, "POST", "/api/hosts", "{\"name\":\"x\"}");
+    CHECK_ERROR(r, 403, "Viewer role is read-only");
+    sb_test_response_free(&r);
+    free(viewer);
+    free(id);
+    sb_test_server_stop(&t);
+}
+
+TEST(wg_config_download) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    char *id = create_host(&t, "{\"name\":\"My Office Box\",\"capabilities\":{\"is_wg_member\":true},"
+                               "\"wg_endpoint\":\"203.0.113.9:51999\"}");
+    REQUIRE(id);
+    char *path = sb_asprintf("/api/hosts/%s/wg-config", id);
+    sb_test_response r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.content_type, "application/octet-stream");
+    CHECK_STR(r.content_disposition, "attachment; filename=\"My_Office_Box-wg.conf\"");
+    CHECK(sb_starts_with(r.body, "# sb-easy managed host: My Office Box\n[Interface]\n"));
+    CHECK_CONTAINS(r.body, "ListenPort = 51999\n");
+    CHECK_CONTAINS(r.body, "AllowedIPs = 10.59.32.0/24\n");
+    CHECK_CONTAINS(r.body, "Endpoint = vpn.example.com:51820\nPersistentKeepalive = 25\n");
+    sb_test_response_free(&r);
+    free(path);
+    free(id);
+    sb_test_server_stop(&t);
+}
+
+/* ---- agent API ----------------------------------------------------------- */
+
+TEST(agent_authentication) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    char *id = create_host(&t, "{\"name\":\"Agent host\",\"capabilities\":{\"runs_singbox\":true}}");
+    REQUIRE(id);
+    char *token = host_token(&t, id);
+    static const char *const routes[][2] = {
+        {"GET", "/api/agent/config"},      {"POST", "/api/agent/status"},
+        {"GET", "/api/agent/commands"},    {"POST", "/api/agent/commands/x/ack"},
+        {"POST", "/api/agent/proxy-latency"}, {"POST", "/api/agent/telemetry"},
+        {"POST", "/api/agent/diagnostics"},
+    };
+    char *lower = sb_asprintf("Authorization: bearer %s", token);
+    char *padded = sb_asprintf("Authorization: Bearer   %s  ", token);
+    const char *missing[] = {NULL, "Authorization: Bearer", "Authorization: Bearer    ", lower, "Authorization: Basic x"};
+    for (size_t i = 0; i < sizeof routes / sizeof *routes; ++i) {
+        const char *body = strcmp(routes[i][0], "POST") == 0 ? "nope" : NULL;
+        for (size_t k = 0; k < sizeof missing / sizeof *missing; ++k) {
+            sb_test_response r = call_with(&t, "", missing[k], routes[i][0], routes[i][1], body);
+            CHECK_ERROR(r, 401, "Missing agent token");
+            sb_test_response_free(&r);
+        }
+        sb_test_response r = call_as(&t, "wrong", routes[i][0], routes[i][1], body);
+        CHECK_ERROR(r, 401, "Invalid agent token");
+        sb_test_response_free(&r);
+        /* The admin JWT is no agent credential either. */
+        r = call(&t, routes[i][0], routes[i][1], body);
+        CHECK_ERROR(r, 401, "Invalid agent token");
+        sb_test_response_free(&r);
+        /* Authentication precedes body validation; the token is trimmed. */
+        r = call_with(&t, "", padded, routes[i][0], routes[i][1], body);
+        if (body)
+            CHECK_ERROR(r, 400, "Request body must be a JSON object");
+        else
+            CHECK_EQ_INT(r.status, 200);
+        sb_test_response_free(&r);
+    }
+    free(lower);
+    free(padded);
+
+    /* The legacy AGENT_TOKEN acts as the self host. */
+    sb_test_response r = call_as(&t, "legacy-self-token", "GET", "/api/agent/commands", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.body, "[]");
+    sb_test_response_free(&r);
+    r = call_as(&t, "legacy-self-token", "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.profile_id, "default");
+    sb_test_response_free(&r);
+
+    /* Disabled hosts lose agent access. */
+    char *path = sb_asprintf("/api/hosts/%s", id);
+    r = call(&t, "PUT", path, "{\"enabled\":false}");
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    free(path);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_ERROR(r, 401, "Invalid agent token");
+    sb_test_response_free(&r);
+    free(token);
+    free(id);
+    sb_test_server_stop(&t);
+}
+
+TEST(agent_reports) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    char *id = create_host(&t, "{\"name\":\"Reporter\",\"capabilities\":{}}");
+    REQUIRE(id);
+    char *token = host_token(&t, id);
+    static const struct {
+        const char *path, *body;
+        int status;
+        const char *error;
+    } cases[] = {
+        {"/api/agent/status", "", 400, "Request body must be a JSON object"},
+        {"/api/agent/status", "{\"singbox_version\":5}", 400, "singbox_version must be a string or null"},
+        {"/api/agent/status", "{\"app_version\":true}", 400, "app_version must be a string or null"},
+        {"/api/agent/status", "{\"singbox_running\":\"yes\"}", 400, "singbox_running must be a boolean or null"},
+        {"/api/agent/status", "{\"config_etag\":1}", 400, "config_etag must be a string or null"},
+        {"/api/agent/status", "{\"last_error\":[]}", 400, "last_error must be a string or null"},
+        /* fields are checked in declaration order */
+        {"/api/agent/status", "{\"last_error\":1,\"singbox_running\":1}", 400, "singbox_running must be a boolean or null"},
+        {"/api/agent/proxy-latency", "{\"results\":null}", 400, "results must be a JSON object"},
+        {"/api/agent/proxy-latency", "{\"results\":[]}", 400, "results must be a JSON object"},
+        {"/api/agent/proxy-latency", "{\"results\":{\"a\":\"x\"}}", 400, "proxy latency values must be numbers or null"},
+        {"/api/agent/proxy-latency", "{\"results\":{\"a\":true}}", 400, "proxy latency values must be numbers or null"},
+        {"/api/agent/telemetry", "{\"up\":1.5}", 400, "up must be an integer"},
+        {"/api/agent/telemetry", "{\"conn_count\":-1}", 400, "conn_count must not be negative"},
+        {"/api/agent/telemetry", "{\"logs\":[1]}", 400, "logs must contain only strings"},
+        {"/api/agent/diagnostics", "{\"reason\":5}", 400, "reason must be a string"},
+        {"/api/agent/diagnostics", "{\"device\":[]}", 400, "device must be a JSON object"},
+        {"/api/agent/diagnostics", "{\"runtime_log_count\":-1}", 400, "runtime_log_count must not be negative"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        sb_test_response r = call_as(&t, token, "POST", cases[i].path, cases[i].body);
+        CHECK_ERROR(r, cases[i].status, cases[i].error);
+        sb_test_response_free(&r);
+    }
+
+    sb_test_response r = call_as(&t, token, "POST", "/api/agent/status", "{}");
+    CHECK_STR(r.body, "{\"ok\":true}");
+    sb_test_response_free(&r);
+    sb_host host;
+    sb_host_init(&host);
+    CHECK(find_host(&t, id, &host) == 1 && host.last_seen);
+    CHECK_STR(host.singbox_state, "{\"app_version\":null,\"etag\":null,\"last_error\":null,\"running\":null,\"version\":null}");
+    sb_host_free(&host);
+    r = call_as(&t, token, "POST", "/api/agent/status",
+                "{\"singbox_version\":\"1\",\"app_version\":\"2\",\"singbox_running\":false,\"config_etag\":\"e\","
+                "\"last_error\":\"boom\\u0000!\",\"extra\":1}");
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    sb_host_init(&host);
+    CHECK(find_host(&t, id, &host) == 1);
+    CHECK_STR(host.singbox_state,
+              "{\"app_version\":\"2\",\"etag\":\"e\",\"last_error\":\"boom\\u0000!\",\"running\":false,\"version\":\"1\"}");
+    sb_host_free(&host);
+
+    /* acknowledgements */
+    char *path = sb_asprintf("/api/hosts/%s/commands", id);
+    r = call(&t, "POST", path, "{\"command\":\"restart\"}");
+    char *command = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    REQUIRE(command);
+    char *ack = sb_asprintf("/api/agent/commands/%s/ack", command);
+    r = call_as(&t, token, "POST", ack, "{\"status\":5}");
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be string, but is number");
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "POST", ack, "{\"status\":null}");
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be string, but is null");
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "POST", ack, "{\"status\":\"done\",\"result\":5}");
+    CHECK_ERROR(r, 400, "result must be a string or null");
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(pending_commands(&t, id), 1);
+    r = call_as(&t, token, "POST", ack, "{\"status\":\"nope\"}");
+    CHECK_STR(r.body, "{\"ok\":true}");
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    CHECK_STR(jstr(r.json, "0.status"), "failed"); /* anything but "done" is a failure */
+    CHECK(sbj_is_null(jpath(r.json, "0.result")));
+    CHECK(jstr(r.json, "0.acked_at") != NULL);
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "POST", "/api/agent/commands/unknown/ack", "{\"status\":\"done\"}");
+    CHECK_STR(r.body, "{\"ok\":true}"); /* unknown ids are not revealed */
+    sb_test_response_free(&r);
+    free(ack);
+    free(command);
+    free(path);
+
+    /* latency updates */
+    REQUIRE(execute_sql(&t, "INSERT INTO proxy_nodes (id, tag, node_type, server, server_port, fingerprint) VALUES "
+                            "('n1', 'Tag One', 'shadowsocks', 'a.example', 1, 'f1')") == 0);
+    r = call_as(&t, token, "POST", "/api/agent/proxy-latency", "{}");
+    CHECK_STR(r.body, "{\"ok\":true,\"updated\":0}");
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "POST", "/api/agent/proxy-latency", "{\"results\":{\"Tag One\":12,\"Other\":null}}");
+    CHECK_STR(r.body, "{\"ok\":true,\"updated\":1}");
+    sb_test_response_free(&r);
+
+    /* telemetry snapshot replaces the previous one */
+    r = call_as(&t, token, "POST", "/api/agent/telemetry", "{\"connections\":{\"any\":\"thing\"},\"up\":5}");
+    CHECK_STR(r.body, "{\"ok\":true}");
+    sb_test_response_free(&r);
+    path = sb_asprintf("/api/hosts/%s/telemetry", id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(jint(r.json, "up"), 5);
+    CHECK_JSON(r.json, "connections", "{\"any\":\"thing\"}");
+    CHECK(jstr(r.json, "at") && strlen(jstr(r.json, "at")) == 20);
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "POST", "/api/agent/telemetry", "{\"up\":\"x\"}");
+    CHECK_ERROR(r, 400, "up must be an integer");
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(jint(r.json, "up"), 5); /* a rejected report keeps the last snapshot */
+    sb_test_response_free(&r);
+    free(path);
+
+    /* diagnostics: the size limit applies before authentication */
+    sb_buf big = {0};
+    sb_buf_puts(&big, "{\"logs\":[\"");
+    for (int i = 0; i < 1000000; ++i) sb_buf_putc(&big, 'a');
+    sb_buf_puts(&big, "\"]}");
+    r = call_as(&t, "", "POST", "/api/agent/diagnostics", big.p);
+    CHECK_ERROR(r, 400, "Diagnostic report exceeds 1 MB");
+    sb_test_response_free(&r);
+    sb_buf_free(&big);
+    r = call_as(&t, token, "POST", "/api/agent/diagnostics",
+                "{\"reason\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\","
+                "\"device\":null,\"connection_count\":2}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK(jstr(r.json, "report_id") && strlen(jstr(r.json, "report_id")) == 36);
+    CHECK_EQ_INT(jbool(r.json, "ok"), 1);
+    sb_test_response_free(&r);
+    path = sb_asprintf("/api/hosts/%s/diagnostics", id);
+    r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(jlen(r.json, NULL), 1);
+    CHECK(jstr(r.json, "0.reason") && strlen(jstr(r.json, "0.reason")) == 80); /* truncated to 80 bytes */
+    CHECK_JSON(r.json, "0.device", "{}");
+    CHECK_EQ_INT(jint(r.json, "0.connection_count"), 2);
+    sb_test_response_free(&r);
+    free(path);
+    free(token);
+    free(id);
+    sb_test_server_stop(&t);
+}
+
+TEST(enrollment_redeem) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    char *id = create_host(&t, "{\"name\":\"Enrolling host\",\"capabilities\":{\"runs_singbox\":true}}");
+    REQUIRE(id);
+    char *path = sb_asprintf("/api/devices/%s/enrollment-codes", id);
+    sb_test_response r = call(&t, "POST", path, NULL);
+    free(path);
+    CHECK_EQ_INT(r.status, 200);
+    char *code = sb_strdup(jstr(r.json, "code"));
+    char *uri = sb_asprintf("sbeasy://enroll?server=https%%3A%%2F%%2Fpanel.example.com&code=%s", code);
+    CHECK_STR(jstr(r.json, "enrollment_uri"), uri);
+    CHECK_STR(jstr(r.json, "host_id"), id);
+    CHECK(sb_starts_with(jstr(r.json, "qr_svg"), "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg "));
+    CHECK(jstr(r.json, "expires_at") && strlen(jstr(r.json, "expires_at")) == 19);
+    CHECK_EQ_INT(sbj_obj_len(r.json), 6);
+    free(uri);
+    sb_test_response_free(&r);
+
+    char *with_nul = sb_asprintf("{\"code\":\"%s\\u0000\"}", code);
+    char *device_array = sb_asprintf("{\"code\":\"%s\",\"device\":[]}", code);
+    char *device_null = sb_asprintf("{\"code\":\"%s\",\"device\":null}", code);
+    const struct {
+        const char *body;
+        const char *error;
+    } invalid[] = {
+        {"", "Request body must be a JSON object"},
+        {"{}", "code must be a non-empty string"},
+        {"{\"code\":5}", "code must be a non-empty string"},
+        {"{\"code\":\"short\"}", "A valid enrollment code and device are required"},
+        {device_array, "A valid enrollment code and device are required"},
+        {device_null, "A valid enrollment code and device are required"},
+        {"{\"code\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}",
+         "Enrollment code is invalid or expired"},
+        /* the full byte string is hashed: a NUL suffix never matches */
+        {with_nul, "Enrollment code is invalid or expired"},
+        {"{\"code\":\"a\\u0000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}", "Enrollment code is invalid or expired"},
+        {"{\"code\":\"a\\u0000b\"}", "A valid enrollment code and device are required"},
+    };
+    for (size_t i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+        r = call_as(&t, "", "POST", "/api/devices/enroll", invalid[i].body);
+        CHECK_ERROR(r, 400, invalid[i].error);
+        sb_test_response_free(&r);
+    }
+    free(with_nul);
+    free(device_array);
+    free(device_null);
+
+    char *body = sb_asprintf("{\"code\":\"%s\",\"device\":{\"platform\":\"linux\",\"model\":7,\"hostname\":\"\"}}", code);
+    r = call_as(&t, "", "POST", "/api/agent/enroll", body);
+    free(body);
+    CHECK_EQ_INT(r.status, 200);
+    char *token = host_token(&t, id);
+    char *expected = sb_asprintf("{\"agent_token\":\"%s\",\"host_id\":\"%s\",\"host_name\":\"Enrolling host\","
+                                 "\"profile\":{\"id\":\"default\",\"name\":\"Default (tun + mixed)\"},"
+                                 "\"server\":\"https://panel.example.com\"}",
+                                 token, id);
+    CHECK_STR(r.body, expected);
+    free(expected);
+    free(token);
+    sb_test_response_free(&r);
+    sb_host host;
+    sb_host_init(&host);
+    CHECK(find_host(&t, id, &host) == 1);
+    /* only non-empty whitelisted strings are merged */
+    CHECK_JSON(host.capabilities, NULL, "{\"platform\":\"linux\",\"runs_singbox\":true}");
+    CHECK(host.last_seen != NULL);
+    sb_host_free(&host);
+    free(code);
+    free(id);
+    sb_test_server_stop(&t);
+}
+
+/* ---- /api/agent/config, /api/hosts/{id}/config --------------------------- */
+
+TEST(agent_config_etag_and_headers) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    sb_test_response r = call_as(&t, "legacy-self-token", "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.content_type, "application/json; charset=utf-8");
+    CHECK_STR(r.rule_source, "profile");
+    CHECK_STR(r.profile_id, "default");
+    CHECK_STR(r.profile_name, "Default (tun + mixed)");
+    /* ETag = SHA256(host id || pretty body || seed), quoted. */
+    char *expected_etag = sb_config_etag("self", r.body, "contract-seed");
+    CHECK_STR(r.etag, expected_etag);
+    free(expected_etag);
+    /* The body is the dump(2) of the same config the admin preview returns. */
+    CHECK(r.body_len > 2 && r.body[0] == '{' && r.body[1] == '\n' && r.body[2] == ' ');
+    char *pretty = r.json ? sbj_dump(r.json, 2) : NULL;
+    CHECK_STR(pretty, r.body);
+    free(pretty);
+    char *compact = r.json ? sbj_dump(r.json, -1) : NULL;
+    char *etag = sb_strdup(r.etag);
+    sb_test_response_free(&r);
+    r = call(&t, "GET", "/api/hosts/self/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.content_type, "application/json; charset=utf-8");
+    CHECK_STR(r.body, compact);
+    CHECK(r.etag == NULL);
+    CHECK(r.rule_source == NULL);
+    sb_test_response_free(&r);
+    free(compact);
+
+    sb_host host;
+    sb_host_init(&host);
+    CHECK(find_host(&t, "self", &host) == 1 && host.last_seen); /* polls touch the host */
+    sb_host_free(&host);
+
+    char *header = sb_asprintf("If-None-Match: %s", etag);
+    r = call_with(&t, "legacy-self-token", header, "GET", "/api/agent/config", NULL);
+    free(header);
+    CHECK_EQ_INT(r.status, 304);
+    CHECK_EQ_INT(r.body_len, 0);
+    CHECK_STR(r.etag, etag);
+    CHECK_STR(r.rule_source, "profile");
+    CHECK_STR(r.profile_id, "default");
+    CHECK_STR(r.profile_name, "Default (tun + mixed)");
+    sb_test_response_free(&r);
+    /* Only an exact match counts. */
+    header = sb_asprintf("If-None-Match: W/%s", etag);
+    r = call_with(&t, "legacy-self-token", header, "GET", "/api/agent/config", NULL);
+    free(header);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.etag, etag);
+    sb_test_response_free(&r);
+    r = call_with(&t, "legacy-self-token", "If-None-Match: *", "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    free(etag);
+
+    /* Profile headers follow the host's profile; a disabled script is
+     * "profile", an enabled one "quickjs"; script failures are 422. */
+    r = call(&t, "POST", "/api/hosts/profiles",
+             "{\"name\":\"Script off\",\"template\":{\"route\":{\"rules\":[],\"final\":\"direct\"}},"
+             "\"rule_script\":\"function buildRules() { throw new Error('never'); }\"}");
+    char *off_id = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts/profiles",
+             "{\"name\":\"Script bad\",\"template\":{\"route\":{\"rules\":[],\"final\":\"direct\"}},"
+             "\"rule_script\":\"function buildRules() { return [{ outbound: 'nope' }]; }\",\"rule_script_enabled\":true}");
+    char *bad_id = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    REQUIRE(off_id && bad_id);
+    char *body = sb_asprintf("{\"name\":\"Off host\",\"capabilities\":{},\"profile_id\":\"%s\"}", off_id);
+    char *off_host = create_host(&t, body);
+    free(body);
+    body = sb_asprintf("{\"name\":\"Bad host\",\"capabilities\":{},\"profile_id\":\"%s\"}", bad_id);
+    char *bad_host = create_host(&t, body);
+    free(body);
+    REQUIRE(off_host && bad_host);
+    char *token = host_token(&t, off_host);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(r.rule_source, "profile");
+    CHECK_STR(r.profile_id, off_id);
+    CHECK_STR(r.profile_name, "Script off");
+    expected_etag = sb_config_etag(off_host, r.body, "contract-seed");
+    CHECK_STR(r.etag, expected_etag);
+    free(expected_etag);
+    sb_test_response_free(&r);
+    free(token);
+    token = host_token(&t, bad_host);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_ERROR(r, 422, "generated rule references unknown outbound tag: nope");
+    CHECK_STR(jstr(r.json, "kind"), "rule_script");
+    CHECK(r.etag == NULL);
+    sb_test_response_free(&r);
+    char *path = sb_asprintf("/api/hosts/%s/config", bad_host);
+    r = call(&t, "GET", path, NULL);
+    CHECK_ERROR(r, 422, "generated rule references unknown outbound tag: nope");
+    sb_test_response_free(&r);
+    free(path);
+    /* A failed render does not count as a poll. */
+    sb_host_init(&host);
+    CHECK(find_host(&t, bad_host, &host) == 1 && host.last_seen == NULL);
+    sb_host_free(&host);
+    free(token);
+    free(off_host);
+    free(bad_host);
+    free(off_id);
+    free(bad_id);
+    sb_test_server_stop(&t);
+}
+
+TEST(embedded_managed_network) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    /* A template that already uses the endpoint tag and a Clash controller. */
+    sb_test_response r = call(&t, "POST", "/api/hosts/profiles",
+                              "{\"name\":\"Embedded\",\"mode\":\"full\",\"template\":{"
+                              "\"endpoints\":[{\"type\":\"wireguard\",\"tag\":\"sb-easy-network\",\"peers\":[]},7],"
+                              "\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}],"
+                              "\"route\":{\"rules\":[],\"final\":\"direct\"},"
+                              "\"experimental\":{\"clash_api\":{\"external_controller\":\"0.0.0.0:9090\"},"
+                              "\"cache_file\":{\"enabled\":true}}}}");
+    CHECK_EQ_INT(r.status, 200);
+    char *profile = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    REQUIRE(profile);
+    char *body = sb_asprintf("{\"name\":\"Phone\",\"capabilities\":{\"platform\":\"android\"},\"profile_id\":\"%s\"}",
+                             profile);
+    char *phone = create_host(&t, body);
+    free(body);
+    REQUIRE(phone);
+    char *token = host_token(&t, phone);
+    char *config_path = sb_asprintf("/api/hosts/%s/config", phone);
+
+    /* The admin preview never provisions: no identity, no endpoint, but the
+     * control-plane route and the Clash removal already apply. */
+    r = call(&t, "GET", config_path, NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jlen(r.json, "endpoints"), 2);
+    CHECK(!jpath(r.json, "experimental.clash_api"));
+    CHECK_JSON(r.json, "experimental.cache_file", "{\"enabled\":true}");
+    CHECK_JSON(r.json, "route.rules.0", "{\"domain\":[\"panel.example.com\"],\"outbound\":\"direct\"}");
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(peer_count(&t), 0);
+
+    /* The first agent poll provisions the device identity. */
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(peer_count(&t), 1);
+    CHECK_EQ_INT(jlen(r.json, "endpoints"), 3);
+    CHECK_STR(jstr(r.json, "endpoints.2.tag"), "sb-easy-network group");
+    CHECK_STR(jstr(r.json, "endpoints.2.type"), "wireguard");
+    CHECK_JSON(r.json, "endpoints.2.address", "[\"10.59.32.2/32\"]");
+    CHECK_STR(jstr(r.json, "endpoints.2.peers.0.address"), "vpn.example.com");
+    CHECK_EQ_INT(jint(r.json, "endpoints.2.peers.0.port"), 51820);
+    CHECK_JSON(r.json, "endpoints.2.peers.0.allowed_ips", "[\"10.59.32.0/24\"]");
+    CHECK_EQ_INT(jint(r.json, "endpoints.2.mtu"), 1420);
+    CHECK_JSON(r.json, "route.rules.0", "{\"domain\":[\"panel.example.com\"],\"outbound\":\"direct\"}");
+    CHECK_JSON(r.json, "route.rules.1", "{\"ip_cidr\":[\"10.59.32.0/24\"],\"outbound\":\"sb-easy-network group\"}");
+    CHECK(!jpath(r.json, "experimental.clash_api"));
+    char *agent_compact = r.json ? sbj_dump(r.json, -1) : NULL;
+    sb_test_response_free(&r);
+    sb_host host;
+    sb_host_init(&host);
+    CHECK(find_host(&t, phone, &host) == 1);
+    CHECK_STR(host.wg_address, "10.59.32.2/32");
+    CHECK(host.wg_public_key != NULL);
+    CHECK(host.clash_api == NULL); /* provisioning for embedded devices sets no Clash default */
+    sb_host_free(&host);
+
+    /* With an identity, the admin preview shows the same config. */
+    r = call(&t, "GET", config_path, NULL);
+    CHECK_STR(r.body, agent_compact);
+    sb_test_response_free(&r);
+    free(agent_compact);
+
+    /* Node tags also count as taken. */
+    REQUIRE(execute_sql(&t, "INSERT INTO proxy_nodes (id, tag, node_type, server, server_port, fingerprint, "
+                            "protocol_config) VALUES ('g', 'sb-easy-network group', 'shadowsocks', 'g.example', 8388, "
+                            "'fg', '{\"method\":\"aes-128-gcm\",\"password\":\"x\"}')") == 0);
+    char *profile_path = sb_asprintf("/api/hosts/profiles/%s", profile);
+    r = call(&t, "PUT", profile_path,
+             "{\"name\":\"Embedded managed\",\"template\":{\"endpoints\":{\"not\":\"an array\"},"
+             "\"route\":{\"rules\":[],\"final\":\"Proxy\"}}}");
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jlen(r.json, "endpoints"), 1); /* a non-array "endpoints" is replaced */
+    CHECK_STR(jstr(r.json, "endpoints.0.tag"), "sb-easy-network");
+    CHECK_STR(r.profile_name, "Embedded managed");
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", profile_path,
+             "{\"name\":\"Embedded managed\",\"template\":{\"endpoints\":[{\"tag\":\"sb-easy-network\"}],"
+             "\"route\":{\"rules\":[],\"final\":\"Proxy\"}}}");
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "endpoints.1.tag"), "sb-easy-network group group");
+    sb_test_response_free(&r);
+    /* value("tag", "") on a template endpoint: non-string tags are errors. */
+    r = call(&t, "PUT", profile_path,
+             "{\"name\":\"Embedded managed\",\"template\":{\"endpoints\":[{\"tag\":5}],\"route\":{\"rules\":[]}}}");
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be string, but is number");
+    sb_test_response_free(&r);
+    r = call(&t, "GET", config_path, NULL);
+    CHECK_ERROR(r, 400, "Invalid JSON request: [json.exception.type_error.302] type must be string, but is number");
+    sb_test_response_free(&r);
+    free(profile_path);
+
+    /* Capability type errors surface as JSON errors on both config routes. */
+    char *host_path = sb_asprintf("/api/hosts/%s", phone);
+    static const struct {
+        const char *capabilities, *error;
+    } bad[] = {
+        {"{\"embedded_wireguard\":\"yes\"}",
+         "Invalid JSON request: [json.exception.type_error.302] type must be boolean, but is string"},
+        {"{\"platform\":5}", "Invalid JSON request: [json.exception.type_error.302] type must be string, but is number"},
+        {"{\"platform\":null}", "Invalid JSON request: [json.exception.type_error.302] type must be string, but is null"},
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; ++i) {
+        body = sb_asprintf("{\"capabilities\":%s,\"profile_id\":\"default\"}", bad[i].capabilities);
+        r = call(&t, "PUT", host_path, body);
+        free(body);
+        CHECK_EQ_INT(r.status, 200);
+        sb_test_response_free(&r);
+        r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+        CHECK_ERROR(r, 400, bad[i].error);
+        sb_test_response_free(&r);
+        r = call(&t, "GET", config_path, NULL);
+        CHECK_ERROR(r, 400, bad[i].error);
+        sb_test_response_free(&r);
+    }
+    /* embedded_wireguard short-circuits the platform check (a full-mode
+     * profile, because the managed renderer reads "platform" itself). */
+    r = call(&t, "POST", "/api/hosts/profiles",
+             "{\"name\":\"Full plain\",\"mode\":\"full\",\"template\":{\"route\":{\"rules\":[]}}}");
+    char *full_plain = sb_strdup(jstr(r.json, "id"));
+    sb_test_response_free(&r);
+    REQUIRE(full_plain);
+    body = sb_asprintf("{\"capabilities\":{\"embedded_wireguard\":true,\"platform\":5},\"profile_id\":\"%s\"}",
+                       full_plain);
+    r = call(&t, "PUT", host_path, body);
+    free(body);
+    CHECK_EQ_INT(r.status, 200);
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "endpoints.0.tag"), "sb-easy-network");
+    CHECK_STR(r.profile_id, full_plain);
+    CHECK_STR(r.profile_name, "Full plain");
+    CHECK(!jpath(r.json, "experimental.clash_api"));
+    sb_test_response_free(&r);
+    free(full_plain);
+    /* A disabled peer yields no endpoint (but still the embedded rules). */
+    REQUIRE(execute_sql(&t, "UPDATE wireguard_peers SET enabled = 0") == 0);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK(!jpath(r.json, "endpoints.0"));
+    CHECK_JSON(r.json, "route.rules.0", "{\"domain\":[\"panel.example.com\"],\"outbound\":\"direct\"}");
+    sb_test_response_free(&r);
+    free(host_path);
+    free(config_path);
+    free(token);
+    free(phone);
+    free(profile);
     sb_test_server_stop(&t);
 }

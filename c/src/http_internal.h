@@ -27,12 +27,12 @@
 
 #include "sb/auth.h"
 #include "sb/http_server.h"
+#include "sb/store.h"
 #include "sb/json.h"
 #include "sb/util.h"
 
 struct mg_connection;
 struct mg_context;
-typedef struct sb_store sb_store;
 typedef struct sb_wireguard sb_wireguard;                       /* sb/wireguard.h */
 typedef struct sb_clash_client sb_clash_client;                 /* sb/clash_client.h */
 typedef struct sb_subscription_fetcher sb_subscription_fetcher; /* sb/subscription_fetcher.h */
@@ -109,6 +109,17 @@ int sb_json_required_string_array(const sbj *body, const char *field, sb_strvec 
 int sb_json_integer_field(const sbj *body, const char *field, int64_t *out, sb_err *err);
 /* require_admin(): SB_ERR_FORBIDDEN "Admin role required". */
 int sb_require_admin(const sb_http_req *req, sb_err *err);
+
+/* Store lookups shared by several route groups (C++ require_host,
+ * require_profile, require_proxy). `out` must be initialised by the caller.
+ * 0 ok, -1 with SB_ERR_NOT_FOUND "Host not found" / "Profile not found" /
+ * "Node not found" (or the store's error). */
+int sb_http_require_host(sb_http_server *srv, const char *id, sb_host *out, sb_err *err);
+int sb_http_require_profile(sb_http_server *srv, const char *id, sb_config_profile *out, sb_err *err);
+int sb_http_require_proxy(sb_http_server *srv, const char *id, sb_proxy_record *out, sb_err *err);
+/* sync_wireguard_best_effort(): sb_wireguard_sync, logging
+ * "WireGuard sync failed: <msg>" at error level instead of failing. */
+void sb_http_sync_wireguard_best_effort(sb_http_server *srv);
 
 /* Misc helpers from the C++ anonymous namespace. */
 char *sb_http_trim(const char *s);

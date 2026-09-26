@@ -33,7 +33,10 @@ typedef enum {
     SB_ERR_SCRIPT,     /* ScriptError */
     SB_ERR_IO,         /* filesystem / process failures */
     SB_ERR_UPSTREAM,   /* remote HTTP / Clash / subscription failures */
-    SB_ERR_AUTH,       /* authentication failures */
+    SB_ERR_AUTH,       /* authentication failures -> HTTP 401 (UnauthorizedError) */
+    SB_ERR_FORBIDDEN,  /* ForbiddenError -> HTTP 403 */
+    SB_ERR_UNAVAILABLE,/* ServiceUnavailableError -> HTTP 503 */
+    SB_ERR_BAD_JSON,   /* nlohmann json::exception -> HTTP 400 "Invalid JSON request: ..." */
 } sb_code;
 
 typedef struct {

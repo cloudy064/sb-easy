@@ -68,3 +68,20 @@ ctest --test-dir build/c --output-on-failure
 * Logging: `SB_INFO(...)` etc. from `sb/util.h`.
 * Must run under ASan/UBSan without reports:
   `-DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"`.
+
+## Working in parallel with other agents
+
+* Several agents edit `c/` at the same time, each owning specific files.
+  Only edit files you own. Never edit `CMakeLists.txt`, never run
+  `git commit/stash/checkout/reset/clean` — the lead integrates and commits.
+* Keep your files compiling at all times: write a compiling skeleton first,
+  then fill it in; fix your compile errors immediately. A broken file breaks
+  every other agent's `sb_core` build.
+* If someone else's file is temporarily broken, exclude it from your build
+  dir instead of waiting: configure with
+  `-DSB_EASY_EXCLUDE_SOURCES="<regex>;<regex>"` (matched against the file
+  name, e.g. `http_routes_admin`), or just retry a bit later. Never edit it.
+* Use your own build directories (`build/c-<you>`, `build/c-<you>-asan`).
+* Tests that bind ports must use port 0 / ephemeral ports — ports 51821,
+  51822, 7890 and 9090 on this machine are production services. Never touch
+  the running `sb-easy-agent` container or `agent-data/`.

@@ -10,12 +10,12 @@
  *                        error mapping, auth/CORS/audit advice, static/SPA,
  *                        managed self sing-box loop (run_self_singbox),
  *                        telemetry store, log ring, shared helpers below.
- *   http_routes_admin.c  /api/health, /api/system/*, /api/auth/*, /api/users*,
- *                        /api/settings*, /api/wireguard/*, /api/one-time/*,
- *                        /api/config/sing-box/*
- *   http_routes_hosts.c  /api/hosts*, /api/devices/*, /api/agent/*
+ *   http_routes_admin.c  /api/health, /api/system/..., /api/auth/..., /api/users*,
+ *                        /api/settings*, /api/wireguard/..., /api/one-time/...,
+ *                        /api/config/sing-box/...
+ *   http_routes_hosts.c  /api/hosts*, /api/devices/..., /api/agent/...
  *   http_routes_proxy.c  /api/proxy/nodes*, /api/subscriptions*,
- *                        /api/sing-box/* (Clash HTTP control)
+ *                        /api/sing-box/... (Clash HTTP control)
  *   clash_websocket.c    /api/sing-box/ws/{traffic,logs,connections,memory}
  */
 #ifndef SB_HTTP_INTERNAL_H
@@ -33,7 +33,9 @@
 struct mg_connection;
 struct mg_context;
 typedef struct sb_store sb_store;
-typedef struct sb_wireguard sb_wireguard; /* sb/wireguard.h */
+typedef struct sb_wireguard sb_wireguard;                       /* sb/wireguard.h */
+typedef struct sb_clash_client sb_clash_client;                 /* sb/clash_client.h */
+typedef struct sb_subscription_fetcher sb_subscription_fetcher; /* sb/subscription_fetcher.h */
 
 /* ---- request / response --------------------------------------------- */
 
@@ -119,10 +121,17 @@ char *sb_http_truncate_utf8(const char *s, size_t max_bytes);
 
 /* ---- shared server state -------------------------------------------- */
 
+/* Handlers run on civetweb worker threads and may block (subscription
+ * fetches, Clash calls, latency tests), unlike Drogon's async handlers, so the
+ * core starts a worker pool of max(opts.threads, 32) threads. Everything in
+ * this struct is shared by those threads: the store serialises internally,
+ * the clients are thread-safe, and the mutable maps below have mutexes. */
 struct sb_http_server {
-    sb_http_server_options opts; /* owned copy */
-    sb_store *store;             /* borrowed */
-    sb_wireguard *wireguard;     /* owned */
+    sb_http_server_options opts;      /* owned copy */
+    sb_store *store;                  /* borrowed */
+    sb_wireguard *wireguard;          /* owned */
+    sb_clash_client *clash;           /* owned; shared ClashClient */
+    sb_subscription_fetcher *fetcher; /* owned; shared SubscriptionFetcher */
     char *enrollment_server;     /* normalised public URL (see register_http_routes) */
     char *legacy_agent_token;    /* trimmed AGENT_TOKEN */
 

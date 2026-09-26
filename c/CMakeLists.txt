@@ -9,6 +9,10 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 option(SB_EASY_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(SB_EASY_STATIC "Build fully static Linux executables" OFF)
 option(SB_EASY_EMBED_SINGBOX "Link the sing-box engine into the service" OFF)
+# Semicolon-separated regexes of src/*.c files to leave out of sb_core, e.g.
+# -DSB_EASY_EXCLUDE_SOURCES="http_routes_admin;wireguard". Only meant for
+# local work on a subset of modules; release builds use every source.
+set(SB_EASY_EXCLUDE_SOURCES "" CACHE STRING "Regexes of core sources to exclude")
 set(SB_EASY_SINGBOX_BRIDGE_LIBRARY "" CACHE FILEPATH "Path to the sing-box Go c-archive")
 set(SB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR "" CACHE PATH "Directory containing libsb_easy_singbox.h")
 
@@ -47,7 +51,8 @@ set(QJS_BUILD_WERROR OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(quickjs_ng
     GIT_REPOSITORY https://github.com/quickjs-ng/quickjs.git
-    GIT_TAG v0.15.1 GIT_SHALLOW TRUE)
+    GIT_TAG v0.15.1 GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL)
 
 # Only populate civetweb/qrcodegen/argon2 (we compile their sources ourselves).
 FetchContent_GetProperties(qrcodegen)
@@ -103,6 +108,9 @@ endif()
 # supervisor variant not selected for this build is part of the core library.
 file(GLOB SB_CORE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)
 list(FILTER SB_CORE_SOURCES EXCLUDE REGEX ".*/main_[^/]*\\.c$")
+foreach(pattern ${SB_EASY_EXCLUDE_SOURCES})
+    list(FILTER SB_CORE_SOURCES EXCLUDE REGEX "/${pattern}[^/]*\\.c$")
+endforeach()
 if(SB_EASY_EMBED_SINGBOX)
     list(FILTER SB_CORE_SOURCES EXCLUDE REGEX ".*/singbox_supervisor_child\\.c$")
 else()

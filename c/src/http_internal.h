@@ -53,6 +53,8 @@ typedef struct {
     size_t param_count;
     sb_auth_claims *claims;  /* set by auth advice for protected routes, else NULL */
     const char *remote_addr; /* borrowed */
+    void *core;              /* private to http_server.c (per-request state); NULL in
+                              * hand-built requests */
 } sb_http_req;
 
 typedef struct {

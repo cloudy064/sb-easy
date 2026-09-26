@@ -155,6 +155,11 @@ endforeach()
 # root so they can reach ../migrations and fixtures.
 if(BUILD_TESTING)
     file(GLOB SB_TESTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*_test.c)
+    if(SB_EASY_EMBED_SINGBOX)
+        # The supervisor test drives fake sing-box executables, which only the
+        # child-process supervisor runs.
+        list(FILTER SB_TESTS EXCLUDE REGEX ".*/singbox_supervisor_test\\.c$")
+    endif()
     foreach(test_source ${SB_TESTS})
         get_filename_component(name ${test_source} NAME_WE)
         add_executable(${name} ${test_source})
@@ -166,4 +171,12 @@ if(BUILD_TESTING)
         set_tests_properties(${name} PROPERTIES
             ENVIRONMENT "SB_EASY_MIGRATIONS=${CMAKE_CURRENT_SOURCE_DIR}/../migrations")
     endforeach()
+endif()
+
+# Starts, reloads and stops the in-process engine; run by the unified image
+# build to prove the Go bridge links and works.
+if(SB_EASY_EMBED_SINGBOX)
+    add_executable(sb-easy-singbox-embedded-smoke tests/singbox_embedded_smoke.c)
+    target_link_libraries(sb-easy-singbox-embedded-smoke PRIVATE sb_core)
+    target_compile_options(sb-easy-singbox-embedded-smoke PRIVATE -Wall -Wextra)
 endif()

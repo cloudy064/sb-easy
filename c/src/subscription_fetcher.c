@@ -88,7 +88,10 @@ static char *resolve_redirect(const http_address *cur, const char *location) {
     return r;
 }
 
-/* Maps a libcurl failure onto Drogon's ReqResult wording. */
+/* Maps a libcurl failure onto the Drogon ReqResult wording the C++ client
+ * reported: failed DNS lookups and refused connections are
+ * BadServerAddress, a connection closed before a complete response is
+ * NetworkFailure, an unparseable response is BadResponse. */
 static const char *transport_reason(const char *message) {
     static const struct {
         CURLcode code;
@@ -96,19 +99,44 @@ static const char *transport_reason(const char *message) {
     } map[] = {
         {CURLE_OPERATION_TIMEDOUT, "Timeout"},
         {CURLE_COULDNT_RESOLVE_HOST, "Bad server address"},
+        {CURLE_COULDNT_CONNECT, "Bad server address"},
         {CURLE_URL_MALFORMAT, "Bad server address"},
         {CURLE_PEER_FAILED_VERIFICATION, "Invalid certificate"},
         {CURLE_SSL_CACERT_BADFILE, "Invalid certificate"},
         {CURLE_SSL_CONNECT_ERROR, "Handshake error"},
         {CURLE_WEIRD_SERVER_REPLY, "Bad response from server"},
-        {CURLE_GOT_NOTHING, "Bad response from server"},
+        {CURLE_UNSUPPORTED_PROTOCOL, "Bad response from server"}, /* HTTP/0.9 reply */
+        {CURLE_GOT_NOTHING, "Network failure"},
         {CURLE_RECV_ERROR, "Network failure"},
         {CURLE_SEND_ERROR, "Network failure"},
-        {CURLE_COULDNT_CONNECT, "Network failure"},
+        {CURLE_PARTIAL_FILE, "Network failure"},
     };
     for (size_t i = 0; i < sizeof map / sizeof *map; ++i)
         if (sb_ends_with(message, curl_easy_strerror(map[i].code))) return map[i].reason;
     return "Network failure";
+}
+
+/* Drogon's HttpRequest encodes the path it sends (setPath + the default
+ * pathEncode_): alphanumerics and -_.!~*'()&=/\? pass through, a space
+ * becomes '+', and every other byte (including '%') becomes %XX. The C++
+ * fetcher passed the whole target (path and query) through setPath, so the
+ * request line upstream servers see is encoded the same way here. */
+static char *drogon_url_encode(const char *src) {
+    static const char hex[] = "0123456789ABCDEF";
+    sb_buf b = {0};
+    for (const unsigned char *p = (const unsigned char *)src; *p; ++p) {
+        unsigned char c = *p;
+        if (c == ' ') {
+            sb_buf_putc(&b, '+');
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                   strchr("-_.!~*'()&=/\\?", c)) {
+            sb_buf_putc(&b, (char)c);
+        } else {
+            char esc[3] = {'%', hex[c >> 4], hex[c & 0x0F]};
+            sb_buf_append(&b, esc, 3);
+        }
+    }
+    return sb_buf_detach(&b);
 }
 
 static bool redirect_status(long s) {
@@ -124,7 +152,9 @@ char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *f, const char *url_
     for (size_t redirects = 0;; ++redirects) {
         http_address addr;
         if (parse_url(url, &addr, err)) break;
-        char *full = sb_asprintf("%s%s", addr.origin, addr.target);
+        char *target = drogon_url_encode(addr.target);
+        char *full = sb_asprintf("%s%s", addr.origin, target);
+        free(target);
         sb_http_request req = {0};
         req.url = full;
         req.headers = headers;

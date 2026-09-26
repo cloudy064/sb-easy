@@ -1,8 +1,8 @@
 /* Port of cpp/src/database.cpp. */
 #include "sb/database.h"
 
-#include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,17 +46,24 @@ static int compare_migrations(const void *a, const void *b) {
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/* Matches ^([0-9]+)_(.+)\.sql$ */
-static bool match_filename(const char *name, int64_t *version, char **description) {
+/* std::regex_match(filename, ^([0-9]+)_(.+)\.sql$) with ECMAScript rules:
+ * '.' matches anything except '\n' and '\r'. Returns 1 on a match, 0 when the
+ * name does not match and -1 when the version overflows (std::stoll throws). */
+static int match_filename(const char *name, int64_t *version, char **description, sb_err *err) {
     size_t n = strlen(name), digits = 0;
-    while (isdigit((unsigned char)name[digits])) ++digits;
-    if (digits == 0 || name[digits] != '_') return false;
-    if (n < digits + 1 + 1 + 4 || strcmp(name + n - 4, ".sql") != 0) return false;
-    *version = strtoll(name, NULL, 10);
+    while (name[digits] >= '0' && name[digits] <= '9') ++digits;
+    if (digits == 0 || name[digits] != '_') return 0;
+    if (n < digits + 1 + 1 + 4 || strcmp(name + n - 4, ".sql") != 0) return 0;
+    for (size_t i = digits + 1; i < n - 4; ++i)
+        if (name[i] == '\n' || name[i] == '\r') return 0;
+    errno = 0;
+    long long parsed = strtoll(name, NULL, 10);
+    if (errno == ERANGE) return sb_fail(err, SB_ERR_GENERIC, "stoll");
+    *version = parsed;
     *description = sb_strndup(name + digits + 1, n - digits - 1 - 4);
     for (char *p = *description; *p; ++p)
         if (*p == '_') *p = ' ';
-    return true;
+    return 1;
 }
 
 static int load_migrations(const char *directory, migration_vec *out, sb_err *err) {
@@ -75,7 +82,13 @@ static int load_migrations(const char *directory, migration_vec *out, sb_err *er
         }
         int64_t version;
         char *description;
-        if (!match_filename(entry->d_name, &version, &description)) {
+        int matched = match_filename(entry->d_name, &version, &description, err);
+        if (matched < 0) {
+            rc = -1;
+            free(path);
+            break;
+        }
+        if (matched == 0) {
             free(path);
             continue;
         }

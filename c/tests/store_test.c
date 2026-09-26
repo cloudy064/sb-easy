@@ -1,7 +1,10 @@
 /* Port of cpp/tests/store_test.cpp (+ C-specific parity checks). */
+#include <dirent.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "sb/auth.h"
@@ -904,4 +907,297 @@ TEST(opens_foreign_database_copy) {
     sb_proxy_record_vec_free(&nodes);
     sb_subscription_vec_free(&subs);
     sb_store_free(s);
+}
+
+/* C-specific: nlohmann exceptions that escape the C++ store (json::value() type
+ * errors, json::dump() of invalid UTF-8) surface as SB_ERR_BAD_JSON with the
+ * identical what() text, and list results are untouched on failure. */
+TEST(json_exception_parity_and_list_failure_semantics) {
+    temp_db t;
+    sb_store *s = open_store(&t);
+    REQUIRE(s);
+    sb_err err = {0};
+
+    sbj *backup = sbj_parse_cstr("{\"wireguard_peers\":[{\"id\":\"w\",\"address\":\"a\",\"enabled\":1}]}");
+    CHECK(sb_store_restore_backup(s, backup, &err) == NULL);
+    CHECK(err.code == SB_ERR_BAD_JSON);
+    CHECK_STR(err.msg, "[json.exception.type_error.302] type must be boolean, but is number");
+    sbj_free(backup);
+    backup = sbj_parse_cstr("{\"subscriptions\":[{\"id\":\"s\",\"url\":\"u\",\"refresh_interval\":true}]}");
+    CHECK(sb_store_restore_backup(s, backup, &err) == NULL);
+    CHECK_STR(err.msg, "[json.exception.type_error.302] type must be number, but is boolean");
+    sbj_free(backup);
+    sb_wireguard_peer_vec peers = {0};
+    CHECK_EQ_INT(sb_store_list_wireguard_peers(s, &peers, &err), 0);
+    CHECK_EQ_INT(peers.len, 0); /* the failed restore rolled back */
+    sb_wireguard_peer_vec_free(&peers);
+
+    sbj *bad = sbj_str("\xff");
+    CHECK_EQ_INT(sb_store_set_app_setting(s, "k", bad, &err), -1);
+    CHECK(err.code == SB_ERR_BAD_JSON);
+    CHECK_STR(err.msg, "[json.exception.type_error.316] invalid UTF-8 byte at index 0: 0xFF");
+    sbj_free(bad);
+    bad = sbj_array();
+    sbj_arr_push(bad, sbj_str("ok"));
+    sbj_arr_push(bad, sbj_str("a\xe4\xb8"));
+    CHECK_EQ_INT(sb_store_set_app_setting(s, "k", bad, &err), -1);
+    CHECK_STR(err.msg, "[json.exception.type_error.316] incomplete UTF-8 string; last byte: 0xB8");
+    sbj_free(bad);
+    bad = sbj_parse_cstr("{\"general\":{}}");
+    sbj_set_str(sbj_get(bad, "general"), "\xed\xa0\x80", "surrogate key");
+    CHECK_EQ_INT(sb_store_update_app_settings(s, bad, &err), -1);
+    CHECK_STR(err.msg, "[json.exception.type_error.316] invalid UTF-8 byte at index 1: 0xA0");
+    sbj_free(bad);
+    sbj *good = sbj_str("\xf0\x9f\x98\x80 ok");
+    CHECK_EQ_INT(sb_store_set_app_setting(s, "k", good, &err), 0);
+    sbj_free(good);
+
+    /* ParsedProxyNode::fingerprint() reads its key material with json::value() */
+    sb_proxy_record node, out;
+    sb_proxy_record_init(&node);
+    sb_proxy_record_init(&out);
+    sb_str_set(&node.tag, "T");
+    sb_str_set(&node.node_type, "trojan");
+    sb_str_set(&node.server, "s");
+    node.server_port = 1;
+    sbj_set_int(node.protocol_config, "password", 7);
+    CHECK_EQ_INT(sb_store_create_proxy_node(s, &node, &out, &err), -1);
+    CHECK(err.code == SB_ERR_BAD_JSON);
+    CHECK_STR(err.msg, "[json.exception.type_error.302] type must be string, but is number");
+    sb_proxy_record_free(&node);
+    sb_proxy_record_free(&out);
+
+    /* save_diagnostic_report reads reason/app_version/core_version with value() */
+    sb_host h;
+    sb_host_init(&h);
+    sbj *report = sbj_parse_cstr("{\"reason\":null}");
+    CHECK(sb_store_save_diagnostic_report(s, "self", report, &err) == NULL);
+    CHECK_STR(err.msg, "[json.exception.type_error.302] type must be string, but is null");
+    sbj_free(report);
+    sb_host_free(&h);
+
+    /* a failing list call leaves the caller's vector untouched */
+    exec_sql(s, "INSERT INTO proxy_nodes (id, tag, node_type, enabled, server, server_port, "
+                "protocol_config, fingerprint) VALUES ('p1','p1','trojan',1,'s',1,'{}','p1'),"
+                "('p2','p2','trojan',1,'s',70000,'{}','p2')");
+    sb_proxy_record_vec nodes = {0};
+    sb_proxy_record *keep = sb_proxy_record_vec_push(&nodes);
+    sb_str_set(&keep->id, "caller-row");
+    CHECK_EQ_INT(sb_store_list_proxy_nodes(s, &nodes, &err), -1);
+    CHECK_STR(err.msg, "proxy server_port is out of range for node p2");
+    REQUIRE(nodes.len == 1);
+    CHECK_STR(nodes.items[0].id, "caller-row");
+    exec_sql(s, "DELETE FROM proxy_nodes WHERE id = 'p2'");
+    CHECK_EQ_INT(sb_store_list_proxy_nodes(s, &nodes, &err), 0);
+    REQUIRE(nodes.len == 2); /* appended after the caller's row */
+    CHECK_STR(nodes.items[1].id, "p1");
+    sb_proxy_record_vec_free(&nodes);
+
+    sb_store_free(s);
+    temp_db_free(&t);
+}
+
+static char *make_migration_dir(const char *const *extra_names, const char *const *extra_sql,
+                                size_t extra) {
+    unsigned char r[6];
+    sb_random_bytes(r, sizeof r);
+    char *hex = sb_hex_encode(r, sizeof r);
+    char *dir = sb_asprintf("/tmp/sb-easy-c-mig-%s", hex);
+    free(hex);
+    mkdir(dir, 0700);
+    DIR *src = opendir(migrations());
+    struct dirent *e;
+    while (src && (e = readdir(src)) != NULL) {
+        if (!sb_ends_with(e->d_name, ".sql")) continue;
+        char *from = sb_path_join(migrations(), e->d_name), *to = sb_path_join(dir, e->d_name);
+        size_t n = 0;
+        char *text = sb_read_file(from, &n);
+        if (text) sb_write_file(to, text, n);
+        free(text);
+        free(from);
+        free(to);
+    }
+    if (src) closedir(src);
+    for (size_t i = 0; i < extra; ++i) {
+        char *to = sb_path_join(dir, extra_names[i]);
+        sb_write_file(to, extra_sql[i], strlen(extra_sql[i]));
+        free(to);
+    }
+    return dir;
+}
+
+static void remove_migration_dir(char *dir) {
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        char *p = sb_path_join(dir, e->d_name);
+        unlink(p);
+        free(p);
+    }
+    if (d) closedir(d);
+    rmdir(dir);
+    free(dir);
+}
+
+/* C-specific: migration runner rules of cpp/src/database.cpp beyond the C++ tests. */
+TEST(migration_runner_edge_cases) {
+    sb_err err = {0};
+    temp_db t;
+    temp_db_init(&t);
+
+    /* names outside ^([0-9]+)_(.+)\.sql$ are ignored */
+    const char *ignored_names[] = {"README.md", "abc.sql", "12.sql", "_x.sql", "13_.sql", "14_a.SQL"};
+    const char *ignored_sql[] = {"x", "BOGUS", "BOGUS", "BOGUS", "BOGUS", "BOGUS"};
+    char *dir = make_migration_dir(ignored_names, ignored_sql, 6);
+    sb_store *s = sb_store_open(t.path, dir, &err);
+    if (!s) fprintf(stderr, "open: %s\n", err.msg);
+    REQUIRE(s);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 11);
+    sb_store_free(s);
+    remove_migration_dir(dir);
+
+    /* a failing migration is rolled back and not recorded */
+    const char *bad_names[] = {"12_add_things.sql"};
+    const char *bad_sql[] = {"CREATE TABLE later_things (id TEXT);\nBOGUS STATEMENT;\n"};
+    dir = make_migration_dir(bad_names, bad_sql, 1);
+    CHECK(sb_store_open(t.path, dir, &err) == NULL);
+    CHECK_STR(err.msg, "execute SQL failed (1): near \"BOGUS\": syntax error");
+    remove_migration_dir(dir);
+    s = sb_store_open(t.path, migrations(), &err);
+    REQUIRE(s);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 11);
+    CHECK_EQ_INT(sb_database_execute(sb_store_database(s), "SELECT * FROM later_things", &err), -1);
+    sb_store_free(s);
+
+    /* description and non-transactional migrations */
+    const char *nt_names[] = {"12_no_tx.sql"};
+    const char *nt_sql[] = {"-- no-transaction\nSELECT 1;\n"};
+    dir = make_migration_dir(nt_names, nt_sql, 1);
+    CHECK(sb_store_open(t.path, dir, &err) == NULL);
+    CHECK_STR(err.msg, "non-transactional migrations are not supported");
+    remove_migration_dir(dir);
+
+    /* duplicate versions and std::stoll overflow */
+    const char *dup_names[] = {"0001_again.sql"};
+    const char *dup_sql[] = {"SELECT 1;"};
+    dir = make_migration_dir(dup_names, dup_sql, 1);
+    CHECK(sb_store_open(t.path, dir, &err) == NULL);
+    CHECK_STR(err.msg, "duplicate migration version: 1");
+    remove_migration_dir(dir);
+    const char *big_names[] = {"99999999999999999999_big.sql"};
+    dir = make_migration_dir(big_names, dup_sql, 1);
+    CHECK(sb_store_open(t.path, dir, &err) == NULL);
+    CHECK_STR(err.msg, "stoll");
+    remove_migration_dir(dir);
+
+    /* a new migration is applied with the SQLx description (underscores -> spaces) */
+    const char *ok_names[] = {"12_add_more_things.sql"};
+    const char *ok_sql[] = {"CREATE TABLE more_things (id TEXT);\n"};
+    dir = make_migration_dir(ok_names, ok_sql, 1);
+    s = sb_store_open(t.path, dir, &err);
+    REQUIRE(s);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 12);
+    CHECK_EQ_INT(sb_database_execute(sb_store_database(s),
+                                     "CREATE TEMP TABLE probe AS SELECT description FROM _sqlx_migrations "
+                                     "WHERE version = 12 AND description = 'add more things'",
+                                     &err),
+                 0);
+    sb_store_free(s);
+    remove_migration_dir(dir);
+    temp_db_free(&t);
+}
+
+typedef struct {
+    sb_store *store;
+    int index;
+    int failures;
+} worker_arg;
+
+#define WORKERS 8
+#define ITERATIONS 25
+
+static void *store_worker(void *p) {
+    worker_arg *w = p;
+    for (int j = 0; j < ITERATIONS; ++j) {
+        sb_err err = {0};
+        sb_host host, created, found;
+        sb_host_init(&host);
+        sb_host_init(&created);
+        sb_host_init(&found);
+        char *name = sb_asprintf("worker-%d-%d", w->index, j);
+        sb_str_set(&host.name, name);
+        if (sb_store_create_host(w->store, &host, &created, &err) != 0) ++w->failures;
+        if (sb_store_find_host(w->store, created.id, &found, &err) != 1 || !sb_streq(found.name, name))
+            ++w->failures;
+        if (sb_store_record_audit(w->store, name, "POST", NULL, &err) != 0) ++w->failures;
+
+        sb_proxy_record node, saved;
+        sb_proxy_record_init(&node);
+        sb_proxy_record_init(&saved);
+        sb_str_set(&node.tag, name);
+        sb_str_set(&node.node_type, "trojan");
+        sb_str_set(&node.server, "concurrent.example");
+        node.server_port = (uint16_t)(1000 + w->index * 100 + j);
+        sbj_set_str(node.protocol_config, "password", name);
+        if (sb_store_create_proxy_node(w->store, &node, &saved, &err) != 0) ++w->failures;
+        sb_strvec ids = {0};
+        sb_strvec_push(&ids, saved.id);
+        if (sb_store_set_host_outbounds(w->store, created.id, &ids, &err) != 0) ++w->failures;
+        sb_strvec_free(&ids);
+        sb_render_request req;
+        sb_render_request_init(&req);
+        if (sb_store_render_request_for_host(w->store, created.id, &req, &err) != 0 || req.nodes.len != 1)
+            ++w->failures;
+        sb_render_request_free(&req);
+
+        sb_host_vec hosts = {0};
+        if (sb_store_list_hosts(w->store, &hosts, &err) != 0 || hosts.len < 2) ++w->failures;
+        sb_host_vec_free(&hosts);
+        sbj *settings = sb_store_app_settings(w->store, &err);
+        if (!settings) ++w->failures;
+        sbj_free(settings);
+
+        sb_proxy_record_free(&node);
+        sb_proxy_record_free(&saved);
+        free(name);
+        sb_host_free(&host);
+        sb_host_free(&created);
+        sb_host_free(&found);
+    }
+    return NULL;
+}
+
+/* C-specific: the store is shared by civetweb worker threads. */
+TEST(store_is_safe_under_concurrent_access) {
+    temp_db t;
+    sb_store *s = open_store(&t);
+    REQUIRE(s);
+    pthread_t threads[WORKERS];
+    worker_arg args[WORKERS];
+    for (int i = 0; i < WORKERS; ++i) {
+        args[i] = (worker_arg){.store = s, .index = i, .failures = 0};
+        REQUIRE(pthread_create(&threads[i], NULL, store_worker, &args[i]) == 0);
+    }
+    int failures = 0;
+    for (int i = 0; i < WORKERS; ++i) {
+        pthread_join(threads[i], NULL);
+        failures += args[i].failures;
+    }
+    CHECK_EQ_INT(failures, 0);
+    sb_err err = {0};
+    sb_host_vec hosts = {0};
+    CHECK_EQ_INT(sb_store_list_hosts(s, &hosts, &err), 0);
+    CHECK_EQ_INT(hosts.len, 1 + WORKERS * ITERATIONS);
+    sb_host_vec_free(&hosts);
+    sb_proxy_record_vec nodes = {0};
+    CHECK_EQ_INT(sb_store_list_proxy_nodes(s, &nodes, &err), 0);
+    CHECK_EQ_INT(nodes.len, WORKERS * ITERATIONS);
+    sb_proxy_record_vec_free(&nodes);
+    sb_audit_entry_vec audit = {0};
+    CHECK_EQ_INT(sb_store_list_audit(s, 1000, &audit, &err), 0);
+    CHECK_EQ_INT(audit.len, WORKERS * ITERATIONS);
+    sb_audit_entry_vec_free(&audit);
+    sb_store_free(s);
+    temp_db_free(&t);
 }

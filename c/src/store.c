@@ -668,17 +668,6 @@ static char *new_agent_token(void) {
     return sb_buf_detach(&b);
 }
 
-static char *fingerprint_of(const char *node_type, const char *tag, const char *server,
-                            uint16_t port, const sbj *config) {
-    sb_parsed_node n;
-    n.node_type = (char *)S(node_type);
-    n.tag = (char *)S(tag);
-    n.server = (char *)S(server);
-    n.server_port = port;
-    n.protocol_config = (sbj *)config;
-    return sb_parsed_node_fingerprint(&n);
-}
-
 #define HOST_SELECT                                                                    \
     "\nSELECT h.id, h.name, h.agent_token, h.capabilities, h.profile_id,\n"            \
     "       h.wg_address, h.wg_public_key, h.wg_endpoint, h.clash_api,\n"              \
@@ -775,9 +764,13 @@ static int host_exists(sqlite3 *db, const char *host_id, sb_err *err) {
     return r;
 }
 
-/* ---- nlohmann json::value() emulation ---- */
+/* ---- nlohmann emulation ------------------------------------------------
+ * The C++ store reads backup/report members with json::value() and writes JSON
+ * columns with json::dump(); both throw json::exception, which the HTTP layer
+ * answers with 400 "Invalid JSON request: <what>". These helpers reproduce the
+ * same conditions and what() texts, reported as SB_ERR_BAD_JSON. */
 static int type_error(sb_err *err, const char *want, const sbj *got) {
-    return sb_fail(err, SB_ERR_GENERIC, "[json.exception.type_error.302] type must be %s, but is %s",
+    return sb_fail(err, SB_ERR_BAD_JSON, "[json.exception.type_error.302] type must be %s, but is %s",
                    want, sbj_type_name(got));
 }
 /* value(key, default) for strings; *out is borrowed. */
@@ -801,6 +794,14 @@ static int jv_bool(const sbj *obj, const char *key, bool def, bool *out, sb_err 
     *out = v->v.b;
     return 0;
 }
+/* static_cast<std::int64_t>(double) as compiled for x86-64 (cvttsd2si): NaN and
+ * out-of-range values become INT64_MIN instead of being undefined. */
+static int64_t float_to_int64(double f) {
+    if (!(f >= -9223372036854775808.0 && f < 9223372036854775808.0)) return INT64_MIN;
+    return (int64_t)f;
+}
+/* value<std::int64_t>(key, default): nlohmann's get<std::int64_t> converts any
+ * number but rejects everything else, booleans included. */
 static int jv_int(const sbj *obj, const char *key, int64_t def, int64_t *out, sb_err *err) {
     const sbj *v = sbj_get(obj, key);
     if (!v) {
@@ -810,8 +811,7 @@ static int jv_int(const sbj *obj, const char *key, int64_t def, int64_t *out, sb
     switch (v->type) {
     case SBJ_INT: *out = v->v.i; return 0;
     case SBJ_UINT: *out = (int64_t)v->v.u; return 0;
-    case SBJ_FLOAT: *out = (int64_t)v->v.f; return 0;
-    case SBJ_BOOL: *out = v->v.b ? 1 : 0; return 0;
+    case SBJ_FLOAT: *out = float_to_int64(v->v.f); return 0;
     default: return type_error(err, "number", v);
     }
 }
@@ -821,18 +821,148 @@ static const char *jv_opt_str(const sbj *obj, const char *key) {
     return sbj_is_string(v) ? v->v.str.ptr : NULL;
 }
 
+/* json::dump() validates every string (member names included) with a strict
+ * UTF-8 decoder and throws type_error.316 at the first offending byte. */
+static int utf8_check(const char *s, size_t n, sb_err *err) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        unsigned char lo = 0x80, hi = 0xBF;
+        size_t need;
+        if (c < 0x80) {
+            ++i;
+            continue;
+        }
+        if (c >= 0xC2 && c <= 0xDF) {
+            need = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            need = 2;
+            if (c == 0xE0) lo = 0xA0;
+            if (c == 0xED) hi = 0x9F;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            need = 3;
+            if (c == 0xF0) lo = 0x90;
+            if (c == 0xF4) hi = 0x8F;
+        } else {
+            return sb_fail(err, SB_ERR_BAD_JSON,
+                           "[json.exception.type_error.316] invalid UTF-8 byte at index %zu: 0x%02X", i, c);
+        }
+        for (++i; need > 0; --need, ++i) {
+            if (i >= n)
+                return sb_fail(err, SB_ERR_BAD_JSON,
+                               "[json.exception.type_error.316] incomplete UTF-8 string; last byte: 0x%02X",
+                               (unsigned char)s[n - 1]);
+            unsigned char d = (unsigned char)s[i];
+            if (d < lo || d > hi)
+                return sb_fail(err, SB_ERR_BAD_JSON,
+                               "[json.exception.type_error.316] invalid UTF-8 byte at index %zu: 0x%02X", i, d);
+            lo = 0x80;
+            hi = 0xBF;
+        }
+    }
+    return 0;
+}
+
+/* Walks the value in serialisation order (sorted keys, key before value). */
+static int check_dumpable(const sbj *v, sb_err *err) {
+    if (!v) return 0;
+    if (v->type == SBJ_STRING) return utf8_check(v->v.str.ptr, v->v.str.len, err);
+    if (v->type == SBJ_ARRAY) {
+        for (size_t i = 0; i < v->v.arr.len; ++i)
+            if (check_dumpable(v->v.arr.items[i], err) != 0) return -1;
+    } else if (v->type == SBJ_OBJECT) {
+        for (size_t i = 0; i < v->v.obj.len; ++i)
+            if (utf8_check(v->v.obj.keys[i], strlen(v->v.obj.keys[i]), err) != 0 ||
+                check_dumpable(v->v.obj.vals[i], err) != 0)
+                return -1;
+    }
+    return 0;
+}
+
+/* json::dump(); NULL (err set) where nlohmann would throw. */
+static char *dump_checked(const sbj *value, sb_err *err) {
+    if (check_dumpable(value, err) != 0) return NULL;
+    return sbj_dump(value, -1);
+}
+
 static const char *const settings_upsert_sql =
     "INSERT INTO app_settings (key, value, updated_at) "
     "VALUES (?1, ?2, datetime('now')) "
     "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
     "updated_at = datetime('now')";
 
-static int bind_dump(sqlite3_stmt *st, int i, const sbj *value) {
-    char *text = sbj_dump(value, -1);
+/* Binds json::dump() of value; -1 (err set) where nlohmann would throw. */
+static int bind_dump(sqlite3_stmt *st, int i, const sbj *value, sb_err *err) {
+    char *text = dump_checked(value, err);
+    if (!text) return -1;
     sbq_bind_text(st, i, text);
     free(text);
     return 0;
 }
+
+/* exec_stmt() unless an earlier bind failed (bound != 0): then only finalise. */
+static int exec_bound(sqlite3_stmt *st, int bound, sb_err *err) {
+    if (bound != 0) {
+        sqlite3_finalize(st);
+        return -1;
+    }
+    return exec_stmt(st, err);
+}
+
+/* ParsedProxyNode::fingerprint(): its key material is read with json::value(),
+ * which throws for present-but-non-string members (sb_parsed_node_fingerprint
+ * silently uses ""). Returns the malloc'd fingerprint or NULL (err set). */
+static char *fingerprint_of(const char *node_type, const char *tag, const char *server,
+                            uint16_t port, const sbj *config, sb_err *err) {
+    const char *t = S(node_type), *first = NULL, *second = NULL, *ignored;
+    if (sb_streq(t, "shadowsocks") || sb_streq(t, "trojan") || sb_streq(t, "hysteria2")) {
+        first = "password";
+    } else if (sb_streq(t, "vmess") || sb_streq(t, "vless")) {
+        first = "uuid";
+    } else if (sb_streq(t, "tuic")) {
+        first = "uuid";
+        second = "password";
+    } else if (sb_streq(t, "http")) {
+        first = "username";
+        second = "password";
+    }
+    if ((first && jv_str(config, first, "", &ignored, err) != 0) ||
+        (second && jv_str(config, second, "", &ignored, err) != 0))
+        return NULL;
+    sb_parsed_node n;
+    n.node_type = (char *)t;
+    n.tag = (char *)S(tag);
+    n.server = (char *)S(server);
+    n.server_port = port;
+    n.protocol_config = (sbj *)config;
+    return sb_parsed_node_fingerprint(&n);
+}
+
+/* ---- list results ----------------------------------------------------
+ * Rows are collected in a local vector and appended to *out only on success,
+ * so a failed call leaves *out untouched. */
+#define VEC_APPEND_MOVE(dst, src)                                                      \
+    do {                                                                               \
+        if ((dst)->len + (src)->len > (dst)->cap) {                                    \
+            (dst)->cap = (dst)->len + (src)->len;                                      \
+            (dst)->items = sb_xrealloc((dst)->items, (dst)->cap * sizeof *(dst)->items); \
+        }                                                                              \
+        if ((src)->len)                                                                \
+            memcpy((dst)->items + (dst)->len, (src)->items, (src)->len * sizeof *(src)->items); \
+        (dst)->len += (src)->len;                                                      \
+        free((src)->items);                                                            \
+        memset((src), 0, sizeof *(src));                                               \
+    } while (0)
+
+#define FINISH_LIST(free_fn, out, rows, r)                                             \
+    do {                                                                               \
+        if ((r) < 0) {                                                                 \
+            free_fn(&(rows));                                                          \
+            return -1;                                                                 \
+        }                                                                              \
+        VEC_APPEND_MOVE((out), &(rows));                                               \
+        return 0;                                                                      \
+    } while (0)
 
 /* ======================================================================
  * store: lifecycle, users, audit, settings
@@ -891,16 +1021,17 @@ int sb_store_ensure_default_admin(sb_store *s, const char *password, sb_err *err
 }
 
 int sb_store_list_users(sb_store *s, sb_user_account_vec *out, sb_err *err) {
+    sb_user_account_vec rows = {0};
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s),
                                    "SELECT id, username, password_hash, role, created_at "
                                    "FROM users ORDER BY created_at",
                                    err);
     int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) read_user(st, sb_user_account_vec_push(out));
+    while (st && (r = sbq_step_row(st, err)) == 1) read_user(st, sb_user_account_vec_push(&rows));
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_user_account_vec_free, out, rows, r);
 }
 
 int sb_store_find_user_by_username(sb_store *s, const char *username, sb_user_account *out,
@@ -1020,6 +1151,7 @@ int sb_store_record_audit(sb_store *s, const char *actor, const char *action, co
 }
 
 int sb_store_list_audit(sb_store *s, size_t limit, sb_audit_entry_vec *out, sb_err *err) {
+    sb_audit_entry_vec rows = {0};
     size_t bounded = limit < 1 ? 1 : limit > 1000 ? 1000 : limit;
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s),
@@ -1029,7 +1161,7 @@ int sb_store_list_audit(sb_store *s, size_t limit, sb_audit_entry_vec *out, sb_e
     int r = st ? 0 : -1;
     if (st) sbq_bind_int(st, 1, (int64_t)bounded);
     while (st && (r = sbq_step_row(st, err)) == 1) {
-        sb_audit_entry *e = sb_audit_entry_vec_push(out);
+        sb_audit_entry *e = sb_audit_entry_vec_push(&rows);
         sb_audit_entry_free(e);
         e->id = sbq_int(st, 0);
         e->timestamp = sbq_text(st, 1);
@@ -1039,7 +1171,7 @@ int sb_store_list_audit(sb_store *s, size_t limit, sb_audit_entry_vec *out, sb_e
     }
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_audit_entry_vec_free, out, rows, r);
 }
 
 sbj *sb_store_app_settings(sb_store *s, sb_err *err) {
@@ -1050,7 +1182,8 @@ sbj *sb_store_app_settings(sb_store *s, sb_err *err) {
     while (st && (r = sbq_step_row(st, err)) == 1) {
         const char *text = (const char *)sqlite3_column_text(st, 1);
         sbj *value = text ? sbj_parse(text, (size_t)sqlite3_column_bytes(st, 1), NULL, 0) : NULL;
-        if (value) sbj_set(settings, (const char *)sqlite3_column_text(st, 0) ?: "", value);
+        const char *key = (const char *)sqlite3_column_text(st, 0);
+        if (value) sbj_set(settings, key ? key : "", value);
     }
     sqlite3_finalize(st);
     UNLOCK(s);
@@ -1076,8 +1209,8 @@ int sb_store_update_app_settings(sb_store *s, const sbj *sections, sb_err *err) 
             break;
         }
         sbq_bind_text(st, 1, allowed[i]);
-        bind_dump(st, 2, found);
-        rc = exec_stmt(st, err);
+        int bound = bind_dump(st, 2, found, err);
+        rc = exec_bound(st, bound, err);
     }
     if (rc == 0) rc = sbq_commit(h, err);
     if (rc != 0) sbq_rollback(h);
@@ -1108,7 +1241,8 @@ int sb_store_app_setting(sb_store *s, const char *key, sbj **out, sb_err *err) {
 
 int sb_store_set_app_setting(sb_store *s, const char *key, const sbj *value, sb_err *err) {
     if (sb_str_empty(key)) return sb_fail(err, SB_ERR_VALIDATION, "setting key is required");
-    char *text = sbj_dump(value, -1);
+    char *text = dump_checked(value, err);
+    if (!text) return -1;
     const char *binds[] = {key, text};
     int rc = exec_changes(s, settings_upsert_sql, NULL, err, 2, binds);
     free(text);
@@ -1130,14 +1264,15 @@ static int find_peer_locked(sqlite3 *h, const char *id, sb_wireguard_peer *out, 
 }
 
 int sb_store_list_wireguard_peers(sb_store *s, sb_wireguard_peer_vec *out, sb_err *err) {
+    sb_wireguard_peer_vec rows = {0};
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s), WIREGUARD_PEER_SELECT " ORDER BY address", err);
     int r = st ? 0 : -1;
     while (st && (r = sbq_step_row(st, err)) == 1)
-        read_wireguard_peer(st, sb_wireguard_peer_vec_push(out));
+        read_wireguard_peer(st, sb_wireguard_peer_vec_push(&rows));
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_wireguard_peer_vec_free, out, rows, r);
 }
 
 int sb_store_find_wireguard_peer(sb_store *s, const char *id, sb_wireguard_peer *out, sb_err *err) {
@@ -1393,9 +1528,10 @@ static int restore_node(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
     if (jv_str(value, "id", "", &id, err) || jv_str(value, "tag", "", &tag, err)) return -1;
     if (!*id || !*tag) return 0;
     const sbj *protocol = sbj_get(value, "protocol_config");
-    char *protocol_text = !protocol            ? sb_strdup("{}")
+    char *protocol_text = !protocol                 ? sb_strdup("{}")
                           : sbj_is_string(protocol) ? sb_strdup(protocol->v.str.ptr)
-                                                    : sbj_dump(protocol, -1);
+                                                    : dump_checked(protocol, err);
+    if (!protocol_text) return -1;
     int rc = -1;
     sqlite3_stmt *st = NULL;
     if (jv_str(value, "node_type", "", &node_type, err) ||
@@ -1512,8 +1648,8 @@ sbj *sb_store_restore_backup(sb_store *s, const sbj *backup, sb_err *err) {
                 break;
             }
             sbq_bind_text(st, 1, key);
-            bind_dump(st, 2, value);
-            if ((rc = exec_stmt(st, err)) != 0) break;
+            int bound = bind_dump(st, 2, value, err);
+            if ((rc = exec_bound(st, bound, err)) != 0) break;
             ++settings_count;
         }
     }
@@ -1569,6 +1705,7 @@ static int reload_profile(sqlite3 *h, const char *id, sb_config_profile *out, sb
 }
 
 int sb_store_list_profiles(sb_store *s, sb_config_profile_vec *out, sb_err *err) {
+    sb_config_profile_vec rows = {0};
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s), PROFILE_SELECT "FROM config_profiles ORDER BY name", err);
     int r = st ? 0 : -1;
@@ -1580,13 +1717,13 @@ int sb_store_list_profiles(sb_store *s, sb_config_profile_vec *out, sb_err *err)
             r = -1;
             break;
         }
-        sb_config_profile *slot = sb_config_profile_vec_push(out);
+        sb_config_profile *slot = sb_config_profile_vec_push(&rows);
         sb_config_profile_free(slot);
         *slot = p;
     }
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_config_profile_vec_free, out, rows, r);
 }
 
 int sb_store_find_profile(sb_store *s, const char *id, sb_config_profile *out, sb_err *err) {
@@ -1614,11 +1751,11 @@ int sb_store_create_profile(sb_store *s, const sb_config_profile *profile, sb_co
     if (st) {
         sbq_bind_text(st, 1, id);
         sbq_bind_text(st, 2, profile->name);
-        bind_dump(st, 3, profile->profile);
+        int bound = bind_dump(st, 3, profile->profile, err);
         sbq_bind_text(st, 4, sb_profile_mode_name(profile->mode));
         sbq_bind_text(st, 5, S(profile->rule_script));
         sbq_bind_bool(st, 6, profile->rule_script_enabled);
-        if (exec_stmt(st, err) == 0) rc = reload_profile(h, id, out, err);
+        if (exec_bound(st, bound, err) == 0) rc = reload_profile(h, id, out, err);
     }
     UNLOCK(s);
     free(id);
@@ -1639,12 +1776,12 @@ int sb_store_update_profile(sb_store *s, const sb_config_profile *profile, sb_co
                                    err);
     if (st) {
         sbq_bind_text(st, 1, profile->name);
-        bind_dump(st, 2, profile->profile);
+        int bound = bind_dump(st, 2, profile->profile, err);
         sbq_bind_text(st, 3, sb_profile_mode_name(profile->mode));
         sbq_bind_text(st, 4, S(profile->rule_script));
         sbq_bind_bool(st, 5, profile->rule_script_enabled);
         sbq_bind_text(st, 6, profile->id);
-        if (exec_stmt(st, err) == 0) {
+        if (exec_bound(st, bound, err) == 0) {
             if (sqlite3_changes(h) == 0)
                 sb_fail(err, SB_ERR_NOT_FOUND, "Profile not found");
             else
@@ -1699,13 +1836,14 @@ static int reload_host(sqlite3 *h, const char *id, sb_host *out, sb_err *err) {
 }
 
 int sb_store_list_hosts(sb_store *s, sb_host_vec *out, sb_err *err) {
+    sb_host_vec rows = {0};
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s), HOST_SELECT " ORDER BY h.created_at", err);
     int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) read_host(st, sb_host_vec_push(out));
+    while (st && (r = sbq_step_row(st, err)) == 1) read_host(st, sb_host_vec_push(&rows));
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_host_vec_free, out, rows, r);
 }
 
 int sb_store_find_host(sb_store *s, const char *id, sb_host *out, sb_err *err) {
@@ -1736,7 +1874,7 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         sbq_bind_text(st, 1, id);
         sbq_bind_text(st, 2, host->name);
         sbq_bind_text(st, 3, token);
-        bind_dump(st, 4, host->capabilities);
+        int bound = bind_dump(st, 4, host->capabilities, err);
         sbq_bind_text(st, 5, profile_id);
         sbq_bind_text(st, 6, host->wg_address);
         sbq_bind_text(st, 7, host->wg_public_key);
@@ -1746,7 +1884,7 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         sbq_bind_text(st, 11, host->last_seen);
         sbq_bind_text(st, 12, host->singbox_state);
         sbq_bind_bool(st, 13, host->enabled);
-        if (exec_stmt(st, err) == 0) rc = reload_host(h, id, out, err);
+        if (exec_bound(st, bound, err) == 0) rc = reload_host(h, id, out, err);
     }
     UNLOCK(s);
     free(id);
@@ -1768,7 +1906,7 @@ int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
                                    err);
     if (st) {
         sbq_bind_text(st, 1, host->name);
-        bind_dump(st, 2, host->capabilities);
+        int bound = bind_dump(st, 2, host->capabilities, err);
         sbq_bind_text(st, 3, host->profile_id);
         sbq_bind_text(st, 4, host->wg_address);
         sbq_bind_text(st, 5, host->wg_public_key);
@@ -1777,7 +1915,7 @@ int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         sbq_bind_text(st, 8, S(host->clash_secret));
         sbq_bind_bool(st, 9, host->enabled);
         sbq_bind_text(st, 10, host->id);
-        if (exec_stmt(st, err) == 0) {
+        if (exec_bound(st, bound, err) == 0) {
             if (sqlite3_changes(h) == 0)
                 sb_fail(err, SB_ERR_NOT_FOUND, "Host not found");
             else
@@ -1841,8 +1979,8 @@ char *sb_store_save_diagnostic_report(sb_store *s, const char *host_id, const sb
             sbq_bind_text(st, 3, reason);
             sbq_bind_text(st, 4, app_version);
             sbq_bind_text(st, 5, core_version);
-            bind_dump(st, 6, report);
-            rc = exec_stmt(st, err);
+            int bound = bind_dump(st, 6, report, err);
+            rc = exec_bound(st, bound, err);
         } else {
             rc = -1;
         }
@@ -1908,6 +2046,7 @@ done:
 }
 
 int sb_store_host_outbounds(sb_store *s, const char *host_id, sb_strvec *out, sb_err *err) {
+    sb_strvec rows = {0};
     LOCK(s);
     sqlite3 *h = H(s);
     int r = host_exists(h, host_id, err);
@@ -1919,11 +2058,11 @@ int sb_store_host_outbounds(sb_store *s, const char *host_id, sb_strvec *out, sb
                                        err);
         r = st ? 0 : -1;
         if (st) sbq_bind_text(st, 1, S(host_id));
-        while (st && (r = sbq_step_row(st, err)) == 1) sb_strvec_push_take(out, sbq_text(st, 0));
+        while (st && (r = sbq_step_row(st, err)) == 1) sb_strvec_push_take(&rows, sbq_text(st, 0));
         sqlite3_finalize(st);
     }
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_strvec_free, out, rows, r);
 }
 
 int sb_store_set_host_outbounds(sb_store *s, const char *host_id, const sb_strvec *node_ids,
@@ -2111,9 +2250,9 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
                                        "updated_at = datetime('now') WHERE id = ?2",
                                        err);
         if (st) {
-            bind_dump(st, 1, capabilities);
+            int bound = bind_dump(st, 1, capabilities, err);
             sbq_bind_text(st, 2, result.host_id);
-            rc = exec_stmt(st, err);
+            rc = exec_bound(st, bound, err);
         } else {
             rc = -1;
         }
@@ -2159,7 +2298,8 @@ int sb_store_touch_host(sb_store *s, const char *host_id, sb_err *err) {
 
 int sb_store_update_agent_status(sb_store *s, const char *host_id, const sbj *state, sb_err *err) {
     if (!sbj_is_object(state)) return sb_fail(err, SB_ERR_VALIDATION, "Agent state must be a JSON object");
-    char *text = sbj_dump(state, -1);
+    char *text = dump_checked(state, err);
+    if (!text) return -1;
     const char *binds[] = {text, S(host_id)};
     int rc = exec_changes(s,
                           "UPDATE hosts SET last_seen = datetime('now'), singbox_state = ?1 "
@@ -2209,6 +2349,7 @@ done:
 
 int sb_store_list_host_commands(sb_store *s, const char *host_id, bool pending_only,
                                 sb_host_command_vec *out, sb_err *err) {
+    sb_host_command_vec rows = {0};
     LOCK(s);
     sqlite3 *h = H(s);
     int r = host_exists(h, host_id, err);
@@ -2222,11 +2363,11 @@ int sb_store_list_host_commands(sb_store *s, const char *host_id, bool pending_o
         sqlite3_stmt *st = sbq_prepare(h, sql, err);
         r = st ? 0 : -1;
         if (st) sbq_bind_text(st, 1, S(host_id));
-        while (st && (r = sbq_step_row(st, err)) == 1) read_host_command(st, sb_host_command_vec_push(out));
+        while (st && (r = sbq_step_row(st, err)) == 1) read_host_command(st, sb_host_command_vec_push(&rows));
         sqlite3_finalize(st);
     }
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_host_command_vec_free, out, rows, r);
 }
 
 int sb_store_acknowledge_host_command(sb_store *s, const char *host_id, const char *command_id,
@@ -2328,6 +2469,7 @@ static int reload_proxy(sqlite3 *h, const char *id, sb_proxy_record *out, sb_err
 }
 
 int sb_store_list_proxy_nodes(sb_store *s, sb_proxy_record_vec *out, sb_err *err) {
+    sb_proxy_record_vec rows = {0};
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s), PROXY_SELECT "FROM proxy_nodes ORDER BY node_type, tag", err);
     int r = st ? 0 : -1;
@@ -2339,13 +2481,13 @@ int sb_store_list_proxy_nodes(sb_store *s, sb_proxy_record_vec *out, sb_err *err
             r = -1;
             break;
         }
-        sb_proxy_record *slot = sb_proxy_record_vec_push(out);
+        sb_proxy_record *slot = sb_proxy_record_vec_push(&rows);
         sb_proxy_record_free(slot);
         *slot = rec;
     }
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_proxy_record_vec_free, out, rows, r);
 }
 
 int sb_store_find_proxy_node(sb_store *s, const char *id, sb_proxy_record *out, sb_err *err) {
@@ -2360,9 +2502,10 @@ int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     if (validate_proxy(node->tag, node->node_type, node->server, node->server_port,
                        node->protocol_config, err) != 0)
         return -1;
-    char *id = sb_str_empty(node->id) ? sb_uuid_v4() : sb_strdup(node->id);
     char *fingerprint = fingerprint_of(node->node_type, node->tag, node->server, node->server_port,
-                                       node->protocol_config);
+                                       node->protocol_config, err);
+    if (!fingerprint) return -1;
+    char *id = sb_str_empty(node->id) ? sb_uuid_v4() : sb_strdup(node->id);
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
@@ -2393,12 +2536,12 @@ int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     sbq_bind_bool(st, 4, node->enabled);
     sbq_bind_text(st, 5, node->server);
     sbq_bind_int(st, 6, node->server_port);
-    bind_dump(st, 7, node->protocol_config);
+    int bound = bind_dump(st, 7, node->protocol_config, err);
     sbq_bind_text(st, 8, node->subscription_id);
     sbq_bind_text(st, 9, fingerprint);
     sbq_bind_opt_double(st, 10, node->has_latency ? &node->latency : NULL);
     sbq_bind_text(st, 11, node->last_latency_test);
-    if (exec_stmt(st, err) != 0) goto done;
+    if (exec_bound(st, bound, err) != 0) goto done;
     rc = reload_proxy(h, id, out, err);
 done:
     UNLOCK(s);
@@ -2414,7 +2557,8 @@ int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
         return -1;
     if (sb_str_empty(node->id)) return sb_fail(err, SB_ERR_VALIDATION, "Proxy id is required");
     char *fingerprint = fingerprint_of(node->node_type, node->tag, node->server, node->server_port,
-                                       node->protocol_config);
+                                       node->protocol_config, err);
+    if (!fingerprint) return -1;
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
@@ -2445,11 +2589,11 @@ int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     sbq_bind_bool(st, 3, node->enabled);
     sbq_bind_text(st, 4, node->server);
     sbq_bind_int(st, 5, node->server_port);
-    bind_dump(st, 6, node->protocol_config);
+    int bound = bind_dump(st, 6, node->protocol_config, err);
     sbq_bind_text(st, 7, node->subscription_id);
     sbq_bind_text(st, 8, fingerprint);
     sbq_bind_text(st, 9, node->id);
-    if (exec_stmt(st, err) != 0) goto done;
+    if (exec_bound(st, bound, err) != 0) goto done;
     if (sqlite3_changes(h) == 0) {
         sb_fail(err, SB_ERR_NOT_FOUND, "Node not found");
         goto done;
@@ -2486,7 +2630,9 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
     if (validate_proxy(node->tag, node->node_type, node->server, node->server_port,
                        node->protocol_config, err) != 0)
         return -1;
-    char *fingerprint = sb_parsed_node_fingerprint(node);
+    char *fingerprint = fingerprint_of(node->node_type, node->tag, node->server, node->server_port,
+                                       node->protocol_config, err);
+    if (!fingerprint) return -1;
     char *existing_id = NULL;
     int rc = -1;
     /* Two-level match: fingerprint first, then the same tag with a different
@@ -2517,11 +2663,11 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
         sbq_bind_text(st, 2, S(node->node_type));
         sbq_bind_text(st, 3, S(node->server));
         sbq_bind_int(st, 4, node->server_port);
-        bind_dump(st, 5, node->protocol_config);
+        int bound = bind_dump(st, 5, node->protocol_config, err);
         sbq_bind_text(st, 6, fingerprint);
         sbq_bind_text(st, 7, subscription_id);
         sbq_bind_text(st, 8, existing_id);
-        if (exec_stmt(st, err) != 0) goto done;
+        if (exec_bound(st, bound, err) != 0) goto done;
         ++result->updated;
     } else {
         st = sbq_prepare(h,
@@ -2540,10 +2686,10 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
         sbq_bind_text(st, 3, S(node->node_type));
         sbq_bind_text(st, 4, S(node->server));
         sbq_bind_int(st, 5, node->server_port);
-        bind_dump(st, 6, node->protocol_config);
+        int bound = bind_dump(st, 6, node->protocol_config, err);
         sbq_bind_text(st, 7, subscription_id);
         sbq_bind_text(st, 8, fingerprint);
-        if (exec_stmt(st, err) != 0) goto done;
+        if (exec_bound(st, bound, err) != 0) goto done;
         ++result->added;
     }
     rc = 0;
@@ -2614,13 +2760,14 @@ static int reload_subscription(sqlite3 *h, const char *id, sb_subscription *out,
 }
 
 int sb_store_list_subscriptions(sb_store *s, sb_subscription_vec *out, sb_err *err) {
+    sb_subscription_vec rows = {0};
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s), SUBSCRIPTION_SELECT "FROM subscriptions ORDER BY name", err);
     int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) read_subscription(st, sb_subscription_vec_push(out));
+    while (st && (r = sbq_step_row(st, err)) == 1) read_subscription(st, sb_subscription_vec_push(&rows));
     sqlite3_finalize(st);
     UNLOCK(s);
-    return r < 0 ? -1 : 0;
+    FINISH_LIST(sb_subscription_vec_free, out, rows, r);
 }
 
 int sb_store_find_subscription(sb_store *s, const char *id, sb_subscription *out, sb_err *err) {
@@ -2705,8 +2852,9 @@ int sb_store_record_subscription_fetch(sb_store *s, const char *id,
     sbj_set(metadata, "skipped", sbj_uint(result->skipped));
     sbj_set(metadata, "total", sbj_uint(result->found));
     sbj_set(metadata, "errors", strvec_to_json(&result->errors));
-    char *text = sbj_dump(metadata, -1);
+    char *text = dump_checked(metadata, err);
     sbj_free(metadata);
+    if (!text) return -1;
     const char *binds[] = {text, S(id)};
     int rc = exec_changes(s,
                           "UPDATE subscriptions SET last_fetched_at = datetime('now'), "

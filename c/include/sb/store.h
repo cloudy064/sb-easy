@@ -8,12 +8,18 @@
  * Conventions:
  *  - int-returning functions: 0 ok / -1 error (err filled; kinds
  *    SB_ERR_NOT_FOUND / SB_ERR_VALIDATION / SB_ERR_CONFLICT mirror the C++
- *    NotFoundError / ValidationError / ConflictError, SQLite and other
- *    failures are SB_ERR_GENERIC).
+ *    NotFoundError / ValidationError / ConflictError; SB_ERR_BAD_JSON is
+ *    where C++ lets a nlohmann json::exception escape (json::value() type
+ *    errors in backups/reports, json::dump() of invalid UTF-8) and carries
+ *    the identical what() text; SQLite and other failures are SB_ERR_GENERIC).
+ *    Messages are the C++ exception messages verbatim.
  *  - find_* functions (std::optional in C++): 1 found (out filled), 0 not
  *    found (out untouched), -1 error.
  *  - `out` structs must be initialised by the caller (*_init) and are
- *    released with *_free; they are overwritten on success.
+ *    released with *_free; they are overwritten on success and untouched on
+ *    failure.
+ *  - list-style functions (std::vector in C++) append the rows to *out on
+ *    success (pass a zeroed vector) and leave *out untouched on failure.
  *  - Nullable char* members correspond to std::optional<std::string>.
  */
 #ifndef SB_STORE_H
@@ -139,14 +145,16 @@ typedef struct {
 } sb_agent_enrollment;
 void sb_agent_enrollment_init(sb_agent_enrollment *e);
 void sb_agent_enrollment_free(sb_agent_enrollment *e);
-sbj *sb_agent_enrollment_to_json(const sb_agent_enrollment *e); /* C-only helper */
+/* C-only helper (no C++ to_json): plain field dump, not the HTTP response shape. */
+sbj *sb_agent_enrollment_to_json(const sb_agent_enrollment *e);
 
 typedef struct {
     char *host_id, *host_name, *agent_token, *profile_id, *profile_name;
 } sb_agent_enrollment_result;
 void sb_agent_enrollment_result_init(sb_agent_enrollment_result *r);
 void sb_agent_enrollment_result_free(sb_agent_enrollment_result *r);
-sbj *sb_agent_enrollment_result_to_json(const sb_agent_enrollment_result *r); /* C-only helper */
+/* C-only helper (no C++ to_json): plain field dump, not the HTTP response shape. */
+sbj *sb_agent_enrollment_result_to_json(const sb_agent_enrollment_result *r);
 
 /* ---- proxies / subscriptions ----------------------------------------- */
 typedef struct {
@@ -191,7 +199,8 @@ typedef struct {
 } sb_proxy_upsert_result;
 void sb_proxy_upsert_result_init(sb_proxy_upsert_result *r);
 void sb_proxy_upsert_result_free(sb_proxy_upsert_result *r);
-sbj *sb_proxy_upsert_result_to_json(const sb_proxy_upsert_result *r); /* C-only helper */
+/* C-only helper (no C++ to_json): {"added","updated","errors"} field dump. */
+sbj *sb_proxy_upsert_result_to_json(const sb_proxy_upsert_result *r);
 
 typedef struct {
     size_t added, updated, skipped, found;

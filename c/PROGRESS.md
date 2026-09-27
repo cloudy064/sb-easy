@@ -74,3 +74,22 @@ release images/CI, and centrally managed Claude egress rollout.
 Local verification logs are `/tmp/sb-c-*.log`. Docker builds can require
 `--network host` on this machine to use its working proxy route; this does
 not start a runtime service or modify host interfaces.
+
+## Identity compatibility follow-up (05168b0)
+
+- Central and unified images tagged `c-panel-05168b0` and
+  `c-unified-05168b0` were built and deployed through the candidate tags.
+- Central cutover preserved all 5 configs, admin session and WireGuard peers.
+  Rollback container: `sb-easy-rollback-20260927-144541`;
+  backup: `/root/workspace/sb-easy/backups/c-cutover-20260927-144541`.
+- Local agent health/proxy checks passed. Rollback container:
+  `sb-easy-agent-rollback-20260927-144956`; backup:
+  `/tmp/sb-easy-agent-backup.MHWGiJ`.
+- Live UI rejected NUL suffixes on both username and password with 401 and no
+  session cookie. All three fixed Japan Z03 route checks passed again.
+- Android last-seen values are unchanged; their reception gate remains open.
+- Isolated C/C++ API probes confirmed the next remaining differences: NUL
+  suffixes on profile names, disabled rule scripts, host names and proxy tags
+  survive C++ storage/response but are truncated by C. Evidence:
+  `/tmp/sb-c-model-audit.log`. These fields still require fixes; this audit
+  is not a claim that other model fields have been exhaustively covered.

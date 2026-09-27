@@ -17,6 +17,25 @@ release images/CI, and centrally managed Claude egress rollout.
   networking inputs and remaining C-string transport boundaries are not claimed
   to have arbitrary-input byte-exact parity; see README compatibility decisions.
 
+## Completion audit on 2026-09-27
+
+- Runtime implementation, the 18 normal/sanitizer suites, C++ comparison
+  fixtures, production database comparison, both release images and the
+  center/local-agent deployments have recorded passing evidence below.
+- CI workflows are configured and their local build/test equivalents were
+  verified. No hosted CI run is claimed; these commits have not been pushed
+  as part of this work.
+- The read-only center check at 08:10 UTC on September 27 still shows both
+  online Linux agents running with matching configuration ETags and no error.
+  Evidence: `/tmp/sb-c-completion-center-state.log`.
+- Remaining rollout acceptance: reconnect `xiaomi` and `adrd`, verify a fresh
+  heartbeat and current configuration ETag, then check actual Claude routing
+  on each device. Their historical status does not establish receipt.
+- Entries below are chronological evidence. Earlier notes that a subsequently
+  fixed model field needs an audit or that changes await packaging are
+  superseded by the later field-specific checks and combined runtime rollout.
+  The documented malformed-input compatibility boundaries remain applicable.
+
 ## Verified on 2026-09-27
 
 - Parser/fetcher suite: 12 cases pass. Fixed uninitialized test HTTP request

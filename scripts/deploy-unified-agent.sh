@@ -33,6 +33,12 @@ if [[ -z "$data_source" || ! -d "$data_source" ]]; then
   echo "Could not resolve the existing /app/data bind mount" >&2
   exit 3
 fi
+cache_source="$data_source/sing-box-cache"
+existing_cache_source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/sing-box"}}{{.Source}}{{end}}{{end}}' "$container_name")"
+if [[ -n "$existing_cache_source" && "$existing_cache_source" != "$cache_source" ]]; then
+  echo "Unsupported existing sing-box cache mount: $existing_cache_source" >&2
+  exit 3
+fi
 
 env_file="$(mktemp /tmp/sb-easy-agent-env.XXXXXX)"
 backup_dir="$(mktemp -d /tmp/sb-easy-agent-backup.XXXXXX)"
@@ -102,6 +108,16 @@ docker stop -t "$stop_timeout" "$container_name" >/dev/null
 docker run --rm --network none --entrypoint tar \
   -v "$data_source:/source:ro" "$image_tag" -C /source -czf - . >"$backup_dir/data.tar.gz"
 data_backup_ready=true
+# Copy the stopped engine's cache on the first migration. Keeping rule sets
+# outside the container avoids depending on CDN availability during cutover.
+# Subsequent deployments include this directory in the normal data backup.
+if [[ -z "$existing_cache_source" ]]; then
+  mkdir -p "$backup_dir/sing-box-cache"
+  docker cp "$container_name:/var/lib/sing-box/." "$backup_dir/sing-box-cache/"
+  docker run --rm --network none --entrypoint /bin/sh \
+    -v "$backup_dir/sing-box-cache:/source:ro" -v "$cache_source:/destination" \
+    "$image_tag" -ec 'cp -a /source/. /destination/'
+fi
 docker rename "$container_name" "$rollback_name"
 
 if ! docker run -d \
@@ -112,6 +128,7 @@ if ! docker run -d \
   --device /dev/net/tun:/dev/net/tun:rwm \
   --env-file "$env_file" \
   -v "$data_source:/app/data" \
+  -v "$cache_source:/var/lib/sing-box" \
   "$image_tag" >/dev/null; then
   exit 5
 fi

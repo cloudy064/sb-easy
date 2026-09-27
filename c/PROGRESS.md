@@ -5,12 +5,17 @@ release images/CI, and centrally managed Claude egress rollout.
 
 ## Current release state
 
-- Production center and local agent run the verified identity fix `05168b0`.
-- Profile/script fixes and host/WireGuard name fixes are verified in source;
-  versioned images through `d2dd8e5` are built. These changes await the combined rollout.
-- Proxy storage/rendering and agent tag operations preserve full bytes;
-  remaining non-authentication string boundaries are still under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
-  of the centrally prepared rules has not been verified.
+- Production center and local unified agent run verified runtime `0ae4433`.
+  The accumulated profile, host, proxy, subscription and metadata fixes are
+  deployed. Both versioned images are built and deployment rollback is retained.
+- The local deployment now persists `/var/lib/sing-box` under
+  `agent-data/sing-box-cache`, preserving stopped-engine rule caches on migration.
+- Both online Linux agents report current configuration ETags and no error.
+  Android `xiaomi` and `adrd` remain offline, so actual reception of the
+  centrally prepared rules has not been verified.
+- Model/API byte compatibility has expanded as recorded below. Malformed
+  networking inputs and remaining C-string transport boundaries are not claimed
+  to have arbitrary-input byte-exact parity; see README compatibility decisions.
 
 ## Verified on 2026-09-27
 
@@ -246,3 +251,34 @@ not start a runtime service or modify host interfaces.
 - Runtime networking/parser boundaries for malformed address/key values remain
   distinct from the verified model-storage and JSON-rendering contract. No
   arbitrary-input transport parity is claimed.
+
+## Combined runtime rollout (0ae4433)
+
+- Both versioned release images built with GCC 12 Release warnings as errors;
+  the unified image passed embedded start/reload/stop. An initial Docker Hub
+  metadata timeout affected the agent build only; retry used the exact Debian,
+  Node and Go base digests from the previous successful build. The panel build
+  completed normally. Logs: `/tmp/sb-c-combined-*-image.log`.
+- The central service runs `c-panel-0ae4433` through the candidate tag. All 5
+  host configs remain byte-identical, and session/WireGuard peer checks pass.
+  Rollback: `sb-easy-rollback-20260927-155441`; backup:
+  `/root/workspace/sb-easy/backups/c-cutover-20260927-155441`.
+- The first local cutover hit a CDN rule-download timeout and automatically
+  restored the healthy previous container. The missing persistent engine cache
+  was identified: old rule sets existed only inside `/var/lib/sing-box`.
+- Deployment now copies that directory from the stopped old container on first
+  migration and bind-mounts `agent-data/sing-box-cache` to `/var/lib/sing-box`.
+  Subsequent stopped-data backups include the cache. The retry is healthy and
+  proxy HTTP 204 passes. Local runtime matches `c-unified-0ae4433`.
+  Rollback: `sb-easy-agent-rollback-20260927-160549`; backup:
+  `/tmp/sb-easy-agent-backup.aPxWIS`.
+- Live local route checks for anyrouter.top, api.anthropic.com and
+  downloads.claude.ai all succeed through `[iKuuu] 🇯🇵 日本Z03 | IEPL`.
+  Read-only central verification confirms all 5 profiles retain the fixed
+  domain rule, required outbounds and script behavior without further changes.
+- Online company-linux and homenas-agent report matching current ETags, running
+  true and no error. Android last-seen timestamps are unchanged (xiaomi Aug 30;
+  adrd Sep 21). No synthetic agent polling was used to update offline devices.
+- Deployment shell syntax and whitespace checks pass. Evidence is in
+  `/tmp/sb-c-combined-*.log`; generated credentials and configuration are never
+  included in those verification summaries.

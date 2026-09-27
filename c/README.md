@@ -102,6 +102,9 @@ container available, and back up the SQLite database and agent data. Compare
 rendered configurations using a database copy before switching the panel.
 `scripts/deploy-unified-agent.sh` builds the C unified image, retains the old
 agent container and automatically restores it if the health/proxy checks fail.
+It also migrates the stopped engine's rule cache to `agent-data/sing-box-cache`
+and mounts it at `/var/lib/sing-box`, so replacing the container retains cached
+rule sets. Later data backups include this directory.
 Use `DOCKERFILE=cpp/Dockerfile.unified` to build the previous implementation.
 
 For the established central bridge-network deployment, load the tested panel

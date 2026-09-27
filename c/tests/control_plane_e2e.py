@@ -214,6 +214,24 @@ def run(args, root):
         config = api("/api/hosts/" + host["id"] + "/config")
         assert any(rule.get("domain_suffix") == ["left\0right"] and rule.get("hostLabel") == host["name"]
                    for rule in config["route"]["rules"])
+        agent_headers = {"Authorization": "Bearer " + api("/api/hosts/" + host["id"] + "/token")["agent_token"]}
+        diagnostic = {"reason": "r" * 78 + "\0éend", "app_version": "app\0tail",
+                      "core_version": "core\0tail", "logs": ["short\0tail", "l" * 3998 + "\0éend"]}
+        status, _, _ = request("/api/agent/diagnostics", diagnostic, headers=agent_headers, authenticated=False)
+        assert status == 200
+        reports = api("/api/hosts/" + host["id"] + "/diagnostics")
+        assert reports[0]["reason"] == "r" * 78 + "\0"
+        assert reports[0]["app_version"] == "app\0tail" and reports[0]["core_version"] == "core\0tail"
+        assert reports[0]["logs"] == ["short\0tail", "l" * 3998 + "\0"]
+        command = api("/api/hosts/" + host["id"] + "/commands", {"command": "reload"})
+        status, _, _ = request("/api/agent/commands/" + command["id"] + "/ack",
+                              {"status": "done\0suffix", "result": "result\0tail"},
+                              headers=agent_headers, authenticated=False)
+        assert status == 200
+        commands = api("/api/hosts/" + host["id"] + "/commands")
+        saved = next(entry for entry in commands if entry["id"] == command["id"])
+        assert saved["status"] == "failed" and saved["result"] == "result\0tail"
+        print("PASS: diagnostic metadata/logs and command results preserve NUL bytes and UTF-8 limits")
         # Seed only this isolated database; WG_ENABLED=false prevents interface changes.
         peer_name = "host: " + host["name"]
         with sqlite3.connect(root / "panel.db") as db:
@@ -222,6 +240,10 @@ def run(args, root):
             db.execute("insert into wireguard_peers(id,name,private_key,public_key,address,host_id) "
                        "values ('name-test',?,'test-peer-private','test-peer-public','10.59.32.44/32',?)",
                        (peer_name, host["id"]))
+        updated_peer = api("/api/wireguard/peers/name-test", {"notes": "note\0tail"}, "PUT")
+        assert updated_peer["notes"] == "note\0tail"
+        peers = api("/api/wireguard/peers")
+        assert next(peer for peer in peers if peer["id"] == "name-test")["notes"] == "note\0tail"
         for path, name, suffix in [
                 ("/api/wireguard/peers/name-test/config", peer_name, ".conf"),
                 ("/api/hosts/" + host["id"] + "/wg-config", host["name"], "-wg.conf")]:

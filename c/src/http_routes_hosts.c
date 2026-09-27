@@ -1072,8 +1072,8 @@ static int handle_agent_command_ack(sb_http_req *req, sb_http_resp *resp, sb_err
         goto done;
     }
     const char *result_text = result && sbj_is_string(result) ? result->v.str.ptr : NULL;
-    if (sb_store_acknowledge_host_command(req->server->store, host.id, route_param(req), status, result_text,
-                                          err) < 0)
+    if (sb_store_acknowledge_host_command_n(req->server->store, host.id, route_param(req), status, result_text,
+                                            result_text ? result->v.str.len : 0, err) < 0)
         goto done;
     respond_ok(resp);
     rc = 0;

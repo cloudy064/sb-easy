@@ -85,7 +85,9 @@ test in this configuration.
   and URLs preserve their bytes in storage and backup; fetching encodes complete
   paths/queries and preserves relative redirect bases. A NUL in the URL authority
   returns Bad server address instead of handing a truncated origin to libcurl.
-  Other model strings still use C
+  Diagnostic metadata/logs, command acknowledgement results and WireGuard notes
+  retain complete bytes through storage; diagnostic limits still truncate at
+  UTF-8 boundaries. Other model strings still use C
   strings; their NUL compatibility requires further audit before claiming byte-exact
   parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI

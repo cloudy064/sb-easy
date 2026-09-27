@@ -143,7 +143,7 @@ sbj *sb_wireguard_peer_to_json(const sb_wireguard_peer *p) {
     sbj_set_int(v, "quota_bytes", p->quota_bytes);
     sbj_set_str(v, "created_at", S(p->created_at));
     sbj_set_str(v, "updated_at", S(p->updated_at));
-    sbj_set(v, "notes", opt_str(p->notes));
+    sbj_set(v, "notes", p->notes ? sbj_strn(p->notes, p->notes_len) : sbj_null());
     sbj_set(v, "host_id", opt_str(p->host_id));
     return v;
 }
@@ -291,7 +291,7 @@ sbj *sb_host_command_to_json(const sb_host_command *c) {
     sbj_set_str(v, "host_id", S(c->host_id));
     sbj_set_str(v, "command", S(c->command));
     sbj_set_str(v, "status", S(c->status));
-    sbj_set(v, "result", opt_str(c->result));
+    sbj_set(v, "result", c->result ? sbj_strn(c->result, c->result_len) : sbj_null());
     sbj_set_str(v, "created_at", S(c->created_at));
     sbj_set(v, "acked_at", opt_str(c->acked_at));
     return v;
@@ -589,6 +589,7 @@ static void read_host_command(sqlite3_stmt *st, sb_host_command *c) {
     c->command = sbq_text(st, 2);
     c->status = sbq_text(st, 3);
     c->result = sbq_opt_text(st, 4);
+    c->result_len = (size_t)sqlite3_column_bytes(st, 4);
     c->created_at = sbq_text(st, 5);
     c->acked_at = sbq_opt_text(st, 6);
 }
@@ -611,6 +612,7 @@ static void read_wireguard_peer(sqlite3_stmt *st, sb_wireguard_peer *p) {
     p->created_at = sbq_text(st, 12);
     p->updated_at = sbq_text(st, 13);
     p->notes = sbq_opt_text(st, 14);
+    p->notes_len = (size_t)sqlite3_column_bytes(st, 14);
     p->host_id = sbq_opt_text(st, 15);
 }
 
@@ -1332,7 +1334,10 @@ int sb_store_create_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
     sbq_bind_text(st, 10, S(peer->allowed_ips));
     sbq_bind_text(st, 11, peer->expire_at);
     sbq_bind_int(st, 12, peer->quota_bytes);
-    sbq_bind_text(st, 13, peer->notes);
+    if (sbq_bind_text_n(st, 13, peer->notes, peer->notes_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_text(st, 14, peer->host_id);
     if (exec_stmt(st, err) != 0) goto done;
     rc = reload_peer(h, id, out, err);
@@ -1367,7 +1372,10 @@ int sb_store_update_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
     sbq_bind_text(st, 5, S(peer->allowed_ips));
     sbq_bind_text(st, 6, peer->expire_at);
     sbq_bind_int(st, 7, peer->quota_bytes);
-    sbq_bind_text(st, 8, peer->notes);
+    if (sbq_bind_text_n(st, 8, peer->notes, peer->notes_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_text(st, 9, peer->host_id);
     sbq_bind_text(st, 10, peer->id);
     if (exec_stmt(st, err) != 0) goto done;
@@ -1621,7 +1629,11 @@ static int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
                                    err);
     if (!st) return -1;
     sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, name);
+    if (sbq_bind_text_n(st, 2, name,
+                        sbj_has(value, "name") ? sbj_get(value, "name")->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        return -1;
+    }
     sbq_bind_text(st, 3, private_key);
     sbq_bind_text(st, 4, public_key);
     sbq_bind_text(st, 5, jv_opt_str(value, "preshared_key"));
@@ -1633,7 +1645,12 @@ static int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
     sbq_bind_text(st, 11, jv_opt_str(value, "expire_at"));
     sbq_bind_int(st, 12, quota);
     sbq_bind_text(st, 13, created_at);
-    sbq_bind_text(st, 14, jv_opt_str(value, "notes"));
+    const sbj *notes = sbj_get(value, "notes");
+    if (sbq_bind_text_n(st, 14, jv_opt_str(value, "notes"),
+                        sbj_is_string(notes) ? notes->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        return -1;
+    }
     sbq_bind_text(st, 15, jv_opt_str(value, "host_id"));
     if (exec_stmt(st, err) != 0) return -1;
     ++*count;
@@ -2001,10 +2018,13 @@ char *sb_store_save_diagnostic_report(sb_store *s, const char *host_id, const sb
         if (st) {
             sbq_bind_text(st, 1, id);
             sbq_bind_text(st, 2, S(host_id));
-            sbq_bind_text(st, 3, reason);
-            sbq_bind_text(st, 4, app_version);
-            sbq_bind_text(st, 5, core_version);
-            int bound = bind_dump(st, 6, report, err);
+            int bound = sbq_bind_text_n(st, 3, reason,
+                sbj_has(report, "reason") ? sbj_get(report, "reason")->v.str.len : strlen(reason), err);
+            if (bound == 0) bound = sbq_bind_text_n(st, 4, app_version,
+                sbj_has(report, "app_version") ? sbj_get(report, "app_version")->v.str.len : strlen(app_version), err);
+            if (bound == 0) bound = sbq_bind_text_n(st, 5, core_version,
+                sbj_has(report, "core_version") ? sbj_get(report, "core_version")->v.str.len : strlen(core_version), err);
+            if (bound == 0) bound = bind_dump(st, 6, report, err);
             rc = exec_bound(st, bound, err);
         } else {
             rc = -1;
@@ -2054,9 +2074,12 @@ sbj *sb_store_list_diagnostic_reports(sb_store *s, const char *host_id, size_t l
             sbj_set(report, "logs", sbj_array());
         }
         sbj_set(report, "report_id", sbj_str_take(sbq_text(st, 0)));
-        sbj_set(report, "reason", sbj_str_take(sbq_text(st, 1)));
-        sbj_set(report, "app_version", sbj_str_take(sbq_text(st, 2)));
-        sbj_set(report, "core_version", sbj_str_take(sbq_text(st, 3)));
+        sbj_set(report, "reason", sbj_strn((const char *)sqlite3_column_text(st, 1),
+                                                    (size_t)sqlite3_column_bytes(st, 1)));
+        sbj_set(report, "app_version", sbj_strn((const char *)sqlite3_column_text(st, 2),
+                                                    (size_t)sqlite3_column_bytes(st, 2)));
+        sbj_set(report, "core_version", sbj_strn((const char *)sqlite3_column_text(st, 3),
+                                                    (size_t)sqlite3_column_bytes(st, 3)));
         sbj_set(report, "created_at", sbj_str_take(sbq_text(st, 5)));
         sbj_arr_push(reports, report);
     }
@@ -2399,6 +2422,13 @@ int sb_store_list_host_commands(sb_store *s, const char *host_id, bool pending_o
 
 int sb_store_acknowledge_host_command(sb_store *s, const char *host_id, const char *command_id,
                                       const char *status, const char *result, sb_err *err) {
+    return sb_store_acknowledge_host_command_n(s, host_id, command_id, status, result,
+                                               result ? strlen(result) : 0, err);
+}
+
+int sb_store_acknowledge_host_command_n(sb_store *s, const char *host_id, const char *command_id,
+                                        const char *status, const char *result, size_t result_len,
+                                        sb_err *err) {
     LOCK(s);
     sqlite3 *h = H(s);
     int rc = -1;
@@ -2408,10 +2438,10 @@ int sb_store_acknowledge_host_command(sb_store *s, const char *host_id, const ch
                                    err);
     if (st) {
         sbq_bind_text(st, 1, S(status));
-        sbq_bind_text(st, 2, result);
+        int bound = sbq_bind_text_n(st, 2, result, result_len, err);
         sbq_bind_text(st, 3, S(command_id));
         sbq_bind_text(st, 4, S(host_id));
-        if (exec_stmt(st, err) == 0) rc = sqlite3_changes(h) != 0 ? 1 : 0;
+        if (exec_bound(st, bound, err) == 0) rc = sqlite3_changes(h) != 0 ? 1 : 0;
     }
     UNLOCK(s);
     return rc;

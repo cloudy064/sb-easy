@@ -581,6 +581,16 @@ fail:
     return NULL;
 }
 
+/* Truncate a JSON byte string at a UTF-8 boundary without using strlen. */
+static sbj *truncate_json_string(const sbj *value, size_t maximum) {
+    size_t end = value->v.str.len;
+    if (end > maximum) {
+        end = maximum;
+        while (end > 0 && (((unsigned char)value->v.str.ptr[end]) & 0xc0u) == 0x80u) --end;
+    }
+    return sbj_strn(value->v.str.ptr, end);
+}
+
 /* Keeps the last `limit` entries of a string array ("<field> must be an
  * array" / "<field> must contain only strings"); truncates when max > 0. */
 static sbj *tail_strings(const sbj *array, size_t limit, size_t max_bytes, sb_err *err) {
@@ -597,7 +607,7 @@ static sbj *tail_strings(const sbj *array, size_t limit, size_t max_bytes, sb_er
             sb_fail(err, SB_ERR_VALIDATION, "logs must contain only strings");
             return NULL;
         }
-        if (max_bytes) sbj_arr_push(out, sbj_str_take(sb_http_truncate_utf8(item->v.str.ptr, max_bytes)));
+        if (max_bytes) sbj_arr_push(out, truncate_json_string(item, max_bytes));
         else sbj_arr_push(out, sbj_clone(item));
     }
     return out;
@@ -648,7 +658,7 @@ static int diagnostic_string(const sbj *body, const char *field, const char *fal
         return 0;
     }
     if (!sbj_is_string(found)) return sb_fail(err, SB_ERR_VALIDATION, "%s must be a string", field);
-    sbj_set(out, field, sbj_str_take(sb_http_truncate_utf8(found->v.str.ptr, max_bytes)));
+    sbj_set(out, field, truncate_json_string(found, max_bytes));
     return 0;
 }
 

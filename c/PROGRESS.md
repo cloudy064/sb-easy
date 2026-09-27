@@ -207,3 +207,24 @@ not start a runtime service or modify host interfaces.
 - Further audit confirmed command requests already validate complete reload/
   restart values and test-proxy lists are serialized JSON. Diagnostic scalar
   metadata/log truncation and command acknowledgement results remain pending.
+
+## Diagnostic, acknowledgement and peer metadata follow-up
+
+- Diagnostic reason/version strings and bounded log lines preserve embedded
+  NUL bytes while respecting the same UTF-8 byte boundary as C++. SQLite
+  report columns and report listing also preserve those lengths.
+- Command acknowledgement results preserve optional full byte strings through
+  the API and database. Status matching remains exact; `done` with a NUL suffix
+  is still a failure, matching C++.
+- WireGuard notes preserve bytes in create/update/list/backup; backup restore
+  now also binds the already-length-aware peer name without truncation.
+- All 18 suites pass in both normal and ASan/UBSan builds after correcting an
+  old assignment in the expanded backup fixture. Authoritative final logs:
+  `/tmp/sb-c-metadata-verified-tests.log` and
+  `/tmp/sb-c-metadata-verified-asan-tests.log`. Expanded C++ HTTP scenarios and
+  all 16 production snapshot comparisons pass. These changes await packaging.
+- Next verified issue: host `profile_id` with a NUL suffix is silently bound to
+  its prefix in C (200, selecting default), while C++ rejects the unknown full
+  foreign key (500). Host `clash_api` and `wg_endpoint` also truncate at storage.
+  Evidence: `/tmp/sb-c-host-reference-audit.log`; the probe used isolated DBs
+  and hosts with WireGuard/sing-box capabilities disabled.

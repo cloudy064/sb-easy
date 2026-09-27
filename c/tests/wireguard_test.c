@@ -334,6 +334,7 @@ TEST(keys_configs_stats_and_peer_repository_are_compatible) {
     peer.persistent_keepalive = 25;
     sb_str_set(&peer.allowed_ips, "0.0.0.0/0, ::/0");
     peer.notes = sb_strdup("fixture");
+    peer.notes_len = strlen(peer.notes);
     REQUIRE(sb_store_create_wireguard_peer(f.store, &peer, &stored, &err) == 0);
     /* peer allocation should skip addresses already used in the /24 */
     CHECK_STR(stored.address, "10.59.32.2/24");
@@ -391,6 +392,7 @@ TEST(keys_configs_stats_and_peer_repository_are_compatible) {
     /* WireGuard peer updates should round-trip */
     stored.enabled = false;
     sb_str_set(&stored.notes, "updated");
+    stored.notes_len = strlen(stored.notes);
     sb_wireguard_peer updated;
     sb_wireguard_peer_init(&updated);
     REQUIRE(sb_store_update_wireguard_peer(f.store, &stored, &updated, &err) == 0);

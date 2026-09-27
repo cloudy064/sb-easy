@@ -601,7 +601,10 @@ static int handle_wireguard_peers_create(sb_http_req *req, sb_http_resp *resp, s
     if (found && json_get_i32(found, &number, err) != 0) goto done;
     peer.quota_bytes = number;
     found = sbj_get(body, "notes");
-    if (sbj_is_string(found)) sb_str_set(&peer.notes, found->v.str.ptr);
+    if (sbj_is_string(found)) {
+        sb_str_setn(&peer.notes, found->v.str.ptr, found->v.str.len);
+        peer.notes_len = found->v.str.len;
+    }
     if (sb_store_create_wireguard_peer(srv->store, &peer, &created, err) != 0) goto done;
     sb_http_sync_wireguard_best_effort(srv);
     sb_resp_json(resp, 200, sb_wireguard_peer_to_json(&created));
@@ -650,7 +653,10 @@ static int handle_wireguard_peer_update(sb_http_req *req, sb_http_resp *resp, sb
     found = sbj_get(body, "expire_at");
     if (sbj_is_string(found)) sb_str_set(&peer.expire_at, found->v.str.ptr);
     found = sbj_get(body, "notes");
-    if (sbj_is_string(found)) sb_str_set(&peer.notes, found->v.str.ptr);
+    if (sbj_is_string(found)) {
+        sb_str_setn(&peer.notes, found->v.str.ptr, found->v.str.len);
+        peer.notes_len = found->v.str.len;
+    }
     if (sb_store_update_wireguard_peer(srv->store, &peer, &updated, err) != 0) goto done;
     sb_http_sync_wireguard_best_effort(srv);
     sb_resp_json(resp, 200, sb_wireguard_peer_to_json(&updated));

@@ -84,6 +84,7 @@ typedef struct {
     int64_t quota_bytes;
     char *created_at, *updated_at;
     char *notes;         /* nullable */
+    size_t notes_len;
     char *host_id;       /* nullable */
 } sb_wireguard_peer;
 void sb_wireguard_peer_init(sb_wireguard_peer *p);
@@ -135,6 +136,7 @@ void sb_host_vec_free(sb_host_vec *v);
 typedef struct {
     char *id, *host_id, *command, *status;
     char *result; /* nullable */
+    size_t result_len;
     char *created_at;
     char *acked_at; /* nullable */
 } sb_host_command;
@@ -315,6 +317,10 @@ int sb_store_acknowledge_host_command(sb_store *s, const char *host_id, const ch
                                       const char *status, const char *result /* nullable */,
                                       sb_err *err);
 
+/* Explicit byte length for an optional agent result string. */
+int sb_store_acknowledge_host_command_n(sb_store *s, const char *host_id, const char *command_id,
+                                        const char *status, const char *result, size_t result_len,
+                                        sb_err *err);
 int sb_store_update_proxy_latencies(sb_store *s, const sbj *results, size_t *updated,
                                     sb_err *err);
 /* latency NULL == std::nullopt */

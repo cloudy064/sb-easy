@@ -39,6 +39,31 @@ TEST(string_escapes) {
 
 TEST(duplicate_keys_last_wins) { RT("{\"a\":1,\"a\":2}", -1, "{\"a\":2}"); }
 
+TEST(embedded_nul_keys_are_distinct_and_round_trip) {
+    sbj *value = sbj_parse_cstr("{\"password\\u0000extra\":2,\"z\":3}");
+    REQUIRE(value);
+    CHECK(sbj_get(value, "password") == NULL);
+    sbj_set_int(value, "password", 1);
+    CHECK_EQ_INT(sbj_as_int(sbj_getn(value, "password\0extra", 14), -1), 2);
+    sbj *updated = sbj_object();
+    sbj_update(updated, value);
+    CHECK(sbj_equal(updated, value));
+    sbj_free(updated);
+    char *text = sbj_dump(value, -1);
+    CHECK_STR(text, "{\"password\":1,\"password\\u0000extra\":2,\"z\":3}");
+    free(text);
+    sbj *copy = sbj_clone(value);
+    CHECK(sbj_equal(value, copy));
+    CHECK(sbj_del(copy, "password"));
+    CHECK(sbj_get(copy, "password") == NULL);
+    CHECK_EQ_INT(sbj_as_int(sbj_getn(copy, "password\0extra", 14), -1), 2);
+    text = sbj_dump(copy, -1);
+    CHECK_STR(text, "{\"password\\u0000extra\":2,\"z\":3}");
+    free(text);
+    sbj_free(copy);
+    sbj_free(value);
+}
+
 TEST(rejects_invalid) {
     const char *bad[] = {"", "{", "[1,]", "{\"a\"}", "01", "1.", "\"\\x\"", "tru", "[1] x", "\"\xff\"", NULL};
     for (int i = 0; bad[i]; ++i) {

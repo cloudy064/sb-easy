@@ -1719,7 +1719,7 @@ static sbj *yaml_to_json(ynode *n, size_t *budget, int depth) {
             const ynode *k = n->items[i];
             /* sbj keys are C strings: a key containing NUL cannot be kept. */
             if (k->kind == Y_SCALAR && !memchr(k->s, '\0', k->slen))
-                sbj_set(o, k->s, yaml_to_json(n->items[i + 1], budget, depth + 1));
+                sbj_setn(o, k->s, k->slen, yaml_to_json(n->items[i + 1], budget, depth + 1));
         }
         n->visiting = false;
         return o;

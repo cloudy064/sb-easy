@@ -52,6 +52,7 @@ struct sbj {
         } arr;
         struct {
             char **keys; /* sorted, unique */
+            size_t *key_lens; /* keys can contain embedded NUL bytes */
             sbj **vals;
             size_t len, cap;
         } obj;
@@ -124,6 +125,8 @@ size_t sbj_obj_len(const sbj *object);
 sbj *sbj_get(const sbj *object, const char *key); /* NULL if absent / not object */
 bool sbj_has(const sbj *object, const char *key);
 void sbj_set(sbj *object, const char *key, sbj *value); /* replaces; takes ownership */
+void sbj_setn(sbj *object, const char *key, size_t key_len, sbj *value);
+sbj *sbj_getn(const sbj *object, const char *key, size_t key_len);
 bool sbj_del(sbj *object, const char *key);
 sbj *sbj_take(sbj *object, const char *key); /* detaches */
 const char *sbj_obj_key(const sbj *object, size_t index);

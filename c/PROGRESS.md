@@ -29,16 +29,38 @@ release images/CI, and centrally managed Claude egress rollout.
 - C++ central service + C agents mixed-version test passes.
 - Local CI YAML parsing and shell syntax checks pass.
 
-## In progress / release gates
+## Production rollout verified on 2026-09-27
 
-- Review documented differences, especially NUL-containing model strings,
-  JSON error wording and platform-dependent WireGuard conversions.
-- Validate CI configuration and release/rollback documentation.
-- Commit the reviewed changes (preserve unrelated untracked `tmp/`).
-- Prepare concrete production cutover, backup and rollback evidence before
-  any live switch. Production currently runs the old C++ agent image.
-- Apply/verify fixed Japanese egress centrally, then verify all subscribed
-  agents receive it; the isolated two-agent test proves the mechanism only.
+- Central panel now runs the C image. Before and after cutover, all 5 host
+  configurations, admin session and WireGuard peer lists matched.
+- Compose image configuration and container ownership labels were updated.
+  Original C++ rollback container: `sb-easy-rollback-20260927-140913`.
+  Original data/config backup on the center:
+  `/root/workspace/sb-easy/backups/c-cutover-20260927-140913`.
+- Local unified agent now runs the C image. Health and proxy connectivity pass.
+  Original rollback container: `sb-easy-agent-rollback-20260927-141856`;
+  private offline data backup: `/tmp/sb-easy-agent-backup.sXX5j6`.
+- Fixed Japan Z03 Claude egress was applied to all 5 central profiles, with
+  backup `/root/workspace/sb-easy/backups/c-rewrite-20260927/claude-profiles-before.json`.
+  Both online Linux agents reported the current config ETag without errors.
+- Local live route tests for `anyrouter.top`, `api.anthropic.com` and
+  `downloads.claude.ai` selected `[iKuuu] 🇯🇵 日本Z03 | IEPL` successfully.
+  The conflicting local anyrouter automatic-selection rule was removed;
+  unrelated local rules were preserved.
+- JSON object keys now preserve embedded NUL bytes through parsing, lookup,
+  clone, update and serialization; a field with a NUL suffix cannot alias
+  the plain field. Regression coverage added.
+
+## Outstanding verification
+
+- Android devices `xiaomi` and `adrd` are offline. Central configuration is
+  ready; actual receipt and routing remain unverified until they reconnect.
+- Passwords and JSON keys preserve embedded NUL bytes. Other model strings
+  still require a broader compatibility audit; arbitrary-input byte-exact
+  parity is not claimed. Detailed JSON error wording and platform-dependent
+  WireGuard conversion differences are documented in README.md.
+- Final JSON-key hardening is being tested and packaged after the first
+  production rollout.
 
 Local verification logs are `/tmp/sb-c-*.log`. Docker builds can require
 `--network host` on this machine to use its working proxy route; this does

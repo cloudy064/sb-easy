@@ -89,6 +89,19 @@ rendered configurations using a database copy before switching the panel.
 agent container and automatically restores it if the health/proxy checks fail.
 Use `DOCKERFILE=cpp/Dockerfile.unified` to build the previous implementation.
 
+For the established central bridge-network deployment, load the tested panel
+image, update the effective Compose image, then run on the central host:
+
+```sh
+python3 c/tools/deploy_center.py --image sb-easy:c-panel-candidate
+```
+
+The helper checks the existing topology, saves private container/environment
+and stopped-data backups, preserves Compose labels, verifies host configs,
+admin session and WireGuard peers, and restores the previous container/data
+if verification fails. Its topology checks intentionally require review for
+other deployment layouts.
+
 See `PROGRESS.md` for verification results and outstanding release gates.
 
 Central Claude egress planning (credentials through environment only):

@@ -77,13 +77,6 @@ sbj *sbj_str_take(char *value) {
 sbj *sbj_array(void) { return new_value(SBJ_ARRAY); }
 sbj *sbj_object(void) { return new_value(SBJ_OBJECT); }
 
-static char *dup_str(const char *s) {
-    size_t n = strlen(s);
-    char *d = xrealloc(NULL, n + 1);
-    memcpy(d, s, n + 1);
-    return d;
-}
-
 void sbj_free(sbj *v) {
     if (!v) return;
     switch (v->type) {
@@ -100,6 +93,7 @@ void sbj_free(sbj *v) {
             sbj_free(v->v.obj.vals[i]);
         }
         free(v->v.obj.keys);
+        free(v->v.obj.key_lens);
         free(v->v.obj.vals);
         break;
     default:
@@ -126,9 +120,13 @@ sbj *sbj_clone(const sbj *v) {
         sbj *o = sbj_object();
         o->v.obj.cap = v->v.obj.len;
         o->v.obj.keys = xrealloc(NULL, o->v.obj.cap * sizeof(char *));
+        o->v.obj.key_lens = xrealloc(NULL, o->v.obj.cap * sizeof(size_t));
         o->v.obj.vals = xrealloc(NULL, o->v.obj.cap * sizeof(sbj *));
         for (size_t i = 0; i < v->v.obj.len; ++i) {
-            o->v.obj.keys[i] = dup_str(v->v.obj.keys[i]);
+            size_t len = v->v.obj.key_lens[i];
+            o->v.obj.keys[i] = xrealloc(NULL, len + 1);
+            memcpy(o->v.obj.keys[i], v->v.obj.keys[i], len + 1);
+            o->v.obj.key_lens[i] = len;
             o->v.obj.vals[i] = sbj_clone(v->v.obj.vals[i]);
         }
         o->v.obj.len = v->v.obj.len;
@@ -191,7 +189,8 @@ bool sbj_equal(const sbj *a, const sbj *b) {
     case SBJ_OBJECT:
         if (a->v.obj.len != b->v.obj.len) return false;
         for (size_t i = 0; i < a->v.obj.len; ++i) {
-            if (strcmp(a->v.obj.keys[i], b->v.obj.keys[i]) != 0) return false;
+            if (a->v.obj.key_lens[i] != b->v.obj.key_lens[i] ||
+                memcmp(a->v.obj.keys[i], b->v.obj.keys[i], a->v.obj.key_lens[i]) != 0) return false;
             if (!sbj_equal(a->v.obj.vals[i], b->v.obj.vals[i])) return false;
         }
         return true;
@@ -287,11 +286,13 @@ void sbj_arr_clear(sbj *a) {
 size_t sbj_obj_len(const sbj *o) { return sbj_is_object(o) ? o->v.obj.len : 0; }
 
 /* Binary search; returns index of key or insertion point with *found = 0. */
-static size_t obj_find(const sbj *o, const char *key, int *found) {
+static size_t obj_find(const sbj *o, const char *key, size_t key_len, int *found) {
     size_t lo = 0, hi = o->v.obj.len;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
-        int c = strcmp(o->v.obj.keys[mid], key);
+        size_t len = o->v.obj.key_lens[mid];
+        int c = memcmp(o->v.obj.keys[mid], key, len < key_len ? len : key_len);
+        if (c == 0) c = len < key_len ? -1 : len > key_len ? 1 : 0;
         if (c == 0) {
             *found = 1;
             return mid;
@@ -304,22 +305,30 @@ static size_t obj_find(const sbj *o, const char *key, int *found) {
 }
 
 sbj *sbj_get(const sbj *o, const char *key) {
+    return sbj_getn(o, key, key ? strlen(key) : 0);
+}
+
+sbj *sbj_getn(const sbj *o, const char *key, size_t key_len) {
     if (!sbj_is_object(o) || !key) return NULL;
     int found;
-    size_t i = obj_find(o, key, &found);
+    size_t i = obj_find(o, key, key_len, &found);
     return found ? o->v.obj.vals[i] : NULL;
 }
 
 bool sbj_has(const sbj *o, const char *key) { return sbj_get(o, key) != NULL; }
 
 void sbj_set(sbj *o, const char *key, sbj *value) {
+    sbj_setn(o, key, key ? strlen(key) : 0, value);
+}
+
+void sbj_setn(sbj *o, const char *key, size_t key_len, sbj *value) {
     if (!sbj_is_object(o) || !key) {
         sbj_free(value);
         return;
     }
     if (!value) value = sbj_null();
     int found;
-    size_t i = obj_find(o, key, &found);
+    size_t i = obj_find(o, key, key_len, &found);
     if (found) {
         sbj_free(o->v.obj.vals[i]);
         o->v.obj.vals[i] = value;
@@ -328,13 +337,18 @@ void sbj_set(sbj *o, const char *key, sbj *value) {
     if (o->v.obj.len == o->v.obj.cap) {
         size_t cap = o->v.obj.cap ? o->v.obj.cap * 2 : 4;
         o->v.obj.keys = xrealloc(o->v.obj.keys, cap * sizeof(char *));
+        o->v.obj.key_lens = xrealloc(o->v.obj.key_lens, cap * sizeof(size_t));
         o->v.obj.vals = xrealloc(o->v.obj.vals, cap * sizeof(sbj *));
         o->v.obj.cap = cap;
     }
     size_t tail = o->v.obj.len - i;
     memmove(o->v.obj.keys + i + 1, o->v.obj.keys + i, tail * sizeof(char *));
+    memmove(o->v.obj.key_lens + i + 1, o->v.obj.key_lens + i, tail * sizeof(size_t));
     memmove(o->v.obj.vals + i + 1, o->v.obj.vals + i, tail * sizeof(sbj *));
-    o->v.obj.keys[i] = dup_str(key);
+    o->v.obj.keys[i] = xrealloc(NULL, key_len + 1);
+    memcpy(o->v.obj.keys[i], key, key_len);
+    o->v.obj.keys[i][key_len] = '\0';
+    o->v.obj.key_lens[i] = key_len;
     o->v.obj.vals[i] = value;
     o->v.obj.len++;
 }
@@ -342,12 +356,13 @@ void sbj_set(sbj *o, const char *key, sbj *value) {
 sbj *sbj_take(sbj *o, const char *key) {
     if (!sbj_is_object(o) || !key) return NULL;
     int found;
-    size_t i = obj_find(o, key, &found);
+    size_t i = obj_find(o, key, strlen(key), &found);
     if (!found) return NULL;
     sbj *v = o->v.obj.vals[i];
     free(o->v.obj.keys[i]);
     size_t tail = o->v.obj.len - i - 1;
     memmove(o->v.obj.keys + i, o->v.obj.keys + i + 1, tail * sizeof(char *));
+    memmove(o->v.obj.key_lens + i, o->v.obj.key_lens + i + 1, tail * sizeof(size_t));
     memmove(o->v.obj.vals + i, o->v.obj.vals + i + 1, tail * sizeof(sbj *));
     o->v.obj.len--;
     return v;
@@ -399,7 +414,7 @@ void sbj_update(sbj *dst, const sbj *src) {
     /* nlohmann update(): shallow overwrite of top-level members. */
     if (!sbj_is_object(dst) || !sbj_is_object(src)) return;
     for (size_t i = 0; i < src->v.obj.len; ++i)
-        sbj_set(dst, src->v.obj.keys[i], sbj_clone(src->v.obj.vals[i]));
+        sbj_setn(dst, src->v.obj.keys[i], src->v.obj.key_lens[i], sbj_clone(src->v.obj.vals[i]));
 }
 
 /* ---------------------------------------------------------------------- */
@@ -568,7 +583,7 @@ static void dump_value(buf_t *b, const sbj *v, int indent, size_t level) {
                 buf_putc(b, '\n');
                 buf_spaces(b, (size_t)indent * (level + 1));
             }
-            dump_string(b, v->v.obj.keys[i], strlen(v->v.obj.keys[i]));
+            dump_string(b, v->v.obj.keys[i], v->v.obj.key_lens[i]);
             buf_puts(b, indent >= 0 ? ": " : ":");
             dump_value(b, v->v.obj.vals[i], indent, level + 1);
         }
@@ -848,7 +863,7 @@ static sbj *parse_value(parser_t *p) {
                 free(key);
                 goto obj_fail;
             }
-            sbj_set(o, key, val);
+            sbj_setn(o, key, klen, val);
             free(key);
             skip_ws(p);
             if (p->pos < p->len && p->s[p->pos] == ',') {
@@ -991,7 +1006,7 @@ int sbj_validate_utf8(const sbj *v, sb_err *err) {
             if (sbj_validate_utf8(v->v.arr.items[i], err) != 0) return -1;
     } else if (v->type == SBJ_OBJECT) {
         for (size_t i = 0; i < v->v.obj.len; ++i)
-            if (utf8_check(v->v.obj.keys[i], strlen(v->v.obj.keys[i]), err) != 0 ||
+            if (utf8_check(v->v.obj.keys[i], v->v.obj.key_lens[i], err) != 0 ||
                 sbj_validate_utf8(v->v.obj.vals[i], err) != 0)
                 return -1;
     }

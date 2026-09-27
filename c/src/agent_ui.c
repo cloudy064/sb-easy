@@ -454,7 +454,13 @@ static void handle_login(sb_agent_ui *ui, const request *req, response *resp) {
         sb_fail(&err, SB_ERR_VALIDATION, "登录请求必须是 JSON 对象");
     } else if (value_string(value, "username", &username, &err) == 0 &&
                value_string(value, "password", &password, &err) == 0) {
-        char *token = session_login(ui, username, password);
+        /* Configured credentials come from C strings (environment/options).
+         * A JSON credential containing NUL is a different byte string. */
+        const sbj *user_value = sbj_get(value, "username");
+        const sbj *password_value = sbj_get(value, "password");
+        bool exact = (!sbj_is_string(user_value) || user_value->v.str.len == strlen(username)) &&
+                     (!sbj_is_string(password_value) || password_value->v.str.len == strlen(password));
+        char *token = exact ? session_login(ui, username, password) : NULL;
         if (!token) {
             response_error(resp, 401, "用户名或密码错误");
         } else {

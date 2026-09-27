@@ -1470,7 +1470,7 @@ static bool auth_advice(http_exchange *ex, wire_response *w) {
 static void audit_advice(const http_exchange *ex, int status) {
     if (safe_method(ex->method) || !ex->req.claims || status < 200 || status >= 300) return;
     sb_err e = {0};
-    if (sb_store_record_audit(ex->srv->store, ex->claims.username ? ex->claims.username : "",
+    if (sb_store_record_audit_n(ex->srv->store, ex->claims.username, ex->claims.username_len,
                               method_names[ex->method], ex->path, &e) != 0)
         SB_ERROR("audit write failed: %s", e.msg);
 }

@@ -15,6 +15,7 @@ extern "C" {
 typedef struct {
     char *subject;
     char *username;
+    size_t username_len;
     char *role;
     int64_t expires_at;
     int64_t issued_at;
@@ -32,6 +33,8 @@ bool sb_verify_password_n(const char *password, size_t len, const char *encoded_
 /* Tokens are signed with `secret` (HS256). create returns malloc'd token. */
 char *sb_auth_create_token(const char *secret, const char *user_id, const char *username,
                            const char *role);
+char *sb_auth_create_token_n(const char *secret, const char *user_id, const char *username,
+                             size_t username_len, const char *role);
 /* Returns true and fills *out when the token is valid and unexpired. */
 bool sb_auth_verify_token(const char *secret, const char *token, sb_auth_claims *out);
 

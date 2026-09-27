@@ -378,6 +378,18 @@ TEST(agent_ui_contract) {
     CHECK_STR(c.cookie, "");
     ui_response_free(&invalid_login);
 
+    const char *nul_credentials[] = {
+        "{\"username\":\"local-admin\\u0000other\",\"password\":\"contract-password\"}",
+        "{\"username\":\"local-admin\",\"password\":\"contract-password\\u0000other\"}"
+    };
+    for (size_t i = 0; i < sizeof nul_credentials / sizeof *nul_credentials; ++i) {
+        ui_response nul_login = request(&c, "POST", "/api/login", nul_credentials[i]);
+        CHECK_EQ_INT(nul_login.status, 401);
+        CHECK(nul_login.set_cookie == NULL);
+        CHECK_STR(c.cookie, "");
+        ui_response_free(&nul_login);
+    }
+
     /* Agent UI login should issue an HttpOnly SameSite session cookie. */
     ui_response login = request(
         &c, "POST", "/api/login",

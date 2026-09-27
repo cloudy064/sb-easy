@@ -46,6 +46,7 @@ static sbj *opt_str(const char *value) { return value ? sbj_str(value) : sbj_nul
 void sb_user_account_init(sb_user_account *u) {
     u->id = sb_strdup("");
     u->username = sb_strdup("");
+    u->username_len = 0;
     u->password_hash = sb_strdup("");
     u->role = sb_strdup("");
     u->created_at = sb_strdup("");
@@ -61,7 +62,7 @@ void sb_user_account_free(sb_user_account *u) {
 sbj *sb_user_account_to_json(const sb_user_account *u) {
     sbj *v = sbj_object();
     sbj_set_str(v, "id", S(u->id));
-    sbj_set_str(v, "username", S(u->username));
+    sbj_set(v, "username", sbj_strn(S(u->username), u->username_len));
     sbj_set_str(v, "role", S(u->role));
     sbj_set_str(v, "created_at", S(u->created_at));
     return v;
@@ -73,6 +74,7 @@ void sb_audit_entry_init(sb_audit_entry *e) {
     e->id = 0;
     e->timestamp = sb_strdup("");
     e->actor = sb_strdup("");
+    e->actor_len = 0;
     e->action = sb_strdup("");
     e->target = NULL;
 }
@@ -87,7 +89,7 @@ sbj *sb_audit_entry_to_json(const sb_audit_entry *e) {
     sbj *v = sbj_object();
     sbj_set_int(v, "id", e->id);
     sbj_set_str(v, "ts", S(e->timestamp));
-    sbj_set_str(v, "actor", S(e->actor));
+    sbj_set(v, "actor", sbj_strn(S(e->actor), e->actor_len));
     sbj_set_str(v, "action", S(e->action));
     sbj_set(v, "target", opt_str(e->target));
     return v;
@@ -522,6 +524,7 @@ static void read_user(sqlite3_stmt *st, sb_user_account *u) {
     sb_user_account_free(u);
     u->id = sbq_text(st, 0);
     u->username = sbq_text(st, 1);
+    u->username_len = (size_t)sqlite3_column_bytes(st, 1);
     u->password_hash = sbq_text(st, 2);
     u->role = sbq_text(st, 3);
     u->created_at = sbq_text(st, 4);
@@ -930,14 +933,14 @@ void sb_store_free(sb_store *s) {
 
 sb_database *sb_store_database(sb_store *s) { return s->db; }
 
-static int find_user_locked(sqlite3 *h, const char *username, sb_user_account *out, sb_err *err) {
+static int find_user_locked(sqlite3 *h, const char *username, size_t username_len, sb_user_account *out, sb_err *err) {
     sqlite3_stmt *st = sbq_prepare(h,
                                    "SELECT id, username, password_hash, role, created_at "
                                    "FROM users WHERE username = ?1 LIMIT 1",
                                    err);
     if (!st) return -1;
-    sbq_bind_text(st, 1, S(username));
-    int r = sbq_step_row(st, err);
+    int r = sbq_bind_text_n(st, 1, S(username), username_len, err);
+    if (r == 0) r = sbq_step_row(st, err);
     if (r == 1) read_user(st, out);
     sqlite3_finalize(st);
     return r;
@@ -978,15 +981,26 @@ int sb_store_list_users(sb_store *s, sb_user_account_vec *out, sb_err *err) {
 
 int sb_store_find_user_by_username(sb_store *s, const char *username, sb_user_account *out,
                                    sb_err *err) {
+    return sb_store_find_user_by_username_n(s, username, strlen(S(username)), out, err);
+}
+
+int sb_store_find_user_by_username_n(sb_store *s, const char *username, size_t username_len,
+                                    sb_user_account *out, sb_err *err) {
     LOCK(s);
-    int r = find_user_locked(H(s), username, out, err);
+    int r = find_user_locked(H(s), username, username ? username_len : 0, out, err);
     UNLOCK(s);
     return r;
 }
 
 int sb_store_create_user(sb_store *s, const char *username, const char *password_hash,
                          const char *role, sb_user_account *out, sb_err *err) {
-    if (sb_str_empty(username) || sb_str_empty(password_hash) ||
+    return sb_store_create_user_n(s, username, strlen(S(username)), password_hash, role, out, err);
+}
+
+int sb_store_create_user_n(sb_store *s, const char *username, size_t username_len,
+                           const char *password_hash, const char *role,
+                           sb_user_account *out, sb_err *err) {
+    if (!username || username_len == 0 || sb_str_empty(password_hash) ||
         (!sb_streq(role, "admin") && !sb_streq(role, "viewer")))
         return sb_fail(err, SB_ERR_VALIDATION, "Invalid user");
     char *id = sb_uuid_v4();
@@ -995,8 +1009,8 @@ int sb_store_create_user(sb_store *s, const char *username, const char *password
     sqlite3 *h = H(s);
     sqlite3_stmt *st = sbq_prepare(h, "SELECT 1 FROM users WHERE username = ?1", err);
     if (!st) goto done;
-    sbq_bind_text(st, 1, username);
-    int r = sbq_step_row(st, err);
+    int r = sbq_bind_text_n(st, 1, username, username_len, err);
+    if (r == 0) r = sbq_step_row(st, err);
     sqlite3_finalize(st);
     if (r < 0) goto done;
     if (r == 1) {
@@ -1009,11 +1023,14 @@ int sb_store_create_user(sb_store *s, const char *username, const char *password
                      err);
     if (!st) goto done;
     sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, username);
+    if (sbq_bind_text_n(st, 2, username, username_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_text(st, 3, password_hash);
     sbq_bind_text(st, 4, role);
     if (exec_stmt(st, err) != 0) goto done;
-    r = find_user_locked(h, username, out, err);
+    r = find_user_locked(h, username, username_len, out, err);
     if (r == 0) sb_fail(err, SB_ERR_GENERIC, "created user could not be reloaded");
     rc = r == 1 ? 0 : -1;
 done:
@@ -1087,9 +1104,23 @@ int sb_store_reset_user_password(sb_store *s, const char *user_id, const char *p
 
 int sb_store_record_audit(sb_store *s, const char *actor, const char *action, const char *target,
                           sb_err *err) {
-    const char *binds[] = {S(actor), S(action), target};
-    return exec_changes(s, "INSERT INTO audit_log (actor, action, target) VALUES (?1, ?2, ?3)",
-                        NULL, err, 3, binds);
+    return sb_store_record_audit_n(s, actor, strlen(S(actor)), action, target, err);
+}
+
+int sb_store_record_audit_n(sb_store *s, const char *actor, size_t actor_len,
+                            const char *action, const char *target, sb_err *err) {
+    LOCK(s);
+    sqlite3_stmt *st = sbq_prepare(H(s),
+        "INSERT INTO audit_log (actor, action, target) VALUES (?1, ?2, ?3)", err);
+    int rc = -1;
+    if (st) {
+        int bound = sbq_bind_text_n(st, 1, S(actor), actor ? actor_len : 0, err);
+        sbq_bind_text(st, 2, S(action));
+        sbq_bind_text(st, 3, target);
+        rc = exec_bound(st, bound, err);
+    }
+    UNLOCK(s);
+    return rc;
 }
 
 int sb_store_list_audit(sb_store *s, size_t limit, sb_audit_entry_vec *out, sb_err *err) {
@@ -1108,6 +1139,7 @@ int sb_store_list_audit(sb_store *s, size_t limit, sb_audit_entry_vec *out, sb_e
         e->id = sbq_int(st, 0);
         e->timestamp = sbq_text(st, 1);
         e->actor = sbq_text(st, 2);
+        e->actor_len = (size_t)sqlite3_column_bytes(st, 2);
         e->action = sbq_text(st, 3);
         e->target = sbq_opt_text(st, 4);
     }

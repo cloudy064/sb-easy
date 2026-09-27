@@ -366,6 +366,54 @@ TEST(passwords_with_nul_create_login_and_reset) {
     sb_test_server_stop(&t);
 }
 
+TEST(usernames_with_nul_preserve_identity_session_and_audit) {
+    sb_test_server t;
+    sb_test_response r = {0};
+    REQUIRE(sb_test_server_start(&t) == 0);
+    const char *create = "{\"username\":\"admin\\u0000other\",\"password\":\"other-password\",\"role\":\"admin\"}";
+    call(&t, &r, "POST", "/api/users", create, ADMIN);
+    REQUIRE(r.status == 200);
+    sbj *expected = sbj_strn("admin\0other", 11);
+    CHECK(sbj_equal(sbj_get(r.json, "username"), expected));
+    call(&t, &r, "POST", "/api/users", create, ADMIN);
+    CHECK_ERROR(r, 409, "Username already exists");
+    call(&t, &r, "POST", "/api/auth/login", create, NO_AUTH);
+    REQUIRE(r.status == 200);
+    CHECK(sbj_equal(sbj_get(r.json, "username"), expected));
+    char *token = sb_strdup(str_of(r.json, "token"));
+    call(&t, &r, "GET", "/api/auth/session", NULL, token);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK(sbj_equal(sbj_get(r.json, "username"), expected));
+    call(&t, &r, "POST", "/api/auth/login",
+         "{\"username\":\"admin\",\"password\":\"other-password\"}", NO_AUTH);
+    CHECK_ERROR(r, 401, "Invalid credentials");
+    call(&t, &r, "GET", "/api/users", NULL, ADMIN);
+    size_t matches = 0;
+    const sbj *item;
+    SBJ_ARR_FOREACH(r.json, i, item) {
+        if (sbj_equal(sbj_get(item, "username"), expected)) ++matches;
+    }
+    CHECK_EQ_INT(matches, 1);
+    call(&t, &r, "PUT", "/api/settings", "{\"general\":{\"app_name\":\"NUL actor\"}}", token);
+    CHECK_EQ_INT(r.status, 200);
+    call(&t, &r, "GET", "/api/users/audit", NULL, ADMIN);
+    matches = 0;
+    SBJ_ARR_FOREACH(r.json, i, item) {
+        if (sbj_equal(sbj_get(item, "actor"), expected)) ++matches;
+    }
+    CHECK_EQ_INT(matches, 1);
+    call(&t, &r, "POST", "/api/users",
+         "{\"username\":\"\\u0000\",\"password\":\"leading-nul\"}", ADMIN);
+    CHECK_EQ_INT(r.status, 200);
+    call(&t, &r, "POST", "/api/auth/login",
+         "{\"username\":\"\\u0000\",\"password\":\"leading-nul\"}", NO_AUTH);
+    CHECK_EQ_INT(r.status, 200);
+    sbj_free(expected);
+    free(token);
+    sb_test_response_free(&r);
+    sb_test_server_stop(&t);
+}
+
 TEST(user_administration) {
     sb_test_server t;
     sb_test_response r = {0};

@@ -73,10 +73,11 @@ test in this configuration.
 - JSON syntax errors keep the existing response shape and status; detailed
   parser wording can differ from nlohmann. Invalid UTF-8 in server JSON
   responses is rejected with the existing type-error response.
-- Password hashing and verification use explicit byte lengths, including
-  embedded NUL bytes. Other model strings still use C strings; their NUL
-  compatibility requires further audit before claiming byte-exact parity for
-  arbitrary inputs.
+- Passwords, usernames, JWT username claims and audit actors preserve explicit
+  byte lengths, including embedded NUL bytes. Agent UI credentials are matched
+  against the full JSON strings. Other model strings still use C strings;
+  their NUL compatibility requires further audit before claiming byte-exact
+  parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI
   requests. It serves only its configured UI directory.
 

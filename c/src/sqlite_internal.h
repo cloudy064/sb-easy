@@ -47,6 +47,13 @@ static inline void sbq_bind_text(sqlite3_stmt *st, int i, const char *value) {
     else
         sqlite3_bind_null(st, i);
 }
+static inline int sbq_bind_text_n(sqlite3_stmt *st, int i, const char *value, size_t len,
+                                  sb_err *err) {
+    int code = value ? sqlite3_bind_text64(st, i, value, (sqlite3_uint64)len,
+                                          SQLITE_TRANSIENT, SQLITE_UTF8)
+                     : sqlite3_bind_null(st, i);
+    return code == SQLITE_OK ? 0 : sbq_fail(sqlite3_db_handle(st), "bind text", code, err);
+}
 static inline void sbq_bind_int(sqlite3_stmt *st, int i, int64_t value) {
     sqlite3_bind_int64(st, i, value);
 }

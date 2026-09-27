@@ -104,6 +104,11 @@ bool sb_verify_password_n(const char *password, size_t len, const char *encoded_
 
 char *sb_auth_create_token(const char *secret, const char *user_id, const char *username,
                            const char *role) {
+    return sb_auth_create_token_n(secret, user_id, username, username ? strlen(username) : 0, role);
+}
+
+char *sb_auth_create_token_n(const char *secret, const char *user_id, const char *username,
+                             size_t username_len, const char *role) {
     if (sb_str_empty(secret)) {
         SB_ERROR("JWT secret is not configured");
         return NULL;
@@ -114,7 +119,7 @@ char *sb_auth_create_token(const char *secret, const char *user_id, const char *
     sbj_set_str(h, "typ", "JWT");
     sbj *p = sbj_object();
     sbj_set_str(p, "sub", user_id ? user_id : "");
-    sbj_set_str(p, "username", username ? username : "");
+    sbj_set(p, "username", sbj_strn(username ? username : "", username ? username_len : 0));
     sbj_set_str(p, "role", role ? role : "");
     sbj_set_int(p, "exp", issued_at + TOKEN_LIFETIME_SECONDS);
     sbj_set_int(p, "iat", issued_at);
@@ -165,7 +170,8 @@ bool sb_auth_verify_token(const char *secret, const char *token, sb_auth_claims 
     if (expires_at <= sb_unix_now()) goto done;
     if (out) {
         out->subject = sb_strdup(sub->v.str.ptr);
-        out->username = sb_strdup(user->v.str.ptr);
+        out->username = sb_strndup(user->v.str.ptr, user->v.str.len);
+        out->username_len = user->v.str.len;
         out->role = sb_strdup(role->v.str.ptr);
         out->expires_at = expires_at;
         out->issued_at = sbj_as_int(iat, 0);

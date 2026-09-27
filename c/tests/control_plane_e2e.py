@@ -90,6 +90,26 @@ def run(args, root):
         start(args.server, env, "panel")
         wait_for(lambda: request("/api/health")[0] == 200, processes)
         token = api("/api/auth/login", {"password": "isolated-e2e-password"})["token"]
+        # Exercise the same byte-string identity contract against C and C++.
+        for username in ("admin\0other", "\0", " \0 "):
+            credentials = {"username": username, "password": "distinct\0password", "role": "admin"}
+            created = api("/api/users", credentials)
+            assert created["username"] == username
+            assert request("/api/users", credentials)[0] == 409
+            login = api("/api/auth/login", credentials)
+            assert login["username"] == username
+            identity_headers = {"Authorization": "Bearer " + login["token"]}
+            status, _, session = request("/api/auth/session", headers=identity_headers, authenticated=False)
+            assert status == 200 and session["username"] == username
+            status, _, _ = request("/api/settings", {"general": {"app_name": "identity test"}}, "PUT",
+                                   headers=identity_headers, authenticated=False)
+            assert status == 200
+            assert any(entry["actor"] == username for entry in api("/api/users/audit"))
+            assert any(user["username"] == username for user in api("/api/users"))
+            wrong = {"username": username.split("\0", 1)[0], "password": credentials["password"]}
+            assert request("/api/auth/login", wrong, authenticated=False)[0] == 401
+            api("/api/users/" + created["id"], method="DELETE")
+        print("PASS: NUL usernames and passwords preserve distinct identities, sessions and audit actors")
         shared = api("/api/hosts/profiles", profile("jp-fixed-a"))
         agents = []
         for n in range(2):

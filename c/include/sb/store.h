@@ -47,6 +47,7 @@ extern "C" {
 /* ---- users / audit ---------------------------------------------------- */
 typedef struct {
     char *id, *username, *password_hash, *role, *created_at;
+    size_t username_len;
 } sb_user_account;
 void sb_user_account_init(sb_user_account *u);
 void sb_user_account_free(sb_user_account *u);
@@ -59,6 +60,7 @@ void sb_user_account_vec_free(sb_user_account_vec *v);
 typedef struct {
     int64_t id;
     char *timestamp, *actor, *action;
+    size_t actor_len;
     char *target; /* nullable */
 } sb_audit_entry;
 void sb_audit_entry_init(sb_audit_entry *e);
@@ -225,6 +227,14 @@ int sb_store_find_user_by_username(sb_store *s, const char *username, sb_user_ac
                                    sb_err *err);
 int sb_store_create_user(sb_store *s, const char *username, const char *password_hash,
                          const char *role, sb_user_account *out, sb_err *err);
+/* Length-aware variants preserve JSON usernames, including embedded NUL. */
+int sb_store_find_user_by_username_n(sb_store *s, const char *username, size_t username_len,
+                                    sb_user_account *out, sb_err *err);
+int sb_store_create_user_n(sb_store *s, const char *username, size_t username_len,
+                           const char *password_hash, const char *role,
+                           sb_user_account *out, sb_err *err);
+int sb_store_record_audit_n(sb_store *s, const char *actor, size_t actor_len,
+                            const char *action, const char *target, sb_err *err);
 int sb_store_delete_user(sb_store *s, const char *actor_id, const char *user_id, sb_err *err);
 int sb_store_reset_user_password(sb_store *s, const char *user_id, const char *password_hash,
                                  sb_err *err);

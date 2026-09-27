@@ -55,7 +55,11 @@ release images/CI, and centrally managed Claude egress rollout.
 
 - Android devices `xiaomi` and `adrd` are offline. Central configuration is
   ready; actual receipt and routing remain unverified until they reconnect.
-- Passwords and JSON keys preserve embedded NUL bytes. Other model strings
+- Passwords, usernames, JSON keys, JWT username claims and audit actors preserve
+  embedded NUL bytes. User identity/session/audit end-to-end checks pass on
+  both C and C++. Agent UI rejects appended NUL credential suffixes without
+  issuing a session. Normal and sanitizer suites pass; production database
+  snapshot still passes all 16 comparisons. Other model strings
   still require a broader compatibility audit; arbitrary-input byte-exact
   parity is not claimed. Detailed JSON error wording and platform-dependent
   WireGuard conversion differences are documented in README.md.

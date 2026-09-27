@@ -16,6 +16,7 @@
 #include "sb/config_renderer.h"
 #include "sb/types.h"
 #include "sb/wireguard.h"
+#include <ctype.h>
 
 #ifndef SB_EASY_VERSION
 #define SB_EASY_VERSION "1.0.0"
@@ -95,12 +96,6 @@ static int json_value_string(const sbj *body, const char *field, const char *fal
 static bool json_string_is(const sbj *value, const char *literal) {
     size_t n = strlen(literal);
     return sbj_is_string(value) && value->v.str.len == n && memcmp(value->v.str.ptr, literal, n) == 0;
-}
-
-/* True when a JSON string holds an embedded NUL. Such values cannot be
- * passed through the C string APIs (store, argon2 wrapper) unchanged. */
-static bool json_string_has_nul(const sbj *value) {
-    return sbj_is_string(value) && strlen(value->v.str.ptr) != value->v.str.len;
 }
 
 /* utc_after(): "%Y-%m-%dT%H:%M:%SZ" for now + `minutes`. NULL on failure. */
@@ -250,7 +245,8 @@ static int handle_auth_login(sb_http_req *req, sb_http_resp *resp, sb_err *err) 
     sb_http_server *srv = req->server;
     sb_user_account user;
     sb_user_account_init(&user);
-    const sbj *found, *username_value = NULL;
+    const sbj *found;
+    size_t username_len = 5;
     const char *username = "admin", *password;
     char *token;
     sbj *out;
@@ -264,32 +260,26 @@ static int handle_auth_login(sb_http_req *req, sb_http_resp *resp, sb_err *err) 
             sb_fail(err, SB_ERR_VALIDATION, "username must be a string");
             goto done;
         }
-        username_value = found;
+        username_len = found->v.str.len;
         username = found->v.str.ptr;
     }
     password = sb_json_required_string(body, "password", err);
     if (!password) goto done;
-    /* C++ compares the full byte strings; a C string would silently drop
-     * everything after an embedded NUL, so such credentials never match. */
-    if (json_string_has_nul(username_value)) {
-        sb_fail(err, SB_ERR_AUTH, "Invalid credentials");
-        goto done;
-    }
-    status = sb_store_find_user_by_username(srv->store, username, &user, err);
+    status = sb_store_find_user_by_username_n(srv->store, username, username_len, &user, err);
     if (status < 0) goto done;
     if (status == 0 || !sb_verify_password_n(password, sbj_get(body, "password")->v.str.len,
                                            user.password_hash)) {
         sb_fail(err, SB_ERR_AUTH, "Invalid credentials");
         goto done;
     }
-    token = sb_auth_create_token(srv->opts.jwt_secret, user.id, user.username, user.role);
+    token = sb_auth_create_token_n(srv->opts.jwt_secret, user.id, user.username, user.username_len, user.role);
     if (!token) {
         sb_fail(err, SB_ERR_GENERIC, "JWT secret is not configured");
         goto done;
     }
     out = sbj_object();
     sbj_set(out, "token", sbj_str_take(token));
-    sbj_set_str(out, "username", S(user.username));
+    sbj_set(out, "username", sbj_strn(S(user.username), user.username_len));
     sbj_set_str(out, "role", S(user.role));
     sb_resp_json(resp, 200, out);
     rc = 0;
@@ -311,7 +301,7 @@ static int handle_auth_session(sb_http_req *req, sb_http_resp *resp, sb_err *err
         return sb_fail(err, SB_ERR_AUTH, "Invalid or expired token");
     }
     sbj *body = sbj_object();
-    sbj_set_str(body, "username", S(claims.username));
+    sbj_set(body, "username", sbj_strn(S(claims.username), claims.username_len));
     sbj_set_str(body, "role", S(claims.role));
     sbj_set_bool(body, "authenticated", true);
     sb_auth_claims_free(&claims);
@@ -361,7 +351,7 @@ static int handle_users_create(sb_http_req *req, sb_http_resp *resp, sb_err *err
     sbj *body = NULL;
     const sbj *found, *role_value = NULL;
     const char *username, *password, *role = "viewer";
-    char *trimmed = NULL, *hash = NULL;
+    char *hash = NULL;
     bool blank;
     int rc = -1;
 
@@ -381,8 +371,10 @@ static int handle_users_create(sb_http_req *req, sb_http_resp *resp, sb_err *err
         role_value = found;
         role = found->v.str.ptr;
     }
-    trimmed = sb_http_trim(username);
-    blank = !trimmed || !*trimmed;
+    size_t username_len = sbj_get(body, "username")->v.str.len;
+    blank = true;
+    for (size_t i = 0; i < username_len; ++i)
+        if (!isspace((unsigned char)username[i])) { blank = false; break; }
     if (blank || sbj_get(body, "password")->v.str.len < 4) {
         sb_fail(err, SB_ERR_VALIDATION, "Username required, password must be at least 4 characters");
         goto done;
@@ -393,12 +385,11 @@ static int handle_users_create(sb_http_req *req, sb_http_resp *resp, sb_err *err
     }
     hash = sb_hash_password_n(password, sbj_get(body, "password")->v.str.len, err);
     if (!hash) goto done;
-    if (sb_store_create_user(srv->store, username, hash, role, &user, err) != 0) goto done;
+    if (sb_store_create_user_n(srv->store, username, username_len, hash, role, &user, err) != 0) goto done;
     sb_resp_json(resp, 200, sb_user_account_to_json(&user));
     rc = 0;
 done:
     sbj_free(body);
-    free(trimmed);
     free(hash);
     sb_user_account_free(&user);
     return rc == 0 ? 0 : fail_json_aware(err);

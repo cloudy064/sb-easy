@@ -85,6 +85,7 @@ typedef struct {
     char *last_put_body;
     /* scripted state */
     int proxies_status;       /* HTTP status for GET /proxies */
+    char *proxies_body;
     char *connections_body;   /* NULL -> the C++ fixture body */
     uint16_t route_port;      /* source port reported for the route test */
 } clash_fixture;
@@ -120,11 +121,12 @@ static char *clash_respond(clash_fixture *f, const char *method, const char *tar
     if (strcmp(method, "GET") == 0 && strcmp(target, "/proxies") == 0) {
         status = f->proxies_status;
         payload = status == 200
-                      ? sb_strdup("{\"proxies\":{\"Agent Node\":{\"type\":\"Shadowsocks\"},"
+                      ? sb_strdup(f->proxies_body ? f->proxies_body : "{\"proxies\":{\"Agent Node\":{\"type\":\"Shadowsocks\"},"
                                   "\"Agent / Group\":{\"type\":\"Selector\",\"now\":\"Agent Node\","
                                   "\"all\":[\"Agent Node\"]},\"direct\":{\"type\":\"Direct\"}}}")
                       : sb_strdup("{\"message\":\"controller exploded\"}");
-    } else if (strcmp(method, "PUT") == 0 && strcmp(target, "/proxies/Agent%20%2F%20Group") == 0) {
+    } else if (strcmp(method, "PUT") == 0 && (strcmp(target, "/proxies/Agent%20%2F%20Group") == 0 ||
+               strcmp(target, "/proxies/Group%00tail") == 0)) {
         free(f->last_put_body);
         f->last_put_body = sb_strdup(body);
         payload = sb_strdup("{\"selected\":true}");
@@ -196,6 +198,7 @@ static void clash_fixture_stop(clash_fixture *f) {
     sb_strvec_free(&f->authorizations);
     free(f->last_put_body);
     free(f->connections_body);
+    free(f->proxies_body);
     pthread_mutex_destroy(&f->mutex);
 }
 
@@ -389,18 +392,20 @@ TEST(agent_clash_test_proxies_filters_and_errors) {
 
     /* Only the requested tags are tested; an empty list tests nothing. */
     reporter_state reports = {.reports = sbj_array(), .fail_after = -1};
-    sb_strvec tags = {0};
-    sb_strvec_push(&tags, "missing");
-    CHECK(sb_agent_clash_test_proxies(clash, &tags, collect_latency, &reports, &tested, &err) == 0);
+    sbj *tags = sbj_array();
+    sbj_arr_push(tags, sbj_str("missing"));
+    CHECK(sb_agent_clash_test_proxies(clash, tags, collect_latency, &reports, &tested, &err) == 0);
     CHECK_EQ_INT(tested, 0);
-    sb_strvec_push(&tags, "Agent Node");
-    sb_strvec_push(&tags, "Agent / Group"); /* groups are never tested */
-    CHECK(sb_agent_clash_test_proxies(clash, &tags, collect_latency, &reports, &tested, &err) == 0);
+    sbj_arr_push(tags, sbj_str("Agent Node"));
+    sbj_arr_push(tags, sbj_str("Agent / Group")); /* groups are never tested */
+    CHECK(sb_agent_clash_test_proxies(clash, tags, collect_latency, &reports, &tested, &err) == 0);
     CHECK_EQ_INT(tested, 1);
-    sb_strvec_free(&tags);
-    sb_strvec empty = {0};
-    CHECK(sb_agent_clash_test_proxies(clash, &empty, collect_latency, &reports, &tested, &err) == 0);
+    sbj_free(tags);
+    sbj *empty = sbj_array();
+    CHECK(sb_agent_clash_test_proxies(clash, empty, collect_latency, &reports, &tested, &err) == 0);
     CHECK_EQ_INT(tested, 0);
+
+    sbj_free(empty);
 
     /* Reporter failures abort the run (C++ exception propagation). */
     reports.fail_after = 0;
@@ -657,5 +662,46 @@ TEST(agent_clash_route_test) {
     remove_dir(dir);
     free(dir);
     proxy_fixture_stop(&inbound);
+    clash_fixture_stop(&fixture);
+}
+
+TEST(agent_clash_byte_tags_survive_filter_paths_results_and_selection) {
+    clash_fixture fixture;
+    REQUIRE(clash_fixture_start(&fixture) == 0);
+    pthread_mutex_lock(&fixture.mutex);
+    fixture.proxies_body = sb_strdup("{\"proxies\":{"
+        "\"node\":{\"type\":\"Shadowsocks\"},"
+        "\"node\\u0000tail\":{\"type\":\"Shadowsocks\"},"
+        "\"\\u0000node\":{\"type\":\"Shadowsocks\"}}}");
+    pthread_mutex_unlock(&fixture.mutex);
+    char *dir = temp_dir();
+    char *config = clash_config(dir, fixture.port, 7);
+    sb_agent_clash *clash = sb_agent_clash_new(config);
+    sb_err err = {0};
+    reporter_state reports = {.reports = sbj_array(), .fail_after = -1};
+    sbj *tags = sbj_array();
+    sbj_arr_push(tags, sbj_strn("node\0tail", 9));
+    sbj_arr_push(tags, sbj_strn("\0node", 5));
+    size_t tested = 0;
+    REQUIRE(sb_agent_clash_test_proxies(clash, tags, collect_latency, &reports, &tested, &err) == 0);
+    CHECK_EQ_INT(tested, 2);
+    CHECK(sbj_getn(sbj_arr_at(reports.reports, 0), "\0node", 5) != NULL);
+    CHECK(sbj_getn(sbj_arr_at(reports.reports, 1), "node\0tail", 9) != NULL);
+    CHECK(fixture_saw(&fixture, "GET /proxies/node%00tail/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000"));
+    CHECK(fixture_saw(&fixture, "GET /proxies/%00node/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000"));
+    CHECK(!fixture_saw(&fixture, "GET /proxies/node/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000"));
+    sbj *selected = sb_agent_clash_select_proxy_n(clash, "Group\0tail", 10, "node\0tail", 9, &err);
+    REQUIRE(selected);
+    CHECK_EQ_INT(sbj_get(selected, "group")->v.str.len, 10);
+    CHECK_EQ_INT(sbj_get(selected, "name")->v.str.len, 9);
+    CHECK(fixture_saw(&fixture, "PUT /proxies/Group%00tail"));
+    CHECK_STR(fixture.last_put_body, "{\"name\":\"node\\u0000tail\"}");
+    sbj_free(selected);
+    sbj_free(tags);
+    sbj_free(reports.reports);
+    sb_agent_clash_free(clash);
+    free(config);
+    remove_dir(dir);
+    free(dir);
     clash_fixture_stop(&fixture);
 }

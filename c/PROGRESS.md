@@ -8,9 +8,8 @@ release images/CI, and centrally managed Claude egress rollout.
 - Production center and local agent run the verified identity fix `05168b0`.
 - Profile/script fixes and host/WireGuard name fixes are verified in source;
   versioned images through `d3c88a8` are built. These changes await the combined rollout.
-- Proxy storage/rendering byte compatibility is verified; agent-side tag
-  collections and remaining non-authentication string boundaries are still
-  under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
+- Proxy storage/rendering and agent tag operations preserve full bytes;
+  remaining non-authentication string boundaries are still under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
   of the centrally prepared rules has not been verified.
 
 ## Verified on 2026-09-27
@@ -163,3 +162,20 @@ not start a runtime service or modify host interfaces.
 - Remaining related boundaries include the agent Clash test-proxy tag filter,
   result keys and UI selection callbacks, which still take C strings. Broader
   subscription/metadata strings also need review. This batch is not deployed.
+
+## Agent tag compatibility follow-up
+
+- Test-proxies command JSON arrays retain full byte strings. Clash filtering,
+  deterministic name ordering, URL encoding and latency result keys retain
+  embedded NUL suffixes rather than selecting/reporting a prefix node.
+- Local UI selection callbacks carry both lengths through the agent to the
+  Clash PUT URL/body and the success response. Leading-NUL names remain valid
+  nonempty byte strings, matching C++.
+- Fake-controller regression proves exact filtered requests, complete result
+  keys and encoded group selection. Authenticated UI regression proves complete
+  group/name callback values. Agent Clash/UI and real two-agent integration
+  suites pass in normal and ASan/UBSan builds; logs are
+  `/tmp/sb-c-agent-tags-*.log`.
+- General command strings, telemetry/diagnostic metadata and subscription
+  fields still need the broader boundary audit. Release and Android receipt
+  gates remain outstanding.

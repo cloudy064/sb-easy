@@ -704,10 +704,10 @@ static int read_existing(const char *path, char **out, size_t *len, sb_err *err)
 }
 
 /* C++ proxy_test_tags(): *all = true for std::nullopt. */
-static int proxy_test_tags(const char *command, sb_strvec *tags, bool *all, sb_err *err) {
+static int proxy_test_tags(const char *command, sbj **tags, bool *all, sb_err *err) {
     static const char prefix[] = "test-proxies";
     const size_t prefix_len = sizeof prefix - 1;
-    memset(tags, 0, sizeof *tags);
+    *tags = NULL;
     *all = true;
     if (strcmp(command, prefix) == 0) return 0;
     if (!sb_starts_with(command, prefix) || strlen(command) <= prefix_len ||
@@ -723,13 +723,11 @@ static int proxy_test_tags(const char *command, sb_strvec *tags, bool *all, sb_e
     const sbj *value;
     SBJ_ARR_FOREACH(parsed, i, value) {
         if (!sbj_is_string(value)) {
-            sb_strvec_free(tags);
             sbj_free(parsed);
             return 0;
         }
-        sb_strvec_push(tags, value->v.str.ptr);
     }
-    sbj_free(parsed);
+    *tags = parsed;
     *all = false;
     return 0;
 }
@@ -1068,19 +1066,19 @@ static int run_commands(agent_runtime *rt, sb_err *err) {
             changes_running_state = true;
         } else if (strcmp(command, "test-proxies") == 0 ||
                    sb_starts_with(command, "test-proxies ")) {
-            sb_strvec tags;
+            sbj *tags = NULL;
             bool all = true;
             sb_err error = {0};
             size_t tested = 0;
             if (proxy_test_tags(command, &tags, &all, &error) == 0 &&
-                sb_agent_clash_test_proxies(rt->clash, all ? NULL : &tags, report_latency, rt,
+                sb_agent_clash_test_proxies(rt->clash, all ? NULL : tags, report_latency, rt,
                                             &tested, &error) == 0) {
                 result.success = true;
                 result.detail = sb_asprintf("tested %zu proxies", tested);
             } else {
                 result.detail = sb_asprintf("test-proxies: %s", error.msg);
             }
-            sb_strvec_free(&tags);
+            sbj_free(tags);
         } else {
             result.detail = sb_asprintf("unknown command: %s", command);
         }
@@ -1302,9 +1300,10 @@ fail:
     return NULL;
 }
 
-static sbj *ui_select_proxy(const char *group, const char *proxy, void *user, sb_err *err) {
+static sbj *ui_select_proxy(const char *group, size_t group_len, const char *proxy,
+                             size_t proxy_len, void *user, sb_err *err) {
     agent_runtime *rt = user;
-    return sb_agent_clash_select_proxy(rt->clash, group, proxy, err);
+    return sb_agent_clash_select_proxy_n(rt->clash, group, group_len, proxy, proxy_len, err);
 }
 
 static sbj *ui_test_route(const char *url, void *user, sb_err *err) {

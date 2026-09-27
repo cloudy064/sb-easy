@@ -94,10 +94,10 @@ static char *replace_all(char *value, const char *from, const char *to) {
 }
 
 /* C++ encode_component(): RFC 3986 unreserved kept, everything else %XX. */
-static char *encode_component(const char *value) {
+static char *encode_component_n(const char *value, size_t len) {
     static const char hexadecimal[] = "0123456789ABCDEF";
     sb_buf out = {0};
-    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+    for (const unsigned char *p = (const unsigned char *)value; len; ++p, --len) {
         if (c_alnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~') {
             sb_buf_putc(&out, (char)*p);
         } else {
@@ -107,6 +107,10 @@ static char *encode_component(const char *value) {
         }
     }
     return sb_buf_detach(&out);
+}
+
+static char *encode_component(const char *value) {
+    return encode_component_n(value, strlen(value));
 }
 
 /* nlohmann object.value(key, "<fallback>"): the fallback when absent, a
@@ -350,20 +354,25 @@ void sb_agent_clash_free(sb_agent_clash *clash) {
 
 /* ---- test_proxies ----------------------------------------------------- */
 
-static bool skipped_type(const char *type) {
+static bool skipped_type(const sbj *type) {
     static const char *const skipped[] = {"Selector", "URLTest", "Fallback", "LoadBalance",
                                           "Direct",   "Reject",  "Compatible", "Pass",
                                           "Dns",      "Block",   "Loopback"};
     for (size_t i = 0; i < sizeof skipped / sizeof skipped[0]; ++i)
-        if (strcmp(type, skipped[i]) == 0) return true;
+        if (sbj_string_is(type, skipped[i])) return true;
     return false;
 }
 
-static int compare_strings(const void *a, const void *b) {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
+static bool contains_tag(const sbj *tags, const char *name, size_t len) {
+    const sbj *tag;
+    SBJ_ARR_FOREACH(tags, i, tag) {
+        if (sbj_is_string(tag) && tag->v.str.len == len && memcmp(tag->v.str.ptr, name, len) == 0)
+            return true;
+    }
+    return false;
 }
 
-int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sb_strvec *tags,
+int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sbj *tags,
                                 sb_latency_reporter reporter, void *user, size_t *tested,
                                 sb_err *err) {
     if (!reporter) return sb_fail(err, SB_ERR_VALIDATION, "proxy latency reporter is required");
@@ -371,7 +380,7 @@ int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sb_strvec *tags,
     if (read_target(clash->config_path, true, &owned, err) < 0) return -1;
     sb_clash_target target = borrow_target(&owned);
     sb_clash_response response = {0};
-    sb_strvec names = {0};
+    sbj *names = sbj_object();
     char *delay_query = NULL;
     int rc = -1;
     size_t count = 0;
@@ -391,19 +400,19 @@ int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sb_strvec *tags,
         const char *type = "";
         if (sbj_is_object(proxy) && value_string(proxy, "type", "", &type, err) != 0) goto out;
         bool is_group = sbj_is_object(proxy) && sbj_has(proxy, "all");
-        if (!is_group && !skipped_type(type) && (!tags || sb_strvec_contains(tags, name)))
-            sb_strvec_push(&names, name);
+        if (!is_group && !skipped_type(sbj_get(proxy, "type")) &&
+            (!tags || contains_tag(tags, name, found->v.obj.key_lens[i])))
+            sbj_setn(names, name, found->v.obj.key_lens[i], sbj_bool(true));
     }
-    if (names.len > 1) qsort(names.items, names.len, sizeof *names.items, compare_strings);
 
     {
         char *probe = encode_component("https://www.gstatic.com/generate_204");
         delay_query = sb_asprintf("/delay?url=%s&timeout=5000", probe);
         free(probe);
     }
-    for (size_t i = 0; i < names.len; ++i) {
+    for (size_t i = 0; i < names->v.obj.len; ++i) {
         sbj *latency = sbj_null();
-        char *encoded = encode_component(names.items[i]);
+        char *encoded = encode_component_n(names->v.obj.keys[i], names->v.obj.key_lens[i]);
         char *path = sb_asprintf("/proxies/%s%s", encoded, delay_query);
         sb_clash_response delay = {0};
         sb_err ignored = {0};
@@ -422,7 +431,7 @@ int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sb_strvec *tags,
         free(path);
         free(encoded);
         sbj *result = sbj_object();
-        sbj_set(result, names.items[i], latency);
+        sbj_setn(result, names->v.obj.keys[i], names->v.obj.key_lens[i], latency);
         int reported = reporter(result, user, err);
         sbj_free(result);
         if (reported != 0) goto out;
@@ -432,7 +441,7 @@ int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sb_strvec *tags,
 out:
     if (rc == 0 && tested) *tested = count;
     free(delay_query);
-    sb_strvec_free(&names);
+    sbj_free(names);
     sb_clash_response_free(&response);
     owned_target_free(&owned);
     return rc;
@@ -755,17 +764,23 @@ sbj *sb_agent_clash_proxies(sb_agent_clash *clash, sb_err *err) {
 
 sbj *sb_agent_clash_select_proxy(sb_agent_clash *clash, const char *group, const char *proxy,
                                  sb_err *err) {
-    if (sb_str_empty(group) || sb_str_empty(proxy)) {
+    return sb_agent_clash_select_proxy_n(clash, group, group ? strlen(group) : 0,
+                                         proxy, proxy ? strlen(proxy) : 0, err);
+}
+
+sbj *sb_agent_clash_select_proxy_n(sb_agent_clash *clash, const char *group, size_t group_len,
+                                   const char *proxy, size_t proxy_len, sb_err *err) {
+    if (!group || !group_len || !proxy || !proxy_len) {
         sb_fail(err, SB_ERR_VALIDATION, "策略组和节点名称不能为空");
         return NULL;
     }
     owned_target owned;
     if (read_target(clash->config_path, true, &owned, err) < 0) return NULL;
     sb_clash_target target = borrow_target(&owned);
-    char *encoded = encode_component(group);
+    char *encoded = encode_component_n(group, group_len);
     char *path = sb_asprintf("/proxies/%s", encoded);
     sbj *body = sbj_object();
-    sbj_set_str(body, "name", proxy);
+    sbj_set(body, "name", sbj_strn(proxy, proxy_len));
     sb_clash_response response = {0};
     int rc = sb_clash_put(clash->client, &target, path, body, &response, err);
     sbj_free(body);
@@ -781,8 +796,8 @@ sbj *sb_agent_clash_select_proxy(sb_agent_clash *clash, const char *group, const
     } else {
         result = sbj_object();
         sbj_set_bool(result, "success", true);
-        sbj_set_str(result, "group", group);
-        sbj_set_str(result, "name", proxy);
+        sbj_set(result, "group", sbj_strn(group, group_len));
+        sbj_set(result, "name", sbj_strn(proxy, proxy_len));
     }
     sb_clash_response_free(&response);
     return result;

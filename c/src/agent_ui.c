@@ -528,7 +528,8 @@ static void handle_select_proxy(sb_agent_ui *ui, const request *req, response *r
         response_error(resp, 400, "请选择有效的策略组和节点");
         return;
     }
-    sbj *result = ui->callbacks.select_proxy(group->v.str.ptr, name->v.str.ptr,
+    sbj *result = ui->callbacks.select_proxy(group->v.str.ptr, group->v.str.len,
+                                             name->v.str.ptr, name->v.str.len,
                                              ui->callbacks.user, &err);
     sbj_free(value);
     response_from_result(resp, result, &err);

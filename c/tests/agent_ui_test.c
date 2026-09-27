@@ -106,17 +106,18 @@ static sbj *cb_proxies(void *user, sb_err *err) {
         "[{\"time\":\"2026-08-10T00:00:00Z\",\"delay\":36}]}}}");
 }
 
-static sbj *cb_select_proxy(const char *group, const char *proxy, void *user, sb_err *err) {
+static sbj *cb_select_proxy(const char *group, size_t group_len, const char *proxy,
+                             size_t proxy_len, void *user, sb_err *err) {
     (void)err;
     fixture_state *state = user;
     pthread_mutex_lock(&state->mutex);
-    sb_str_set(&state->selected_group, group);
-    sb_str_set(&state->selected_proxy, proxy);
+    sb_str_setn(&state->selected_group, group, group_len);
+    sb_str_setn(&state->selected_proxy, proxy, proxy_len);
     pthread_mutex_unlock(&state->mutex);
     sbj *result = sbj_object();
     sbj_set_bool(result, "success", true);
-    sbj_set_str(result, "group", group);
-    sbj_set_str(result, "name", proxy);
+    sbj_set(result, "group", sbj_strn(group, group_len));
+    sbj_set(result, "name", sbj_strn(proxy, proxy_len));
     return result;
 }
 
@@ -474,6 +475,18 @@ TEST(agent_ui_contract) {
     ui_response_free(&switched);
 
     /* Agent UI should reject a proxy switch without a node name. */
+    ui_response byte_switch = request(&c, "PUT", "/api/proxies",
+        "{\"group\":\"Proxy\\u0000tail\",\"name\":\"\\u0000node\"}");
+    CHECK_EQ_INT(byte_switch.status, 200);
+    const sbj *byte_group = sbj_get(byte_switch.json, "group");
+    const sbj *byte_name = sbj_get(byte_switch.json, "name");
+    REQUIRE(sbj_is_string(byte_group) && sbj_is_string(byte_name));
+    CHECK_EQ_INT(byte_group->v.str.len, 10);
+    CHECK(memcmp(byte_group->v.str.ptr, "Proxy\0tail", 10) == 0);
+    CHECK_EQ_INT(byte_name->v.str.len, 5);
+    CHECK(memcmp(byte_name->v.str.ptr, "\0node", 5) == 0);
+    ui_response_free(&byte_switch);
+
     ui_response invalid_switch = request(&c, "PUT", "/api/proxies", "{\"group\":\"Proxy\"}");
     CHECK_EQ_INT(invalid_switch.status, 400);
     CHECK_STR(json_str(invalid_switch.json, "error"), "请选择有效的策略组和节点");

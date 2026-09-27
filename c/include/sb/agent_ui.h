@@ -24,7 +24,8 @@ typedef struct {
     sbj *(*update_settings)(const sbj *value, void *user, sb_err *err);
     sbj *(*config)(void *user, sb_err *err);
     sbj *(*proxies)(void *user, sb_err *err);
-    sbj *(*select_proxy)(const char *group, const char *proxy, void *user, sb_err *err);
+    sbj *(*select_proxy)(const char *group, size_t group_len, const char *proxy,
+                         size_t proxy_len, void *user, sb_err *err);
     sbj *(*test_route)(const char *url, void *user, sb_err *err);
     int (*request_action)(const char *action, void *user, sb_err *err);
     void *user;

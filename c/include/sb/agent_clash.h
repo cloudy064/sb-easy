@@ -30,11 +30,11 @@ void sb_agent_clash_free(sb_agent_clash *clash);
 
 /* Tests all concrete proxies, or only the requested tags, and invokes the
  * reporter once per proxy so the control plane can show progressive results.
- * tags == NULL means "all" (std::nullopt); a non-NULL empty vector tests
+ * tags == NULL means "all" (std::nullopt); a non-NULL empty JSON array tests
  * nothing. On success stores the number of tested proxies in *tested.
  * Errors: SB_ERR_VALIDATION "proxy latency reporter is required",
  * config/Clash failures, or whatever the reporter set. */
-int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sb_strvec *tags,
+int sb_agent_clash_test_proxies(sb_agent_clash *clash, const sbj *tags,
                                 sb_latency_reporter reporter, void *user, size_t *tested,
                                 sb_err *err);
 
@@ -50,6 +50,10 @@ sbj *sb_agent_clash_proxies(sb_agent_clash *clash, sb_err *err);
  * ({"success":true,"group":...,"name":...}). */
 sbj *sb_agent_clash_select_proxy(sb_agent_clash *clash, const char *group, const char *proxy,
                                  sb_err *err);
+
+/* Byte-length variant for JSON selection requests. */
+sbj *sb_agent_clash_select_proxy_n(sb_agent_clash *clash, const char *group, size_t group_len,
+                                   const char *proxy, size_t proxy_len, sb_err *err);
 
 /* Opens a short-lived CONNECT tunnel through the installed local HTTP/mixed
  * inbound and returns the actual Clash connection chain selected by sing-box.

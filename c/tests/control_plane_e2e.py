@@ -2,6 +2,7 @@
 """Real panel + two polling agents, isolated from the host's proxy and database."""
 import argparse
 import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import threading
 import urllib.error
 import urllib.request
 
@@ -135,6 +137,55 @@ def run(args, root):
         for node in nodes:
             api("/api/proxy/nodes/" + node["id"], method="DELETE")
         print("PASS: proxy byte strings preserve CRUD, exact protocol matching and credential fingerprints")
+        for name, url, expected_name in (
+                (" sub\0tail ", "https://example.invalid/sub\0tail", "sub\0tail"),
+                (" \0 ", "https://example.invalid/", "\0"),
+                (" ", "https://host\0tail.invalid/path", "host\0tail.invalid")):
+            sub = api("/api/subscriptions", {"name": name, "url": url})
+            assert sub["name"] == expected_name and sub["url"] == url
+            sub = api("/api/subscriptions/" + sub["id"],
+                      {"enabled": False, "name": " \0renamed ", "url": url + "\0end"}, "PUT")
+            assert sub["name"] == "\0renamed" and sub["url"] == url + "\0end"
+            listed = {entry["id"]: entry for entry in api("/api/subscriptions")}
+            assert listed[sub["id"]]["url"] == sub["url"]
+            api("/api/subscriptions/" + sub["id"], method="DELETE")
+
+        paths = []
+        class SubscriptionSource(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                paths.append(self.path)
+                if self.path == "/dir%00tail/source":
+                    self.send_response(302)
+                    self.send_header("Location", "next?q=x")
+                    self.end_headers()
+                    return
+                content = b"trojan://fixture-password@fixture.invalid:443#subscription-byte-test"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+        with http.server.HTTPServer(("127.0.0.1", 0), SubscriptionSource) as source:
+            thread = threading.Thread(target=source.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for path in ("/sub\0tail?q=x\0y", "/dir\0tail/source"):
+                    sub = api("/api/subscriptions", {"name": "source\0tail",
+                        "url": f"http://127.0.0.1:{source.server_port}" + path})
+                    fetched = api("/api/subscriptions/" + sub["id"] + "/fetch", {}, "POST")
+                    assert fetched["found"] == 1
+                    api("/api/subscriptions/" + sub["id"], method="DELETE")
+            finally:
+                source.shutdown()
+                thread.join(timeout=5)
+        assert paths == ["/sub%00tail?q=x%00y", "/dir%00tail/source", "/dir%00tail/next?q=x"], paths
+        for node in api("/api/proxy/nodes"):
+            if node["tag"] == "subscription-byte-test":
+                api("/api/proxy/nodes/" + node["id"], method="DELETE")
+        print("PASS: subscription byte strings survive CRUD, default names, fetch paths and relative redirects")
         script = "function buildRules(context) { return [{domain_suffix:['left\0right'],outbound:'direct',hostLabel:context.host.name}]; }"
         preview = api("/api/hosts/rule-script/test", {"rule_script": script})
         assert preview["rules"][0]["domain_suffix"] == ["left\0right"]

@@ -651,29 +651,32 @@ static int require_subscription(sb_http_server *srv, const char *id, sb_subscrip
 
 /* default_subscription_name(): the URL host without credentials, port or
  * IPv6 brackets; "Subscription" when nothing is left. */
-static char *default_subscription_name(const char *url) {
-    const char *separator = strstr(url, "://");
-    const char *start = separator ? separator + 3 : url;
-    const char *end = strchr(start, '/');
-    char *authority = end ? sb_strndup(start, (size_t)(end - start)) : sb_strdup(start);
-    char *at = strrchr(authority, '@');
-    if (at) memmove(authority, at + 1, strlen(at + 1) + 1);
-    if (authority[0] == '[') {
-        char *close = strchr(authority, ']');
-        if (close) {
-            size_t n = (size_t)(close - authority) - 1;
-            memmove(authority, authority + 1, n);
-            authority[n] = '\0';
+static char *default_subscription_name(const char *url, size_t len, size_t *name_len) {
+    size_t start = 0, end = len;
+    for (size_t i = 0; i + 2 < len; ++i) {
+        if (memcmp(url + i, "://", 3) == 0) { start = i + 3; break; }
+    }
+    for (size_t i = start; i < len; ++i) {
+        if (url[i] == '/') { end = i; break; }
+    }
+    for (size_t i = start; i < end; ++i) {
+        if (url[i] == '@') start = i + 1;
+    }
+    if (start < end && url[start] == '[') {
+        for (size_t i = start + 1; i < end; ++i) {
+            if (url[i] == ']') { ++start; end = i; break; }
         }
     } else {
-        char *colon = strrchr(authority, ':');
-        if (colon) *colon = '\0';
+        for (size_t i = end; i > start; --i) {
+            if (url[i - 1] == ':') { end = i - 1; break; }
+        }
     }
-    if (!*authority) {
-        free(authority);
+    if (start == end) {
+        *name_len = strlen("Subscription");
         return sb_strdup("Subscription");
     }
-    return authority;
+    *name_len = end - start;
+    return sb_strndup(url + start, *name_len);
 }
 
 /* refresh_interval(): absent/null -> fallback; "must be an integer" /
@@ -697,10 +700,12 @@ static int subscription_from_create_request(const sbj *body, sb_subscription *su
     if (!url) return -1;
     const sbj *name = sbj_get(body, "name");
     if (!sbj_is_string(name)) return sb_fail(err, SB_ERR_VALIDATION, "name must be a string");
-    char *trimmed = sb_http_trim(name->v.str.ptr);
-    if (!*trimmed) {
+    size_t name_len = 0;
+    const size_t url_len = sbj_get(body, "url")->v.str.len;
+    char *trimmed = sb_http_trim_n(name->v.str.ptr, name->v.str.len, &name_len);
+    if (!name_len) {
         free(trimmed);
-        trimmed = default_subscription_name(url);
+        trimmed = default_subscription_name(url, url_len, &name_len);
     }
     int64_t interval = 0;
     if (refresh_interval(body, 3600, &interval, err) != 0) {
@@ -709,7 +714,9 @@ static int subscription_from_create_request(const sbj *body, sb_subscription *su
     }
     free(sub->name);
     sub->name = trimmed;
-    sb_str_set(&sub->url, url);
+    sub->name_len = name_len;
+    sb_str_setn(&sub->url, url, url_len);
+    sub->url_len = url_len;
     sub->enabled = true;
     sub->refresh_interval = interval;
     return 0;
@@ -723,13 +730,14 @@ static int subscription_from_update_request(const sbj *body, sb_subscription *su
         const char *name = sb_json_required_string(body, "name", err);
         if (!name) return -1;
         free(sub->name);
-        sub->name = sb_http_trim(name);
+        sub->name = sb_http_trim_n(name, found->v.str.len, &sub->name_len);
     }
     found = sbj_get(body, "url");
     if (found && found->type != SBJ_NULL) {
         const char *url = sb_json_required_string(body, "url", err);
         if (!url) return -1;
-        sb_str_set(&sub->url, url);
+        sb_str_setn(&sub->url, url, found->v.str.len);
+        sub->url_len = found->v.str.len;
     }
     found = sbj_get(body, "enabled");
     if (found && found->type != SBJ_NULL) {
@@ -746,7 +754,7 @@ static int fetch_subscription(sb_http_server *srv, const sb_subscription *sub, s
                               sb_err *err) {
     size_t len = 0;
     sb_err fetch_err = {0};
-    char *body = sb_subscription_fetcher_fetch(srv->fetcher, sub->url, &len, &fetch_err);
+    char *body = sb_subscription_fetcher_fetch_n(srv->fetcher, sub->url, sub->url_len, &len, &fetch_err);
     if (!body) return sb_fail(err, SB_ERR_VALIDATION, "Failed to fetch subscription: %s", fetch_err.msg);
     sb_parsed_node_vec nodes;
     int rc = sb_parse_subscription_body_ex(body, len, &nodes, err);
@@ -810,7 +818,7 @@ static int h_subscriptions_fetch_all(sb_http_req *req, sb_http_resp *resp, sb_er
         sb_err fetch_err = {0};
         sbj *entry = sbj_object();
         sbj_set_str(entry, "id", sub->id);
-        sbj_set_str(entry, "name", sub->name);
+        sbj_set(entry, "name", sbj_strn(sub->name, sub->name_len));
         if (fetch_subscription(srv, sub, &result, &fetch_err) == 0) {
             sbj_set(entry, "added", sbj_uint(result.added));
             sbj_set(entry, "updated", sbj_uint(result.updated));

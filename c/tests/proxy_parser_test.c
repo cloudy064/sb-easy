@@ -664,3 +664,27 @@ TEST(outbound_bytes_round_trip_and_fingerprints_distinguish_suffixes) {
     sbj_free(original);
     sbj_free(config);
 }
+
+TEST(subscription_fetcher_encodes_full_paths_and_checks_full_url) {
+    sb_err err = {0};
+    sb_subscription_fetcher *f = sb_subscription_fetcher_new(NULL, &err);
+    REQUIRE(f);
+    test_server server;
+    server_start(&server, 1);
+    sb_buf url = {0};
+    sb_buf_printf(&url, "http://127.0.0.1:%u/sub", (unsigned)server.port);
+    const char tail[] = "\0tail?q=x\0y";
+    sb_buf_append(&url, tail, sizeof tail - 1);
+    char *body = sb_subscription_fetcher_fetch_n(f, url.p, url.len, NULL, &err);
+    CHECK_STR(body, "/sub%00tail?q=x%00y");
+    free(body);
+    server_stop(&server);
+    sb_buf_puts(&url, "#fragment");
+    CHECK(sb_subscription_fetcher_fetch_n(f, url.p, url.len, NULL, &err) == NULL);
+    CHECK_STR(err.msg, "subscription URL must not contain a fragment");
+    const char bad_authority[] = "http://prefix\0suffix.invalid/sub";
+    CHECK(sb_subscription_fetcher_fetch_n(f, bad_authority, sizeof bad_authority - 1, NULL, &err) == NULL);
+    CHECK_STR(err.msg, "subscription HTTP request failed: Bad server address");
+    sb_buf_free(&url);
+    sb_subscription_fetcher_free(f);
+}

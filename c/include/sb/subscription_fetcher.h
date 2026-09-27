@@ -35,6 +35,11 @@ void sb_subscription_fetcher_free(sb_subscription_fetcher *fetcher);
 char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *fetcher, const char *url, size_t *len,
                                     sb_err *err);
 
+/* Explicit-length URL variant: path/query bytes are encoded before transport.
+ * Embedded NUL in the authority is rejected (libcurl accepts C-string origins). */
+char *sb_subscription_fetcher_fetch_n(sb_subscription_fetcher *fetcher, const char *url,
+                                      size_t url_len, size_t *len, sb_err *err);
+
 #ifdef __cplusplus
 }
 #endif

@@ -436,8 +436,10 @@ void sb_subscription_free(sb_subscription *s) {
 void sb_subscription_copy(sb_subscription *dst, const sb_subscription *src) {
     sb_subscription_free(dst);
     dst->id = sb_strdup(S(src->id));
-    dst->name = sb_strdup(S(src->name));
-    dst->url = sb_strdup(S(src->url));
+    dst->name = sb_strndup(S(src->name), src->name_len);
+    dst->name_len = src->name_len;
+    dst->url = sb_strndup(S(src->url), src->url_len);
+    dst->url_len = src->url_len;
     dst->enabled = src->enabled;
     dst->refresh_interval = src->refresh_interval;
     dst->last_fetched_at = sb_strdup(src->last_fetched_at);
@@ -448,8 +450,8 @@ void sb_subscription_copy(sb_subscription *dst, const sb_subscription *src) {
 sbj *sb_subscription_to_json(const sb_subscription *s) {
     sbj *v = sbj_object();
     sbj_set_str(v, "id", S(s->id));
-    sbj_set_str(v, "name", S(s->name));
-    sbj_set_str(v, "url", S(s->url));
+    sbj_set(v, "name", sbj_strn(S(s->name), s->name_len));
+    sbj_set(v, "url", sbj_strn(S(s->url), s->url_len));
     sbj_set_bool(v, "enabled", s->enabled);
     sbj_set_int(v, "refresh_interval", s->refresh_interval);
     sbj_set(v, "last_fetched_at", opt_str(s->last_fetched_at));
@@ -647,7 +649,9 @@ static void read_subscription(sqlite3_stmt *st, sb_subscription *s) {
     sb_subscription_free(s);
     s->id = sbq_text(st, 0);
     s->name = sbq_text(st, 1);
+    s->name_len = (size_t)sqlite3_column_bytes(st, 1);
     s->url = sbq_text(st, 2);
+    s->url_len = (size_t)sqlite3_column_bytes(st, 2);
     s->enabled = sbq_int(st, 3) != 0;
     s->refresh_interval = sbq_int(st, 4);
     s->last_fetched_at = sbq_opt_text(st, 5);
@@ -1496,7 +1500,7 @@ static int restore_subscription(sqlite3 *h, const sbj *value, size_t *count, sb_
     bool enabled = false;
     int64_t refresh;
     if (jv_str(value, "id", "", &id, err) || jv_str(value, "url", "", &url, err)) return -1;
-    if (!*id || !*url) return 0;
+    if (!*id || !sbj_has(value, "url") || !sbj_get(value, "url")->v.str.len) return 0;
     if (jv_str(value, "name", "", &name, err) || jv_bool(value, "enabled", true, &enabled, err) ||
         jv_int(value, "refresh_interval", 3600, &refresh, err) ||
         jv_str(value, "created_at", "", &created_at, err))
@@ -1510,8 +1514,16 @@ static int restore_subscription(sqlite3 *h, const sbj *value, size_t *count, sb_
                                    err);
     if (!st) return -1;
     sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, name);
-    sbq_bind_text(st, 3, url);
+    if (sbq_bind_text_n(st, 2, name,
+                        sbj_has(value, "name") ? sbj_get(value, "name")->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        return -1;
+    }
+    if (sbq_bind_text_n(st, 3, url,
+                        sbj_has(value, "url") ? sbj_get(value, "url")->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        return -1;
+    }
     sbq_bind_bool(st, 4, enabled);
     sbq_bind_int(st, 5, refresh);
     sbq_bind_text(st, 6, jv_opt_str(value, "last_fetched_at"));
@@ -2842,7 +2854,7 @@ int sb_store_find_subscription(sb_store *s, const char *id, sb_subscription *out
 
 int sb_store_create_subscription(sb_store *s, const sb_subscription *sub, sb_subscription *out,
                                  sb_err *err) {
-    if (sb_str_empty(sub->name) || sb_str_empty(sub->url) || sub->refresh_interval <= 0)
+    if (!sub->name_len || !sub->url_len || sub->refresh_interval <= 0)
         return sb_fail(err, SB_ERR_VALIDATION,
                        "Subscription name, URL, and positive refresh interval are required");
     char *id = sb_str_empty(sub->id) ? sb_uuid_v4() : sb_strdup(sub->id);
@@ -2858,13 +2870,13 @@ int sb_store_create_subscription(sb_store *s, const sb_subscription *sub, sb_sub
                                    err);
     if (st) {
         sbq_bind_text(st, 1, id);
-        sbq_bind_text(st, 2, sub->name);
-        sbq_bind_text(st, 3, sub->url);
+        int bound = sbq_bind_text_n(st, 2, sub->name, sub->name_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 3, sub->url, sub->url_len, err);
         sbq_bind_bool(st, 4, sub->enabled);
         sbq_bind_int(st, 5, sub->refresh_interval);
         sbq_bind_text(st, 6, sub->last_fetched_at);
         sbq_bind_text(st, 7, sub->last_fetch_result);
-        if (exec_stmt(st, err) == 0) rc = reload_subscription(h, id, out, err);
+        if (exec_bound(st, bound, err) == 0) rc = reload_subscription(h, id, out, err);
     }
     UNLOCK(s);
     free(id);
@@ -2873,7 +2885,7 @@ int sb_store_create_subscription(sb_store *s, const sb_subscription *sub, sb_sub
 
 int sb_store_update_subscription(sb_store *s, const sb_subscription *sub, sb_subscription *out,
                                  sb_err *err) {
-    if (sb_str_empty(sub->id) || sb_str_empty(sub->name) || sb_str_empty(sub->url) ||
+    if (sb_str_empty(sub->id) || !sub->name_len || !sub->url_len ||
         sub->refresh_interval <= 0)
         return sb_fail(err, SB_ERR_VALIDATION,
                        "Subscription id, name, URL, and positive refresh interval are required");
@@ -2885,12 +2897,12 @@ int sb_store_update_subscription(sb_store *s, const sb_subscription *sub, sb_sub
                                    "refresh_interval = ?4, updated_at = datetime('now') WHERE id = ?5",
                                    err);
     if (st) {
-        sbq_bind_text(st, 1, sub->name);
-        sbq_bind_text(st, 2, sub->url);
+        int bound = sbq_bind_text_n(st, 1, sub->name, sub->name_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 2, sub->url, sub->url_len, err);
         sbq_bind_bool(st, 3, sub->enabled);
         sbq_bind_int(st, 4, sub->refresh_interval);
         sbq_bind_text(st, 5, sub->id);
-        if (exec_stmt(st, err) == 0) {
+        if (exec_bound(st, bound, err) == 0) {
             if (sqlite3_changes(h) == 0)
                 sb_fail(err, SB_ERR_NOT_FOUND, "Subscription not found");
             else

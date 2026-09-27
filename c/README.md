@@ -81,7 +81,11 @@ test in this configuration.
   bodies, file writes and download headers. Proxy tags and server strings preserve
   their bytes in CRUD/import/backup, fingerprints and rendered configurations,
   including duplicate tags and QuickJS outbound validation. Agent proxy tests
-  and local selector operations also retain full tag bytes. Other model strings still use C
+  and local selector operations also retain full tag bytes. Subscription names
+  and URLs preserve their bytes in storage and backup; fetching encodes complete
+  paths/queries and preserves relative redirect bases. A NUL in the URL authority
+  returns Bad server address instead of handing a truncated origin to libcurl.
+  Other model strings still use C
   strings; their NUL compatibility requires further audit before claiming byte-exact
   parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI

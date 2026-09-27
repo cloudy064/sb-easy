@@ -39,6 +39,7 @@ void sb_subscription_fetcher_free(sb_subscription_fetcher *f) { free(f); }
 
 typedef struct {
     char *scheme, *origin, *target;
+    size_t origin_len, target_len;
 } http_address;
 
 static void address_free(http_address *a) {
@@ -47,44 +48,57 @@ static void address_free(http_address *a) {
     free(a->target);
 }
 
-static int parse_url(const char *url, http_address *out, sb_err *err) {
+static int parse_url(const char *url, size_t len, http_address *out, sb_err *err) {
     memset(out, 0, sizeof *out);
-    const char *sep = strstr(url, "://");
-    if (!sep)
+    size_t scheme_len = 0;
+    while (scheme_len + 2 < len && memcmp(url + scheme_len, "://", 3) != 0) ++scheme_len;
+    if (scheme_len + 2 >= len)
         return sb_fail(err, SB_ERR_VALIDATION, "subscription URL must include http:// or https://");
-    size_t scheme_len = (size_t)(sep - url);
-    if (!((scheme_len == 4 && !strncmp(url, "http", 4)) ||
-          (scheme_len == 5 && !strncmp(url, "https", 5))))
+    if (!((scheme_len == 4 && !memcmp(url, "http", 4)) ||
+          (scheme_len == 5 && !memcmp(url, "https", 5))))
         return sb_fail(err, SB_ERR_VALIDATION, "subscription URL must use HTTP or HTTPS");
-    const char *authority = sep + 3;
-    if (strchr(authority, '#'))
+    size_t start = scheme_len + 3;
+    if (memchr(url + start, '#', len - start))
         return sb_fail(err, SB_ERR_VALIDATION, "subscription URL must not contain a fragment");
-    size_t alen = strcspn(authority, "/?");
-    if (alen == 0 || memchr(authority, '@', alen))
+    size_t path = start;
+    while (path < len && url[path] != '/' && url[path] != '?') ++path;
+    if (path == start || memchr(url + start, '@', path - start))
         return sb_fail(err, SB_ERR_VALIDATION,
                        "subscription URL authority is empty or contains credentials");
+    /* libcurl requires a terminated origin. Never silently reinterpret an
+     * embedded-NUL authority as a different host/path. */
+    if (memchr(url + start, '\0', path - start))
+        return sb_fail(err, SB_ERR_UPSTREAM, "subscription HTTP request failed: Bad server address");
     out->scheme = sb_strndup(url, scheme_len);
-    out->origin = sb_strndup(url, scheme_len + 3 + alen);
-    const char *path = authority + alen;
-    if (!*path) out->target = sb_strdup("/");
-    else if (*path == '?') out->target = sb_asprintf("/%s", path);
-    else out->target = sb_strdup(path);
+    out->origin_len = path;
+    out->origin = sb_strndup(url, path);
+    sb_buf target = {0};
+    if (path == len || url[path] == '?') sb_buf_putc(&target, '/');
+    sb_buf_append(&target, url + path, len - path);
+    out->target_len = target.len;
+    out->target = sb_buf_detach(&target);
     return 0;
 }
 
-static char *resolve_redirect(const http_address *cur, const char *location) {
-    if (sb_starts_with(location, "http://") || sb_starts_with(location, "https://"))
-        return sb_strdup(location);
-    if (sb_starts_with(location, "//")) return sb_asprintf("%s:%s", cur->scheme, location);
-    if (location[0] == '/') return sb_asprintf("%s%s", cur->origin, location);
-    char *base = sb_strdup(cur->target);
-    char *q = strchr(base, '?');
-    if (q) *q = '\0';
-    char *slash = strrchr(base, '/');
-    if (slash) slash[1] = '\0';
-    char *r = sb_asprintf("%s%s%s", cur->origin, slash ? base : "/", location);
-    free(base);
-    return r;
+static char *resolve_redirect(const http_address *cur, const char *location, size_t *len) {
+    sb_buf next = {0};
+    if (sb_starts_with(location, "http://") || sb_starts_with(location, "https://")) {
+        sb_buf_puts(&next, location);
+    } else if (sb_starts_with(location, "//")) {
+        sb_buf_printf(&next, "%s:%s", cur->scheme, location);
+    } else {
+        sb_buf_append(&next, cur->origin, cur->origin_len);
+        if (location[0] != '/') {
+            size_t end = 0, slash = 0;
+            while (end < cur->target_len && cur->target[end] != '?') ++end;
+            for (size_t i = 0; i < end; ++i) if (cur->target[i] == '/') slash = i + 1;
+            if (slash) sb_buf_append(&next, cur->target, slash);
+            else sb_buf_putc(&next, '/');
+        }
+        sb_buf_puts(&next, location);
+    }
+    *len = next.len;
+    return sb_buf_detach(&next);
 }
 
 /* Drogon's HttpRequest encodes the path it sends (setPath + the default
@@ -92,15 +106,15 @@ static char *resolve_redirect(const http_address *cur, const char *location) {
  * becomes '+', and every other byte (including '%') becomes %XX. The C++
  * fetcher passed the whole target (path and query) through setPath, so the
  * request line upstream servers see is encoded the same way here. */
-static char *drogon_url_encode(const char *src) {
+static char *drogon_url_encode(const char *src, size_t len) {
     static const char hex[] = "0123456789ABCDEF";
     sb_buf b = {0};
-    for (const unsigned char *p = (const unsigned char *)src; *p; ++p) {
+    for (const unsigned char *p = (const unsigned char *)src; len; ++p, --len) {
         unsigned char c = *p;
         if (c == ' ') {
             sb_buf_putc(&b, '+');
         } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                   strchr("-_.!~*'()&=/\\?", c)) {
+                   (c != 0 && strchr("-_.!~*'()&=/\\?", c))) {
             sb_buf_putc(&b, (char)c);
         } else {
             char esc[3] = {'%', hex[c >> 4], hex[c & 0x0F]};
@@ -116,14 +130,19 @@ static bool redirect_status(long s) {
 
 char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *f, const char *url_in, size_t *len,
                                     sb_err *err) {
+    return sb_subscription_fetcher_fetch_n(f, url_in, url_in ? strlen(url_in) : 0, len, err);
+}
+
+char *sb_subscription_fetcher_fetch_n(sb_subscription_fetcher *f, const char *url_in,
+                                      size_t url_len, size_t *len, sb_err *err) {
     static const char *const headers[] = {"Accept: text/plain, application/yaml, application/json",
                                           NULL};
-    char *url = sb_strdup(url_in ? url_in : "");
+    char *url = sb_strndup(url_in ? url_in : "", url_len);
     char *result = NULL;
     for (size_t redirects = 0;; ++redirects) {
         http_address addr;
-        if (parse_url(url, &addr, err)) break;
-        char *target = drogon_url_encode(addr.target);
+        if (parse_url(url, url_len, &addr, err)) break;
+        char *target = drogon_url_encode(addr.target, addr.target_len);
         char *full = sb_asprintf("%s%s", addr.origin, target);
         free(target);
         sb_http_request req = {0};
@@ -155,7 +174,7 @@ char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *f, const char *url_
                 sb_fail(err, SB_ERR_UPSTREAM, "subscription redirect is missing Location");
             } else {
                 free(url);
-                url = resolve_redirect(&addr, location);
+                url = resolve_redirect(&addr, location, &url_len);
                 free(location);
                 sb_http_response_free(&resp);
                 address_free(&addr);

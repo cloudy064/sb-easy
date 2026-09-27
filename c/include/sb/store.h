@@ -187,6 +187,7 @@ void sb_proxy_record_vec_free(sb_proxy_record_vec *v);
 
 typedef struct {
     char *id, *name, *url;
+    size_t name_len, url_len;
     bool enabled;             /* default true */
     int64_t refresh_interval; /* default 3600 */
     char *last_fetched_at, *last_fetch_result; /* nullable */

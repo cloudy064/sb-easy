@@ -190,3 +190,20 @@ not start a runtime service or modify host interfaces.
   The disabled test subscription used only `example.invalid` and no fetch.
   Evidence: `/tmp/sb-c-subscription-byte-audit.log`. This is the next concrete
   model-boundary fix, before the combined rollout.
+
+## Subscription compatibility follow-up
+
+- Subscription names and URLs preserve byte lengths through API create/update,
+  trimming/default-name derivation, model copy, SQLite, list and backup restore.
+- Fetching encodes the complete path/query, validates fragments after embedded
+  NUL and resolves relative redirects against the complete original path.
+- C and C++ both pass the expanded real HTTP lifecycle and local subscription
+  server scenarios, including leading-NUL names and relative redirects. All
+  18 normal and ASan/UBSan suites pass, and all 16 production snapshot
+  comparisons pass. Logs: `/tmp/sb-c-subscription-*.log`.
+- Embedded NUL in a URL authority is rejected with Bad server address rather
+  than passing a truncated origin to libcurl. This invalid-authority behavior
+  is an explicit transport compatibility boundary, not byte-exact parity.
+- Further audit confirmed command requests already validate complete reload/
+  restart values and test-proxy lists are serialized JSON. Diagnostic scalar
+  metadata/log truncation and command acknowledgement results remain pending.

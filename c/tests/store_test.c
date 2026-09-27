@@ -752,7 +752,9 @@ TEST(subscription_repository_records_source_attribution_and_fetch_results) {
     sb_subscription_init(&reloaded);
     sb_subscription_init(&saved);
     sb_str_set(&sub.name, "Provider");
+    sub.name_len = strlen(sub.name);
     sb_str_set(&sub.url, "https://provider.example/sub");
+    sub.url_len = strlen(sub.url);
     sub.refresh_interval = 1800;
     REQUIRE(sb_store_create_subscription(s, &sub, &created, &err) == 0);
     sb_parsed_node_vec parsed = parse_body("proxies:\n"
@@ -1282,6 +1284,51 @@ TEST(proxy_bytes_survive_import_latency_and_backup) {
     sbj_free(backup);
     sb_proxy_import_free(&imported);
     sbj_free(config);
+    sb_store_free(s);
+    temp_db_free(&t);
+}
+
+TEST(subscription_bytes_survive_copy_updates_and_backup) {
+    temp_db t;
+    sb_store *s = open_store(&t);
+    REQUIRE(s);
+    sb_subscription sub, created, updated;
+    sb_subscription_init(&sub);
+    sb_subscription_init(&created);
+    sb_subscription_init(&updated);
+    const char name[] = "\0provider";
+    const char url[] = "https://example.invalid/sub\0tail";
+    sb_str_setn(&sub.name, name, sizeof name - 1);
+    sub.name_len = sizeof name - 1;
+    sb_str_setn(&sub.url, url, sizeof url - 1);
+    sub.url_len = sizeof url - 1;
+    sb_err err = {0};
+    REQUIRE(sb_store_create_subscription(s, &sub, &created, &err) == 0);
+    CHECK_EQ_INT(created.name_len, sizeof name - 1);
+    CHECK_EQ_INT(created.url_len, sizeof url - 1);
+    CHECK(memcmp(created.name, name, sizeof name - 1) == 0);
+    CHECK(memcmp(created.url, url, sizeof url - 1) == 0);
+    sb_subscription_copy(&sub, &created);
+    sub.enabled = false;
+    REQUIRE(sb_store_update_subscription(s, &sub, &updated, &err) == 0);
+    CHECK_EQ_INT(updated.url_len, sizeof url - 1);
+    CHECK(memcmp(updated.url, url, sizeof url - 1) == 0);
+    sbj *backup = sb_store_export_backup(s, &err);
+    REQUIRE(backup);
+    REQUIRE(sb_store_delete_subscription(s, created.id, &err) == 0);
+    sbj *counts = sb_store_restore_backup(s, backup, &err);
+    REQUIRE(counts);
+    sbj_free(counts);
+    REQUIRE(sb_store_find_subscription(s, created.id, &updated, &err) == 1);
+    sbj *encoded = sb_subscription_to_json(&updated);
+    CHECK_EQ_INT(sbj_get(encoded, "name")->v.str.len, sizeof name - 1);
+    CHECK_EQ_INT(sbj_get(encoded, "url")->v.str.len, sizeof url - 1);
+    CHECK(memcmp(updated.url, url, sizeof url - 1) == 0);
+    sbj_free(encoded);
+    sbj_free(backup);
+    sb_subscription_free(&sub);
+    sb_subscription_free(&created);
+    sb_subscription_free(&updated);
     sb_store_free(s);
     temp_db_free(&t);
 }

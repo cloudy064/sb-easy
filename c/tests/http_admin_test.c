@@ -656,7 +656,9 @@ TEST(backup_restore_and_config_downloads) {
     sb_subscription_init(&sub);
     sb_subscription_init(&created_sub);
     sb_str_set(&sub.name, "Fixture");
+    sub.name_len = strlen(sub.name);
     sb_str_set(&sub.url, "http://127.0.0.1:9/fixture");
+    sub.url_len = strlen(sub.url);
     sb_err err = {0};
     CHECK(sb_store_create_subscription(t.store, &sub, &created_sub, &err) == 0);
     sb_subscription_free(&sub);

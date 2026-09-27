@@ -7,7 +7,7 @@ release images/CI, and centrally managed Claude egress rollout.
 
 - Production center and local agent run the verified identity fix `05168b0`.
 - Profile/script fixes and host/WireGuard name fixes are verified in source;
-  the profile images are built. These changes await the combined rollout.
+  versioned images through `d3c88a8` are built. These changes await the combined rollout.
 - Proxy tags and the remaining non-authentication string boundaries are still
   under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
   of the centrally prepared rules has not been verified.
@@ -138,4 +138,7 @@ not start a runtime service or modify host interfaces.
   exact peer reuse, distinct peer allocation, complete client/host/server
   exports, and full server config file writes. All 16 production DB snapshot
   comparisons still pass. Logs: `/tmp/sb-c-host-*.log`.
+- Images `sb-easy:c-panel-d3c88a8` and `sb-easy:c-unified-d3c88a8`
+  built successfully with GCC 12 Release warnings as errors. Embedded engine
+  start/reload/stop smoke passed during the unified image build.
 - These changes are staged for the combined release, not deployed yet.

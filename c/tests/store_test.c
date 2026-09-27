@@ -353,6 +353,7 @@ TEST(host_crud_hides_secrets_and_manages_outbound_assignments) {
     sbj_set_bool(host.capabilities, "runs_singbox", true);
     sbj_set_bool(host.capabilities, "is_wg_member", false);
     sb_str_set(&host.clash_secret, "do-not-serialize");
+    host.clash_secret_len = host.clash_secret ? strlen(host.clash_secret) : 0;
     REQUIRE(sb_store_create_host(s, &host, &created, &err) == 0);
     CHECK(!sb_str_empty(created.id));
     CHECK_EQ_INT(strlen(created.agent_token), 64);
@@ -450,6 +451,7 @@ TEST(profile_deletion_resets_assigned_hosts_to_default) {
     sb_str_set(&host.name, "Profile consumer");
     host.name_len = strlen(host.name);
     host.profile_id = sb_strdup(cp.id);
+    host.profile_id_len = strlen(host.profile_id);
     REQUIRE(sb_store_create_host(s, &host, &ch, &err) == 0);
     CHECK_EQ_INT(sb_store_delete_profile(s, cp.id, &err), 0);
     sb_host reloaded;
@@ -481,6 +483,7 @@ TEST(device_enrollment_codes_are_platform_neutral_expiring_and_single_use) {
     sb_str_set(&host.name, "Managed device");
     host.name_len = strlen(host.name);
     host.profile_id = sb_strdup("android-client");
+    host.profile_id_len = strlen(host.profile_id);
     sbj_set_bool(host.capabilities, "runs_singbox", true);
     sbj_set_bool(host.capabilities, "is_wg_member", false);
     REQUIRE(sb_store_create_host(s, &host, &created, &err) == 0);

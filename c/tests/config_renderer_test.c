@@ -74,7 +74,9 @@ TEST(managed_rendering_injects_outbounds_and_script_rules) {
         "    outbound: context.outboundTags.includes(\"hk\") ? \"hk\" : \"direct\"\n  }];\n}\n");
     r.rule_script_len = strlen(r.rule_script);
     sb_str_set(&r.clash_controller, "0.0.0.0:9090");
+    r.clash_controller_len = r.clash_controller ? strlen(r.clash_controller) : 0;
     sb_str_set(&r.clash_secret, "controller-secret");
+    r.clash_secret_len = r.clash_secret ? strlen(r.clash_secret) : 0;
 
     sb_err err = {0};
     sbj *config = render(&r, &err);

@@ -45,7 +45,7 @@ static int require_array(const sbj *value, sb_err *err) {
 static int parse_request(const sbj *value, sb_render_request *request, sb_err *err) {
     const char *mode = NULL;
     if (get_string(value, "mode", "managed", &mode, err) != 0) return -1;
-    request->mode = strcmp(mode, "full") == 0 ? SB_PROFILE_FULL : SB_PROFILE_MANAGED;
+    request->mode = sbj_string_is(sbj_get(value, "mode"), "full") ? SB_PROFILE_FULL : SB_PROFILE_MANAGED;
 
     const sbj *profile = sbj_get(value, "profile");
     if (!profile)
@@ -101,8 +101,10 @@ static int parse_request(const sbj *value, sb_render_request *request, sb_err *e
         if (get_string(clash, "controller", "", &controller, err) != 0 ||
             get_string(clash, "secret", "", &secret, err) != 0)
             return -1;
-        sb_str_set(&request->clash_controller, controller);
-        sb_str_set(&request->clash_secret, secret);
+        request->clash_controller_len = sbj_has(clash, "controller") ? sbj_get(clash, "controller")->v.str.len : 0;
+        sb_str_setn(&request->clash_controller, controller, request->clash_controller_len);
+        request->clash_secret_len = sbj_has(clash, "secret") ? sbj_get(clash, "secret")->v.str.len : 0;
+        sb_str_setn(&request->clash_secret, secret, request->clash_secret_len);
     }
     return 0;
 }

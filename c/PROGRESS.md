@@ -228,3 +228,21 @@ not start a runtime service or modify host interfaces.
   foreign key (500). Host `clash_api` and `wg_endpoint` also truncate at storage.
   Evidence: `/tmp/sb-c-host-reference-audit.log`; the probe used isolated DBs
   and hosts with WireGuard/sing-box capabilities disabled.
+
+## Host references and connection fields follow-up
+
+- Host profile references carry explicit lengths through API/model/SQLite.
+  A NUL-suffixed unknown profile id now fails its foreign key instead of
+  silently selecting a valid prefix; failed updates retain the prior profile.
+- Host WireGuard address/key/endpoint and Clash URL/secret retain complete bytes
+  through create/update/list/copy/storage. Provisioning initializes lengths for
+  generated values. Render requests and Clash injection retain controller and
+  secret bytes, including the controller derivation from the stored URL.
+- Renderer CLI mode matching is exact and Clash fields preserve explicit lengths.
+- All 18 normal and ASan/UBSan suites pass. Expanded HTTP cases also pass on
+  C++; three CLI fixtures match C++ byte-for-byte in normal and sanitizer
+  binaries. All 16 production snapshot comparisons pass. Evidence:
+  `/tmp/sb-c-host-fields-*.log`.
+- Runtime networking/parser boundaries for malformed address/key values remain
+  distinct from the verified model-storage and JSON-rendering contract. No
+  arbitrary-input transport parity is claimed.

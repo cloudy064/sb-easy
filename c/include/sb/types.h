@@ -59,6 +59,7 @@ typedef struct {
     size_t rule_script_len;     /* exact byte length when present */
     char *clash_controller;
     char *clash_secret;
+    size_t clash_controller_len, clash_secret_len;
 } sb_render_request;
 
 void sb_render_request_init(sb_render_request *r);

@@ -1278,8 +1278,11 @@ TEST(host_configs_and_endpoints_match_cpp) {
         sb_str_set(&host.name, specs[i].name);
         host.name_len = strlen(host.name);
         host.wg_endpoint = sb_strdup(specs[i].endpoint);
+        host.wg_endpoint_len = host.wg_endpoint ? strlen(host.wg_endpoint) : 0;
         host.wg_address = sb_strdup(specs[i].address);
+        host.wg_address_len = host.wg_address ? strlen(host.wg_address) : 0;
         host.wg_public_key = sb_strdup(specs[i].public_key);
+        host.wg_public_key_len = host.wg_public_key ? strlen(host.wg_public_key) : 0;
         host.enabled = specs[i].enabled;
         REQUIRE(sb_store_create_host(f.store, &host, &created, &err) == 0);
         /* Distinct creation times keep list_hosts() ordering deterministic. */
@@ -1499,6 +1502,7 @@ TEST(provisioning_allocates_links_and_removes_host_peers) {
     sb_str_set(&sigma.name, "Sigma");
     sigma.name_len = strlen(sigma.name);
     sigma.clash_api = sb_strdup("http://custom:9090");
+    sigma.clash_api_len = sigma.clash_api ? strlen(sigma.clash_api) : 0;
     REQUIRE(sb_store_create_host(f.store, &sigma, &sigma, &err) == 0);
     REQUIRE(sb_wireguard_provision_host(service, &sigma, true, &sigma, &err) == 0);
     CHECK_STR(sigma.clash_api, "http://custom:9090");

@@ -114,8 +114,8 @@ static int validate_rule_tags(const sbj *rules, const sbj *allowed, sb_err *err)
 
 /* ---- clash API -------------------------------------------------------- */
 
-static void inject_clash_api(sbj *config, const char *controller, const char *secret) {
-    if (sb_str_empty(controller) || !sbj_is_object(config)) return;
+static void inject_clash_api(sbj *config, const sb_render_request *request) {
+    if (!request->clash_controller_len || !sbj_is_object(config)) return;
     sbj *existing = sbj_get(config, "experimental");
     if (sbj_is_object(existing) && sbj_has(existing, "clash_api")) return;
 
@@ -124,8 +124,9 @@ static void inject_clash_api(sbj *config, const char *controller, const char *se
     if (!sbj_is_object(experimental)) return;
 
     sbj *clash_api = sbj_object();
-    sbj_set_str(clash_api, "external_controller", controller);
-    if (!sb_str_empty(secret)) sbj_set_str(clash_api, "secret", secret);
+    sbj_set(clash_api, "external_controller", sbj_strn(request->clash_controller, request->clash_controller_len));
+    if (request->clash_secret_len)
+        sbj_set(clash_api, "secret", sbj_strn(request->clash_secret, request->clash_secret_len));
     sbj_set(experimental, "clash_api", clash_api);
 }
 
@@ -600,7 +601,7 @@ sbj *sb_config_renderer_render(const sb_config_renderer *renderer,
     sbj_free(protected_rules);
 
     /* These fields remain under server control even when scripting is enabled. */
-    inject_clash_api(config, request->clash_controller, request->clash_secret);
+    inject_clash_api(config, request);
     disable_clash_dashboard(config);
     return config;
 

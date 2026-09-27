@@ -491,7 +491,9 @@ static void contract_prepare(sb_store *store, void *user) {
     sb_str_set(&host.name, "Remote Clash target");
     host.name_len = strlen(host.name);
     host.clash_api = sb_asprintf("http://127.0.0.1:%u/remote", (unsigned)c->clash.port);
+    host.clash_api_len = host.clash_api ? strlen(host.clash_api) : 0;
     sb_str_set(&host.clash_secret, "remote-secret");
+    host.clash_secret_len = host.clash_secret ? strlen(host.clash_secret) : 0;
     sb_err err = {0};
     if (sb_store_create_host(store, &host, &created, &err) == 0) c->remote_id = sb_strdup(created.id);
     else fprintf(stderr, "create host failed: %s\n", err.msg);
@@ -534,7 +536,9 @@ static char *add_clash_host(sb_test_server *t, const char *name, const char *cla
     sb_str_set(&host.name, name);
     host.name_len = strlen(host.name);
     host.clash_api = clash_api ? sb_strdup(clash_api) : NULL;
+    host.clash_api_len = host.clash_api ? strlen(host.clash_api) : 0;
     sb_str_set(&host.clash_secret, secret ? secret : "");
+    host.clash_secret_len = host.clash_secret ? strlen(host.clash_secret) : 0;
     sb_err err = {0};
     char *id = sb_store_create_host(t->store, &host, &created, &err) == 0 ? sb_strdup(created.id) : NULL;
     sb_host_free(&host);

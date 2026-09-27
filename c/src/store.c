@@ -232,12 +232,18 @@ void sb_host_copy(sb_host *dst, const sb_host *src) {
     dst->name_len = src->name_len;
     dst->agent_token = sb_strdup(S(src->agent_token));
     dst->capabilities = src->capabilities ? sbj_clone(src->capabilities) : sbj_object();
-    dst->profile_id = sb_strdup(src->profile_id);
-    dst->wg_address = sb_strdup(src->wg_address);
-    dst->wg_public_key = sb_strdup(src->wg_public_key);
-    dst->wg_endpoint = sb_strdup(src->wg_endpoint);
-    dst->clash_api = sb_strdup(src->clash_api);
-    dst->clash_secret = sb_strdup(S(src->clash_secret));
+    dst->profile_id = sb_strndup(src->profile_id, src->profile_id_len);
+    dst->profile_id_len = src->profile_id_len;
+    dst->wg_address = sb_strndup(src->wg_address, src->wg_address_len);
+    dst->wg_address_len = src->wg_address_len;
+    dst->wg_public_key = sb_strndup(src->wg_public_key, src->wg_public_key_len);
+    dst->wg_public_key_len = src->wg_public_key_len;
+    dst->wg_endpoint = sb_strndup(src->wg_endpoint, src->wg_endpoint_len);
+    dst->wg_endpoint_len = src->wg_endpoint_len;
+    dst->clash_api = sb_strndup(src->clash_api, src->clash_api_len);
+    dst->clash_api_len = src->clash_api_len;
+    dst->clash_secret = sb_strndup(S(src->clash_secret), src->clash_secret_len);
+    dst->clash_secret_len = src->clash_secret_len;
     dst->last_seen = sb_strdup(src->last_seen);
     dst->singbox_state = sb_strdup(src->singbox_state);
     dst->enabled = src->enabled;
@@ -250,11 +256,11 @@ sbj *sb_host_to_json(const sb_host *h) {
     sbj_set_str(v, "id", S(h->id));
     sbj_set(v, "name", sbj_strn(S(h->name), h->name_len));
     sbj_set(v, "capabilities", h->capabilities ? sbj_clone(h->capabilities) : sbj_null());
-    sbj_set(v, "profile_id", opt_str(h->profile_id));
-    sbj_set(v, "wg_address", opt_str(h->wg_address));
-    sbj_set(v, "wg_public_key", opt_str(h->wg_public_key));
-    sbj_set(v, "wg_endpoint", opt_str(h->wg_endpoint));
-    sbj_set(v, "clash_api", opt_str(h->clash_api));
+    sbj_set(v, "profile_id", h->profile_id ? sbj_strn(h->profile_id, h->profile_id_len) : sbj_null());
+    sbj_set(v, "wg_address", h->wg_address ? sbj_strn(h->wg_address, h->wg_address_len) : sbj_null());
+    sbj_set(v, "wg_public_key", h->wg_public_key ? sbj_strn(h->wg_public_key, h->wg_public_key_len) : sbj_null());
+    sbj_set(v, "wg_endpoint", h->wg_endpoint ? sbj_strn(h->wg_endpoint, h->wg_endpoint_len) : sbj_null());
+    sbj_set(v, "clash_api", h->clash_api ? sbj_strn(h->clash_api, h->clash_api_len) : sbj_null());
     sbj_set(v, "last_seen", opt_str(h->last_seen));
     sbj_set(v, "singbox_state", opt_str(h->singbox_state));
     sbj_set_bool(v, "enabled", h->enabled);
@@ -569,11 +575,17 @@ static void read_host(sqlite3_stmt *st, sb_host *h) {
     h->capabilities = parse_object_or_empty(caps);
     free(caps);
     h->profile_id = sbq_opt_text(st, 4);
+    h->profile_id_len = (size_t)sqlite3_column_bytes(st, 4);
     h->wg_address = sbq_opt_text(st, 5);
+    h->wg_address_len = (size_t)sqlite3_column_bytes(st, 5);
     h->wg_public_key = sbq_opt_text(st, 6);
+    h->wg_public_key_len = (size_t)sqlite3_column_bytes(st, 6);
     h->wg_endpoint = sbq_opt_text(st, 7);
+    h->wg_endpoint_len = (size_t)sqlite3_column_bytes(st, 7);
     h->clash_api = sbq_opt_text(st, 8);
+    h->clash_api_len = (size_t)sqlite3_column_bytes(st, 8);
     h->clash_secret = sbq_text(st, 9);
+    h->clash_secret_len = (size_t)sqlite3_column_bytes(st, 9);
     h->last_seen = sbq_opt_text(st, 10);
     h->singbox_state = sbq_opt_text(st, 11);
     h->enabled = sbq_int(st, 12) != 0;
@@ -722,16 +734,17 @@ static char *new_agent_token(void) {
 
 #define COMMAND_SELECT "SELECT id, host_id, command, status, result, created_at, acked_at "
 
-static char *controller_address(const char *address) {
-    if (sb_str_empty(address)) return sb_strdup("0.0.0.0:9090");
-    const char *v = address;
-    if (sb_starts_with(v, "https://"))
-        v += 8;
-    else if (sb_starts_with(v, "http://"))
-        v += 7;
-    size_t n = strlen(v);
-    while (n > 0 && v[n - 1] == '/') --n;
-    return sb_strndup(v, n);
+static char *controller_address(const char *address, size_t len, size_t *out_len) {
+    if (!address || !len) {
+        *out_len = strlen("0.0.0.0:9090");
+        return sb_strdup("0.0.0.0:9090");
+    }
+    size_t start = 0;
+    if (len >= 8 && memcmp(address, "https://", 8) == 0) start = 8;
+    else if (len >= 7 && memcmp(address, "http://", 7) == 0) start = 7;
+    while (len > start && address[len - 1] == '/') --len;
+    *out_len = len - start;
+    return sb_strndup(address + start, *out_len);
 }
 
 static int read_nodes(sqlite3 *db, const char *sql, const char *host_id, sb_proxy_node_vec *out,
@@ -1917,12 +1930,13 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         int bound = sbq_bind_text_n(st, 2, host->name, host->name_len, err);
         sbq_bind_text(st, 3, token);
         if (bound == 0) bound = bind_dump(st, 4, host->capabilities, err);
-        sbq_bind_text(st, 5, profile_id);
-        sbq_bind_text(st, 6, host->wg_address);
-        sbq_bind_text(st, 7, host->wg_public_key);
-        sbq_bind_text(st, 8, host->wg_endpoint);
-        sbq_bind_text(st, 9, host->clash_api);
-        sbq_bind_text(st, 10, S(host->clash_secret));
+        if (bound == 0) bound = sbq_bind_text_n(st, 5, profile_id,
+            host->profile_id ? host->profile_id_len : strlen("default"), err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 6, host->wg_address, host->wg_address_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 7, host->wg_public_key, host->wg_public_key_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 8, host->wg_endpoint, host->wg_endpoint_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 9, host->clash_api, host->clash_api_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 10, host->clash_secret, host->clash_secret_len, err);
         sbq_bind_text(st, 11, host->last_seen);
         sbq_bind_text(st, 12, host->singbox_state);
         sbq_bind_bool(st, 13, host->enabled);
@@ -1949,12 +1963,12 @@ int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
     if (st) {
         int bound = sbq_bind_text_n(st, 1, host->name, host->name_len, err);
         if (bound == 0) bound = bind_dump(st, 2, host->capabilities, err);
-        sbq_bind_text(st, 3, host->profile_id);
-        sbq_bind_text(st, 4, host->wg_address);
-        sbq_bind_text(st, 5, host->wg_public_key);
-        sbq_bind_text(st, 6, host->wg_endpoint);
-        sbq_bind_text(st, 7, host->clash_api);
-        sbq_bind_text(st, 8, S(host->clash_secret));
+        if (bound == 0) bound = sbq_bind_text_n(st, 3, host->profile_id, host->profile_id_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 4, host->wg_address, host->wg_address_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 5, host->wg_public_key, host->wg_public_key_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 6, host->wg_endpoint, host->wg_endpoint_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 7, host->clash_api, host->clash_api_len, err);
+        if (bound == 0) bound = sbq_bind_text_n(st, 8, host->clash_secret, host->clash_secret_len, err);
         sbq_bind_bool(st, 9, host->enabled);
         sbq_bind_text(st, 10, host->id);
         if (exec_bound(st, bound, err) == 0) {
@@ -3036,10 +3050,12 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
     capabilities = NULL;
     free(out->clash_controller);
     char *clash_api = sbq_opt_text(host, 4);
-    out->clash_controller = controller_address(clash_api);
+    out->clash_controller = controller_address(clash_api, (size_t)sqlite3_column_bytes(host, 4),
+                                                &out->clash_controller_len);
     free(clash_api);
     free(out->clash_secret);
     out->clash_secret = sbq_text(host, 5);
+    out->clash_secret_len = (size_t)sqlite3_column_bytes(host, 5);
     if (profile.rule_script_enabled && profile.rule_script_len > 0) {
         out->rule_script = sb_strndup(profile.rule_script, profile.rule_script_len);
         out->rule_script_len = profile.rule_script_len;

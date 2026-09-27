@@ -811,7 +811,9 @@ static int handle_config_full(sb_http_req *req, sb_http_resp *resp, sb_err *err)
     if (sb_store_render_request_for_host(srv->store, "self", &request, err) != 0) goto done;
     free(request.clash_controller);
     request.clash_controller = sb_http_clash_controller_address(S(srv->opts.clash_api_url));
+    request.clash_controller_len = request.clash_controller ? strlen(request.clash_controller) : 0;
     sb_str_set(&request.clash_secret, S(srv->opts.clash_api_secret));
+    request.clash_secret_len = request.clash_secret ? strlen(request.clash_secret) : 0;
     if (sb_config_renderer_init(&renderer, NULL, err) != 0) goto done;
     config = sb_config_renderer_render(&renderer, &request, err);
     if (!config) goto done;

@@ -87,7 +87,9 @@ test in this configuration.
   returns Bad server address instead of handing a truncated origin to libcurl.
   Diagnostic metadata/logs, command acknowledgement results and WireGuard notes
   retain complete bytes through storage; diagnostic limits still truncate at
-  UTF-8 boundaries. Other model strings still use C
+  UTF-8 boundaries. Host profile references and connection fields retain full
+  bytes in storage; Clash controller/secret values also retain them in generated
+  JSON. Invalid profile references cannot alias an existing prefix. Other model strings still use C
   strings; their NUL compatibility requires further audit before claiming byte-exact
   parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI

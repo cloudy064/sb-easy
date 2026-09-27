@@ -1054,10 +1054,13 @@ int sb_wireguard_provision_host(sb_wireguard *wg, const sb_host *host, bool set_
 
     sb_host_copy(&updated, host);
     sb_str_set(&updated.wg_address, S(peer.address));
+    updated.wg_address_len = updated.wg_address ? strlen(updated.wg_address) : 0;
     sb_str_set(&updated.wg_public_key, S(peer.public_key));
+    updated.wg_public_key_len = updated.wg_public_key ? strlen(updated.wg_public_key) : 0;
     if (set_default_clash && !updated.clash_api) {
         char *ip = peer_ip(S(peer.address));
         updated.clash_api = sb_asprintf("http://%s:9090", ip);
+        updated.clash_api_len = updated.clash_api ? strlen(updated.clash_api) : 0;
         free(ip);
     }
     rc = sb_store_update_host(wg->store, &updated, out, err);

@@ -2260,7 +2260,9 @@ static int self_singbox_render(sb_http_server *srv, sb_singbox_supervisor *super
         if (sb_store_render_request_for_host(srv->store, "self", &request, err) == 0) {
             free(request.clash_controller);
             request.clash_controller = sb_http_clash_controller_address(srv->opts.clash_api_url);
+            request.clash_controller_len = request.clash_controller ? strlen(request.clash_controller) : 0;
             sb_str_set(&request.clash_secret, srv->opts.clash_api_secret);
+            request.clash_secret_len = request.clash_secret ? strlen(request.clash_secret) : 0;
             if (sb_config_renderer_init(&renderer, NULL, err) == 0 &&
                 (config = sb_config_renderer_render(&renderer, &request, err)) != NULL) {
                 body = sbj_dump(config, 2);

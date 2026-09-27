@@ -214,6 +214,31 @@ def run(args, root):
         config = api("/api/hosts/" + host["id"] + "/config")
         assert any(rule.get("domain_suffix") == ["left\0right"] and rule.get("hostLabel") == host["name"]
                    for rule in config["route"]["rules"])
+        invalid_host = {"name": "invalid-profile-reference", "profile_id": "default\0suffix",
+                        "capabilities": {"runs_singbox": False, "is_wg_member": False}}
+        assert request("/api/hosts", invalid_host)[0] == 500
+        assert not any(entry["name"] == invalid_host["name"] for entry in api("/api/hosts"))
+        assert request("/api/hosts/" + host["id"], {"profile_id": "default\0suffix"}, "PUT")[0] == 500
+        assert next(entry for entry in api("/api/hosts") if entry["id"] == host["id"])["profile_id"] == prof["id"]
+        connection_fields = {"wg_address": "10.0.0.2/32\0tail", "wg_endpoint": "\0endpoint:51820",
+                             "clash_api": "http://controller\0tail:9090///", "clash_secret": "secret\0tail"}
+        reference_host = api("/api/hosts", dict(connection_fields, name="connection-field-check",
+            profile_id=prof["id"], capabilities={"runs_singbox": False, "is_wg_member": False}))
+        for key in ("wg_address", "wg_endpoint", "clash_api"):
+            assert reference_host[key] == connection_fields[key]
+        for suffix in ("tail", "updated"):
+            connection_fields = {"wg_address": "10.0.0.2/32\0" + suffix,
+                "wg_public_key": "public\0" + suffix, "wg_endpoint": "endpoint:51820\0" + suffix,
+                "clash_api": "http://controller\0" + suffix + ":9090///", "clash_secret": "secret\0" + suffix}
+            reference_host = api("/api/hosts/" + reference_host["id"], connection_fields, "PUT")
+            listed = next(entry for entry in api("/api/hosts") if entry["id"] == reference_host["id"])
+            for key in ("wg_address", "wg_public_key", "wg_endpoint", "clash_api"):
+                assert reference_host[key] == listed[key] == connection_fields[key]
+            rendered = api("/api/hosts/" + reference_host["id"] + "/config")
+            assert rendered["experimental"]["clash_api"]["external_controller"] == "controller\0" + suffix + ":9090"
+            assert rendered["experimental"]["clash_api"]["secret"] == connection_fields["clash_secret"]
+        api("/api/hosts/" + reference_host["id"], method="DELETE")
+        print("PASS: complete host profile references reject prefix aliases; connection fields survive CRUD/rendering")
         agent_headers = {"Authorization": "Bearer " + api("/api/hosts/" + host["id"] + "/token")["agent_token"]}
         diagnostic = {"reason": "r" * 78 + "\0éend", "app_version": "app\0tail",
                       "core_version": "core\0tail", "logs": ["short\0tail", "l" * 3998 + "\0éend"]}

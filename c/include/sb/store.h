@@ -118,6 +118,8 @@ typedef struct {
     size_t name_len;
     sbj *capabilities; /* object */
     char *profile_id, *wg_address, *wg_public_key, *wg_endpoint, *clash_api; /* nullable */
+    size_t profile_id_len, wg_address_len, wg_public_key_len, wg_endpoint_len;
+    size_t clash_api_len, clash_secret_len;
     char *clash_secret;
     char *last_seen, *singbox_state; /* nullable */
     bool enabled; /* default true */

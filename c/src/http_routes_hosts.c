@@ -309,19 +309,20 @@ static int host_from_create_request(const sbj *body, sb_host *host, sb_err *err)
         sbj_set_bool(host->capabilities, "is_wg_hub", false);
         sbj_set_bool(host->capabilities, "is_self", false);
     }
-    if (sb_json_assign_string(body, "profile_id", &host->profile_id, err) != 0 ||
-        sb_json_assign_string(body, "wg_address", &host->wg_address, err) != 0 ||
-        sb_json_assign_string(body, "wg_endpoint", &host->wg_endpoint, err) != 0 ||
-        sb_json_assign_string(body, "clash_api", &host->clash_api, err) != 0)
+    if (sb_json_assign_string_n(body, "profile_id", &host->profile_id, &host->profile_id_len, err) != 0 ||
+        sb_json_assign_string_n(body, "wg_address", &host->wg_address, &host->wg_address_len, err) != 0 ||
+        sb_json_assign_string_n(body, "wg_endpoint", &host->wg_endpoint, &host->wg_endpoint_len, err) != 0 ||
+        sb_json_assign_string_n(body, "clash_api", &host->clash_api, &host->clash_api_len, err) != 0)
         return -1;
-    if (host->wg_endpoint && !*host->wg_endpoint) {
+    if (host->wg_endpoint && !host->wg_endpoint_len) {
         free(host->wg_endpoint);
         host->wg_endpoint = NULL;
     }
     const sbj *secret = sbj_get(body, "clash_secret");
     if (secret && !sbj_is_null(secret)) {
         if (!sbj_is_string(secret)) return sb_fail(err, SB_ERR_VALIDATION, "clash_secret must be a string");
-        sb_str_set(&host->clash_secret, secret->v.str.ptr);
+        sb_str_setn(&host->clash_secret, secret->v.str.ptr, secret->v.str.len);
+        host->clash_secret_len = secret->v.str.len;
     }
     return 0;
 }
@@ -342,16 +343,17 @@ static int host_from_update_request(sb_host *host, const sbj *body, sb_err *err)
         sbj_free(host->capabilities);
         host->capabilities = sbj_clone(capabilities);
     }
-    if (sb_json_assign_string(body, "profile_id", &host->profile_id, err) != 0 ||
-        sb_json_assign_string(body, "wg_address", &host->wg_address, err) != 0 ||
-        sb_json_assign_string(body, "wg_public_key", &host->wg_public_key, err) != 0 ||
-        sb_json_assign_string(body, "wg_endpoint", &host->wg_endpoint, err) != 0 ||
-        sb_json_assign_string(body, "clash_api", &host->clash_api, err) != 0)
+    if (sb_json_assign_string_n(body, "profile_id", &host->profile_id, &host->profile_id_len, err) != 0 ||
+        sb_json_assign_string_n(body, "wg_address", &host->wg_address, &host->wg_address_len, err) != 0 ||
+        sb_json_assign_string_n(body, "wg_public_key", &host->wg_public_key, &host->wg_public_key_len, err) != 0 ||
+        sb_json_assign_string_n(body, "wg_endpoint", &host->wg_endpoint, &host->wg_endpoint_len, err) != 0 ||
+        sb_json_assign_string_n(body, "clash_api", &host->clash_api, &host->clash_api_len, err) != 0)
         return -1;
     const sbj *secret = sbj_get(body, "clash_secret");
     if (secret && !sbj_is_null(secret)) {
         if (!sbj_is_string(secret)) return sb_fail(err, SB_ERR_VALIDATION, "clash_secret must be a string");
-        sb_str_set(&host->clash_secret, secret->v.str.ptr);
+        sb_str_setn(&host->clash_secret, secret->v.str.ptr, secret->v.str.len);
+        host->clash_secret_len = secret->v.str.len;
     }
     const sbj *enabled = sbj_get(body, "enabled");
     if (enabled && !sbj_is_null(enabled)) {
@@ -538,6 +540,7 @@ static int managed_render_request(sb_http_server *srv, sb_host *host, bool provi
      * service for 0.0.0.0:9090. Remove both the repository default and any
      * controller accidentally persisted in the profile template. */
     sb_str_set(&out->clash_controller, "");
+    out->clash_controller_len = 0;
     sbj *experimental = sbj_get(out->profile, "experimental");
     if (sbj_is_object(experimental)) sbj_del(experimental, "clash_api");
 

@@ -7,7 +7,7 @@ release images/CI, and centrally managed Claude egress rollout.
 
 - Production center and local agent run the verified identity fix `05168b0`.
 - Profile/script fixes and host/WireGuard name fixes are verified in source;
-  versioned images through `d3c88a8` are built. These changes await the combined rollout.
+  versioned images through `d2dd8e5` are built. These changes await the combined rollout.
 - Proxy storage/rendering and agent tag operations preserve full bytes;
   remaining non-authentication string boundaries are still under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
   of the centrally prepared rules has not been verified.
@@ -179,3 +179,14 @@ not start a runtime service or modify host interfaces.
 - General command strings, telemetry/diagnostic metadata and subscription
   fields still need the broader boundary audit. Release and Android receipt
   gates remain outstanding.
+
+## Proxy compatibility packaging and next verified difference
+
+- Both `sb-easy:c-panel-d2dd8e5` and `sb-easy:c-unified-d2dd8e5` built
+  successfully with GCC 12 Release warnings as errors; the unified build
+  executed its embedded start/reload/stop smoke. Images are not deployed.
+- Isolated subscription API probes confirm that C++ preserves a NUL suffix in
+  both the trimmed name and stored URL, while C currently truncates them.
+  The disabled test subscription used only `example.invalid` and no fetch.
+  Evidence: `/tmp/sb-c-subscription-byte-audit.log`. This is the next concrete
+  model-boundary fix, before the combined rollout.

@@ -336,8 +336,11 @@ static int finish_node(sb_parsed_node *out, const char *type, sv tag, sv server,
     }
     sb_parsed_node_free(out);
     out->node_type = sb_strdup(type);
+    out->node_type_len = strlen(type);
     out->tag = sb_strndup(tag.p, tag.n);
+    out->tag_len = tag.n;
     out->server = sb_strndup(server.p, server.n);
+    out->server_len = server.n;
     out->server_port = port;
     out->protocol_config = config;
     return 1;
@@ -2145,36 +2148,36 @@ static int parse_outbound(const sbj *outbound, sb_parsed_node *out, sb_err *err)
     sv tag;
     if (value_string(outbound, "tag", server, &tag, err)) return -1;
     sbj *config = sbj_object();
-    if (!strcmp(type, "shadowsocks")) {
+    if (sbj_string_is(t, "shadowsocks")) {
         sbj_set(config, "method", value_or_wrapped(outbound, "method", sbj_null()));
         sbj_set(config, "password", value_or_wrapped(outbound, "password", sbj_null()));
-    } else if (!strcmp(type, "vmess")) {
+    } else if (sbj_string_is(t, "vmess")) {
         sbj_set(config, "uuid", value_or_wrapped(outbound, "uuid", sbj_null()));
         sbj_set(config, "alter_id", value_or_wrapped(outbound, "alter_id", sbj_int(0)));
         sbj_set(config, "security", value_or_wrapped(outbound, "security", sbj_str("auto")));
-    } else if (!strcmp(type, "vless")) {
+    } else if (sbj_string_is(t, "vless")) {
         sbj_set(config, "uuid", value_or_wrapped(outbound, "uuid", sbj_null()));
         sbj_set(config, "flow", value_or_wrapped(outbound, "flow", sbj_str("")));
         sbj_set(config, "packet_encoding",
                 value_or_wrapped(outbound, "packet_encoding", sbj_str("xudp")));
-    } else if (!strcmp(type, "trojan")) {
+    } else if (sbj_string_is(t, "trojan")) {
         sbj_set(config, "password", value_or_wrapped(outbound, "password", sbj_null()));
-    } else if (!strcmp(type, "hysteria2")) {
+    } else if (sbj_string_is(t, "hysteria2")) {
         sbj_set(config, "password", value_or_wrapped(outbound, "password", sbj_null()));
         copy_if(config, outbound, "obfs");
-    } else if (!strcmp(type, "tuic")) {
+    } else if (sbj_string_is(t, "tuic")) {
         sbj_set(config, "uuid", value_or_wrapped(outbound, "uuid", sbj_null()));
         sbj_set(config, "password", value_or_wrapped(outbound, "password", sbj_null()));
         copy_if(config, outbound, "congestion_control");
         copy_if(config, outbound, "udp_relay_mode");
-    } else if (!strcmp(type, "http")) {
+    } else if (sbj_string_is(t, "http")) {
         copy_if(config, outbound, "username");
         copy_if(config, outbound, "password");
     } else {
         sbj_free(config);
         return 0;
     }
-    if (strcmp(type, "shadowsocks") != 0) {
+    if (!sbj_string_is(t, "shadowsocks")) {
         copy_if(config, outbound, "tls");
         copy_if(config, outbound, "transport");
     }

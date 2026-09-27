@@ -136,6 +136,7 @@ char *sb_http_trim_n(const char *s, size_t len, size_t *out_len);
 char *sb_http_trim_trailing_slashes(const char *s);
 char *sb_http_clash_controller_address(const char *url);
 char *sb_http_encode_component(const char *s);
+char *sb_http_encode_component_n(const char *s, size_t len);
 char *sb_http_secure_token(size_t bytes);
 char *sb_http_utc_now(void); /* "%Y-%m-%dT%H:%M:%SZ" */
 char *sb_http_truncate_utf8(const char *s, size_t max_bytes);

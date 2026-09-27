@@ -81,7 +81,7 @@ static int parse_request(const sbj *value, sb_render_request *request, sb_err *e
                 return sb_fail(err, SB_ERR_GENERIC,
                                "[json.exception.type_error.302] type must be string, but is %s",
                                sbj_type_name(tag));
-            sb_strvec_push(&request->external_route_tags, tag->v.str.ptr);
+            sbj_arr_push(request->external_route_tags, sbj_clone(tag));
         }
     }
 

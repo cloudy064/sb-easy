@@ -65,11 +65,6 @@ static int value_int(const sbj *object, const char *key, int fallback, int *out,
     }
 }
 
-/* Tag of a generated outbound (always an object with a string tag, or none). */
-static const char *outbound_tag(const sbj *outbound) {
-    return sbj_get_str(outbound, "tag", "");
-}
-
 static sbj *value_or_null(const sbj *value, const char *key) {
     const sbj *found = sbj_get(value, key);
     return found ? sbj_clone(found) : sbj_null();
@@ -80,10 +75,9 @@ static void copy_if_present(sbj *destination, const sbj *source, const char *key
     if (found) sbj_set(destination, key, sbj_clone(found));
 }
 
-static const char *string_or(const sbj *value, const char *key, const char *fallback) {
+static sbj *string_or(const sbj *value, const char *key, const char *fallback) {
     const sbj *found = sbj_get(value, key);
-    if (!sbj_is_string(found)) return fallback;
-    return found->v.str.ptr;
+    return sbj_is_string(found) ? sbj_clone(found) : sbj_str(fallback);
 }
 
 /* nlohmann `obj[key]`: inserts null when missing. Returns the (borrowed) slot. */
@@ -102,37 +96,13 @@ static sbj *set_get(sbj *object, const char *key, sbj *value) {
     return sbj_get(object, key);
 }
 
-/* ---- sorted string set (std::set<std::string>) ------------------------ */
-
-static int cmp_str(const void *a, const void *b) {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
-static void strset_normalize(sb_strvec *v) {
-    if (v->len == 0) return;
-    qsort(v->items, v->len, sizeof *v->items, cmp_str);
-    size_t out = 1;
-    for (size_t i = 1; i < v->len; ++i) {
-        if (strcmp(v->items[i], v->items[out - 1]) == 0) {
-            free(v->items[i]);
-        } else {
-            v->items[out++] = v->items[i];
-        }
-    }
-    v->len = out;
-}
-
-static bool strset_contains(const sb_strvec *v, const char *s) {
-    return v->len && bsearch(&s, v->items, v->len, sizeof *v->items, cmp_str) != NULL;
-}
-
 /* ---- rule validation --------------------------------------------------- */
 
-static int validate_rule_tags(const sbj *rules, const sb_strvec *allowed, sb_err *err) {
+static int validate_rule_tags(const sbj *rules, const sbj *allowed, sb_err *err) {
     const sbj *rule;
     SBJ_ARR_FOREACH(rules, i, rule) {
         const sbj *outbound = sbj_get(rule, "outbound");
-        if (sbj_is_string(outbound) && !strset_contains(allowed, outbound->v.str.ptr)) {
+        if (sbj_is_string(outbound) && !sbj_getn(allowed, outbound->v.str.ptr, outbound->v.str.len)) {
             return sb_fail(err, SB_ERR_SCRIPT, "generated rule references unknown outbound tag: %s",
                            outbound->v.str.ptr);
         }
@@ -231,7 +201,7 @@ static void normalize_managed_dns_detours(sbj *config, bool has_auto,
     SBJ_ARR_FOREACH(servers, i, server) {
         const sbj *detour = sbj_get(server, "detour");
         if (!sbj_is_object(server) || !sbj_is_string(detour)) continue;
-        if (strcmp(detour->v.str.ptr, "Proxy") == 0 || strcmp(detour->v.str.ptr, "Auto") == 0) {
+        if (sbj_string_is(detour, "Proxy") || sbj_string_is(detour, "Auto")) {
             sbj_set_str(server, "detour", target);
         }
     }
@@ -241,11 +211,11 @@ static const char meta_rules_base[] =
     "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/";
 
 static bool rule_set_tag_matches(const sbj *value, const char *tag) {
-    if (sbj_is_string(value)) return strcmp(value->v.str.ptr, tag) == 0;
+    if (sbj_is_string(value)) return sbj_string_is(value, tag);
     if (!sbj_is_array(value)) return false;
     const sbj *item;
     SBJ_ARR_FOREACH(value, i, item) {
-        if (sbj_is_string(item) && strcmp(item->v.str.ptr, tag) == 0) return true;
+        if (sbj_is_string(item) && sbj_string_is(item, tag)) return true;
     }
     return false;
 }
@@ -280,7 +250,7 @@ static int add_remote_rule_set(sbj *rule_sets, const char *tag, const char *rela
         if (!sbj_is_object(item)) continue;
         const char *existing = NULL;
         if (value_str(item, "tag", "", &existing, err) != 0) return -1;
-        if (strcmp(existing, tag) == 0) return 0;
+        if (sbj_string_is(sbj_get(item, "tag"), tag)) return 0;
     }
     sbj *entry = sbj_object();
     sbj_set_str(entry, "type", "remote");
@@ -356,8 +326,8 @@ int sb_config_renderer_init(sb_config_renderer *renderer, const sb_script_limits
 static sbj *outbound_base(const char *type, const sb_proxy_node *node) {
     sbj *o = sbj_object();
     sbj_set_str(o, "type", type);
-    sbj_set_str(o, "tag", node->tag);
-    sbj_set_str(o, "server", node->server);
+    sbj_set(o, "tag", sbj_strn(node->tag, node->tag_len));
+    sbj_set(o, "server", sbj_strn(node->server, node->server_len));
     sbj_set_int(o, "server_port", node->server_port);
     return o;
 }
@@ -367,45 +337,44 @@ sbj *sb_config_generate_outbound(const sb_proxy_node *node, sb_err *err) {
     const char *type = node->type ? node->type : "";
     sbj *outbound;
 
-    if (strcmp(type, "shadowsocks") == 0) {
+    if (sb_strn_eq(type, node->type_len, "shadowsocks")) {
         outbound = outbound_base("shadowsocks", node);
         sbj_set(outbound, "method", value_or_null(config, "method"));
         sbj_set(outbound, "password", value_or_null(config, "password"));
-    } else if (strcmp(type, "vmess") == 0) {
+    } else if (sb_strn_eq(type, node->type_len, "vmess")) {
         int alter_id = 0;
         if (value_int(config, "alter_id", 0, &alter_id, err) != 0) return NULL;
         outbound = outbound_base("vmess", node);
         sbj_set(outbound, "uuid", value_or_null(config, "uuid"));
         sbj_set_int(outbound, "alter_id", alter_id);
-        sbj_set_str(outbound, "security", string_or(config, "security", "auto"));
+        sbj_set(outbound, "security", string_or(config, "security", "auto"));
         copy_if_present(outbound, config, "transport");
         copy_if_present(outbound, config, "tls");
-    } else if (strcmp(type, "trojan") == 0) {
+    } else if (sb_strn_eq(type, node->type_len, "trojan")) {
         outbound = outbound_base("trojan", node);
         sbj_set(outbound, "password", value_or_null(config, "password"));
         copy_if_present(outbound, config, "transport");
         copy_if_present(outbound, config, "tls");
-    } else if (strcmp(type, "vless") == 0) {
+    } else if (sb_strn_eq(type, node->type_len, "vless")) {
         outbound = outbound_base("vless", node);
         sbj_set(outbound, "uuid", value_or_null(config, "uuid"));
-        sbj_set_str(outbound, "flow", string_or(config, "flow", ""));
-        sbj_set_str(outbound, "packet_encoding", string_or(config, "packet_encoding", "xudp"));
+        sbj_set(outbound, "flow", string_or(config, "flow", ""));
+        sbj_set(outbound, "packet_encoding", string_or(config, "packet_encoding", "xudp"));
         copy_if_present(outbound, config, "transport");
         copy_if_present(outbound, config, "tls");
-    } else if (strcmp(type, "hysteria2") == 0) {
+    } else if (sb_strn_eq(type, node->type_len, "hysteria2")) {
         outbound = outbound_base("hysteria2", node);
         sbj_set(outbound, "password", value_or_null(config, "password"));
         copy_if_present(outbound, config, "tls");
         copy_if_present(outbound, config, "obfs");
-    } else if (strcmp(type, "tuic") == 0) {
+    } else if (sb_strn_eq(type, node->type_len, "tuic")) {
         outbound = outbound_base("tuic", node);
         sbj_set(outbound, "uuid", value_or_null(config, "uuid"));
         sbj_set(outbound, "password", value_or_null(config, "password"));
-        sbj_set_str(outbound, "congestion_control",
-                    string_or(config, "congestion_control", "bbr"));
-        sbj_set_str(outbound, "udp_relay_mode", string_or(config, "udp_relay_mode", "native"));
+        sbj_set(outbound, "congestion_control", string_or(config, "congestion_control", "bbr"));
+        sbj_set(outbound, "udp_relay_mode", string_or(config, "udp_relay_mode", "native"));
         copy_if_present(outbound, config, "tls");
-    } else if (strcmp(type, "http") == 0) {
+    } else if (sb_strn_eq(type, node->type_len, "http")) {
         outbound = outbound_base("http", node);
         copy_if_present(outbound, config, "username");
         copy_if_present(outbound, config, "password");
@@ -413,15 +382,13 @@ sbj *sb_config_generate_outbound(const sb_proxy_node *node, sb_err *err) {
     } else {
         outbound = sbj_object();
         sbj_set_str(outbound, "type", "direct");
-        sbj_set_str(outbound, "tag", node->tag);
+        sbj_set(outbound, "tag", sbj_strn(node->tag, node->tag_len));
     }
     return outbound;
 }
 
 sbj *sb_config_generate_outbounds(const sb_proxy_node *nodes, size_t count, sb_err *err) {
-    /* std::map<std::string, unsigned> seen: parallel arrays, linear lookup. */
-    sb_strvec seen_tags = {0};
-    unsigned *seen_counts = NULL;
+    sbj *seen_counts = sbj_object();
     sbj *outbounds = sbj_array();
     sbj *auto_tags = sbj_array();
 
@@ -432,26 +399,21 @@ sbj *sb_config_generate_outbounds(const sb_proxy_node *nodes, size_t count, sb_e
         if (!outbound) {
             sbj_free(outbounds);
             sbj_free(auto_tags);
-            sb_strvec_free(&seen_tags);
-            free(seen_counts);
+            sbj_free(seen_counts);
             return NULL;
         }
-        size_t slot = 0;
-        while (slot < seen_tags.len && strcmp(seen_tags.items[slot], node->tag) != 0) ++slot;
-        if (slot == seen_tags.len) {
-            sb_strvec_push(&seen_tags, node->tag);
-            seen_counts = sb_xrealloc(seen_counts, seen_tags.cap * sizeof *seen_counts);
-            seen_counts[slot] = 0;
-        }
-        unsigned occurrence = ++seen_counts[slot];
-        char *tag = occurrence == 1 ? sb_strdup(node->tag)
-                                    : sb_asprintf("%s #%u", node->tag, occurrence);
-        sbj_set_str(outbound, "tag", tag);
-        sbj_arr_push(auto_tags, sbj_str_take(tag));
+        const sbj *previous = sbj_getn(seen_counts, node->tag, node->tag_len);
+        unsigned occurrence = previous ? (unsigned)previous->v.i + 1 : 1;
+        sbj_setn(seen_counts, node->tag, node->tag_len, sbj_int(occurrence));
+        sb_buf tag = {0};
+        sb_buf_append(&tag, node->tag, node->tag_len);
+        if (occurrence > 1) sb_buf_printf(&tag, " #%u", occurrence);
+        sbj_set(outbound, "tag", sbj_strn(tag.p, tag.len));
+        sbj_arr_push(auto_tags, sbj_strn(tag.p, tag.len));
+        sb_buf_free(&tag);
         sbj_arr_push(outbounds, outbound);
     }
-    sb_strvec_free(&seen_tags);
-    free(seen_counts);
+    sbj_free(seen_counts);
 
     if (sbj_arr_len(auto_tags) > 0) {
         sbj *urltest = sbj_object();
@@ -474,7 +436,7 @@ sbj *sb_config_generate_outbounds(const sb_proxy_node *nodes, size_t count, sb_e
 static bool outbounds_have_tag(const sbj *outbounds, const char *tag) {
     const sbj *o;
     SBJ_ARR_FOREACH(outbounds, i, o) {
-        if (strcmp(outbound_tag(o), tag) == 0) return true;
+        if (sbj_string_is(sbj_get(o, "tag"), tag)) return true;
     }
     return false;
 }
@@ -500,7 +462,7 @@ static int render_managed(const sb_render_request *request, sbj *config, bool *h
             sbj_free(outbounds);
             return -1;
         }
-        is_android = strcmp(platform, "android") == 0;
+        is_android = sbj_string_is(sbj_get(capabilities, "platform"), "android");
     }
     if (!outbounds_have_tag(outbounds, "direct")) {
         sbj *direct = sbj_object();
@@ -520,8 +482,9 @@ static int render_managed(const sb_render_request *request, sbj *config, bool *h
         sbj_arr_push(selector_outbounds, sbj_str("auto"));
         const sbj *o;
         SBJ_ARR_FOREACH(outbounds, i, o) {
-            const char *tag = outbound_tag(o);
-            if (*tag && strcmp(tag, "auto") != 0) sbj_arr_push(selector_outbounds, sbj_str(tag));
+            const sbj *tag = sbj_get(o, "tag");
+            if (sbj_is_string(tag) && tag->v.str.len && !sbj_string_is(tag, "auto"))
+                sbj_arr_push(selector_outbounds, sbj_clone(tag));
         }
         sbj *selector = sbj_object();
         sbj_set_str(selector, "type", "selector");
@@ -538,16 +501,14 @@ static int render_managed(const sb_render_request *request, sbj *config, bool *h
     if (sbj_is_object(route)) {
         const sbj *final_value = sbj_get(route, "final");
         if (sbj_is_string(final_value)) {
-            char *current = sb_strdup(final_value->v.str.ptr);
-            const bool legacy = strcmp(current, "Proxy") == 0 || strcmp(current, "Auto") == 0;
+            const bool legacy = sbj_string_is(final_value, "Proxy") || sbj_string_is(final_value, "Auto");
             if (!has_auto) {
                 sbj_set_str(route, "final", "direct");
-            } else if (android_selector && (legacy || strcmp(current, "auto") == 0)) {
+            } else if (android_selector && (legacy || sbj_string_is(final_value, "auto"))) {
                 sbj_set_str(route, "final", android_selector);
             } else if (legacy) {
                 sbj_set_str(route, "final", "auto");
             }
-            free(current);
         }
     }
     free(android_selector);
@@ -559,27 +520,30 @@ static int render_rule_script(const sb_config_renderer *renderer,
     sbj *route = sbj_get(config, "route");
     if (!sbj_is_object(route)) route = set_get(config, "route", sbj_object());
 
-    sb_strvec allowed = {0};
-    sb_strvec_push(&allowed, "direct");
-    sb_strvec_push(&allowed, "block");
-    sb_strvec_push(&allowed, "dns");
-    sb_strvec_push(&allowed, "reject");
+    sbj *allowed = sbj_object();
+    sbj_set(allowed, "direct", sbj_bool(true));
+    sbj_set(allowed, "block", sbj_bool(true));
+    sbj_set(allowed, "dns", sbj_bool(true));
+    sbj_set(allowed, "reject", sbj_bool(true));
     const sbj *outbounds = sbj_get(config, "outbounds");
     if (sbj_is_array(outbounds)) {
         const sbj *o;
         SBJ_ARR_FOREACH(outbounds, i, o) {
             const sbj *tag = sbj_get(o, "tag");
-            if (sbj_is_string(tag)) sb_strvec_push(&allowed, tag->v.str.ptr);
+            if (sbj_is_string(tag)) sbj_setn(allowed, tag->v.str.ptr, tag->v.str.len, sbj_bool(true));
         }
     }
-    for (size_t i = 0; i < request->external_route_tags.len; ++i)
-        sb_strvec_push(&allowed, request->external_route_tags.items[i]);
-    strset_normalize(&allowed);
+    const sbj *external_tag;
+    SBJ_ARR_FOREACH(request->external_route_tags, i, external_tag) {
+        if (sbj_is_string(external_tag))
+            sbj_setn(allowed, external_tag->v.str.ptr, external_tag->v.str.len, sbj_bool(true));
+    }
 
     sbj *context = sbj_object();
     sbj_set(context, "host", sbj_clone(request->host_context));
     sbj *tags = sbj_array();
-    for (size_t i = 0; i < allowed.len; ++i) sbj_arr_push(tags, sbj_str(allowed.items[i]));
+    for (size_t i = 0; i < allowed->v.obj.len; ++i)
+        sbj_arr_push(tags, sbj_strn(allowed->v.obj.keys[i], allowed->v.obj.key_lens[i]));
     sbj_set(context, "outboundTags", tags);
     const sbj *current_rules = sbj_get(route, "rules");
     sbj_set(context, "currentRules", current_rules ? sbj_clone(current_rules) : sbj_array());
@@ -587,12 +551,12 @@ static int render_rule_script(const sb_config_renderer *renderer,
     sbj *rules =
         sb_rule_script_engine_build_rules_n(&renderer->scripts, request->rule_script, request->rule_script_len, context, err);
     sbj_free(context);
-    if (!rules || validate_rule_tags(rules, &allowed, err) != 0) {
+    if (!rules || validate_rule_tags(rules, allowed, err) != 0) {
         sbj_free(rules);
-        sb_strvec_free(&allowed);
+        sbj_free(allowed);
         return -1;
     }
-    sb_strvec_free(&allowed);
+    sbj_free(allowed);
     sbj_set(route, "rules", rules);
     return 0;
 }

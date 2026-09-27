@@ -172,6 +172,10 @@ static int num_cmp_equal(const sbj *a, const sbj *b) {
     return 0; /* INT vs UINT: UINT is always > INT64_MAX */
 }
 
+bool sbj_string_is(const sbj *v, const char *literal) {
+    return sbj_is_string(v) && sb_strn_eq(v->v.str.ptr, v->v.str.len, literal);
+}
+
 bool sbj_equal(const sbj *a, const sbj *b) {
     if (!a || !b) return sbj_is_null(a) && sbj_is_null(b);
     if (sbj_is_number(a) && sbj_is_number(b)) return num_cmp_equal(a, b);

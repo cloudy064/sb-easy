@@ -111,10 +111,14 @@ static char *utc_after_minutes(int64_t minutes) {
 /* renderer_node(): ProxyRecord -> ProxyNode. `out` must be initialised. */
 static void renderer_node(const sb_proxy_record *record, sb_proxy_node *out) {
     sb_str_set(&out->id, S(record->id));
-    sb_str_set(&out->tag, S(record->tag));
-    sb_str_set(&out->type, S(record->node_type));
+    out->id_len = strlen(out->id);
+    sb_str_setn(&out->tag, S(record->tag), record->tag_len);
+    out->tag_len = record->tag_len;
+    sb_str_setn(&out->type, S(record->node_type), record->node_type_len);
+    out->type_len = record->node_type_len;
     out->enabled = record->enabled;
-    sb_str_set(&out->server, S(record->server));
+    sb_str_setn(&out->server, S(record->server), record->server_len);
+    out->server_len = record->server_len;
     out->server_port = record->server_port;
     sbj_free(out->protocol_config);
     out->protocol_config = record->protocol_config ? sbj_clone(record->protocol_config) : sbj_object();

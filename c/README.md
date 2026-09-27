@@ -78,7 +78,9 @@ test in this configuration.
   against the full JSON strings. Profile names and rule scripts also preserve
   byte lengths through storage, rendering and enrollment. Host and WireGuard
   peer names preserve their bytes through matching, credentials, configuration
-  bodies, file writes and download headers. Other model strings still use C
+  bodies, file writes and download headers. Proxy tags and server strings preserve
+  their bytes in CRUD/import/backup, fingerprints and rendered configurations,
+  including duplicate tags and QuickJS outbound validation. Other model strings still use C
   strings; their NUL compatibility requires further audit before claiming byte-exact
   parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI

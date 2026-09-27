@@ -8,10 +8,14 @@
 static void shadowsocks(sb_proxy_node *n, const char *tag) {
     free(n->id);
     n->id = sb_asprintf("id-%s", tag);
+    n->id_len = strlen(n->id);
     sb_str_set(&n->tag, tag);
+    n->tag_len = strlen(n->tag);
     sb_str_set(&n->type, "shadowsocks");
+    n->type_len = strlen(n->type);
     n->enabled = true;
     sb_str_set(&n->server, "192.0.2.10");
+    n->server_len = strlen(n->server);
     n->server_port = 443;
     sbj_set_str(n->protocol_config, "method", "aes-256-gcm");
     sbj_set_str(n->protocol_config, "password", "secret");
@@ -182,7 +186,7 @@ TEST(server_priority_routes_survive_quickjs_rule_replacement) {
     sb_render_request_init(&r);
     set_profile(&r, "{\"route\":{\"rules\":[]}}");
     shadowsocks(sb_proxy_node_vec_push(&r.nodes), "hk");
-    sb_strvec_push(&r.external_route_tags, "sb-easy-network");
+    sbj_arr_push(r.external_route_tags, sbj_str("sb-easy-network"));
     sbj_free(r.priority_route_rules);
     r.priority_route_rules =
         sbj_parse_cstr("[{\"ip_cidr\":[\"10.59.32.0/24\"],\"outbound\":\"sb-easy-network\"}]");
@@ -225,4 +229,63 @@ TEST(empty_managed_profiles_fall_back_to_direct) {
     CHECK_STR(at_str(config, "outbounds.0.tag"), "direct");
     sbj_free(config);
     sb_render_request_free(&r);
+}
+
+TEST(byte_tags_survive_duplicates_android_and_script_validation) {
+    sb_render_request r;
+    sb_render_request_init(&r);
+    set_profile(&r, "{\"route\":{\"final\":\"Proxy\\u0000tail\"},"
+                    "\"dns\":{\"servers\":[{\"detour\":\"Proxy\\u0000tail\"}]}}");
+    set_host(&r, "{\"capabilities\":{\"platform\":\"android\"}}");
+    const char tag[] = "Proxy\0tail";
+    for (size_t i = 0; i < 2; ++i) {
+        sb_proxy_node *node = sb_proxy_node_vec_push(&r.nodes);
+        shadowsocks(node, "unused");
+        sb_str_setn(&node->tag, tag, sizeof tag - 1);
+        node->tag_len = sizeof tag - 1;
+    }
+    sbj_arr_push(r.external_route_tags, sbj_strn("ext\0tail", 8));
+    r.rule_script = sb_strdup("function buildRules(c) {"
+        "if (!c.outboundTags.includes('Proxy\\u0000tail #2') ||"
+        " !c.outboundTags.includes('ext\\u0000tail')) throw Error('truncated tags');"
+        "return [{outbound:'Proxy\\u0000tail'},{outbound:'ext\\u0000tail'}]; }");
+    r.rule_script_len = strlen(r.rule_script);
+    sb_err err = {0};
+    sbj *config = render(&r, &err);
+    REQUIRE(config != NULL);
+    CHECK(at_json(config, "outbounds.0.tag", "\"Proxy\\u0000tail\""));
+    CHECK(at_json(config, "outbounds.1.tag", "\"Proxy\\u0000tail #2\""));
+    CHECK(at_json(config, "outbounds.2.outbounds", "[\"Proxy\\u0000tail\",\"Proxy\\u0000tail #2\"]"));
+    CHECK_STR(at_str(config, "outbounds.4.tag"), "Proxy");
+    CHECK(at_json(config, "outbounds.4.outbounds", "[\"auto\",\"Proxy\\u0000tail\",\"Proxy\\u0000tail #2\",\"direct\"]"));
+    CHECK(at_json(config, "route.final", "\"Proxy\\u0000tail\""));
+    CHECK(at_json(config, "dns.servers.0.detour", "\"Proxy\\u0000tail\""));
+    sbj_free(config);
+    sb_str_set(&r.rule_script, "function buildRules() { return [{outbound:'ext'}]; }");
+    r.rule_script_len = strlen(r.rule_script);
+    CHECK(render(&r, &err) == NULL);
+    CHECK_STR(err.msg, "generated rule references unknown outbound tag: ext");
+    sb_render_request_free(&r);
+}
+
+TEST(protocol_values_and_unknown_type_suffix_preserve_bytes) {
+    sbj *input = sbj_parse_cstr("{\"tag\":\"tag\\u0000tail\",\"type\":\"vmess\","
+        "\"server\":\"server\\u0000tail\",\"server_port\":443,"
+        "\"protocol_config\":{\"uuid\":\"uuid\",\"security\":\"auto\\u0000tail\"}}");
+    sb_proxy_node node;
+    REQUIRE(sb_proxy_node_from_json(input, &node, NULL) == 0);
+    sbj *outbound = sb_config_generate_outbound(&node, NULL);
+    REQUIRE(outbound);
+    CHECK(at_json(outbound, "tag", "\"tag\\u0000tail\""));
+    CHECK(at_json(outbound, "server", "\"server\\u0000tail\""));
+    CHECK(at_json(outbound, "security", "\"auto\\u0000tail\""));
+    sbj_free(outbound);
+    sb_str_setn(&node.type, "vmess\0tail", 10);
+    node.type_len = 10;
+    outbound = sb_config_generate_outbound(&node, NULL);
+    CHECK_STR(at_str(outbound, "type"), "direct");
+    CHECK(at_json(outbound, "tag", "\"tag\\u0000tail\""));
+    sbj_free(outbound);
+    sb_proxy_node_free(&node);
+    sbj_free(input);
 }

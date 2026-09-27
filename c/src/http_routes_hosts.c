@@ -506,7 +506,7 @@ static int endpoint_tag_in_use(const sbj *endpoints, const sb_render_request *re
     }
     bool in_nodes = false;
     for (size_t i = 0; i < request->nodes.len && !in_nodes; ++i)
-        in_nodes = sb_streq(S(request->nodes.items[i].tag), candidate);
+        in_nodes = sb_strn_eq(request->nodes.items[i].tag, request->nodes.items[i].tag_len, candidate);
     *out = in_endpoints || in_nodes;
     return 0;
 }
@@ -572,7 +572,7 @@ static int managed_render_request(sb_http_server *srv, sb_host *host, bool provi
     }
     sbj_set_str(endpoint, "tag", tag.p);
     sbj_arr_push(endpoints, endpoint);
-    sb_strvec_push(&out->external_route_tags, tag.p);
+    sbj_arr_push(out->external_route_tags, sbj_strn(tag.p, tag.len));
 
     /* endpoints.back().at("peers").at(0).at("allowed_ips") */
     const sbj *peers = sbj_get(endpoint, "peers");

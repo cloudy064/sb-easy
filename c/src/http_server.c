@@ -150,9 +150,13 @@ char *sb_http_clash_controller_address(const char *url) {
 }
 
 char *sb_http_encode_component(const char *s) {
+    return sb_http_encode_component_n(s, s ? strlen(s) : 0);
+}
+
+char *sb_http_encode_component_n(const char *s, size_t len) {
     static const char hex[] = "0123456789ABCDEF";
     sb_buf b = {0};
-    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; ++p) {
+    for (const unsigned char *p = (const unsigned char *)s; len; ++p, --len) {
         if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~') {
             sb_buf_putc(&b, (char)*p);
         } else {

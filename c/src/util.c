@@ -95,6 +95,10 @@ char *sb_asprintf(const char *fmt, ...) {
     return s;
 }
 
+bool sb_strn_eq(const char *a, size_t len, const char *literal) {
+    return a && literal && len == strlen(literal) && memcmp(a, literal, len) == 0;
+}
+
 bool sb_streq(const char *a, const char *b) {
     if (!a || !b) return a == b;
     return strcmp(a, b) == 0;

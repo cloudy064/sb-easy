@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real panel + two polling agents, isolated from the host's proxy and database."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -112,6 +113,28 @@ def run(args, root):
             assert request("/api/auth/login", wrong, authenticated=False)[0] == 401
             api("/api/users/" + created["id"], method="DELETE")
         print("PASS: NUL usernames and passwords preserve distinct identities, sessions and audit actors")
+        # Different byte suffixes must remain distinct throughout CRUD and fingerprints.
+        nodes = []
+        for suffix in ("one", "two"):
+            body = {"tag": "tag\0" + suffix, "node_type": "shadowsocks",
+                    "server": "server\0tail", "server_port": 443,
+                    "protocol_config": {"method": "aes-256-gcm", "password": "pw\0" + suffix}}
+            node = api("/api/proxy/nodes", body)
+            assert node["tag"] == body["tag"] and node["server"] == body["server"]
+            material = body["server"] + ":443:shadowsocks:" + body["protocol_config"]["password"]
+            assert node["fingerprint"] == hashlib.sha256(material.encode()).hexdigest()
+            nodes.append(node)
+        assert nodes[0]["fingerprint"] != nodes[1]["fingerprint"]
+        renamed = api("/api/proxy/nodes/" + nodes[0]["id"], {"tag": "\0renamed"}, "PUT")
+        assert renamed["tag"] == "\0renamed" and renamed["server"] == "server\0tail"
+        listed = {node["id"]: node for node in api("/api/proxy/nodes")}
+        assert listed[nodes[0]["id"]]["tag"] == "\0renamed"
+        assert listed[nodes[1]["id"]]["tag"] == "tag\0two"
+        invalid = dict(body, tag="invalid", node_type="shadowsocks\0tail")
+        assert request("/api/proxy/nodes", invalid)[0] == 400
+        for node in nodes:
+            api("/api/proxy/nodes/" + node["id"], method="DELETE")
+        print("PASS: proxy byte strings preserve CRUD, exact protocol matching and credential fingerprints")
         script = "function buildRules(context) { return [{domain_suffix:['left\0right'],outbound:'direct',hostLabel:context.host.name}]; }"
         preview = api("/api/hosts/rule-script/test", {"rule_script": script})
         assert preview["rules"][0]["domain_suffix"] == ["left\0right"]

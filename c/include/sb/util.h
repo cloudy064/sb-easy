@@ -59,6 +59,8 @@ char *sb_strndup(const char *s, size_t n);
 char *sb_asprintf(const char *fmt, ...) SB_PRINTF(1, 2);
 char *sb_vasprintf(const char *fmt, va_list ap);
 bool sb_streq(const char *a, const char *b); /* NULL-safe */
+/* Compare an explicit byte string with a NUL-terminated literal. */
+bool sb_strn_eq(const char *a, size_t len, const char *literal);
 bool sb_starts_with(const char *s, const char *prefix);
 bool sb_ends_with(const char *s, const char *suffix);
 bool sb_str_empty(const char *s); /* NULL or "" */

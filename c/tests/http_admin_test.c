@@ -144,9 +144,12 @@ static char *store_node(sb_test_server *t, const char *tag, const char *type, bo
     sb_proxy_record_init(&node);
     sb_proxy_record_init(&created);
     sb_str_set(&node.tag, tag);
+    node.tag_len = strlen(node.tag);
     sb_str_set(&node.node_type, type);
+    node.node_type_len = strlen(node.node_type);
     node.enabled = enabled;
     sb_str_set(&node.server, "proxy.example.com");
+    node.server_len = strlen(node.server);
     node.server_port = 443;
     sbj_free(node.protocol_config);
     node.protocol_config = sbj_parse_cstr(config);

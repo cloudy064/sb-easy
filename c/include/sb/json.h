@@ -89,6 +89,7 @@ int sbj_validate_utf8(const sbj *value, sb_err *err);
 static inline bool sbj_is_null(const sbj *v) { return !v || v->type == SBJ_NULL; }
 static inline bool sbj_is_bool(const sbj *v) { return v && v->type == SBJ_BOOL; }
 static inline bool sbj_is_string(const sbj *v) { return v && v->type == SBJ_STRING; }
+bool sbj_string_is(const sbj *v, const char *literal);
 static inline bool sbj_is_array(const sbj *v) { return v && v->type == SBJ_ARRAY; }
 static inline bool sbj_is_object(const sbj *v) { return v && v->type == SBJ_OBJECT; }
 static inline bool sbj_is_number(const sbj *v) {

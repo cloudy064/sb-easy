@@ -376,10 +376,13 @@ void sb_proxy_record_free(sb_proxy_record *r) {
 void sb_proxy_record_copy(sb_proxy_record *dst, const sb_proxy_record *src) {
     sb_proxy_record_free(dst);
     dst->id = sb_strdup(S(src->id));
-    dst->tag = sb_strdup(S(src->tag));
-    dst->node_type = sb_strdup(S(src->node_type));
+    dst->tag = sb_strndup(S(src->tag), src->tag_len);
+    dst->tag_len = src->tag_len;
+    dst->node_type = sb_strndup(S(src->node_type), src->node_type_len);
+    dst->node_type_len = src->node_type_len;
     dst->enabled = src->enabled;
-    dst->server = sb_strdup(S(src->server));
+    dst->server = sb_strndup(S(src->server), src->server_len);
+    dst->server_len = src->server_len;
     dst->server_port = src->server_port;
     dst->protocol_config = src->protocol_config ? sbj_clone(src->protocol_config) : sbj_object();
     dst->subscription_id = sb_strdup(src->subscription_id);
@@ -393,10 +396,10 @@ void sb_proxy_record_copy(sb_proxy_record *dst, const sb_proxy_record *src) {
 sbj *sb_proxy_record_to_json(const sb_proxy_record *r) {
     sbj *v = sbj_object();
     sbj_set_str(v, "id", S(r->id));
-    sbj_set_str(v, "tag", S(r->tag));
-    sbj_set_str(v, "node_type", S(r->node_type));
+    sbj_set(v, "tag", sbj_strn(S(r->tag), r->tag_len));
+    sbj_set(v, "node_type", sbj_strn(S(r->node_type), r->node_type_len));
     sbj_set_bool(v, "enabled", r->enabled);
-    sbj_set_str(v, "server", S(r->server));
+    sbj_set(v, "server", sbj_strn(S(r->server), r->server_len));
     sbj_set(v, "server_port", sbj_uint(r->server_port));
     sbj_set(v, "protocol_config", sbj_str_take(sbj_dump(r->protocol_config, -1)));
     sbj_set(v, "subscription_id", opt_str(r->subscription_id));
@@ -622,9 +625,12 @@ static int read_proxy_record(sqlite3_stmt *st, sb_proxy_record *r, sb_err *err) 
     sb_proxy_record_free(r);
     r->id = sbq_text(st, 0);
     r->tag = sbq_text(st, 1);
+    r->tag_len = (size_t)sqlite3_column_bytes(st, 1);
     r->node_type = sbq_text(st, 2);
+    r->node_type_len = (size_t)sqlite3_column_bytes(st, 2);
     r->enabled = sbq_int(st, 3) != 0;
     r->server = sbq_text(st, 4);
+    r->server_len = (size_t)sqlite3_column_bytes(st, 4);
     r->server_port = (uint16_t)raw_port;
     r->protocol_config = config;
     r->subscription_id = sbq_opt_text(st, 7);
@@ -650,20 +656,21 @@ static void read_subscription(sqlite3_stmt *st, sb_subscription *s) {
     s->updated_at = sbq_text(st, 8);
 }
 
-static bool supported_proxy_type(const char *type) {
+static bool supported_proxy_type(const char *type, size_t len) {
     static const char *const supported[] = {"shadowsocks", "vmess",     "vless", "trojan",
                                             "hysteria2",   "tuic",      "http"};
     for (size_t i = 0; i < sizeof supported / sizeof *supported; ++i)
-        if (sb_streq(type, supported[i])) return true;
+        if (sb_strn_eq(type, len, supported[i])) return true;
     return false;
 }
 
-static int validate_proxy(const char *tag, const char *node_type, const char *server,
+static int validate_proxy(const char *tag, size_t tag_len, const char *node_type, size_t type_len,
+                          const char *server, size_t server_len,
                           uint16_t port, const sbj *config, sb_err *err) {
-    if (sb_str_empty(tag) || sb_str_empty(server) || port == 0U || !sbj_is_object(config))
+    if (!tag || tag_len == 0 || !server || server_len == 0 || port == 0U || !sbj_is_object(config))
         return sb_fail(err, SB_ERR_VALIDATION,
                        "Proxy tag, server, port, and object protocol_config are required");
-    if (!supported_proxy_type(S(node_type)))
+    if (!supported_proxy_type(S(node_type), type_len))
         return sb_fail(err, SB_ERR_VALIDATION, "Unsupported proxy type: %s", S(node_type));
     return 0;
 }
@@ -744,13 +751,17 @@ static int read_nodes(sqlite3 *db, const char *sql, const char *host_id, sb_prox
         sb_proxy_node *n = sb_proxy_node_vec_push(out);
         free(n->id);
         n->id = sbq_text(st, 0);
+        n->id_len = (size_t)sqlite3_column_bytes(st, 0);
         free(n->tag);
         n->tag = sbq_text(st, 1);
+        n->tag_len = (size_t)sqlite3_column_bytes(st, 1);
         free(n->type);
         n->type = sbq_text(st, 2);
+        n->type_len = (size_t)sqlite3_column_bytes(st, 2);
         n->enabled = sbq_int(st, 3) != 0;
         free(n->server);
         n->server = sbq_text(st, 4);
+        n->server_len = (size_t)sqlite3_column_bytes(st, 4);
         n->server_port = (uint16_t)server_port;
         sbj_free(n->protocol_config);
         n->protocol_config = config;
@@ -866,26 +877,27 @@ static int exec_bound(sqlite3_stmt *st, int bound, sb_err *err) {
 /* ParsedProxyNode::fingerprint(): its key material is read with json::value(),
  * which throws for present-but-non-string members (sb_parsed_node_fingerprint
  * silently uses ""). Returns the malloc'd fingerprint or NULL (err set). */
-static char *fingerprint_of(const char *node_type, const char *tag, const char *server,
+static char *fingerprint_of(const char *node_type, size_t type_len, const char *server, size_t server_len,
                             uint16_t port, const sbj *config, sb_err *err) {
     const char *t = S(node_type), *first = NULL, *second = NULL, *ignored;
-    if (sb_streq(t, "shadowsocks") || sb_streq(t, "trojan") || sb_streq(t, "hysteria2")) {
+    if (sb_strn_eq(t, type_len, "shadowsocks") || sb_strn_eq(t, type_len, "trojan") || sb_strn_eq(t, type_len, "hysteria2")) {
         first = "password";
-    } else if (sb_streq(t, "vmess") || sb_streq(t, "vless")) {
+    } else if (sb_strn_eq(t, type_len, "vmess") || sb_strn_eq(t, type_len, "vless")) {
         first = "uuid";
-    } else if (sb_streq(t, "tuic")) {
+    } else if (sb_strn_eq(t, type_len, "tuic")) {
         first = "uuid";
         second = "password";
-    } else if (sb_streq(t, "http")) {
+    } else if (sb_strn_eq(t, type_len, "http")) {
         first = "username";
         second = "password";
     }
     if ((first && jv_str(config, first, "", &ignored, err) != 0) ||
         (second && jv_str(config, second, "", &ignored, err) != 0))
         return NULL;
-    sb_parsed_node n;
+    sb_parsed_node n = {0};
     n.node_type = (char *)t;
-    n.tag = (char *)S(tag);
+    n.node_type_len = type_len;
+    n.server_len = server_len;
     n.server = (char *)S(server);
     n.server_port = port;
     n.protocol_config = (sbj *)config;
@@ -1515,7 +1527,7 @@ static int restore_node(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
     bool enabled = false;
     int64_t port;
     if (jv_str(value, "id", "", &id, err) || jv_str(value, "tag", "", &tag, err)) return -1;
-    if (!*id || !*tag) return 0;
+    if (!*id || !sbj_has(value, "tag") || !sbj_get(value, "tag")->v.str.len) return 0;
     const sbj *protocol = sbj_get(value, "protocol_config");
     char *protocol_text = !protocol                 ? sb_strdup("{}")
                           : sbj_is_string(protocol) ? sb_strdup(protocol->v.str.ptr)
@@ -1539,10 +1551,22 @@ static int restore_node(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
                      err);
     if (!st) goto done;
     sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, tag);
-    sbq_bind_text(st, 3, node_type);
+    if (sbq_bind_text_n(st, 2, tag,
+                        sbj_has(value, "tag") ? sbj_get(value, "tag")->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
+    if (sbq_bind_text_n(st, 3, node_type,
+                        sbj_has(value, "node_type") ? sbj_get(value, "node_type")->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_bool(st, 4, enabled);
-    sbq_bind_text(st, 5, server);
+    if (sbq_bind_text_n(st, 5, server,
+                        sbj_has(value, "server") ? sbj_get(value, "server")->v.str.len : 0, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_int(st, 6, port);
     sbq_bind_text(st, 7, protocol_text);
     sbq_bind_text(st, 8, jv_opt_str(value, "subscription_id"));
@@ -2410,8 +2434,8 @@ int sb_store_update_proxy_latencies(sb_store *s, const sbj *results, size_t *upd
             break;
         }
         sbq_bind_opt_double(st, 1, has ? &latency : NULL);
-        sbq_bind_text(st, 2, tag);
-        rc = exec_stmt(st, err);
+        int bound = sbq_bind_text_n(st, 2, tag, results->v.obj.key_lens[i], err);
+        rc = exec_bound(st, bound, err);
         if (rc == 0) count += (size_t)sqlite3_changes(h);
     }
     if (rc == 0) rc = sbq_commit(h, err);
@@ -2490,10 +2514,11 @@ int sb_store_find_proxy_node(sb_store *s, const char *id, sb_proxy_record *out, 
 
 int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_proxy_record *out,
                                sb_err *err) {
-    if (validate_proxy(node->tag, node->node_type, node->server, node->server_port,
+    if (validate_proxy(node->tag, node->tag_len, node->node_type, node->node_type_len,
+                       node->server, node->server_len, node->server_port,
                        node->protocol_config, err) != 0)
         return -1;
-    char *fingerprint = fingerprint_of(node->node_type, node->tag, node->server, node->server_port,
+    char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
                                        node->protocol_config, err);
     if (!fingerprint) return -1;
     char *id = sb_str_empty(node->id) ? sb_uuid_v4() : sb_strdup(node->id);
@@ -2503,7 +2528,10 @@ int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     sqlite3_stmt *st = sbq_prepare(h, "SELECT 1 FROM proxy_nodes WHERE tag = ?1 OR fingerprint = ?2 LIMIT 1",
                                    err);
     if (!st) goto done;
-    sbq_bind_text(st, 1, node->tag);
+    if (sbq_bind_text_n(st, 1, node->tag, node->tag_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_text(st, 2, fingerprint);
     int r = sbq_step_row(st, err);
     sqlite3_finalize(st);
@@ -2522,10 +2550,19 @@ int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
                      err);
     if (!st) goto done;
     sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, node->tag);
-    sbq_bind_text(st, 3, node->node_type);
+    if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
+    if (sbq_bind_text_n(st, 3, node->node_type, node->node_type_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_bool(st, 4, node->enabled);
-    sbq_bind_text(st, 5, node->server);
+    if (sbq_bind_text_n(st, 5, node->server, node->server_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_int(st, 6, node->server_port);
     int bound = bind_dump(st, 7, node->protocol_config, err);
     sbq_bind_text(st, 8, node->subscription_id);
@@ -2543,11 +2580,12 @@ done:
 
 int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_proxy_record *out,
                                sb_err *err) {
-    if (validate_proxy(node->tag, node->node_type, node->server, node->server_port,
+    if (validate_proxy(node->tag, node->tag_len, node->node_type, node->node_type_len,
+                       node->server, node->server_len, node->server_port,
                        node->protocol_config, err) != 0)
         return -1;
     if (sb_str_empty(node->id)) return sb_fail(err, SB_ERR_VALIDATION, "Proxy id is required");
-    char *fingerprint = fingerprint_of(node->node_type, node->tag, node->server, node->server_port,
+    char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
                                        node->protocol_config, err);
     if (!fingerprint) return -1;
     int rc = -1;
@@ -2559,7 +2597,10 @@ int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
                                    err);
     if (!st) goto done;
     sbq_bind_text(st, 1, node->id);
-    sbq_bind_text(st, 2, node->tag);
+    if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_text(st, 3, fingerprint);
     int r = sbq_step_row(st, err);
     sqlite3_finalize(st);
@@ -2575,10 +2616,19 @@ int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
                      "WHERE id = ?9",
                      err);
     if (!st) goto done;
-    sbq_bind_text(st, 1, node->tag);
-    sbq_bind_text(st, 2, node->node_type);
+    if (sbq_bind_text_n(st, 1, node->tag, node->tag_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
+    if (sbq_bind_text_n(st, 2, node->node_type, node->node_type_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_bool(st, 3, node->enabled);
-    sbq_bind_text(st, 4, node->server);
+    if (sbq_bind_text_n(st, 4, node->server, node->server_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_int(st, 5, node->server_port);
     int bound = bind_dump(st, 6, node->protocol_config, err);
     sbq_bind_text(st, 7, node->subscription_id);
@@ -2618,10 +2668,11 @@ int sb_store_delete_proxy_node(sb_store *s, const char *id, sb_err *err) {
 /* One node of upsert_proxy_nodes; errors are collected by the caller. */
 static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscription_id,
                       sb_proxy_upsert_result *result, sb_err *err) {
-    if (validate_proxy(node->tag, node->node_type, node->server, node->server_port,
+    if (validate_proxy(node->tag, node->tag_len, node->node_type, node->node_type_len,
+                       node->server, node->server_len, node->server_port,
                        node->protocol_config, err) != 0)
         return -1;
-    char *fingerprint = fingerprint_of(node->node_type, node->tag, node->server, node->server_port,
+    char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
                                        node->protocol_config, err);
     if (!fingerprint) return -1;
     char *existing_id = NULL;
@@ -2636,7 +2687,10 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
                                    err);
     if (!st) goto done;
     sbq_bind_text(st, 1, fingerprint);
-    sbq_bind_text(st, 2, S(node->tag));
+    if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     int r = sbq_step_row(st, err);
     if (r == 1) existing_id = sbq_text(st, 0);
     sqlite3_finalize(st);
@@ -2650,9 +2704,18 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
                          "updated_at = datetime('now') WHERE id = ?8",
                          err);
         if (!st) goto done;
-        sbq_bind_text(st, 1, S(node->tag));
-        sbq_bind_text(st, 2, S(node->node_type));
-        sbq_bind_text(st, 3, S(node->server));
+        if (sbq_bind_text_n(st, 1, node->tag, node->tag_len, err) != 0) {
+            sqlite3_finalize(st);
+            goto done;
+        }
+        if (sbq_bind_text_n(st, 2, node->node_type, node->node_type_len, err) != 0) {
+            sqlite3_finalize(st);
+            goto done;
+        }
+        if (sbq_bind_text_n(st, 3, node->server, node->server_len, err) != 0) {
+            sqlite3_finalize(st);
+            goto done;
+        }
         sbq_bind_int(st, 4, node->server_port);
         int bound = bind_dump(st, 5, node->protocol_config, err);
         sbq_bind_text(st, 6, fingerprint);
@@ -2673,9 +2736,18 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
         char *id = sb_uuid_v4();
         sbq_bind_text(st, 1, id);
         free(id);
-        sbq_bind_text(st, 2, S(node->tag));
-        sbq_bind_text(st, 3, S(node->node_type));
-        sbq_bind_text(st, 4, S(node->server));
+        if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
+            sqlite3_finalize(st);
+            goto done;
+        }
+        if (sbq_bind_text_n(st, 3, node->node_type, node->node_type_len, err) != 0) {
+            sqlite3_finalize(st);
+            goto done;
+        }
+        if (sbq_bind_text_n(st, 4, node->server, node->server_len, err) != 0) {
+            sqlite3_finalize(st);
+            goto done;
+        }
         sbq_bind_int(st, 5, node->server_port);
         int bound = bind_dump(st, 6, node->protocol_config, err);
         sbq_bind_text(st, 7, subscription_id);
@@ -2935,7 +3007,7 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
     const sbj *endpoint;
     SBJ_ARR_FOREACH(endpoints, i, endpoint) {
         const sbj *tag = sbj_get(endpoint, "tag");
-        if (sbj_is_string(tag)) sb_strvec_push(&out->external_route_tags, tag->v.str.ptr);
+        if (sbj_is_string(tag)) sbj_arr_push(out->external_route_tags, sbj_clone(tag));
     }
     rc = 0;
 done:

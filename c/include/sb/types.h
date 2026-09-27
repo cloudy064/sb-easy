@@ -23,7 +23,9 @@ int sb_profile_mode_parse(const char *name, sb_profile_mode *out); /* 0 ok */
 typedef struct {
     char *id;
     char *tag;
+    size_t tag_len, server_len;
     char *type;
+    size_t id_len, type_len;
     bool enabled;
     char *server;
     uint16_t server_port;
@@ -50,7 +52,7 @@ typedef struct {
     sbj *profile;               /* object */
     sb_proxy_node_vec nodes;
     sbj *host_context;          /* object */
-    sb_strvec external_route_tags;
+    sbj *external_route_tags; /* array of byte strings */
     sbj *priority_route_rules;  /* array */
     char *control_plane_server; /* "" when unset */
     char *rule_script;          /* NULL == std::nullopt */
@@ -65,7 +67,9 @@ void sb_render_request_free(sb_render_request *r);
 /* C++ ParsedProxyNode (proxy_parser.hpp). */
 typedef struct {
     char *node_type;
+    size_t node_type_len;
     char *tag;
+    size_t tag_len, server_len;
     char *server;
     uint16_t server_port;
     sbj *protocol_config; /* object */

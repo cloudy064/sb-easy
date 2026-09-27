@@ -123,10 +123,14 @@ static bool round_trips(const sb_parsed_node *parsed, const sbj *original) {
     sb_proxy_node node;
     sb_proxy_node_init(&node);
     sb_str_set(&node.id, "imported");
-    sb_str_set(&node.tag, parsed->tag);
-    sb_str_set(&node.type, parsed->node_type);
+    node.id_len = strlen(node.id);
+    sb_str_setn(&node.tag, parsed->tag, parsed->tag_len);
+    node.tag_len = parsed->tag_len;
+    sb_str_setn(&node.type, parsed->node_type, parsed->node_type_len);
+    node.type_len = parsed->node_type_len;
     node.enabled = true;
-    sb_str_set(&node.server, parsed->server);
+    sb_str_setn(&node.server, parsed->server, parsed->server_len);
+    node.server_len = parsed->server_len;
     node.server_port = parsed->server_port;
     sbj_free(node.protocol_config);
     node.protocol_config = sbj_clone(parsed->protocol_config);
@@ -634,4 +638,29 @@ TEST(subscription_fetcher_against_local_server) {
     CHECK_STR(err.msg, "subscription HTTP request failed: Bad server address");
     CHECK(err.code == SB_ERR_UPSTREAM);
     sb_subscription_fetcher_free(f);
+}
+
+TEST(outbound_bytes_round_trip_and_fingerprints_distinguish_suffixes) {
+    sbj *original = sbj_parse_cstr("{\"type\":\"shadowsocks\",\"tag\":\"\\u0000tag\","
+        "\"server\":\"host\\u0000tail\",\"server_port\":443,\"method\":\"aes-256-gcm\","
+        "\"password\":\"secret\\u0000tail\"}");
+    sbj *config = sbj_object();
+    sbj *outbounds = sbj_get_or_array(config, "outbounds");
+    sbj_arr_push(outbounds, sbj_clone(original));
+    sbj *invalid = sbj_clone(original);
+    sbj_set(invalid, "type", sbj_strn("shadowsocks\0tail", 16));
+    sbj_arr_push(outbounds, invalid);
+    sb_proxy_import imported;
+    REQUIRE(sb_parse_outbound_config(config, &imported, NULL) == 0);
+    REQUIRE(imported.nodes.len == 1);
+    CHECK(round_trips(&imported.nodes.items[0], original));
+    char *full = sb_parsed_node_fingerprint(&imported.nodes.items[0]);
+    sbj_set_str(imported.nodes.items[0].protocol_config, "password", "secret");
+    char *shortened = sb_parsed_node_fingerprint(&imported.nodes.items[0]);
+    CHECK(strcmp(full, shortened) != 0);
+    free(full);
+    free(shortened);
+    sb_proxy_import_free(&imported);
+    sbj_free(original);
+    sbj_free(config);
 }

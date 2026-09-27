@@ -165,6 +165,7 @@ sbj *sb_agent_enrollment_result_to_json(const sb_agent_enrollment_result *r);
 /* ---- proxies / subscriptions ----------------------------------------- */
 typedef struct {
     char *id, *tag, *node_type;
+    size_t tag_len, node_type_len, server_len;
     bool enabled; /* default true */
     char *server;
     uint16_t server_port;

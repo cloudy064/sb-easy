@@ -150,9 +150,9 @@ static int clash_passthrough(sb_http_req *req, sb_http_resp *resp, clash_method 
 /* test_proxy_latency(): NULL-latency (returns false) on any transport error,
  * non-2xx status or missing numeric "delay" (matches the Rust API). */
 static bool test_proxy_latency(sb_http_server *srv, const clash_target *target, const char *tag,
-                               double *latency) {
+                               size_t tag_len, double *latency) {
     if (sb_str_empty(target->base_url)) return false;
-    char *name = sb_http_encode_component(tag);
+    char *name = sb_http_encode_component_n(tag, tag_len);
     char *url = sb_http_encode_component(default_delay_url);
     char *path = sb_asprintf("/proxies/%s/delay?url=%s&timeout=5000", name, url);
     free(name);
@@ -344,10 +344,13 @@ static int proxy_from_create_request(const sbj *body, sb_proxy_record *node, sb_
     if (required_port(body, "server_port", &port, err) != 0) return -1;
     const sbj *config = sb_json_required_object(body, "protocol_config", err);
     if (!config) return -1;
-    sb_str_set(&node->tag, tag);
-    sb_str_set(&node->node_type, node_type);
+    node->tag_len = sbj_get(body, "tag")->v.str.len;
+    sb_str_setn(&node->tag, tag, node->tag_len);
+    node->node_type_len = sbj_get(body, "node_type")->v.str.len;
+    sb_str_setn(&node->node_type, node_type, node->node_type_len);
     node->enabled = enabled;
-    sb_str_set(&node->server, server);
+    node->server_len = sbj_get(body, "server")->v.str.len;
+    sb_str_setn(&node->server, server, node->server_len);
     node->server_port = port;
     sbj_free(node->protocol_config);
     node->protocol_config = sbj_clone(config);
@@ -361,13 +364,15 @@ static int proxy_from_update_request(const sbj *body, sb_proxy_record *node, sb_
     if (found && found->type != SBJ_NULL) {
         const char *tag = sb_json_required_string(body, "tag", err);
         if (!tag) return -1;
-        sb_str_set(&node->tag, tag);
+        node->tag_len = sbj_get(body, "tag")->v.str.len;
+        sb_str_setn(&node->tag, tag, node->tag_len);
     }
     found = sbj_get(body, "server");
     if (found && found->type != SBJ_NULL) {
         const char *server = sb_json_required_string(body, "server", err);
         if (!server) return -1;
-        sb_str_set(&node->server, server);
+        node->server_len = sbj_get(body, "server")->v.str.len;
+        sb_str_setn(&node->server, server, node->server_len);
     }
     found = sbj_get(body, "server_port");
     if (found && found->type != SBJ_NULL) {
@@ -470,6 +475,7 @@ typedef struct {
     sb_http_server *srv;
     const clash_target *target;
     const char *tag;
+    size_t tag_len;
     double latency;
     bool measured;
     bool threaded;
@@ -478,7 +484,7 @@ typedef struct {
 
 static void *latency_job_main(void *arg) {
     latency_job *job = arg;
-    job->measured = test_proxy_latency(job->srv, job->target, job->tag, &job->latency);
+    job->measured = test_proxy_latency(job->srv, job->target, job->tag, job->tag_len, &job->latency);
     return NULL;
 }
 
@@ -528,6 +534,7 @@ static int h_nodes_test_all(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
             job->srv = srv;
             job->target = &target;
             job->tag = nodes[i]->tag;
+            job->tag_len = nodes[i]->tag_len;
             job->threaded = pthread_create(&job->thread, NULL, latency_job_main, job) == 0;
             if (!job->threaded) latency_job_main(job);
         }
@@ -538,7 +545,7 @@ static int h_nodes_test_all(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
             rc = sb_store_update_proxy_latency(srv->store, nodes[i]->id, job->measured ? &job->latency : NULL,
                                                err);
             if (rc != 0) continue;
-            sbj_set(results, nodes[i]->tag, job->measured ? sbj_float(job->latency) : sbj_null());
+            sbj_setn(results, nodes[i]->tag, nodes[i]->tag_len, job->measured ? sbj_float(job->latency) : sbj_null());
             ++tested;
         }
     }
@@ -581,7 +588,7 @@ static int h_node_test_latency(sb_http_req *req, sb_http_resp *resp, sb_err *err
     rc = resolve_clash_target(req, &target, err);
     if (rc != 0) goto done;
     double latency = 0.0;
-    bool measured = test_proxy_latency(srv, &target, node.tag, &latency);
+    bool measured = test_proxy_latency(srv, &target, node.tag, node.tag_len, &latency);
     clash_target_free(&target);
     rc = sb_store_update_proxy_latency(srv->store, node.id, measured ? &latency : NULL, err);
     if (rc != 0) goto done;

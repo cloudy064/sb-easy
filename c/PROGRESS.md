@@ -8,7 +8,8 @@ release images/CI, and centrally managed Claude egress rollout.
 - Production center and local agent run the verified identity fix `05168b0`.
 - Profile/script fixes and host/WireGuard name fixes are verified in source;
   versioned images through `d3c88a8` are built. These changes await the combined rollout.
-- Proxy tags and the remaining non-authentication string boundaries are still
+- Proxy storage/rendering byte compatibility is verified; agent-side tag
+  collections and remaining non-authentication string boundaries are still
   under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
   of the centrally prepared rules has not been verified.
 
@@ -142,3 +143,23 @@ not start a runtime service or modify host interfaces.
   built successfully with GCC 12 Release warnings as errors. Embedded engine
   start/reload/stop smoke passed during the unified image build.
 - These changes are staged for the combined release, not deployed yet.
+
+## Proxy model and renderer compatibility follow-up
+
+- Proxy tags, server strings and protocol values preserve full bytes through
+  JSON/model copies, API CRUD, import, SQLite, backup restore and rendering.
+  Fingerprints include complete server and credential strings, so embedded-NUL
+  suffix differences do not incorrectly merge distinct imported nodes.
+- Duplicate tag suffixes, Android selectors, reserved-tag comparisons, script
+  outboundTags and external endpoint tags use full-byte matching. Panel latency
+  requests encode complete tags and latency updates bind complete JSON keys.
+- Added renderer, parser, store and real HTTP regression coverage. The same
+  HTTP lifecycle and fingerprint expectations pass against C++.
+- All 18 normal and ASan/UBSan suites pass; the final expanded HTTP scenario
+  also passes separately under sanitizers. Three renderer fixtures (Android,
+  NUL-suffixed Android and Linux) match C++ output byte-for-byte, including
+  duplicate tags and script context. All 16 production snapshot comparisons pass.
+  Evidence: `/tmp/sb-c-proxy-*.log`.
+- Remaining related boundaries include the agent Clash test-proxy tag filter,
+  result keys and UI selection callbacks, which still take C strings. Broader
+  subscription/metadata strings also need review. This batch is not deployed.

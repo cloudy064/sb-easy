@@ -660,8 +660,11 @@ TEST(proxy_repository_crud_and_imports_preserve_rust_api_shape) {
     sb_proxy_record_init(&created);
     sb_proxy_record_init(&saved);
     sb_str_set(&manual.tag, "Manual SS");
+    manual.tag_len = strlen(manual.tag);
     sb_str_set(&manual.node_type, "shadowsocks");
+    manual.node_type_len = strlen(manual.node_type);
     sb_str_set(&manual.server, "manual.example.com");
+    manual.server_len = strlen(manual.server);
     manual.server_port = 8388;
     sbj_set_str(manual.protocol_config, "method", "aes-256-gcm");
     sbj_set_str(manual.protocol_config, "password", "manual-secret");
@@ -675,6 +678,7 @@ TEST(proxy_repository_crud_and_imports_preserve_rust_api_shape) {
     CHECK_EQ_INT(sb_store_create_proxy_node(s, &manual, &saved, &err), -1);
     CHECK_STR(err.msg, "A proxy with the same tag or fingerprint already exists");
     sb_str_set(&manual.node_type, "wireguard");
+    manual.node_type_len = strlen(manual.node_type);
     CHECK_EQ_INT(sb_store_create_proxy_node(s, &manual, &saved, &err), -1);
     CHECK_STR(err.msg, "Unsupported proxy type: wireguard");
 
@@ -682,6 +686,7 @@ TEST(proxy_repository_crud_and_imports_preserve_rust_api_shape) {
     sb_proxy_record_init(&upd);
     sb_proxy_record_copy(&upd, &created);
     sb_str_set(&upd.tag, "Manual SS renamed");
+    upd.tag_len = strlen(upd.tag);
     upd.enabled = false;
     REQUIRE(sb_store_update_proxy_node(s, &upd, &saved, &err) == 0);
     CHECK_STR(saved.tag, "Manual SS renamed");
@@ -711,6 +716,7 @@ TEST(proxy_repository_crud_and_imports_preserve_rust_api_shape) {
     CHECK_STR(err.msg, "Subscription not found");
     /* invalid node lands in errors */
     sb_str_set(&rotated.items[0].node_type, "bogus");
+    rotated.items[0].node_type_len = strlen(rotated.items[0].node_type);
     sb_proxy_upsert_result_init(&second);
     REQUIRE(sb_store_upsert_proxy_nodes(s, rotated.items, rotated.len, NULL, &second, &err) == 0);
     REQUIRE(second.errors.len == 1);
@@ -969,8 +975,11 @@ TEST(json_exception_parity_and_list_failure_semantics) {
     sb_proxy_record_init(&node);
     sb_proxy_record_init(&out);
     sb_str_set(&node.tag, "T");
+    node.tag_len = strlen(node.tag);
     sb_str_set(&node.node_type, "trojan");
+    node.node_type_len = strlen(node.node_type);
     sb_str_set(&node.server, "s");
+    node.server_len = strlen(node.server);
     node.server_port = 1;
     sbj_set_int(node.protocol_config, "password", 7);
     CHECK_EQ_INT(sb_store_create_proxy_node(s, &node, &out, &err), -1);
@@ -1149,8 +1158,11 @@ static void *store_worker(void *p) {
         sb_proxy_record_init(&node);
         sb_proxy_record_init(&saved);
         sb_str_set(&node.tag, name);
+        node.tag_len = strlen(node.tag);
         sb_str_set(&node.node_type, "trojan");
+        node.node_type_len = strlen(node.node_type);
         sb_str_set(&node.server, "concurrent.example");
+        node.server_len = strlen(node.server);
         node.server_port = (uint16_t)(1000 + w->index * 100 + j);
         sbj_set_str(node.protocol_config, "password", name);
         if (sb_store_create_proxy_node(w->store, &node, &saved, &err) != 0) ++w->failures;
@@ -1211,6 +1223,65 @@ TEST(store_is_safe_under_concurrent_access) {
     CHECK_EQ_INT(sb_store_list_audit(s, 1000, &audit, &err), 0);
     CHECK_EQ_INT(audit.len, WORKERS * ITERATIONS);
     sb_audit_entry_vec_free(&audit);
+    sb_store_free(s);
+    temp_db_free(&t);
+}
+
+TEST(proxy_bytes_survive_import_latency_and_backup) {
+    temp_db t;
+    sb_store *s = open_store(&t);
+    REQUIRE(s);
+    sb_err err = {0};
+    const char *body = "[{\"type\":\"shadowsocks\",\"tag\":\"tag\\u0000one\","
+        "\"server\":\"host\\u0000one\",\"server_port\":443,\"method\":\"aes-256-gcm\",\"password\":\"pw\\u0000one\"},"
+        "{\"type\":\"shadowsocks\",\"tag\":\"tag\\u0000two\","
+        "\"server\":\"host\\u0000one\",\"server_port\":443,\"method\":\"aes-256-gcm\",\"password\":\"pw\\u0000two\"}]";
+    sbj *config = sbj_object();
+    sbj_set(config, "outbounds", sbj_parse_cstr(body));
+    sb_proxy_import imported;
+    REQUIRE(sb_parse_outbound_config(config, &imported, &err) == 0);
+    REQUIRE(imported.nodes.len == 2);
+    sb_proxy_upsert_result result;
+    sb_proxy_upsert_result_init(&result);
+    REQUIRE(sb_store_upsert_proxy_nodes(s, imported.nodes.items, imported.nodes.len, NULL, &result, &err) == 0);
+    CHECK_EQ_INT(result.added, 2);
+    CHECK_EQ_INT(result.errors.len, 0);
+    sb_proxy_upsert_result_free(&result);
+    sbj *latencies = sbj_object();
+    sbj_setn(latencies, "tag\0two", 7, sbj_int(123));
+    size_t updated = 0;
+    REQUIRE(sb_store_update_proxy_latencies(s, latencies, &updated, &err) == 0);
+    CHECK_EQ_INT(updated, 1);
+    sbj_free(latencies);
+    sb_proxy_record_vec records = {0};
+    REQUIRE(sb_store_list_proxy_nodes(s, &records, &err) == 0);
+    REQUIRE(records.len == 2);
+    for (size_t i = 0; i < records.len; ++i) {
+        CHECK_EQ_INT(records.items[i].tag_len, 7);
+        CHECK_EQ_INT(records.items[i].server_len, 8);
+        CHECK(memcmp(records.items[i].server, "host\0one", 8) == 0);
+    }
+    CHECK(strcmp(records.items[0].fingerprint, records.items[1].fingerprint) != 0);
+    sb_proxy_record *two = memcmp(records.items[0].tag, "tag\0two", 7) == 0 ? &records.items[0] : &records.items[1];
+    CHECK(two->has_latency && two->latency == 123);
+    sbj *backup = sb_store_export_backup(s, &err);
+    REQUIRE(backup);
+    for (size_t i = 0; i < records.len; ++i)
+        REQUIRE(sb_store_delete_proxy_node(s, records.items[i].id, &err) == 0);
+    sb_proxy_record_vec_free(&records);
+    sbj *counts = sb_store_restore_backup(s, backup, &err);
+    REQUIRE(counts);
+    sbj_free(counts);
+    REQUIRE(sb_store_list_proxy_nodes(s, &records, &err) == 0);
+    REQUIRE(records.len == 2);
+    for (size_t i = 0; i < records.len; ++i) {
+        CHECK_EQ_INT(records.items[i].tag_len, 7);
+        CHECK_EQ_INT(records.items[i].server_len, 8);
+    }
+    sb_proxy_record_vec_free(&records);
+    sbj_free(backup);
+    sb_proxy_import_free(&imported);
+    sbj_free(config);
     sb_store_free(s);
     temp_db_free(&t);
 }

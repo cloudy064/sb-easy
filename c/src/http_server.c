@@ -117,12 +117,16 @@ static void self_singbox_join(sb_http_server *srv);
 static bool is_space(unsigned char c) { return isspace(c) != 0; }
 
 char *sb_http_trim(const char *s) {
-    if (!s) return sb_strdup("");
-    const char *b = s;
-    while (*b && is_space((unsigned char)*b)) ++b;
-    const char *e = b + strlen(b);
-    while (e > b && is_space((unsigned char)e[-1])) --e;
-    return sb_strndup(b, (size_t)(e - b));
+    return sb_http_trim_n(s, s ? strlen(s) : 0, NULL);
+}
+
+char *sb_http_trim_n(const char *s, size_t len, size_t *out_len) {
+    if (!s) { s = ""; len = 0; }
+    size_t start = 0, end = len;
+    while (start < end && is_space((unsigned char)s[start])) ++start;
+    while (end > start && is_space((unsigned char)s[end - 1])) --end;
+    if (out_len) *out_len = end - start;
+    return sb_strndup(s + start, end - start);
 }
 
 char *sb_http_trim_trailing_slashes(const char *s) {
@@ -213,7 +217,25 @@ void sb_resp_text(sb_http_resp *resp, int status, const char *content_type, char
 }
 
 void sb_resp_header(sb_http_resp *resp, const char *name, const char *value) {
-    sb_strvec_push_take(&resp->headers, sb_asprintf("%s: %s", name, value ? value : ""));
+    sb_resp_header_n(resp, name, value, value ? strlen(value) : 0);
+}
+
+void sb_resp_header_n(sb_http_resp *resp, const char *name, const char *value, size_t len) {
+    if (!resp->headers) resp->headers = sbj_array();
+    sbj *header = sbj_object();
+    sbj_set_str(header, "name", name);
+    sbj_set(header, "value", sbj_strn(value ? value : "", value ? len : 0));
+    sbj_arr_push(resp->headers, header);
+}
+
+void sb_resp_attachment(sb_http_resp *resp, const char *name, size_t len, const char *suffix) {
+    sb_buf value = {0};
+    sb_buf_puts(&value, "attachment; filename=\"");
+    for (size_t i = 0; i < len; ++i) sb_buf_putc(&value, name[i] == ' ' ? '_' : name[i]);
+    sb_buf_puts(&value, suffix);
+    sb_buf_putc(&value, '"');
+    sb_resp_header_n(resp, "Content-Disposition", value.p, value.len);
+    sb_buf_free(&value);
 }
 
 /* ---- per-request state -------------------------------------------------- */
@@ -360,10 +382,16 @@ const sbj *sb_json_required_object(const sbj *body, const char *field, sb_err *e
 }
 
 int sb_json_assign_string(const sbj *body, const char *field, char **dest, sb_err *err) {
+    return sb_json_assign_string_n(body, field, dest, NULL, err);
+}
+
+int sb_json_assign_string_n(const sbj *body, const char *field, char **dest, size_t *dest_len,
+                             sb_err *err) {
     const sbj *found = sbj_get(body, field);
     if (!found || found->type == SBJ_NULL) return 0;
     if (!sbj_is_string(found)) return sb_fail(err, SB_ERR_VALIDATION, "%s must be a string", field);
-    sb_str_set(dest, found->v.str.ptr);
+    sb_str_setn(dest, found->v.str.ptr, found->v.str.len);
+    if (dest_len) *dest_len = found->v.str.len;
     return 0;
 }
 
@@ -882,6 +910,7 @@ typedef struct {
     int status;
     char *content_type; /* NULL: no content-type header */
     sb_strvec names, values;
+    size_t *value_lens;
     char *body;
     size_t body_len;
     char *file;         /* stream this file instead of body */
@@ -898,22 +927,30 @@ static void wire_free(wire_response *w) {
     free(w->content_type);
     sb_strvec_free(&w->names);
     sb_strvec_free(&w->values);
+    free(w->value_lens);
     free(w->body);
     free(w->file);
     memset(w, 0, sizeof *w);
 }
 
-static void wire_set_header(wire_response *w, const char *name, const char *value) {
+static void wire_set_header_n(wire_response *w, const char *name, const char *value, size_t len) {
     char *lowered = ascii_lower_dup(name, strlen(name));
     for (size_t i = 0; i < w->names.len; ++i) {
         if (strcmp(w->names.items[i], lowered) == 0) {
             free(lowered);
-            sb_str_set(&w->values.items[i], value);
+            sb_str_setn(&w->values.items[i], value, len);
+            w->value_lens[i] = len;
             return;
         }
     }
     sb_strvec_push_take(&w->names, lowered);
-    sb_strvec_push(&w->values, value);
+    sb_strvec_push_take(&w->values, sb_strndup(value, len));
+    w->value_lens = sb_xrealloc(w->value_lens, w->values.len * sizeof *w->value_lens);
+    w->value_lens[w->values.len - 1] = len;
+}
+
+static void wire_set_header(wire_response *w, const char *name, const char *value) {
+    wire_set_header_n(w, name, value, strlen(value));
 }
 
 static const char *wire_header(const wire_response *w, const char *lowered_name) {
@@ -1481,7 +1518,7 @@ static void resp_release(sb_http_resp *resp) {
     sbj_free(resp->json);
     free(resp->body);
     free(resp->content_type);
-    sb_strvec_free(&resp->headers);
+    sbj_free(resp->headers);
     free(resp->file_path);
     memset(resp, 0, sizeof *resp);
 }
@@ -1530,17 +1567,15 @@ static void resp_to_wire(sb_http_resp *resp, wire_response *w) {
         resp->body = NULL;
         sb_str_set(&w->content_type, resp->content_type ? resp->content_type : "text/plain; charset=utf-8");
     }
-    for (size_t i = 0; i < resp->headers.len; ++i) {
-        const char *line = resp->headers.items[i];
-        const char *colon = strchr(line, ':');
-        if (!colon) continue;
-        char *name = sb_strndup(line, (size_t)(colon - line));
-        char *trimmed_name = sb_http_trim(name);
-        char *value = sb_http_trim(colon + 1);
-        if (strcasecmp(trimmed_name, "content-type") == 0) sb_str_set(&w->content_type, value);
-        else if (strcasecmp(trimmed_name, "content-length") != 0) wire_set_header(w, trimmed_name, value);
+    const sbj *header;
+    SBJ_ARR_FOREACH(resp->headers, i, header) {
+        char *name = sb_http_trim(sbj_get_str(header, "name", ""));
+        const sbj *raw = sbj_get(header, "value");
+        size_t len = 0;
+        char *value = sb_http_trim_n(raw->v.str.ptr, raw->v.str.len, &len);
+        if (strcasecmp(name, "content-type") == 0) sb_str_set(&w->content_type, value);
+        else if (strcasecmp(name, "content-length") != 0) wire_set_header_n(w, name, value, len);
         free(name);
-        free(trimmed_name);
         free(value);
     }
 }
@@ -1735,7 +1770,11 @@ static void write_response(const http_exchange *ex, const wire_response *w) {
         else if (ex->http10) sb_buf_puts(&out, "connection: Keep-Alive\r\n");
     }
     if (w->content_type && *w->content_type) sb_buf_printf(&out, "content-type: %s\r\n", w->content_type);
-    for (size_t i = 0; i < w->names.len; ++i) sb_buf_printf(&out, "%s: %s\r\n", w->names.items[i], w->values.items[i]);
+    for (size_t i = 0; i < w->names.len; ++i) {
+        sb_buf_printf(&out, "%s: ", w->names.items[i]);
+        sb_buf_append(&out, w->values.items[i], w->value_lens[i]);
+        sb_buf_puts(&out, "\r\n");
+    }
     char date[64];
     http_date(time(NULL), date, sizeof date);
     sb_buf_printf(&out, "date: %s\r\n\r\n", date);

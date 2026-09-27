@@ -513,7 +513,7 @@ static int handle_wireguard_peers_list(sb_http_req *req, sb_http_resp *resp, sb_
             sb_host host;
             sb_host_init(&host);
             int found = sb_store_find_host(srv->store, peer->host_id, &host, err);
-            if (found >= 0) sbj_set(value, "host_name", found == 1 ? sbj_str(S(host.name)) : sbj_null());
+            if (found >= 0) sbj_set(value, "host_name", found == 1 ? sbj_strn(S(host.name), host.name_len) : sbj_null());
             sb_host_free(&host);
             if (found < 0) {
                 sbj_free(value);
@@ -565,7 +565,7 @@ static int handle_wireguard_peers_create(sb_http_req *req, sb_http_resp *resp, s
     name = sb_json_required_string(body, "name", err);
     if (!name) goto done;
     free(peer.name);
-    peer.name = sb_http_trim(name);
+    peer.name = sb_http_trim_n(name, sbj_get(body, "name")->v.str.len, &peer.name_len);
     sb_str_set(&peer.private_key, S(keys.private_key));
     sb_str_set(&peer.public_key, S(keys.public_key));
     free(peer.preshared_key);
@@ -634,7 +634,7 @@ static int handle_wireguard_peer_update(sb_http_req *req, sb_http_resp *resp, sb
     if (require_peer(srv, req->params[0], &peer, err) != 0) goto done;
     body = sb_req_json_object(req, err);
     if (!body) goto done;
-    if (sb_json_assign_string(body, "name", &peer.name, err) != 0 ||
+    if (sb_json_assign_string_n(body, "name", &peer.name, &peer.name_len, err) != 0 ||
         sb_json_assign_string(body, "dns", &peer.dns, err) != 0 ||
         sb_json_assign_bool(body, "enabled", &peer.enabled, err) != 0 ||
         sb_json_assign_string(body, "allowed_ips", &peer.allowed_ips, err) != 0)
@@ -696,24 +696,19 @@ static int handle_wireguard_peer_config(sb_http_req *req, sb_http_resp *resp, sb
     sb_http_server *srv = req->server;
     sb_wireguard_peer peer;
     sb_wireguard_peer_init(&peer);
-    char *config = NULL, *filename = NULL, *disposition = NULL;
+    char *config = NULL;
     int rc = -1;
 
     if (require_peer(srv, req->params[0], &peer, err) != 0) goto done;
-    config = sb_wireguard_client_config(srv->wireguard, &peer, err);
+    size_t config_len = 0;
+    config = sb_wireguard_client_config_n(srv->wireguard, &peer, &config_len, err);
     if (!config) goto done;
-    filename = sb_strdup(S(peer.name));
-    for (char *c = filename; *c; ++c)
-        if (*c == ' ') *c = '_';
-    disposition = sb_asprintf("attachment; filename=\"%s.conf\"", filename);
-    sb_resp_text(resp, 200, "application/octet-stream", config, strlen(config));
+    sb_resp_text(resp, 200, "application/octet-stream", config, config_len);
     config = NULL;
-    sb_resp_header(resp, "Content-Disposition", disposition);
+    sb_resp_attachment(resp, S(peer.name), peer.name_len, ".conf");
     rc = 0;
 done:
     free(config);
-    free(filename);
-    free(disposition);
     sb_wireguard_peer_free(&peer);
     return rc == 0 ? 0 : fail_json_aware(err);
 }

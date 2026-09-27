@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -50,7 +51,8 @@ def run(args, root):
             response = error
         with response:
             raw = response.read()
-            return response.status, dict(response.headers), json.loads(raw) if raw else None
+            value = json.loads(raw) if raw and "json" in response.headers.get("Content-Type", "") else raw or None
+            return response.status, dict(response.headers), value
 
     def api(path, body=None, method=None):
         status, _, data = request(path, body, method)
@@ -110,7 +112,7 @@ def run(args, root):
             assert request("/api/auth/login", wrong, authenticated=False)[0] == 401
             api("/api/users/" + created["id"], method="DELETE")
         print("PASS: NUL usernames and passwords preserve distinct identities, sessions and audit actors")
-        script = "function buildRules() { return [{domain_suffix:['left\0right'],outbound:'direct'}]; }"
+        script = "function buildRules(context) { return [{domain_suffix:['left\0right'],outbound:'direct',hostLabel:context.host.name}]; }"
         preview = api("/api/hosts/rule-script/test", {"rule_script": script})
         assert preview["rules"][0]["domain_suffix"] == ["left\0right"]
         body = {"name": "profile\0tail", "mode": "full", "template": {
@@ -126,13 +128,36 @@ def run(args, root):
         body["name"] = "\0renamed"
         prof = api("/api/hosts/profiles/" + prof["id"], body, "PUT")
         assert prof["name"] == body["name"] and prof["rule_script"] == script
-        host = api("/api/hosts", {"name": "script identity host", "profile_id": prof["id"],
+        host = api("/api/hosts", {"name": "script\0identity host", "profile_id": prof["id"],
                     "capabilities": {"runs_singbox": False, "is_wg_member": False}})
         enrollment = api("/api/devices/" + host["id"] + "/enrollment-codes", method="POST")
         redeemed = api("/api/devices/enroll", {"code": enrollment["code"], "device": {}})
         assert redeemed["profile"]["name"] == body["name"]
+        assert redeemed["host_name"] == "script\0identity host"
+        host = api("/api/hosts/" + host["id"], {"name": "\0renamed host"}, "PUT")
+        assert host["name"] == "\0renamed host"
+        assert next(h for h in api("/api/hosts") if h["id"] == host["id"])["name"] == host["name"]
         config = api("/api/hosts/" + host["id"] + "/config")
-        assert any(rule.get("domain_suffix") == ["left\0right"] for rule in config["route"]["rules"])
+        assert any(rule.get("domain_suffix") == ["left\0right"] and rule.get("hostLabel") == host["name"]
+                   for rule in config["route"]["rules"])
+        # Seed only this isolated database; WG_ENABLED=false prevents interface changes.
+        peer_name = "host: " + host["name"]
+        with sqlite3.connect(root / "panel.db") as db:
+            db.execute("insert or replace into app_settings(key,value) values ('wg_server_key',?)",
+                       (json.dumps({"private_key": "test-private", "public_key": "test-public"}),))
+            db.execute("insert into wireguard_peers(id,name,private_key,public_key,address,host_id) "
+                       "values ('name-test',?,'test-peer-private','test-peer-public','10.59.32.44/32',?)",
+                       (peer_name, host["id"]))
+        for path, name, suffix in [
+                ("/api/wireguard/peers/name-test/config", peer_name, ".conf"),
+                ("/api/hosts/" + host["id"] + "/wg-config", host["name"], "-wg.conf")]:
+            status, headers, raw = request(path)
+            assert status == 200 and host["name"].encode() in raw
+            assert b"PrivateKey = test-peer-private" in raw and b"PersistentKeepalive = 25" in raw
+            disposition = next(v for k, v in headers.items() if k.lower() == "content-disposition")
+            assert disposition == 'attachment; filename="' + name.replace(" ", "_") + suffix + '"'
+        with sqlite3.connect(root / "panel.db") as db:
+            db.execute("delete from wireguard_peers where id='name-test'")
         api("/api/hosts/" + host["id"], method="DELETE")
         api("/api/hosts/profiles/" + prof["id"], method="DELETE")
         print("PASS: profile name and script bytes survive create, update, list, preview and rendering")
@@ -142,7 +167,7 @@ def run(args, root):
             with socket.socket() as controller:
                 controller.bind(("127.0.0.1", 0))
                 controller_port = controller.getsockname()[1]
-            host = api("/api/hosts", {"name": f"e2e-agent-{n}", "profile_id": shared["id"],
+            host = api("/api/hosts", {"name": f"e2e-agent-{n}\0tail", "profile_id": shared["id"],
                        "clash_api": f"http://127.0.0.1:{controller_port}", "clash_secret": "isolated-controller",
                        "capabilities": {"runs_singbox": True, "is_wg_member": False,
                                         "is_wg_hub": False, "is_self": False}})
@@ -170,6 +195,9 @@ def run(args, root):
             return True
 
         wait_for(lambda: converged("jp-fixed-a"), processes)
+        for n, (host_id, config_path) in enumerate(agents):
+            saved = json.loads((config_path.parent / "device-credential.json").read_text())
+            assert saved["host_name"] == f"e2e-agent-{n}\0tail"
         agent_tokens = [api(f"/api/hosts/{host_id}/token")["agent_token"] for host_id, _ in agents]
 
         def agent_config(agent_token, etag=None):

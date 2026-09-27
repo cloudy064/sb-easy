@@ -297,7 +297,7 @@ static void control_plane(const fixture_request *req, sb_buf *out) {
         sbj_free(body);
         if (ok)
             respond(out, "200 OK", NULL,
-                    "{\"host_id\":\"host-1\",\"host_name\":\"C agent\",\"agent_token\":\"" AGENT_TOKEN
+                    "{\"host_id\":\"host-1\",\"host_name\":\"C agent\\u0000tail\",\"agent_token\":\"" AGENT_TOKEN
                     "\",\"profile\":{\"id\":\"p1\",\"name\":\"Default\\u0000tail\"}}");
         else
             respond(out, "400 Bad Request", NULL, "{\"error\":\"bad enrollment\"}");
@@ -363,6 +363,8 @@ TEST(agent_client_contract) {
     sb_device_enrollment_options enroll = {server, ENROLL_CODE, device, 2000};
     REQUIRE(sb_enroll_device(&enroll, &credential, &err) == 0);
     CHECK_STR(credential.host_id, "host-1");
+    CHECK_EQ_INT(credential.host_name_len, 12);
+    CHECK(memcmp(credential.host_name, "C agent\0tail", 12) == 0);
     CHECK_STR(credential.token, AGENT_TOKEN);
     CHECK_STR(credential.server, server); /* falls back to the requested server */
     CHECK_EQ_INT(credential.profile_name_len, 12);

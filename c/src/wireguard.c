@@ -816,6 +816,11 @@ int sb_wireguard_stats(sb_wireguard *wg, sb_wireguard_peer_stats_vec *out, sb_er
 }
 
 char *sb_wireguard_client_config(sb_wireguard *wg, const sb_wireguard_peer *peer, sb_err *err) {
+    return sb_wireguard_client_config_n(wg, peer, NULL, err);
+}
+
+char *sb_wireguard_client_config_n(sb_wireguard *wg, const sb_wireguard_peer *peer, size_t *len, sb_err *err) {
+    if (len) *len = 0;
     sb_wireguard_options runtime;
     if (sb_wireguard_runtime_options(wg, &runtime, err) != 0) return NULL;
     char *server_public = sb_wireguard_server_public_key(wg, err);
@@ -824,7 +829,9 @@ char *sb_wireguard_client_config(sb_wireguard *wg, const sb_wireguard_peer *peer
         return NULL;
     }
     sb_buf config = {0};
-    sb_buf_printf(&config, "# Client: %s\n[Interface]\n", S(peer->name));
+    sb_buf_puts(&config, "# Client: ");
+    sb_buf_append(&config, S(peer->name), peer->name_len);
+    sb_buf_puts(&config, "\n[Interface]\n");
     sb_buf_printf(&config, "PrivateKey = %s\n", S(peer->private_key));
     sb_buf_printf(&config, "Address = %s\n", S(peer->address));
     sb_buf_printf(&config, "DNS = %s\n", S(peer->dns));
@@ -839,6 +846,7 @@ char *sb_wireguard_client_config(sb_wireguard *wg, const sb_wireguard_peer *peer
         sb_buf_printf(&config, "PersistentKeepalive = %d\n", (int)peer->persistent_keepalive);
     free(server_public);
     sb_wireguard_options_free(&runtime);
+    if (len) *len = config.len;
     return sb_buf_detach(&config);
 }
 
@@ -918,6 +926,11 @@ static const sb_wireguard_peer_stats *find_stats(const sb_wireguard_peer_stats_v
 }
 
 char *sb_wireguard_server_config(sb_wireguard *wg, sb_err *err) {
+    return sb_wireguard_server_config_n(wg, NULL, err);
+}
+
+char *sb_wireguard_server_config_n(sb_wireguard *wg, size_t *len, sb_err *err) {
+    if (len) *len = 0;
     sb_wireguard_options runtime;
     if (sb_wireguard_runtime_options(wg, &runtime, err) != 0) return NULL;
     /* Live counters only enforce quotas; failures (no interface, no `wg`)
@@ -944,8 +957,9 @@ char *sb_wireguard_server_config(sb_wireguard *wg, sb_err *err) {
             (int64_t)((uint64_t)found->transfer_rx + (uint64_t)found->transfer_tx) >=
                 peer->quota_bytes)
             continue;
-        sb_buf_printf(&config, "\n# Client: %s\n[Peer]\nPublicKey = %s\n", S(peer->name),
-                      S(peer->public_key));
+        sb_buf_puts(&config, "\n# Client: ");
+        sb_buf_append(&config, S(peer->name), peer->name_len);
+        sb_buf_printf(&config, "\n[Peer]\nPublicKey = %s\n", S(peer->public_key));
         if (!sb_str_empty(peer->preshared_key))
             sb_buf_printf(&config, "PresharedKey = %s\n", peer->preshared_key);
         char *ip = peer_ip(S(peer->address));
@@ -954,6 +968,7 @@ char *sb_wireguard_server_config(sb_wireguard *wg, sb_err *err) {
         if (peer->persistent_keepalive > 0)
             sb_buf_printf(&config, "PersistentKeepalive = %d\n", (int)peer->persistent_keepalive);
     }
+    if (len) *len = config.len;
     result = sb_buf_detach(&config);
 done:
     sb_buf_free(&config);
@@ -995,7 +1010,8 @@ int sb_wireguard_provision_host(sb_wireguard *wg, const sb_host *host, bool set_
          * before unified enrollment existed. Reuse an exact-name, unlinked
          * peer instead of silently allocating a second address and keypair. */
         for (size_t i = 0; i < existing.len && !found; ++i)
-            if (!existing.items[i].host_id && sb_streq(S(existing.items[i].name), S(host->name)))
+            if (!existing.items[i].host_id && existing.items[i].name_len == host->name_len &&
+                memcmp(S(existing.items[i].name), S(host->name), host->name_len) == 0)
                 found = &existing.items[i];
         if (found) {
             take_peer(&candidate, found);
@@ -1013,7 +1029,11 @@ int sb_wireguard_provision_host(sb_wireguard *wg, const sb_host *host, bool set_
             char *ip = peer_ip(allocated);
             sb_str_set(&candidate.id, "");
             free(candidate.name);
-            candidate.name = sb_asprintf("host: %s", S(host->name));
+            candidate.name_len = 6 + host->name_len;
+            candidate.name = sb_xmalloc(candidate.name_len + 1);
+            memcpy(candidate.name, "host: ", 6);
+            memcpy(candidate.name + 6, S(host->name), host->name_len);
+            candidate.name[candidate.name_len] = '\0';
             sb_str_set(&candidate.private_key, keys.private_key);
             sb_str_set(&candidate.public_key, keys.public_key);
             free(candidate.preshared_key);
@@ -1069,6 +1089,11 @@ int sb_wireguard_deprovision_host(sb_wireguard *wg, const char *host_id, sb_err 
 }
 
 char *sb_wireguard_host_config(sb_wireguard *wg, const sb_host *host, sb_err *err) {
+    return sb_wireguard_host_config_n(wg, host, NULL, err);
+}
+
+char *sb_wireguard_host_config_n(sb_wireguard *wg, const sb_host *host, size_t *len, sb_err *err) {
+    if (len) *len = 0;
     sb_wireguard_peer_vec peers = {0};
     sb_host_vec hosts = {0};
     sb_wireguard_options runtime;
@@ -1085,8 +1110,11 @@ char *sb_wireguard_host_config(sb_wireguard *wg, const sb_host *host, sb_err *er
     if (sb_wireguard_runtime_options(wg, &runtime, err) != 0) goto done;
     have_runtime = true;
     const char *label = S(found->name);
-    if (sb_starts_with(label, "host: ")) label += 6;
-    sb_buf_printf(&config, "# sb-easy managed host: %s\n[Interface]\n", label);
+    size_t label_len = found->name_len;
+    if (label_len >= 6 && memcmp(label, "host: ", 6) == 0) { label += 6; label_len -= 6; }
+    sb_buf_puts(&config, "# sb-easy managed host: ");
+    sb_buf_append(&config, label, label_len);
+    sb_buf_puts(&config, "\n[Interface]\n");
     sb_buf_printf(&config, "PrivateKey = %s\n", S(found->private_key));
     sb_buf_printf(&config, "Address = %s\n", S(found->address));
     if (runtime.mtu > 0U) sb_buf_printf(&config, "MTU = %u\n", (unsigned)runtime.mtu);
@@ -1114,12 +1142,14 @@ char *sb_wireguard_host_config(sb_wireguard *wg, const sb_host *host, sb_err *er
         bool other_has_endpoint = endpoint_port(other->wg_endpoint, &other_port);
         if (!other_has_endpoint && !this_has_endpoint) continue;
         char *ip = peer_ip(other->wg_address);
-        sb_buf_printf(&config, "\n# Mesh: %s\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\n",
-                      S(other->name), other->wg_public_key, ip);
+        sb_buf_puts(&config, "\n# Mesh: ");
+        sb_buf_append(&config, S(other->name), other->name_len);
+        sb_buf_printf(&config, "\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\n", other->wg_public_key, ip);
         free(ip);
         if (other_has_endpoint) sb_buf_printf(&config, "Endpoint = %s\n", other->wg_endpoint);
         sb_buf_puts(&config, "PersistentKeepalive = 25\n");
     }
+    if (len) *len = config.len;
     result = sb_buf_detach(&config);
 done:
     sb_buf_free(&config);
@@ -1164,12 +1194,13 @@ static int write_server_config(sb_wireguard *wg, const sb_wireguard_options *run
     /* std::filesystem::path::operator/ on POSIX. */
     char *path = sb_path_join(runtime->config_directory, name);
     free(name);
-    char *config = sb_wireguard_server_config(wg, err);
+    size_t config_len = 0;
+    char *config = sb_wireguard_server_config_n(wg, &config_len, err);
     if (!config) {
         free(path);
         return -1;
     }
-    int rc = sb_atomic_replace_file(path, config, strlen(config), NULL, NULL, err);
+    int rc = sb_atomic_replace_file(path, config, config_len, NULL, NULL, err);
     free(config);
     if (rc != 0) {
         free(path);

@@ -123,6 +123,7 @@ static char *store_peer(sb_test_server *t, const char *name, const char *public_
     sb_wireguard_peer_init(&peer);
     sb_wireguard_peer_init(&created);
     sb_str_set(&peer.name, name);
+    peer.name_len = strlen(peer.name);
     sb_str_set(&peer.private_key, "cHJpdmF0ZS1rZXktZml4dHVyZS1wcml2YXRlLWtleQ=");
     sb_str_set(&peer.public_key, public_key);
     sb_str_set(&peer.preshared_key, "cHJlc2hhcmVkLWtleS1maXh0dXJlLXByZXNoYXJlZA=");
@@ -1099,6 +1100,16 @@ TEST(wireguard_client_config_is_exact) {
     CHECK(r.content_type && sb_starts_with(r.content_type, "image/svg+xml"));
     CHECK_CONTAINS(r.body, "<svg");
     CHECK_CONTAINS(r.body, "</svg>");
+
+    free(path);
+    path = sb_asprintf("/api/wireguard/peers/%s", peer_id);
+    call(&t, &r, "PUT", path, "{\"name\":\"Fixed\\u0000peer\"}", ADMIN);
+    CHECK_EQ_INT(r.status, 200);
+    sbj *expected_name = sbj_strn("Fixed\0peer", 10);
+    CHECK(sbj_equal(sbj_get(r.json, "name"), expected_name));
+    sbj_free(expected_name);
+    /* libcurl rejects NUL in the filename header (also emitted by C++).
+     * The byte-exact body/header contract is checked by control_plane_e2e. */
 
     free(path);
     free(peer_id);

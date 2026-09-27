@@ -83,6 +83,10 @@ int sb_wireguard_runtime_options(sb_wireguard *wg, sb_wireguard_options *out, sb
 char *sb_wireguard_server_public_key(sb_wireguard *wg, sb_err *err);
 int sb_wireguard_stats(sb_wireguard *wg, sb_wireguard_peer_stats_vec *out, sb_err *err);
 char *sb_wireguard_client_config(sb_wireguard *wg, const sb_wireguard_peer *peer, sb_err *err);
+/* Owned config bytes; *len includes embedded NUL bytes but not the final terminator. */
+char *sb_wireguard_client_config_n(sb_wireguard *wg, const sb_wireguard_peer *peer, size_t *len, sb_err *err);
+char *sb_wireguard_server_config_n(sb_wireguard *wg, size_t *len, sb_err *err);
+char *sb_wireguard_host_config_n(sb_wireguard *wg, const sb_host *host, size_t *len, sb_err *err);
 /* client_endpoint(): 1 with *out set, 0 when the host has no endpoint
  * (std::nullopt), -1 error. */
 int sb_wireguard_client_endpoint(sb_wireguard *wg, const sb_host *host, sbj **out, sb_err *err);

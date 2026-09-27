@@ -292,7 +292,9 @@ static int handle_delete_profile(sb_http_req *req, sb_http_resp *resp, sb_err *e
 /* host_from_create_request(): `host` must be freshly initialised. */
 static int host_from_create_request(const sbj *body, sb_host *host, sb_err *err) {
     if (!sb_json_required_string(body, "name", err)) return -1;
-    sb_str_set(&host->name, sbj_get(body, "name")->v.str.ptr);
+    const sbj *name = sbj_get(body, "name");
+    sb_str_setn(&host->name, name->v.str.ptr, name->v.str.len);
+    host->name_len = name->v.str.len;
     const sbj *capabilities = sbj_get(body, "capabilities");
     if (capabilities && !sbj_is_null(capabilities)) {
         if (!sbj_is_object(capabilities))
@@ -330,7 +332,8 @@ static int host_from_update_request(sb_host *host, const sbj *body, sb_err *err)
     if (name && !sbj_is_null(name)) {
         if (!sbj_is_string(name) || name->v.str.len == 0)
             return sb_fail(err, SB_ERR_VALIDATION, "name must be a non-empty string");
-        sb_str_set(&host->name, name->v.str.ptr);
+        sb_str_setn(&host->name, name->v.str.ptr, name->v.str.len);
+        host->name_len = name->v.str.len;
     }
     const sbj *capabilities = sbj_get(body, "capabilities");
     if (capabilities && !sbj_is_null(capabilities)) {
@@ -768,16 +771,11 @@ static int handle_host_wg_config(sb_http_req *req, sb_http_resp *resp, sb_err *e
     sb_host host;
     sb_host_init(&host);
     if (sb_http_require_host(srv, route_param(req), &host, err) != 0) goto done;
-    char *config = sb_wireguard_host_config(srv->wireguard, &host, err);
+    size_t config_len = 0;
+    char *config = sb_wireguard_host_config_n(srv->wireguard, &host, &config_len, err);
     if (!config) goto done;
-    char *filename = sb_strdup(S(host.name));
-    for (char *p = filename; *p; ++p)
-        if (*p == ' ') *p = '_';
-    char *disposition = sb_asprintf("attachment; filename=\"%s-wg.conf\"", filename);
-    free(filename);
-    sb_resp_text(resp, 200, "application/octet-stream", config, strlen(config));
-    sb_resp_header(resp, "Content-Disposition", disposition);
-    free(disposition);
+    sb_resp_text(resp, 200, "application/octet-stream", config, config_len);
+    sb_resp_attachment(resp, S(host.name), host.name_len, "-wg.conf");
     rc = 0;
 done:
     sb_host_free(&host);
@@ -933,7 +931,7 @@ static int handle_redeem_device_enrollment(sb_http_req *req, sb_http_resp *resp,
     sbj *out = sbj_object();
     sbj_set_str(out, "server", S(srv->enrollment_server));
     sbj_set_str(out, "host_id", S(enrollment.host_id));
-    sbj_set_str(out, "host_name", S(enrollment.host_name));
+    sbj_set(out, "host_name", sbj_strn(S(enrollment.host_name), enrollment.host_name_len));
     sbj_set_str(out, "agent_token", S(enrollment.agent_token));
     sbj *profile = sbj_object();
     sbj_set_str(profile, "id", S(enrollment.profile_id));
@@ -990,7 +988,7 @@ static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err
     sb_resp_header(resp, "ETag", etag);
     sb_resp_header(resp, "X-SB-Easy-Rule-Source", rule_source);
     sb_resp_header(resp, "X-SB-Easy-Profile-Id", profile_id);
-    sb_resp_header(resp, "X-SB-Easy-Profile-Name", S(profile.name));
+    sb_resp_header_n(resp, "X-SB-Easy-Profile-Name", S(profile.name), profile.name_len);
     rc = 0;
 done:
     free(previous_address);

@@ -73,6 +73,7 @@ void sb_audit_entry_vec_free(sb_audit_entry_vec *v);
 /* ---- WireGuard -------------------------------------------------------- */
 typedef struct {
     char *id, *name, *private_key, *public_key;
+    size_t name_len;
     char *preshared_key; /* nullable */
     char *address;
     char *dns;           /* default "10.59.32.1" */
@@ -113,6 +114,7 @@ void sb_config_profile_vec_free(sb_config_profile_vec *v);
 /* ---- hosts ------------------------------------------------------------ */
 typedef struct {
     char *id, *name, *agent_token;
+    size_t name_len;
     sbj *capabilities; /* object */
     char *profile_id, *wg_address, *wg_public_key, *wg_endpoint, *clash_api; /* nullable */
     char *clash_secret;
@@ -153,7 +155,7 @@ sbj *sb_agent_enrollment_to_json(const sb_agent_enrollment *e);
 
 typedef struct {
     char *host_id, *host_name, *agent_token, *profile_id, *profile_name;
-    size_t profile_name_len;
+    size_t host_name_len, profile_name_len;
 } sb_agent_enrollment_result;
 void sb_agent_enrollment_result_init(sb_agent_enrollment_result *r);
 void sb_agent_enrollment_result_free(sb_agent_enrollment_result *r);

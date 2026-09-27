@@ -489,6 +489,7 @@ static void contract_prepare(sb_store *store, void *user) {
     sb_host_init(&host);
     sb_host_init(&created);
     sb_str_set(&host.name, "Remote Clash target");
+    host.name_len = strlen(host.name);
     host.clash_api = sb_asprintf("http://127.0.0.1:%u/remote", (unsigned)c->clash.port);
     sb_str_set(&host.clash_secret, "remote-secret");
     sb_err err = {0};
@@ -531,6 +532,7 @@ static char *add_clash_host(sb_test_server *t, const char *name, const char *cla
     sb_host_init(&host);
     sb_host_init(&created);
     sb_str_set(&host.name, name);
+    host.name_len = strlen(host.name);
     host.clash_api = clash_api ? sb_strdup(clash_api) : NULL;
     sb_str_set(&host.clash_secret, secret ? secret : "");
     sb_err err = {0};

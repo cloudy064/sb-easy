@@ -312,9 +312,11 @@ static int load_device_credential(const char *path, agent_identity *out, sb_err 
     out->server = sb_strdup(server);
     out->token = sb_strdup(token);
     out->host_id = sb_strdup(host_id);
-    out->host_name = sb_strdup(host_name);
+    const sbj *host_name_value = sbj_get(parsed, "host_name");
+    out->host_name = sb_strndup(host_name, sbj_is_string(host_name_value) ? host_name_value->v.str.len : 0);
     out->profile_id = sb_strdup(profile_id);
-    out->profile_name = sb_strdup(profile_name);
+    const sbj *profile_name_value = sbj_get(parsed, "profile_name");
+    out->profile_name = sb_strndup(profile_name, sbj_is_string(profile_name_value) ? profile_name_value->v.str.len : 0);
     sbj_free(parsed);
     return 1;
 }
@@ -324,7 +326,7 @@ static int save_device_credential(const char *path, const sb_device_credential *
     sbj *value = sbj_object();
     sbj_set_str(value, "server", credential->server);
     sbj_set_str(value, "host_id", credential->host_id);
-    sbj_set_str(value, "host_name", credential->host_name);
+    sbj_set(value, "host_name", sbj_strn(credential->host_name, credential->host_name_len));
     sbj_set_str(value, "agent_token", credential->token);
     sbj_set_str(value, "profile_id", credential->profile_id);
     sbj_set(value, "profile_name", sbj_strn(credential->profile_name, credential->profile_name_len));
@@ -381,7 +383,9 @@ static int resolve_agent_identity(const char *credential_path, agent_identity *o
         sb_device_credential_free(&credential);
         return -1;
     }
-    printf("device enrolled as %s (%s)\n", credential.host_name, credential.host_id);
+    fputs("device enrolled as ", stdout);
+    fwrite(credential.host_name, 1, credential.host_name_len, stdout);
+    printf(" (%s)\n", credential.host_id);
     out->server = credential.server;
     out->token = credential.token;
     out->host_id = credential.host_id;

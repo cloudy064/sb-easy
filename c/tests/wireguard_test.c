@@ -228,6 +228,7 @@ static void peer_make(sb_wireguard_peer *p, const char *id, const char *name, co
     sb_wireguard_peer_init(p);
     sb_str_set(&p->id, id);
     sb_str_set(&p->name, name);
+    p->name_len = strlen(p->name);
     sb_str_set(&p->private_key, private_key);
     sb_str_set(&p->public_key, public_key);
     p->preshared_key = sb_strdup(preshared_key);
@@ -320,6 +321,7 @@ TEST(keys_configs_stats_and_peer_repository_are_compatible) {
     sb_wireguard_peer_init(&peer);
     sb_wireguard_peer_init(&stored);
     sb_str_set(&peer.name, "Phone client");
+    peer.name_len = strlen(peer.name);
     sb_str_set(&peer.private_key, keys.private_key);
     sb_str_set(&peer.public_key, keys.public_key);
     peer.preshared_key = sb_wireguard_generate_preshared_key(&err);
@@ -427,6 +429,101 @@ TEST(keys_configs_stats_and_peer_repository_are_compatible) {
     fixture_close(&f);
 }
 
+TEST(nul_names_match_exact_peers_and_export_complete_configs) {
+    fixture f;
+    REQUIRE(fixture_open(&f));
+    sb_err err = {0};
+    sb_wireguard *service = service_new(&f, false, NULL);
+    REQUIRE(service);
+    sb_wireguard_peer peer;
+    peer_make(&peer, "prefix", "Phone", P1_PRIV, P1_PUB, NULL, "10.1.0.2/32");
+    peer_create(f.store, &peer);
+    peer_make(&peer, "exact", "Phone", P2_PRIV, P2_PUB, NULL, "10.1.0.3/32");
+    sb_str_setn(&peer.name, "Phone\0client", 12);
+    peer.name_len = 12;
+    peer_create(f.store, &peer);
+
+    sb_host host, created;
+    sb_host_init(&host);
+    sb_host_init(&created);
+    sb_str_setn(&host.name, "Phone\0client", 12);
+    host.name_len = 12;
+    REQUIRE(sb_store_create_host(f.store, &host, &created, &err) == 0);
+    REQUIRE(sb_wireguard_provision_host(service, &created, false, &created, &err) == 0);
+    CHECK_STR(created.wg_public_key, P2_PUB);
+    CHECK_EQ_INT(created.name_len, 12);
+    CHECK(memcmp(created.name, "Phone\0client", 12) == 0);
+    sb_wireguard_peer_init(&peer);
+    REQUIRE(find_peer(f.store, "prefix", &peer));
+    CHECK(peer.host_id == NULL);
+    REQUIRE(find_peer(f.store, "exact", &peer));
+    CHECK_STR(peer.host_id, created.id);
+    size_t len = 0;
+    char *config = sb_wireguard_client_config_n(service, &peer, &len, &err);
+    REQUIRE(config);
+    const char client_prefix[] = "# Client: Phone\0client\n[Interface]\n";
+    CHECK(len >= sizeof client_prefix - 1);
+    CHECK(memcmp(config, client_prefix, sizeof client_prefix - 1) == 0);
+    CHECK_CONTAINS(config + strlen(config) + 1, "PrivateKey = ");
+    free(config);
+    config = sb_wireguard_host_config_n(service, &created, &len, &err);
+    REQUIRE(config);
+    const char host_prefix[] = "# sb-easy managed host: Phone\0client\n[Interface]\n";
+    CHECK(len >= sizeof host_prefix - 1);
+    CHECK(memcmp(config, host_prefix, sizeof host_prefix - 1) == 0);
+    CHECK_CONTAINS(config + strlen(config) + 1, "# Hub (central server)");
+    free(config);
+    config = sb_wireguard_server_config_n(service, &len, &err);
+    REQUIRE(config);
+    CHECK(len > strlen(config));
+    CHECK_CONTAINS(config + strlen(config) + 1, "PublicKey = " P2_PUB);
+    free(config);
+    sb_wireguard_peer_free(&peer);
+    sb_host_free(&created);
+
+    /* A third full name must allocate a new peer, not take the prefix peer. */
+    sb_str_setn(&host.name, "Phone\0other", 11);
+    host.name_len = 11;
+    REQUIRE(sb_store_create_host(f.store, &host, &created, &err) == 0);
+    REQUIRE(sb_wireguard_provision_host(service, &created, false, &created, &err) == 0);
+    CHECK_EQ_INT(peer_count(f.store), 3);
+    REQUIRE(find_peer(f.store, "prefix", &peer));
+    CHECK(peer.host_id == NULL);
+    sb_wireguard_peer_vec all = {0};
+    REQUIRE(sb_store_list_wireguard_peers(f.store, &all, &err) == 0);
+    size_t named = 0;
+    for (size_t i = 0; i < all.len; ++i) {
+        if (sb_streq(all.items[i].host_id, created.id)) {
+            ++named;
+            CHECK_EQ_INT(all.items[i].name_len, 17);
+            CHECK(memcmp(all.items[i].name, "host: Phone\0other", 17) == 0);
+        }
+    }
+    CHECK_EQ_INT(named, 1);
+    sb_wireguard_peer_vec_free(&all);
+    /* The fake-tool sync must write every byte, including after both NULs. */
+    sb_wireguard *enabled = service_new(&f, true, "names");
+    REQUIRE(enabled);
+    config = sb_wireguard_server_config_n(enabled, &len, &err);
+    REQUIRE(config);
+    REQUIRE(sb_wireguard_sync(enabled, &err) == 0);
+    char *file = sb_path_join(f.dir, "names/wg0.conf");
+    size_t written_len = 0;
+    char *written = sb_read_file(file, &written_len);
+    REQUIRE(written);
+    CHECK_EQ_INT(written_len, len);
+    CHECK(written_len == len && memcmp(written, config, len) == 0);
+    free(written);
+    free(file);
+    free(config);
+    sb_wireguard_free(enabled);
+    sb_wireguard_peer_free(&peer);
+    sb_host_free(&created);
+    sb_host_free(&host);
+    sb_wireguard_free(service);
+    fixture_close(&f);
+}
+
 TEST(managed_devices_reuse_standalone_peers_as_singbox_endpoints) {
     fixture f;
     REQUIRE(fixture_open(&f));
@@ -435,6 +532,7 @@ TEST(managed_devices_reuse_standalone_peers_as_singbox_endpoints) {
     sb_host_init(&host);
     sb_host_init(&created);
     sb_str_set(&host.name, "Phone client");
+    host.name_len = strlen(host.name);
     sbj_free(host.capabilities);
     host.capabilities = sbj_parse_cstr("{\"platform\":\"android\",\"runs_singbox\":true}");
     REQUIRE(sb_store_create_host(f.store, &host, &created, &err) == 0);
@@ -1176,6 +1274,7 @@ TEST(host_configs_and_endpoints_match_cpp) {
         sb_host_init(&created);
         sb_str_set(&host.id, specs[i].id);
         sb_str_set(&host.name, specs[i].name);
+        host.name_len = strlen(host.name);
         host.wg_endpoint = sb_strdup(specs[i].endpoint);
         host.wg_address = sb_strdup(specs[i].address);
         host.wg_public_key = sb_strdup(specs[i].public_key);
@@ -1365,6 +1464,7 @@ TEST(provisioning_allocates_links_and_removes_host_peers) {
     sb_host_init(&provisioned);
     sb_str_set(&omega.id, "host-omega");
     sb_str_set(&omega.name, "Omega");
+    omega.name_len = strlen(omega.name);
     REQUIRE(sb_store_create_host(f.store, &omega, &omega, &err) == 0);
     REQUIRE(sb_wireguard_provision_host(service, &omega, true, &provisioned, &err) == 0);
     CHECK_STR(provisioned.wg_address, "10.60.0.2/32");
@@ -1395,6 +1495,7 @@ TEST(provisioning_allocates_links_and_removes_host_peers) {
     /* An explicit Clash API is kept. */
     sb_str_set(&sigma.id, "host-sigma");
     sb_str_set(&sigma.name, "Sigma");
+    sigma.name_len = strlen(sigma.name);
     sigma.clash_api = sb_strdup("http://custom:9090");
     REQUIRE(sb_store_create_host(f.store, &sigma, &sigma, &err) == 0);
     REQUIRE(sb_wireguard_provision_host(service, &sigma, true, &sigma, &err) == 0);
@@ -1412,6 +1513,7 @@ TEST(provisioning_allocates_links_and_removes_host_peers) {
     sb_host_init(&laptop);
     sb_str_set(&laptop.id, "host-laptop");
     sb_str_set(&laptop.name, "Laptop");
+    laptop.name_len = strlen(laptop.name);
     REQUIRE(sb_store_create_host(f.store, &laptop, &laptop, &err) == 0);
     REQUIRE(sb_wireguard_provision_host(service, &laptop, false, &laptop, &err) == 0);
     CHECK_STR(laptop.wg_address, "10.60.0.40/24");
@@ -1434,6 +1536,7 @@ TEST(provisioning_allocates_links_and_removes_host_peers) {
     sb_host_init(&untouched);
     sb_str_set(&ghost.id, "host-ghost");
     sb_str_set(&ghost.name, "Ghost");
+    ghost.name_len = strlen(ghost.name);
     sb_err_clear(&err);
     CHECK_EQ_INT(sb_wireguard_provision_host(service, &ghost, false, &untouched, &err), -1);
     CHECK_ERR(err, SB_ERR_NOT_FOUND, "Host not found");

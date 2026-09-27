@@ -152,6 +152,7 @@ static void prepare_contract_peer(sb_store *store, void *user) {
     sb_wireguard_peer_init(&peer);
     sb_wireguard_peer_init(&created);
     sb_str_set(&peer.name, "Contract phone");
+    peer.name_len = strlen(peer.name);
     sb_str_set(&peer.private_key, keys.private_key);
     sb_str_set(&peer.public_key, keys.public_key);
     sb_str_set(&peer.address, "10.59.32.2/24");

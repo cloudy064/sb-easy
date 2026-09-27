@@ -253,6 +253,7 @@ TEST(diagnostic_reports_are_host_scoped_and_retain_the_latest_twenty) {
     sb_host_init(&host);
     sb_host_init(&created);
     sb_str_set(&host.name, "Diagnostic device");
+    host.name_len = strlen(host.name);
     REQUIRE(sb_store_create_host(s, &host, &created, &err) == 0);
     for (int i = 0; i < 21; ++i) {
         char *text = sb_asprintf("{\"reason\":\"manual\",\"app_version\":\"%d\",\"core_version\":\"1.13.12\","
@@ -348,6 +349,7 @@ TEST(host_crud_hides_secrets_and_manages_outbound_assignments) {
     sb_host_init(&host);
     sb_host_init(&created);
     sb_str_set(&host.name, "Remote node");
+    host.name_len = strlen(host.name);
     sbj_set_bool(host.capabilities, "runs_singbox", true);
     sbj_set_bool(host.capabilities, "is_wg_member", false);
     sb_str_set(&host.clash_secret, "do-not-serialize");
@@ -404,6 +406,7 @@ TEST(host_crud_hides_secrets_and_manages_outbound_assignments) {
 
     REQUIRE(sb_store_find_host(s, created.id, &found, &err) == 1);
     sb_str_set(&found.name, "Renamed remote");
+    found.name_len = strlen(found.name);
     found.enabled = false;
     sb_host updated;
     sb_host_init(&updated);
@@ -445,6 +448,7 @@ TEST(profile_deletion_resets_assigned_hosts_to_default) {
     sb_host_init(&host);
     sb_host_init(&ch);
     sb_str_set(&host.name, "Profile consumer");
+    host.name_len = strlen(host.name);
     host.profile_id = sb_strdup(cp.id);
     REQUIRE(sb_store_create_host(s, &host, &ch, &err) == 0);
     CHECK_EQ_INT(sb_store_delete_profile(s, cp.id, &err), 0);
@@ -475,6 +479,7 @@ TEST(device_enrollment_codes_are_platform_neutral_expiring_and_single_use) {
     sb_host_init(&host);
     sb_host_init(&created);
     sb_str_set(&host.name, "Managed device");
+    host.name_len = strlen(host.name);
     host.profile_id = sb_strdup("android-client");
     sbj_set_bool(host.capabilities, "runs_singbox", true);
     sbj_set_bool(host.capabilities, "is_wg_member", false);
@@ -560,6 +565,7 @@ TEST(agent_repository_isolates_tokens_status_commands_and_latency) {
     sb_host_init(&created);
     sb_host_init(&found);
     sb_str_set(&host.name, "Agent repository host");
+    host.name_len = strlen(host.name);
     REQUIRE(sb_store_create_host(s, &host, &created, &err) == 0);
     REQUIRE(sb_store_find_enabled_host_by_token(s, created.agent_token, &found, &err) == 1);
     CHECK_STR(found.id, created.id);
@@ -819,6 +825,7 @@ TEST(wireguard_peers_and_backup_round_trip) {
     sb_wireguard_peer_init(&created);
     sb_wireguard_peer_init(&updated);
     sb_str_set(&peer.name, "phone");
+    peer.name_len = strlen(peer.name);
     sb_str_set(&peer.private_key, "priv");
     sb_str_set(&peer.public_key, "pub");
     sb_str_set(&peer.address, addr);
@@ -832,6 +839,7 @@ TEST(wireguard_peers_and_backup_round_trip) {
     CHECK_STR(addr, "10.59.32.3/24");
     free(addr);
     sb_str_set(&created.name, "tablet");
+    created.name_len = strlen(created.name);
     created.notes = sb_strdup("n");
     REQUIRE(sb_store_update_wireguard_peer(s, &created, &updated, &err) == 0);
     CHECK_STR(updated.name, "tablet");
@@ -1131,6 +1139,7 @@ static void *store_worker(void *p) {
         sb_host_init(&found);
         char *name = sb_asprintf("worker-%d-%d", w->index, j);
         sb_str_set(&host.name, name);
+        host.name_len = strlen(host.name);
         if (sb_store_create_host(w->store, &host, &created, &err) != 0) ++w->failures;
         if (sb_store_find_host(w->store, created.id, &found, &err) != 1 || !sb_streq(found.name, name))
             ++w->failures;

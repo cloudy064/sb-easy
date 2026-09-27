@@ -63,7 +63,7 @@ typedef struct {
     char *body;              /* raw body (used when json == NULL) */
     size_t body_len;
     char *content_type;      /* for raw body; default "text/plain; charset=utf-8" */
-    sb_strvec headers;       /* extra "Name: value" lines */
+    sbj *headers;            /* ordered array of {name, value} byte strings */
     char *file_path;         /* serve this file instead of body (static) */
     bool immutable;          /* Cache-Control for file responses */
     bool handled;            /* handler wrote directly to the connection (e.g. streaming) */
@@ -89,6 +89,8 @@ void sb_resp_json(sb_http_resp *resp, int status, sbj *body);
 void sb_resp_error(sb_http_resp *resp, int status, const char *message);
 void sb_resp_text(sb_http_resp *resp, int status, const char *content_type, char *body, size_t len);
 void sb_resp_header(sb_http_resp *resp, const char *name, const char *value);
+void sb_resp_header_n(sb_http_resp *resp, const char *name, const char *value, size_t len);
+void sb_resp_attachment(sb_http_resp *resp, const char *name, size_t len, const char *suffix);
 
 /* Request helpers — port of the C++ helpers with identical messages. */
 const char *sb_req_header(const sb_http_req *req, const char *name); /* borrowed or NULL */
@@ -102,6 +104,8 @@ const sbj *sb_json_required_object(const sbj *body, const char *field, sb_err *e
 /* assign_optional_string / assign_string: absent or null leaves *dest
  * untouched; non-string -> "<field> must be a string". */
 int sb_json_assign_string(const sbj *body, const char *field, char **dest, sb_err *err);
+int sb_json_assign_string_n(const sbj *body, const char *field, char **dest, size_t *dest_len,
+                             sb_err *err);
 /* assign_boolean: "<field> must be a boolean". */
 int sb_json_assign_bool(const sbj *body, const char *field, bool *dest, sb_err *err);
 /* required_string_array: "<field> must be an array" /
@@ -128,6 +132,7 @@ void sb_http_sync_wireguard_best_effort(sb_http_server *srv);
 
 /* Misc helpers from the C++ anonymous namespace. */
 char *sb_http_trim(const char *s);
+char *sb_http_trim_n(const char *s, size_t len, size_t *out_len);
 char *sb_http_trim_trailing_slashes(const char *s);
 char *sb_http_clash_controller_address(const char *url);
 char *sb_http_encode_component(const char *s);

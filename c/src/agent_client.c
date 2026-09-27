@@ -185,6 +185,8 @@ int sb_enroll_device(const sb_device_enrollment_options *options, sb_device_cred
     if (!value_rc) value_rc |= value_string(body, "agent_token", "", &out->token, err);
     if (!value_rc) value_rc |= value_string(profile, "id", "", &out->profile_id, err);
     if (!value_rc) value_rc |= value_string(profile, "name", "", &out->profile_name, err);
+    const sbj *host_name = sbj_get(body, "host_name");
+    out->host_name_len = sbj_is_string(host_name) ? host_name->v.str.len : 0;
     const sbj *profile_name = sbj_get(profile, "name");
     out->profile_name_len = sbj_is_string(profile_name) ? profile_name->v.str.len : 0;
     sbj_free(empty_profile);

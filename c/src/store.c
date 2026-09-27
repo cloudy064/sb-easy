@@ -130,7 +130,7 @@ void sb_wireguard_peer_free(sb_wireguard_peer *p) {
 sbj *sb_wireguard_peer_to_json(const sb_wireguard_peer *p) {
     sbj *v = sbj_object();
     sbj_set_str(v, "id", S(p->id));
-    sbj_set_str(v, "name", S(p->name));
+    sbj_set(v, "name", sbj_strn(S(p->name), p->name_len));
     sbj_set_str(v, "private_key", S(p->private_key));
     sbj_set_str(v, "public_key", S(p->public_key));
     sbj_set(v, "preshared_key", opt_str(p->preshared_key));
@@ -228,7 +228,8 @@ void sb_host_free(sb_host *h) {
 void sb_host_copy(sb_host *dst, const sb_host *src) {
     sb_host_free(dst);
     dst->id = sb_strdup(S(src->id));
-    dst->name = sb_strdup(S(src->name));
+    dst->name = sb_strndup(S(src->name), src->name_len);
+    dst->name_len = src->name_len;
     dst->agent_token = sb_strdup(S(src->agent_token));
     dst->capabilities = src->capabilities ? sbj_clone(src->capabilities) : sbj_object();
     dst->profile_id = sb_strdup(src->profile_id);
@@ -247,7 +248,7 @@ void sb_host_copy(sb_host *dst, const sb_host *src) {
 sbj *sb_host_to_json(const sb_host *h) {
     sbj *v = sbj_object();
     sbj_set_str(v, "id", S(h->id));
-    sbj_set_str(v, "name", S(h->name));
+    sbj_set(v, "name", sbj_strn(S(h->name), h->name_len));
     sbj_set(v, "capabilities", h->capabilities ? sbj_clone(h->capabilities) : sbj_null());
     sbj_set(v, "profile_id", opt_str(h->profile_id));
     sbj_set(v, "wg_address", opt_str(h->wg_address));
@@ -322,6 +323,7 @@ sbj *sb_agent_enrollment_to_json(const sb_agent_enrollment *e) {
 void sb_agent_enrollment_result_init(sb_agent_enrollment_result *r) {
     r->host_id = sb_strdup("");
     r->host_name = sb_strdup("");
+    r->host_name_len = 0;
     r->agent_token = sb_strdup("");
     r->profile_id = sb_strdup("");
     r->profile_name = sb_strdup("");
@@ -338,7 +340,7 @@ void sb_agent_enrollment_result_free(sb_agent_enrollment_result *r) {
 sbj *sb_agent_enrollment_result_to_json(const sb_agent_enrollment_result *r) {
     sbj *v = sbj_object();
     sbj_set_str(v, "host_id", S(r->host_id));
-    sbj_set_str(v, "host_name", S(r->host_name));
+    sbj_set(v, "host_name", sbj_strn(S(r->host_name), r->host_name_len));
     sbj_set_str(v, "agent_token", S(r->agent_token));
     sbj_set_str(v, "profile_id", S(r->profile_id));
     sbj_set(v, "profile_name", sbj_strn(S(r->profile_name), r->profile_name_len));
@@ -556,6 +558,7 @@ static void read_host(sqlite3_stmt *st, sb_host *h) {
     sb_host_free(h);
     h->id = sbq_text(st, 0);
     h->name = sbq_text(st, 1);
+    h->name_len = (size_t)sqlite3_column_bytes(st, 1);
     h->agent_token = sbq_text(st, 2);
     char *caps = sbq_text(st, 3);
     h->capabilities = parse_object_or_empty(caps);
@@ -589,6 +592,7 @@ static void read_wireguard_peer(sqlite3_stmt *st, sb_wireguard_peer *p) {
     sb_wireguard_peer_free(p);
     p->id = sbq_text(st, 0);
     p->name = sbq_text(st, 1);
+    p->name_len = (size_t)sqlite3_column_bytes(st, 1);
     p->private_key = sbq_text(st, 2);
     p->public_key = sbq_text(st, 3);
     p->preshared_key = sbq_opt_text(st, 4);
@@ -1269,7 +1273,7 @@ static int reload_peer(sqlite3 *h, const char *id, sb_wireguard_peer *out, sb_er
 
 int sb_store_create_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
                                    sb_wireguard_peer *out, sb_err *err) {
-    if (sb_str_empty(peer->name) || sb_str_empty(peer->private_key) ||
+    if ((!peer->name || peer->name_len == 0) || sb_str_empty(peer->private_key) ||
         sb_str_empty(peer->public_key) || sb_str_empty(peer->address))
         return sb_fail(err, SB_ERR_VALIDATION, "WireGuard name, keys, and address are required");
     if (peer->persistent_keepalive < 0 || peer->persistent_keepalive > 65535 || peer->quota_bytes < 0)
@@ -1298,7 +1302,10 @@ int sb_store_create_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
                      err);
     if (!st) goto done;
     sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, peer->name);
+    if (sbq_bind_text_n(st, 2, peer->name, peer->name_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_text(st, 3, peer->private_key);
     sbq_bind_text(st, 4, peer->public_key);
     sbq_bind_text(st, 5, peer->preshared_key);
@@ -1321,7 +1328,7 @@ done:
 
 int sb_store_update_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
                                    sb_wireguard_peer *out, sb_err *err) {
-    if (sb_str_empty(peer->id) || sb_str_empty(peer->name) || peer->persistent_keepalive < 0 ||
+    if (sb_str_empty(peer->id) || (!peer->name || peer->name_len == 0) || peer->persistent_keepalive < 0 ||
         peer->persistent_keepalive > 65535 || peer->quota_bytes < 0)
         return sb_fail(err, SB_ERR_VALIDATION, "Invalid WireGuard peer");
     int rc = -1;
@@ -1334,7 +1341,10 @@ int sb_store_update_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
                                    "host_id = ?9 WHERE id = ?10",
                                    err);
     if (!st) goto done;
-    sbq_bind_text(st, 1, peer->name);
+    if (sbq_bind_text_n(st, 1, peer->name, peer->name_len, err) != 0) {
+        sqlite3_finalize(st);
+        goto done;
+    }
     sbq_bind_bool(st, 2, peer->enabled);
     sbq_bind_text(st, 3, S(peer->dns));
     sbq_bind_int(st, 4, peer->persistent_keepalive);
@@ -1833,7 +1843,7 @@ int sb_store_find_host(sb_store *s, const char *id, sb_host *out, sb_err *err) {
 }
 
 int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err *err) {
-    if (sb_str_empty(host->name) || !sbj_is_object(host->capabilities))
+    if ((!host->name || host->name_len == 0) || !sbj_is_object(host->capabilities))
         return sb_fail(err, SB_ERR_VALIDATION, "Host name and object capabilities are required");
     char *id = sb_str_empty(host->id) ? sb_uuid_v4() : sb_strdup(host->id);
     char *token = sb_str_empty(host->agent_token) ? new_agent_token() : sb_strdup(host->agent_token);
@@ -1851,9 +1861,9 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
                                    err);
     if (st) {
         sbq_bind_text(st, 1, id);
-        sbq_bind_text(st, 2, host->name);
+        int bound = sbq_bind_text_n(st, 2, host->name, host->name_len, err);
         sbq_bind_text(st, 3, token);
-        int bound = bind_dump(st, 4, host->capabilities, err);
+        if (bound == 0) bound = bind_dump(st, 4, host->capabilities, err);
         sbq_bind_text(st, 5, profile_id);
         sbq_bind_text(st, 6, host->wg_address);
         sbq_bind_text(st, 7, host->wg_public_key);
@@ -1872,7 +1882,7 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
 }
 
 int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err *err) {
-    if (sb_str_empty(host->id) || sb_str_empty(host->name) || !sbj_is_object(host->capabilities))
+    if (sb_str_empty(host->id) || (!host->name || host->name_len == 0) || !sbj_is_object(host->capabilities))
         return sb_fail(err, SB_ERR_VALIDATION, "Host id, name, and object capabilities are required");
     int rc = -1;
     LOCK(s);
@@ -1884,8 +1894,8 @@ int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
                                    "updated_at = datetime('now') WHERE id = ?10",
                                    err);
     if (st) {
-        sbq_bind_text(st, 1, host->name);
-        int bound = bind_dump(st, 2, host->capabilities, err);
+        int bound = sbq_bind_text_n(st, 1, host->name, host->name_len, err);
+        if (bound == 0) bound = bind_dump(st, 2, host->capabilities, err);
         sbq_bind_text(st, 3, host->profile_id);
         sbq_bind_text(st, 4, host->wg_address);
         sbq_bind_text(st, 5, host->wg_public_key);
@@ -2192,6 +2202,7 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
                 enrollment_id = sbq_text(st, 0);
                 result.host_id = sbq_text(st, 1);
                 result.host_name = sbq_text(st, 2);
+                result.host_name_len = (size_t)sqlite3_column_bytes(st, 2);
                 result.agent_token = sbq_text(st, 3);
                 result.profile_id = sbq_text(st, 4);
                 result.profile_name = sbq_text(st, 5);
@@ -2905,7 +2916,8 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
     out->nodes = nodes;
     memset(&nodes, 0, sizeof nodes);
     sbj_set(out->host_context, "id", sbj_str_take(sbq_text(host, 0)));
-    sbj_set(out->host_context, "name", sbj_str_take(sbq_text(host, 1)));
+    sbj_set(out->host_context, "name", sbj_strn((const char *)sqlite3_column_text(host, 1),
+                                                   (size_t)sqlite3_column_bytes(host, 1)));
     sbj_set(out->host_context, "capabilities", capabilities);
     capabilities = NULL;
     free(out->clash_controller);

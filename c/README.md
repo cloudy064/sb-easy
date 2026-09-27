@@ -76,8 +76,10 @@ test in this configuration.
 - Passwords, usernames, JWT username claims and audit actors preserve explicit
   byte lengths, including embedded NUL bytes. Agent UI credentials are matched
   against the full JSON strings. Profile names and rule scripts also preserve
-  byte lengths through storage, rendering and enrollment. Other model strings still use C strings;
-  their NUL compatibility requires further audit before claiming byte-exact
+  byte lengths through storage, rendering and enrollment. Host and WireGuard
+  peer names preserve their bytes through matching, credentials, configuration
+  bodies, file writes and download headers. Other model strings still use C
+  strings; their NUL compatibility requires further audit before claiming byte-exact
   parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI
   requests. It serves only its configured UI directory.

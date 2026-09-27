@@ -3,6 +3,15 @@
 Objective: finish the C rewrite, compatibility and integration verification,
 release images/CI, and centrally managed Claude egress rollout.
 
+## Current release state
+
+- Production center and local agent run the verified identity fix `05168b0`.
+- Profile/script fixes and host/WireGuard name fixes are verified in source;
+  the profile images are built. These changes await the combined rollout.
+- Proxy tags and the remaining non-authentication string boundaries are still
+  under audit. Android `xiaomi` and `adrd` remain offline, so actual reception
+  of the centrally prepared rules has not been verified.
+
 ## Verified on 2026-09-27
 
 - Parser/fetcher suite: 12 cases pass. Fixed uninitialized test HTTP request
@@ -91,7 +100,7 @@ not start a runtime service or modify host interfaces.
 - Isolated C/C++ API probes confirmed the next remaining differences: NUL
   suffixes on profile names, disabled rule scripts, host names and proxy tags
   survive C++ storage/response but are truncated by C. Evidence:
-  `/tmp/sb-c-model-audit.log`. These fields still require fixes; this audit
+  `/tmp/sb-c-model-audit.log`. Later fixes are recorded below; this audit
   is not a claim that other model fields have been exhaustively covered.
 
 ## Profile string compatibility follow-up
@@ -110,6 +119,23 @@ not start a runtime service or modify host interfaces.
 - Versioned images `sb-easy:c-panel-f181f96` and
   `sb-easy:c-unified-f181f96` built successfully with GCC 12 Release warnings
   as errors; the embedded engine smoke test passed during the agent build.
-- These source changes are not deployed yet. Host names, proxy tags and the
+- These source changes are not deployed yet. Proxy tags and the
   wider non-authentication model audit remain in progress; Android receipt
   remains dependent on the two offline devices reconnecting.
+
+## Host and WireGuard name compatibility follow-up
+
+- Host names preserve complete byte lengths through API create/update/list,
+  SQLite, copy, QuickJS host context, enrollment and saved agent credentials.
+- WireGuard peer names preserve full bytes on create/update/read, and name
+  matching distinguishes a plain prefix from every NUL-containing name.
+  Auto-generated `host: ...` peer names preserve the complete host name.
+- Config exports and server file writes carry explicit lengths. Download
+  headers and `X-SB-Easy-Profile-Name` preserve the C++ byte-string behavior.
+- Isolated C/C++ exports have identical config hashes and filename headers;
+  real-agent enrollment checks preserve NUL-containing names in credentials.
+- All 18 normal and ASan/UBSan suites pass. Additional fake-tool checks prove
+  exact peer reuse, distinct peer allocation, complete client/host/server
+  exports, and full server config file writes. All 16 production DB snapshot
+  comparisons still pass. Logs: `/tmp/sb-c-host-*.log`.
+- These changes are staged for the combined release, not deployed yet.

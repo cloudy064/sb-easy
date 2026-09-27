@@ -51,7 +51,7 @@ release images/CI, and centrally managed Claude egress rollout.
   clone, update and serialization; a field with a NUL suffix cannot alias
   the plain field. Regression coverage added.
 
-## Outstanding verification
+## Final packaging and outstanding verification
 
 - Android devices `xiaomi` and `adrd` are offline. Central configuration is
   ready; actual receipt and routing remain unverified until they reconnect.
@@ -59,8 +59,13 @@ release images/CI, and centrally managed Claude egress rollout.
   still require a broader compatibility audit; arbitrary-input byte-exact
   parity is not claimed. Detailed JSON error wording and platform-dependent
   WireGuard conversion differences are documented in README.md.
-- Final JSON-key hardening is being tested and packaged after the first
-  production rollout.
+- Final JSON-key hardening (`7eacb28`) passed normal and sanitizer checks,
+  was packaged into both images and deployed. Final panel cutover retained
+  `sb-easy-rollback-20260927-143212` and backup
+  `/root/workspace/sb-easy/backups/c-cutover-20260927-143212`.
+  Final local agent cutover retained `sb-easy-agent-rollback-20260927-143606`
+  and backup `/tmp/sb-easy-agent-backup.kRVIEK`. All three Claude route
+  tests passed again after this cutover.
 
 Local verification logs are `/tmp/sb-c-*.log`. Docker builds can require
 `--network host` on this machine to use its working proxy route; this does

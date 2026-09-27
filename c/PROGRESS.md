@@ -5,6 +5,18 @@ release images/CI, and centrally managed Claude egress rollout.
 
 ## Current release state
 
+- Android DNS follow-up: the `android-client` central profile now routes DNS
+  for `geosite-private` and `geosite-cn` to `bootstrap-dns` (AliDNS HTTPS),
+  explicitly using the `direct` outbound. Other DNS settings and traffic
+  routing are preserved. Both assigned host renders differ only in DNS.
+  The candidate passed the pinned Android sing-box source CLI configuration
+  check with QUIC, WireGuard, uTLS and gVisor enabled. Private rollback data:
+  `/root/workspace/sb-easy/backups/android-dns-20260927.json` on the center.
+  At 10:14 UTC, `adrd` last reported at 09:57 UTC and had not acknowledged
+  the new ETag. Device application and WeChat performance remain unverified.
+  Earlier in this session it reconnected and accepted the preceding config;
+  the offline statements below describe earlier observations.
+
 - Production center and local unified agent run verified runtime `0ae4433`.
   The accumulated profile, host, proxy, subscription and metadata fixes are
   deployed. Both versioned images are built and deployment rollback is retained.

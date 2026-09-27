@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 container_name="${CONTAINER_NAME:-sb-easy-agent}"
 image_tag="${IMAGE_TAG:-sb-easy:unified-agent-$(date +%Y%m%d-%H%M%S)}"
-dockerfile="${DOCKERFILE:-cpp/Dockerfile.unified}"
+dockerfile="${DOCKERFILE:-c/Dockerfile.unified}"
+skip_build="${SKIP_BUILD:-0}"
 health_timeout="${HEALTH_TIMEOUT:-60}"
 stop_timeout="${STOP_TIMEOUT:-8}"
 test_url="${TEST_URL:-https://www.google.com/generate_204}"
@@ -33,9 +35,12 @@ if [[ -z "$data_source" || ! -d "$data_source" ]]; then
 fi
 
 env_file="$(mktemp /tmp/sb-easy-agent-env.XXXXXX)"
+backup_dir="$(mktemp -d /tmp/sb-easy-agent-backup.XXXXXX)"
+docker inspect "$container_name" >"$backup_dir/container.json"
 cutover_started=false
 deployment_complete=false
 rollback_done=false
+data_backup_ready=false
 
 rollback() {
   if [[ "$rollback_done" == true ]]; then
@@ -50,6 +55,11 @@ rollback() {
       docker rename "$container_name" "$failed_name" >/dev/null 2>&1 || true
     fi
     docker rename "$rollback_name" "$container_name" >/dev/null 2>&1 || true
+  fi
+  if [[ "$data_backup_ready" == true ]]; then
+    docker run --rm --network none --entrypoint tar \
+      -v "$data_source:/restore" -v "$backup_dir:/backup:ro" "$image_tag" \
+      -xzf /backup/data.tar.gz -C /restore || echo "Data restore failed: $backup_dir" >&2
   fi
   docker update --restart=unless-stopped "$container_name" >/dev/null 2>&1 || true
   docker start "$container_name" >/dev/null 2>&1 || true
@@ -69,8 +79,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 chmod 600 "$env_file"
 
-echo "Building $image_tag while $container_name remains online"
-docker build -f "$repo_dir/$dockerfile" -t "$image_tag" "$repo_dir"
+if [[ "$skip_build" == 0 ]]; then
+  echo "Building $image_tag while $container_name remains online"
+  docker build -f "$repo_dir/$dockerfile" -t "$image_tag" "$repo_dir"
+elif [[ "$skip_build" != 1 ]]; then
+  echo "SKIP_BUILD must be 0 or 1" >&2
+  exit 2
+fi
 docker run --rm --entrypoint /bin/sh "$image_tag" -ec \
   'test -d /var/lib/sing-box && test -x /usr/local/bin/sb-easy && command -v curl >/dev/null'
 
@@ -84,6 +99,9 @@ docker inspect "$container_name" --format '{{range .Config.Env}}{{println .}}{{e
 docker update --restart=no "$container_name" >/dev/null
 cutover_started=true
 docker stop -t "$stop_timeout" "$container_name" >/dev/null
+docker run --rm --network none --entrypoint tar \
+  -v "$data_source:/source:ro" "$image_tag" -C /source -czf - . >"$backup_dir/data.tar.gz"
+data_backup_ready=true
 docker rename "$container_name" "$rollback_name"
 
 if ! docker run -d \
@@ -128,3 +146,4 @@ fi
 deployment_complete=true
 echo "Deployment healthy: $container_name -> $image_tag"
 echo "Rollback container retained as: $rollback_name"
+echo "Container settings and data backup: $backup_dir"

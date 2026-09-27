@@ -154,6 +154,7 @@ endforeach()
 # tests/<name>_test.c -> executable + ctest entry. Tests run from the repo
 # root so they can reach ../migrations and fixtures.
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     file(GLOB SB_TESTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*_test.c)
     if(SB_EASY_EMBED_SINGBOX)
         # The supervisor test drives fake sing-box executables, which only the
@@ -171,6 +172,10 @@ if(BUILD_TESTING)
         set_tests_properties(${name} PROPERTIES
             ENVIRONMENT "SB_EASY_MIGRATIONS=${CMAKE_CURRENT_SOURCE_DIR}/../migrations")
     endforeach()
+    add_test(NAME control_plane_e2e
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/control_plane_e2e.py
+            --server $<TARGET_FILE:sb-easy-c-server> --agent $<TARGET_FILE:sb-easy-c-agent>)
+    set_tests_properties(control_plane_e2e PROPERTIES TIMEOUT 90)
 endif()
 
 # Starts, reloads and stops the in-process engine; run by the unified image
@@ -179,4 +184,8 @@ if(SB_EASY_EMBED_SINGBOX)
     add_executable(sb-easy-singbox-embedded-smoke tests/singbox_embedded_smoke.c)
     target_link_libraries(sb-easy-singbox-embedded-smoke PRIVATE sb_core)
     target_compile_options(sb-easy-singbox-embedded-smoke PRIVATE -Wall -Wextra)
+    if(BUILD_TESTING)
+        add_test(NAME singbox_embedded_smoke COMMAND sb-easy-singbox-embedded-smoke)
+        set_tests_properties(singbox_embedded_smoke PROPERTIES TIMEOUT 30)
+    endif()
 endif()

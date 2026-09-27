@@ -80,8 +80,8 @@ static int load_migrations(const char *directory, migration_vec *out, sb_err *er
             free(path);
             continue;
         }
-        int64_t version;
-        char *description;
+        int64_t version = 0;
+        char *description = NULL;
         int matched = match_filename(entry->d_name, &version, &description, err);
         if (matched < 0) {
             rc = -1;

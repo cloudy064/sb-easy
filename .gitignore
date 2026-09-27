@@ -1,6 +1,7 @@
 /target
 /build
 /dist/
+__pycache__/
 
 # Node / Vue
 frontend/node_modules/

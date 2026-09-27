@@ -24,18 +24,6 @@ void sb_clash_response_free(sb_clash_response *r) {
     r->body = NULL;
 }
 
-const char *sb_http_failure_reason(const char *message) {
-    if (!message) return "Network failure";
-    if (strstr(message, "Timeout") || strstr(message, "timed out")) return "Timeout";
-    if (strstr(message, "resolve") || strstr(message, "URL") || strstr(message, "Malformed"))
-        return "Bad server address";
-    if (strstr(message, "certificate")) return "Invalid certificate";
-    if (strstr(message, "SSL") || strstr(message, "TLS")) return "Handshake error";
-    if (strstr(message, "Weird server reply") || strstr(message, "HTTP/0.9"))
-        return "Bad response from server";
-    return "Network failure";
-}
-
 sb_clash_client *sb_clash_client_new(const sb_clash_client_options *options, sb_err *err) {
     sb_clash_client_options o;
     if (options) o = *options;

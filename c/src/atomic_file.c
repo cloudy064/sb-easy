@@ -82,7 +82,7 @@ int sb_atomic_replace_file(const char *destination, const void *contents, size_t
         system_fail(err, "create_directories", errno);
         goto out;
     }
-    mode_t mode;
+    mode_t mode = 0;
     if (destination_mode(destination, &mode, err) != 0) goto out;
     temporary = temporary_path_for(destination, err);
     if (!temporary) goto out;

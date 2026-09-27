@@ -939,3 +939,61 @@ sbj *sbj_parse(const char *text, size_t len, char *error, size_t error_size) {
 sbj *sbj_parse_cstr(const char *text) {
     return text ? sbj_parse(text, strlen(text), NULL, 0) : NULL;
 }
+
+/* json::dump() validates every string (member names included) with a strict
+ * UTF-8 decoder and throws type_error.316 at the first offending byte. */
+static int utf8_check(const char *s, size_t n, sb_err *err) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        unsigned char lo = 0x80, hi = 0xBF;
+        size_t need;
+        if (c < 0x80) {
+            ++i;
+            continue;
+        }
+        if (c >= 0xC2 && c <= 0xDF) {
+            need = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            need = 2;
+            if (c == 0xE0) lo = 0xA0;
+            if (c == 0xED) hi = 0x9F;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            need = 3;
+            if (c == 0xF0) lo = 0x90;
+            if (c == 0xF4) hi = 0x8F;
+        } else {
+            return sb_fail(err, SB_ERR_BAD_JSON,
+                           "[json.exception.type_error.316] invalid UTF-8 byte at index %zu: 0x%02X", i, c);
+        }
+        for (++i; need > 0; --need, ++i) {
+            if (i >= n)
+                return sb_fail(err, SB_ERR_BAD_JSON,
+                               "[json.exception.type_error.316] incomplete UTF-8 string; last byte: 0x%02X",
+                               (unsigned char)s[n - 1]);
+            unsigned char d = (unsigned char)s[i];
+            if (d < lo || d > hi)
+                return sb_fail(err, SB_ERR_BAD_JSON,
+                               "[json.exception.type_error.316] invalid UTF-8 byte at index %zu: 0x%02X", i, d);
+            lo = 0x80;
+            hi = 0xBF;
+        }
+    }
+    return 0;
+}
+
+/* Walks the value in serialisation order (sorted keys, key before value). */
+int sbj_validate_utf8(const sbj *v, sb_err *err) {
+    if (!v) return 0;
+    if (v->type == SBJ_STRING) return utf8_check(v->v.str.ptr, v->v.str.len, err);
+    if (v->type == SBJ_ARRAY) {
+        for (size_t i = 0; i < v->v.arr.len; ++i)
+            if (sbj_validate_utf8(v->v.arr.items[i], err) != 0) return -1;
+    } else if (v->type == SBJ_OBJECT) {
+        for (size_t i = 0; i < v->v.obj.len; ++i)
+            if (utf8_check(v->v.obj.keys[i], strlen(v->v.obj.keys[i]), err) != 0 ||
+                sbj_validate_utf8(v->v.obj.vals[i], err) != 0)
+                return -1;
+    }
+    return 0;
+}

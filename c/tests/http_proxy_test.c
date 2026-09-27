@@ -855,7 +855,7 @@ TEST(clash_control_errors) {
     path = sb_asprintf("/api/sing-box/proxies?host=%s", dead_host);
     sb_test_request(&t, "GET", path, NULL, &r);
     free(path);
-    char *expected = sb_asprintf("Could not reach sing-box Clash API (%s): Clash API request failed: Network failure", url);
+    char *expected = sb_asprintf("Could not reach sing-box Clash API (%s): Clash API request failed: Bad server address", url);
     CHECK_ERROR(&r, 503, expected);
     free(expected);
     sb_test_response_free(&r);
@@ -1458,10 +1458,12 @@ TEST(websocket_authentication) {
         }
     }
     ws_client_close(&ws);
+    /* The C core treats API paths case-insensitively for authentication,
+     * so a case variant is rejected before routing. */
     target = sb_asprintf("/API/sing-box/ws/traffic?token=%s", t.token);
     REQUIRE(ws_client_open(&ws, t.port, target) == 0);
     free(target);
-    CHECK_EQ_INT(ws.status, 404);
+    CHECK_EQ_INT(ws.status, 401);
     ws_client_close(&ws);
     target = sb_asprintf("/api/sing-box/ws/TRAFFIC?token=%s", t.token);
     REQUIRE(ws_client_open(&ws, t.port, target) == 0);

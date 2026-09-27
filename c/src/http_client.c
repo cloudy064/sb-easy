@@ -134,3 +134,32 @@ void sb_http_response_free(sb_http_response *resp) {
     free(resp->headers);
     memset(resp, 0, sizeof *resp);
 }
+
+/* Maps a libcurl failure onto the Drogon ReqResult wording the C++ client
+ * reported: failed DNS lookups and refused connections are
+ * BadServerAddress, a connection closed before a complete response is
+ * NetworkFailure, an unparseable response is BadResponse. */
+const char *sb_http_failure_reason(const char *message) {
+    if (!message) return "Network failure";
+    static const struct {
+        CURLcode code;
+        const char *reason;
+    } map[] = {
+        {CURLE_OPERATION_TIMEDOUT, "Timeout"},
+        {CURLE_COULDNT_RESOLVE_HOST, "Bad server address"},
+        {CURLE_COULDNT_CONNECT, "Bad server address"},
+        {CURLE_URL_MALFORMAT, "Bad server address"},
+        {CURLE_PEER_FAILED_VERIFICATION, "Invalid certificate"},
+        {CURLE_SSL_CACERT_BADFILE, "Invalid certificate"},
+        {CURLE_SSL_CONNECT_ERROR, "Handshake error"},
+        {CURLE_WEIRD_SERVER_REPLY, "Bad response from server"},
+        {CURLE_UNSUPPORTED_PROTOCOL, "Bad response from server"}, /* HTTP/0.9 reply */
+        {CURLE_GOT_NOTHING, "Network failure"},
+        {CURLE_RECV_ERROR, "Network failure"},
+        {CURLE_SEND_ERROR, "Network failure"},
+        {CURLE_PARTIAL_FILE, "Network failure"},
+    };
+    for (size_t i = 0; i < sizeof map / sizeof *map; ++i)
+        if (sb_ends_with(message, curl_easy_strerror(map[i].code))) return map[i].reason;
+    return "Network failure";
+}

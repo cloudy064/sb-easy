@@ -25,6 +25,9 @@ void sb_auth_claims_free(sb_auth_claims *c);
 /* Returns a malloc'd "$argon2id$v=19$m=19456,t=2,p=1$..." string or NULL. */
 char *sb_hash_password(const char *password, sb_err *err);
 bool sb_verify_password(const char *password, const char *encoded_hash);
+/* JSON passwords may contain embedded NUL bytes. */
+char *sb_hash_password_n(const char *password, size_t len, sb_err *err);
+bool sb_verify_password_n(const char *password, size_t len, const char *encoded_hash);
 
 /* Tokens are signed with `secret` (HS256). create returns malloc'd token. */
 char *sb_auth_create_token(const char *secret, const char *user_id, const char *username,

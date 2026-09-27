@@ -339,6 +339,33 @@ TEST(auth_login_and_session) {
  * /api/users*
  * ====================================================================== */
 
+TEST(passwords_with_nul_create_login_and_reset) {
+    sb_test_server t;
+    sb_test_response r = {0};
+    REQUIRE(sb_test_server_start(&t) == 0);
+    call(&t, &r, "POST", "/api/users",
+         "{\"username\":\"nul-password\",\"password\":\"pass\\u0000word\"}", ADMIN);
+    REQUIRE(r.status == 200);
+    char *path = sb_asprintf("/api/users/%s/password", str_of(r.json, "id"));
+    call(&t, &r, "POST", "/api/auth/login",
+         "{\"username\":\"nul-password\",\"password\":\"pass\\u0000word\"}", NO_AUTH);
+    CHECK_EQ_INT(r.status, 200);
+    call(&t, &r, "POST", "/api/auth/login",
+         "{\"username\":\"nul-password\",\"password\":\"pass\"}", NO_AUTH);
+    CHECK_ERROR(r, 401, "Invalid credentials");
+    call(&t, &r, "POST", path, "{\"password\":\"new\\u0000password\"}", ADMIN);
+    CHECK_SUCCESS(r);
+    call(&t, &r, "POST", "/api/auth/login",
+         "{\"username\":\"nul-password\",\"password\":\"new\\u0000password\"}", NO_AUTH);
+    CHECK_EQ_INT(r.status, 200);
+    call(&t, &r, "POST", "/api/auth/login",
+         "{\"username\":\"nul-password\",\"password\":\"new\"}", NO_AUTH);
+    CHECK_ERROR(r, 401, "Invalid credentials");
+    free(path);
+    sb_test_response_free(&r);
+    sb_test_server_stop(&t);
+}
+
 TEST(user_administration) {
     sb_test_server t;
     sb_test_response r = {0};

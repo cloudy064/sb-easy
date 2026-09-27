@@ -67,6 +67,10 @@ static sbj *decode_json_segment(const char *text, size_t len) {
 }
 
 char *sb_hash_password(const char *password, sb_err *err) {
+    return sb_hash_password_n(password, password ? strlen(password) : 0, err);
+}
+
+char *sb_hash_password_n(const char *password, size_t len, sb_err *err) {
     unsigned char salt[ARGON_SALT_BYTES];
     if (sb_random_bytes(salt, sizeof salt) != 0) {
         sb_fail(err, SB_ERR_GENERIC, "password salt generation failed");
@@ -78,7 +82,7 @@ char *sb_hash_password(const char *password, sb_err *err) {
     char *encoded = sb_xcalloc(encoded_size + 1, 1);
     const char *pw = password ? password : "";
     int result = argon2id_hash_encoded(ARGON_TIME_COST, ARGON_MEMORY_COST, ARGON_PARALLELISM,
-                                       pw, strlen(pw), salt, sizeof salt, ARGON_HASH_BYTES,
+                                       pw, password ? len : 0, salt, sizeof salt, ARGON_HASH_BYTES,
                                        encoded, encoded_size);
     if (result != ARGON2_OK) {
         free(encoded);
@@ -89,9 +93,13 @@ char *sb_hash_password(const char *password, sb_err *err) {
 }
 
 bool sb_verify_password(const char *password, const char *encoded_hash) {
+    return sb_verify_password_n(password, password ? strlen(password) : 0, encoded_hash);
+}
+
+bool sb_verify_password_n(const char *password, size_t len, const char *encoded_hash) {
     if (sb_str_empty(encoded_hash)) return false;
     const char *pw = password ? password : "";
-    return argon2id_verify(encoded_hash, pw, strlen(pw)) == ARGON2_OK;
+    return argon2id_verify(encoded_hash, pw, password ? len : 0) == ARGON2_OK;
 }
 
 char *sb_auth_create_token(const char *secret, const char *user_id, const char *username,

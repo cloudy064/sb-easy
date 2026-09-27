@@ -7,6 +7,48 @@ on:
     branches: [master]
 
 jobs:
+  c:
+    name: C backend (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [release, sanitizers]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc git pkg-config libcurl4-openssl-dev libyaml-dev libsqlite3-dev libssl-dev
+      - name: Configure
+        shell: bash
+        run: |
+          flags=()
+          if [[ '${{ matrix.mode }}' == sanitizers ]]; then
+            flags+=('-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' '-DCMAKE_EXE_LINKER_FLAGS=-no-pie')
+          fi
+          cmake -S c -B build/c -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSB_EASY_WARNINGS_AS_ERRORS=ON "${flags[@]}"
+      - name: Build
+        run: cmake --build build/c --parallel 2
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build/c --output-on-failure --timeout 180 --parallel 2
+
+  c-embedded:
+    name: C agent with embedded sing-box
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: c/Dockerfile.unified
+          target: runtime
+          push: false
+          tags: sb-easy:c-embedded-ci
+
   cpp:
     name: C++ backend (build + test)
     runs-on: ubuntu-latest

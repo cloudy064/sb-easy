@@ -431,7 +431,7 @@ TEST(agent_client_contract) {
     sb_agent_client *offline = sb_agent_client_new(&options, &err);
     REQUIRE(offline);
     CHECK(sb_agent_client_poll_config(offline, NULL, &rejected, &err) != 0);
-    CHECK_STR(err.msg, "agent HTTP request failed: Network failure");
+    CHECK_STR(err.msg, "agent HTTP request failed: Bad server address");
     sb_agent_client_free(offline);
     free(server);
 }
@@ -530,7 +530,7 @@ TEST(clash_client_contract) {
 
     fixture_stop(&f);
     CHECK(sb_clash_get(client, &target, "/proxies", &resp, &err) != 0);
-    CHECK_STR(err.msg, "Clash API request failed: Network failure");
+    CHECK_STR(err.msg, "Clash API request failed: Bad server address");
     sb_clash_client_free(client);
     free(base);
 }

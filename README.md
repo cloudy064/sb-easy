@@ -5,9 +5,12 @@ spirit of wg-easy. One central server manages many hosts, their proxies, configs
 and clients — and can run/supervise sing-box itself, so there's nothing extra to
 install.
 
-- **Backend**: C++20 (Drogon + SQLite + QuickJS), serving the Vue frontend.
+- **Backend**: C11 (CivetWeb + SQLite + QuickJS), serving the Vue frontend.
 - **Data plane**: sing-box (supervised in-process by sb-easy when managed).
 - **Frontend**: Vue 3 + TS + Pinia.
+
+Build and compatibility notes for the C implementation: [c/README.md](c/README.md).
+The previous C++ implementation remains in `cpp/` for rollback and comparisons.
 
 ## Features
 - Multi-host central management: register hosts, assign proxies, edit config
@@ -15,7 +18,7 @@ install.
 - Profile-scoped QuickJS rule generation with an enable switch, bounded
   server-side test run, readable output preview, and Agent result provenance.
 - Per-host agent token; the image runs the panel as `sb-easy` and preserves
-  `sb-easy agent` as a compatibility alias for the dedicated C++ agent.
+  `sb-easy agent` as a compatibility alias for the dedicated C agent.
 - Managed sing-box: spawn / reload-on-change / respawn-on-crash; Clash API
   exposed for live monitoring.
 - WireGuard hub + clients (keys, QR, quota, expiry); optional host mesh.
@@ -48,7 +51,7 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 > Behind a registry mirror (no Docker Hub access), pass base images, e.g.:
 > ```sh
 > docker build \
->   --build-arg CXX_IMAGE=docker.1ms.run/library/debian:bookworm-slim \
+>   --build-arg C_IMAGE=docker.1ms.run/library/debian:bookworm-slim \
 >   --build-arg NODE_IMAGE=docker.1ms.run/library/node:20-alpine \
 >   --build-arg DEBIAN_IMAGE=docker.1ms.run/library/debian:bookworm-slim \
 >   -t sb-easy:latest .
@@ -79,14 +82,14 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 | `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`, or `fatal` |
 
 Node mode in the production image remains `sb-easy agent`; it dispatches to the
-dedicated C++ agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
+dedicated C agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
 `agent/.env.example`). The agent supervises the bundled sing-box process and
 preserves the Rust node-local egress/override environment variables. Set a
 separate `AGENT_UI_PASSWORD` to enable its local management page on
 `0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
 The local console is an independent Svelte build served from `AGENT_UI_PATH`;
 the image sets it to `/usr/share/sb-easy/agent-ui`, while a bare Agent can run
-API-only when it is unset. The C++ service contains no embedded HTML and another
+API-only when it is unset. The C service contains no embedded HTML and another
 compatible UI can be substituted without rebuilding it. The
 page shows live Clash API traffic plus runtime/config status, supports live
 selector-group node switching, persists
@@ -95,13 +98,13 @@ without exposing the Agent token. The configuration view exposes the current
 raw JSON and can open a short-lived test connection for a URL to report the
 actual sing-box rule, selector chain, and final proxy/direct decision.
 
-The unified managed-node build keeps the C++ Agent as the host executable and
+The unified managed-node build keeps the C Agent as the host executable and
 links the official sing-box engine into that same process. Go is used only in
 the disposable build stage; the deployed machine needs neither Go/GCC nor a
 separate `sing-box` executable. The Svelte UI remains replaceable on disk:
 
 ```sh
-docker build -f cpp/Dockerfile.unified --target artifacts \
+docker build -f c/Dockerfile.unified --target artifacts \
   --output type=local,dest=dist/sb-easy-unified-glibc .
 ```
 

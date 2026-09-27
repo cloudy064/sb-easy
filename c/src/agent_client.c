@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sb/clash_client.h" /* sb_http_failure_reason */
 #include "sb/http_client.h"
 
 #ifndef SB_EASY_VERSION

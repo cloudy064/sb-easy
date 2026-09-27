@@ -271,13 +271,14 @@ static int handle_auth_login(sb_http_req *req, sb_http_resp *resp, sb_err *err) 
     if (!password) goto done;
     /* C++ compares the full byte strings; a C string would silently drop
      * everything after an embedded NUL, so such credentials never match. */
-    if (json_string_has_nul(username_value) || json_string_has_nul(sbj_get(body, "password"))) {
+    if (json_string_has_nul(username_value)) {
         sb_fail(err, SB_ERR_AUTH, "Invalid credentials");
         goto done;
     }
     status = sb_store_find_user_by_username(srv->store, username, &user, err);
     if (status < 0) goto done;
-    if (status == 0 || !sb_verify_password(password, user.password_hash)) {
+    if (status == 0 || !sb_verify_password_n(password, sbj_get(body, "password")->v.str.len,
+                                           user.password_hash)) {
         sb_fail(err, SB_ERR_AUTH, "Invalid credentials");
         goto done;
     }
@@ -390,7 +391,7 @@ static int handle_users_create(sb_http_req *req, sb_http_resp *resp, sb_err *err
         sb_fail(err, SB_ERR_VALIDATION, "Role must be admin or viewer");
         goto done;
     }
-    hash = sb_hash_password(password, err);
+    hash = sb_hash_password_n(password, sbj_get(body, "password")->v.str.len, err);
     if (!hash) goto done;
     if (sb_store_create_user(srv->store, username, hash, role, &user, err) != 0) goto done;
     sb_resp_json(resp, 200, sb_user_account_to_json(&user));
@@ -429,7 +430,7 @@ static int handle_users_password(sb_http_req *req, sb_http_resp *resp, sb_err *e
         sb_fail(err, SB_ERR_VALIDATION, "Password must be at least 4 characters");
         goto done;
     }
-    hash = sb_hash_password(password, err);
+    hash = sb_hash_password_n(password, sbj_get(body, "password")->v.str.len, err);
     if (!hash) goto done;
     if (sb_store_reset_user_password(req->server->store, req->params[0], hash, err) != 0) goto done;
     respond_success(resp);
@@ -562,7 +563,7 @@ static int handle_wireguard_peers_create(sb_http_req *req, sb_http_resp *resp, s
     sb_wireguard_peer_init(&created);
     sbj *body = NULL;
     const sbj *found;
-    const char *name, *text;
+    const char *name = NULL, *text = NULL;
     int32_t number;
     int rc = -1;
 

@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/socket.h>
@@ -329,7 +330,7 @@ static void check_tags(const char *body, const char *expected, int line) {
 TEST(clash_yaml_follows_yaml_cpp_semantics) {
     /* scalars stay strings; nulls; merge keys are ordinary keys (no merge) */
     CHECK_TAGS("common: &c {type: trojan, password: pw}\nproxies:\n"
-               "  - {name: merged, server: s, port: 1, <<: *c}\n" P(plain),
+               "  - {name: merged, server: s, port: 1, <<: *c}\n" P("plain"),
                "plain");
     /* aliases resolve, including anchor names libyaml does not allow */
     CHECK_TAGS("p: &香港 {name: cjk, type: trojan, server: s, port: 1, password: pw}\n"
@@ -348,36 +349,36 @@ TEST(clash_yaml_follows_yaml_cpp_semantics) {
     /* the \' escape, tab-only lines, CRLF, BOM */
     CHECK_TAGS("\xEF\xBB\xBFproxies:\r\n\t\r\n" P("\"it\\'s\"") "  \t# tabbed comment\r\n", "it's");
     /* a truncated download: colon-less last key line / open quote */
-    CHECK_TAGS("proxies:\n" P(a) "  - name: b\n    type: trojan\n    server: s\n    port: 2\n"
+    CHECK_TAGS("proxies:\n" P("a") "  - name: b\n    type: trojan\n    server: s\n    port: 2\n"
                "    password: pw\n    skip-cert",
                "a,b");
-    CHECK_TAGS("proxies:\n" P(a) "  - name: b\n    type: trojan\n    server: s\n    port: 2\n"
+    CHECK_TAGS("proxies:\n" P("a") "  - name: b\n    type: trojan\n    server: s\n    port: 2\n"
                "    password: \"pw",
-               "a,b");
-    CHECK_TAGS("proxies:\n" P(a) "  - name: b\n    password: \"pw x", ""); /* yaml-cpp: EOF in scalar */
+               ""); /* yaml-cpp rejects EOF after nonempty quoted content */
+    CHECK_TAGS("proxies:\n" P("a") "  - name: b\n    password: \"pw x", ""); /* yaml-cpp: EOF in scalar */
     /* empty flow entries and keys are null nodes */
     CHECK_TAGS("proxies:\n  - {name: e, , type: trojan, : x, server: s, port: 1, password: pw}\n", "e");
     /* the token after the document is scanned: a stray ']' fails the load */
-    CHECK_TAGS("proxies:\n" P(a) "]\n", "");
+    CHECK_TAGS("proxies:\n" P("a") "]\n", "");
     /* only the first document counts */
-    CHECK_TAGS("proxies:\n" P(first) "---\nproxies:\n" P(second), "first");
+    CHECK_TAGS("proxies:\n" P("first") "---\nproxies:\n" P("second"), "first");
     /* nesting limit (yaml-cpp DepthGuard<500>) */
     {
         sb_buf b = {0};
-        sb_buf_puts(&b, "proxies:\n" P(deep) "x: ");
-        for (int i = 0; i < 497; ++i) sb_buf_putc(&b, '[');
-        for (int i = 0; i < 497; ++i) sb_buf_putc(&b, ']');
+        sb_buf_puts(&b, "proxies:\n" P("deep") "x: ");
+        for (int i = 0; i < 498; ++i) sb_buf_putc(&b, '[');
+        for (int i = 0; i < 498; ++i) sb_buf_putc(&b, ']');
         sb_buf_putc(&b, '\n');
         CHECK_TAGS(b.p, "deep"); /* depth 499 */
         sb_buf_reset(&b);
-        sb_buf_puts(&b, "proxies:\n" P(deep) "x: ");
-        for (int i = 0; i < 498; ++i) sb_buf_putc(&b, '[');
-        for (int i = 0; i < 498; ++i) sb_buf_putc(&b, ']');
+        sb_buf_puts(&b, "proxies:\n" P("deep") "x: ");
+        for (int i = 0; i < 499; ++i) sb_buf_putc(&b, '[');
+        for (int i = 0; i < 499; ++i) sb_buf_putc(&b, ']');
         CHECK_TAGS(b.p, ""); /* depth 500 */
         sb_buf_free(&b);
     }
     /* recursive aliases do not recurse forever (C++ overflowed the stack) */
-    CHECK_TAGS("proxies: &p\n  - *p\n" P(r), "r");
+    CHECK_TAGS("proxies: &p\n  - *p\n" P("r"), "r");
 }
 
 TEST(clash_yaml_utf16_and_raw_bytes) {
@@ -400,7 +401,8 @@ TEST(clash_yaml_utf16_and_raw_bytes) {
     free(got);
     sb_buf_free(&b);
     /* invalid UTF-8 and control bytes pass through into scalars */
-    got = tags_of("proxies:\n  - {name: \"x\xFF\x01y\", type: trojan, server: s, port: 1, password: pw}\n", 71);
+    const char raw_body[] = "proxies:\n  - {name: \"x\xFF\x01y\", type: trojan, server: s, port: 1, password: pw}\n";
+    got = tags_of(raw_body, sizeof raw_body - 1);
     CHECK_STR(got, "x\xFF\x01y");
     free(got);
     /* a raw NUL inside a quoted scalar is kept (it truncates the C tag) */
@@ -427,6 +429,7 @@ typedef struct {
     int listen_fd;
     int port;
     int expected;
+    int handled;
     char last_request[4096];
     pthread_t thread;
 } test_server;
@@ -448,9 +451,16 @@ static void respond(int fd, const char *status, const char *extra_headers, const
 static void *server_main(void *arg) {
     test_server *s = arg;
     for (int i = 0; i < s->expected; ++i) {
+        /* A broken redirect must fail the test, not leave pthread_join
+         * waiting forever for a request the client never sends. */
+        struct pollfd ready = {s->listen_fd, POLLIN, 0};
+        if (poll(&ready, 1, 3000) <= 0) break;
         int fd = accept(s->listen_fd, NULL, NULL);
         if (fd < 0) break;
-        char req[4096];
+        ++s->handled;
+        struct timeval receive_timeout = {3, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof receive_timeout);
+        char req[4096] = {0};
         size_t len = 0;
         while (len < sizeof req - 1 && !strstr(req, "\r\n\r\n")) {
             ssize_t r = read(fd, req + len, sizeof req - 1 - len);
@@ -512,6 +522,7 @@ static void server_start(test_server *s, int expected) {
 static void server_stop(test_server *s) {
     pthread_join(s->thread, NULL);
     close(s->listen_fd);
+    CHECK_EQ_INT(s->handled, s->expected);
 }
 
 static char *fetch(sb_subscription_fetcher *f, const char *url, sb_err *err) {

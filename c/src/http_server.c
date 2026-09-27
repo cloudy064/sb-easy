@@ -925,6 +925,15 @@ static const char *wire_header(const wire_response *w, const char *lowered_name)
 static void wire_json(wire_response *w, int status, sbj *body) {
     w->status = status;
     free(w->body);
+    sb_err encoding_error = {0};
+    if (sbj_validate_utf8(body, &encoding_error) != 0) {
+        sbj_free(body);
+        body = sbj_object();
+        char *message = sb_asprintf("Invalid JSON request: %s", encoding_error.msg);
+        sbj_set_str(body, "error", message);
+        free(message);
+        w->status = 400;
+    }
     w->body = sbj_dump(body, -1);
     w->body_len = strlen(w->body);
     sb_str_set(&w->content_type, "application/json; charset=utf-8");

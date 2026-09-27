@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <curl/curl.h>
 
 #include "sb/http_client.h"
 
@@ -88,34 +87,6 @@ static char *resolve_redirect(const http_address *cur, const char *location) {
     return r;
 }
 
-/* Maps a libcurl failure onto the Drogon ReqResult wording the C++ client
- * reported: failed DNS lookups and refused connections are
- * BadServerAddress, a connection closed before a complete response is
- * NetworkFailure, an unparseable response is BadResponse. */
-static const char *transport_reason(const char *message) {
-    static const struct {
-        CURLcode code;
-        const char *reason;
-    } map[] = {
-        {CURLE_OPERATION_TIMEDOUT, "Timeout"},
-        {CURLE_COULDNT_RESOLVE_HOST, "Bad server address"},
-        {CURLE_COULDNT_CONNECT, "Bad server address"},
-        {CURLE_URL_MALFORMAT, "Bad server address"},
-        {CURLE_PEER_FAILED_VERIFICATION, "Invalid certificate"},
-        {CURLE_SSL_CACERT_BADFILE, "Invalid certificate"},
-        {CURLE_SSL_CONNECT_ERROR, "Handshake error"},
-        {CURLE_WEIRD_SERVER_REPLY, "Bad response from server"},
-        {CURLE_UNSUPPORTED_PROTOCOL, "Bad response from server"}, /* HTTP/0.9 reply */
-        {CURLE_GOT_NOTHING, "Network failure"},
-        {CURLE_RECV_ERROR, "Network failure"},
-        {CURLE_SEND_ERROR, "Network failure"},
-        {CURLE_PARTIAL_FILE, "Network failure"},
-    };
-    for (size_t i = 0; i < sizeof map / sizeof *map; ++i)
-        if (sb_ends_with(message, curl_easy_strerror(map[i].code))) return map[i].reason;
-    return "Network failure";
-}
-
 /* Drogon's HttpRequest encodes the path it sends (setPath + the default
  * pathEncode_): alphanumerics and -_.!~*'()&=/\? pass through, a space
  * becomes '+', and every other byte (including '%') becomes %XX. The C++
@@ -172,7 +143,7 @@ char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *f, const char *url_
                         "subscription response exceeds the configured size limit");
             else
                 sb_fail(err, SB_ERR_UPSTREAM, "subscription HTTP request failed: %s",
-                        transport_reason(herr.msg));
+                        sb_http_failure_reason(herr.msg));
             address_free(&addr);
             break;
         }

@@ -471,8 +471,8 @@ static int parse_vmess(sv uri, sb_parsed_node *out, sb_err *err) {
     if (!have_port) goto done;
     sv server = {server_value->v.str.ptr, server_value->v.str.len};
     /* C++: value.value("ps", value.value("name", "vmess")) — inner first. */
-    sv name, tag, id, scy, net, tlsv;
-    int aid;
+    sv name = {0}, tag = {0}, id = {0}, scy = {0}, net = {0}, tlsv = {0};
+    int aid = 0;
     if (value_string(value, "name", sv_of("vmess"), &name, err) ||
         value_string(value, "ps", name, &tag, err) ||
         value_string(value, "id", sv_of(""), &id, err) ||
@@ -2219,7 +2219,7 @@ int sb_parse_outbound_config(const sbj *config, sb_proxy_import *out, sb_err *er
             vec_push_move(&out->nodes, &node);
         } else {
             sb_parsed_node_free(&node);
-            sv tag;
+            sv tag = {0};
             if (value_string(outbound, "tag", sv_of("?"), &tag, err)) goto fail;
             sb_buf b = {0};
             sb_buf_append(&b, tag.p, tag.n);

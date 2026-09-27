@@ -294,7 +294,8 @@ static int load_device_credential(const char *path, agent_identity *out, sb_err 
         sbj_free(parsed);
         return sb_fail(err, SB_ERR_GENERIC, "device credential is not valid JSON: %s", path);
     }
-    const char *server, *token, *host_id, *host_name, *profile_id, *profile_name;
+    const char *server = NULL, *token = NULL, *host_id = NULL, *host_name = NULL,
+               *profile_id = NULL, *profile_name = NULL;
     if (value_string(parsed, "server", "", &server, err) != 0 ||
         value_string(parsed, "agent_token", "", &token, err) != 0 ||
         value_string(parsed, "host_id", "", &host_id, err) != 0 ||
@@ -1266,7 +1267,7 @@ static sbj *ui_proxies(void *user, sb_err *err) {
     const sbj *outbound;
     SBJ_ARR_FOREACH(outbounds, i, outbound) {
         if (!sbj_is_object(outbound)) continue;
-        const char *tag, *type_or_unknown, *type;
+        const char *tag = NULL, *type_or_unknown = NULL, *type = NULL;
         if (value_string(outbound, "tag", "", &tag, err) != 0) goto fail;
         if (!*tag) continue;
         if (value_string(outbound, "type", "unknown", &type_or_unknown, err) != 0) goto fail;
@@ -1280,7 +1281,7 @@ static sbj *ui_proxies(void *user, sb_err *err) {
             sbj_set_str(proxy, "type", strcmp(type, "selector") == 0 ? "Selector" : "URLTest");
             const sbj *all = sbj_get(outbound, "outbounds");
             sbj_set(proxy, "all", all ? sbj_clone(all) : sbj_array());
-            const char *now;
+            const char *now = NULL;
             if (value_string(outbound, "default", "", &now, err) != 0) {
                 sbj_free(proxy);
                 goto fail;

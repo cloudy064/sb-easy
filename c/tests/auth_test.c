@@ -26,6 +26,16 @@ TEST(argon2id_verifies_cpp_generated_hash) {
     CHECK(!sb_verify_password("other", cpp_hash));
 }
 
+TEST(passwords_preserve_embedded_nul_bytes) {
+    const char password[] = "pass\0word";
+    char *hash = sb_hash_password_n(password, sizeof password - 1, NULL);
+    REQUIRE(hash);
+    CHECK(sb_verify_password_n(password, sizeof password - 1, hash));
+    CHECK(!sb_verify_password("pass", hash));
+    CHECK(!sb_verify_password_n("pass\0other", 10, hash));
+    free(hash);
+}
+
 TEST(hs256_sessions_reject_wrong_secrets_and_tampering) {
     char *token = sb_auth_create_token("jwt-test-secret", "user-1", "alice", "viewer");
     REQUIRE(token);

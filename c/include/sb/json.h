@@ -16,6 +16,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sb/util.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -78,6 +80,9 @@ sbj *sbj_parse_cstr(const char *text);
 /* indent < 0: compact (nlohmann dump()); indent >= 0: pretty with that many
  * spaces per level (nlohmann dump(indent)). Returns a malloc'd string. */
 char *sbj_dump(const sbj *value, int indent);
+/* Validate strings and keys before emitting externally sourced JSON.
+ * Returns -1 with nlohmann-compatible type_error.316 on invalid UTF-8. */
+int sbj_validate_utf8(const sbj *value, sb_err *err);
 
 /* ---- inspection ------------------------------------------------------ */
 static inline bool sbj_is_null(const sbj *v) { return !v || v->type == SBJ_NULL; }

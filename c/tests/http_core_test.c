@@ -194,12 +194,20 @@ static int h_block(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     return 0;
 }
 
+static int h_invalid_utf8(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    sbj *body = sbj_object();
+    sbj_set_str(body, "name", "bad\xFF");
+    sb_resp_json(resp, 200, body);
+    return 0;
+}
+
 static void register_test_routes(sb_test_server *t) {
     sb_http_route(t->server, "GET,POST,PUT,DELETE,PATCH", "/api/test/echo", h_echo);
     sb_http_route(t->server, "GET", "/api/test/echo/{a}/x/{b}", h_echo);
     sb_http_route(t->server, "POST", "/api/test/fail/{kind}", h_fail);
     sb_http_route(t->server, "GET", "/api/test/text", h_text);
     sb_http_route(t->server, "GET", "/api/test/direct", h_direct);
+    sb_http_route(t->server, "GET", "/api/test/invalid-utf8", h_invalid_utf8);
     sb_http_route(t->server, "GET", "/api/test/block", h_block);
     sb_http_route(t->server, "GET", "/api/test/{id}", h_echo);
     sb_http_route(t->server, "POST", "/api/test/{id}/post-only", h_echo);
@@ -460,6 +468,11 @@ TEST(error_kind_mapping) {
         sb_test_response_free(&r);
         free(path);
     }
+    sb_test_response invalid;
+    sb_test_request(&t, "GET", "/api/test/invalid-utf8", NULL, &invalid);
+    CHECK_ERROR(&invalid, 400,
+                "Invalid JSON request: [json.exception.type_error.316] invalid UTF-8 byte at index 3: 0xFF");
+    sb_test_response_free(&invalid);
     sb_test_server_stop(&t);
 }
 

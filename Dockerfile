@@ -2,40 +2,41 @@
 
 # Base images are parameterized so environments behind a registry mirror can
 # override them.
-ARG CXX_IMAGE=debian:bookworm-slim
+ARG C_IMAGE=debian:bookworm-slim
 ARG NODE_IMAGE=node:20-alpine
 ARG DEBIAN_IMAGE=debian:bookworm-slim
 
-# ===== Stage 1: Build C++ server and polling agent =====
-FROM ${CXX_IMAGE} AS backend-builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# ===== Stage 1: Build C server and polling agent =====
+FROM ${C_IMAGE} AS backend-builder
+RUN apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     ca-certificates \
     cmake \
-    g++ \
+    gcc \
+    pkg-config \
+    libcurl4-openssl-dev \
+    libyaml-dev \
     git \
-    libjsoncpp-dev \
     libsqlite3-dev \
     libssl-dev \
     make \
-    uuid-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY cpp /src/cpp
+COPY c /src/c
 COPY migrations /src/migrations
-RUN --mount=type=cache,target=/src/build \
-    cmake -S cpp -B build \
+RUN --mount=type=cache,target=/src/build,id=sb-easy-c-panel-build \
+    cmake -S c -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_TESTING=OFF \
         -DSB_EASY_WARNINGS_AS_ERRORS=ON \
     && cmake --build build \
-        --target sb-easy-cpp sb-easy-cpp-server sb-easy-cpp-agent \
+        --target sb-easy-c-render sb-easy-c-server sb-easy-c-agent \
         --parallel 2 \
     && install -d /out \
-    && install -m 0755 build/sb-easy-cpp /out/sb-easy-cpp \
-    && install -m 0755 build/sb-easy-cpp-server /out/sb-easy-cpp-server \
-    && install -m 0755 build/sb-easy-cpp-agent /out/sb-easy-cpp-agent
+    && install -m 0755 build/sb-easy-c-render /out/sb-easy-c-render \
+    && install -m 0755 build/sb-easy-c-server /out/sb-easy-c-server \
+    && install -m 0755 build/sb-easy-c-agent /out/sb-easy-c-agent
 
 # ===== Stage 1b: Bundle sing-box binary =====
 # So the image ships one artifact: sb-easy can supervise sing-box itself
@@ -43,7 +44,7 @@ RUN --mount=type=cache,target=/src/build \
 FROM ${DEBIAN_IMAGE} AS singbox
 ARG SINGBOX_VERSION=1.13.12
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+RUN apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/var/cache/sb-easy-download set -eux; \
     case "${TARGETARCH:-amd64}" in \
@@ -96,27 +97,26 @@ RUN npm run check && npm run build
 
 # ===== Stage 3: Runtime =====
 FROM ${DEBIAN_IMAGE}
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     wireguard-tools \
     iptables \
     iproute2 \
     ca-certificates \
     curl \
     libbrotli1 \
-    libjsoncpp25 \
+    libcurl4 \
+    libyaml-0-2 \
     libsqlite3-0 \
     libssl3 \
-    libstdc++6 \
-    libuuid1 \
     libzstd1 \
     procps \
     zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=backend-builder /out/sb-easy-cpp-server /usr/local/bin/sb-easy
-COPY --from=backend-builder /out/sb-easy-cpp-agent /usr/local/bin/sb-easy-agent
-COPY --from=backend-builder /out/sb-easy-cpp /usr/local/bin/sb-easy-cpp
+COPY --from=backend-builder /out/sb-easy-c-server /usr/local/bin/sb-easy
+COPY --from=backend-builder /out/sb-easy-c-agent /usr/local/bin/sb-easy-agent
+COPY --from=backend-builder /out/sb-easy-c-render /usr/local/bin/sb-easy-c-render
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 COPY --from=agent-ui-builder /app/agent-ui/dist /usr/share/sb-easy/agent-ui
@@ -124,7 +124,7 @@ COPY migrations /app/migrations
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-# Managed sing-box by default: the C++ server supervises the bundled process.
+# Managed sing-box by default: the C server supervises the bundled process.
 ENV BIND_ADDR=0.0.0.0:51821 \
     DATABASE_URL=sqlite:/app/data/sb-easy.db?mode=rwc \
     MIGRATIONS_DIR=/app/migrations \

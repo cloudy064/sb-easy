@@ -14,6 +14,10 @@
 extern "C" {
 #endif
 
+/* Maps an sb_http_perform transport error message to Drogon's ReqResult
+ * wording ("Timeout", "Network failure", ...). Shared with agent_client. */
+const char *sb_http_failure_reason(const char *message);
+
 typedef struct {
     const char *method;          /* "GET" (default), "POST", "PUT", "DELETE", ... */
     const char *url;

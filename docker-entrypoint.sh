@@ -6,7 +6,7 @@ set -e
 mkdir -p /app/data /var/lib/sing-box
 
 # Preserve the former image's `sb-easy agent` invocation while dispatching to
-# the dedicated C++ polling-agent executable.
+# the dedicated C polling-agent executable.
 if [ "${1:-}" = "sb-easy" ] && [ "${2:-}" = "agent" ]; then
     shift 2
     exec sb-easy-agent "$@"

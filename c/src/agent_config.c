@@ -163,7 +163,7 @@ static int transform_outbound(sbj **slot, const sb_agent_config_options *options
 
     if (options->default_proxy_outbound && original_route_final &&
         strcmp(original_route_final, original_tag) == 0) {
-        const char *type;
+        const char *type = NULL;
         if (value_string(outbound, "type", &type, err) != 0) goto out;
         if (strcmp(type, "selector") == 0) {
             const char *wanted = options->default_proxy_outbound;
@@ -274,7 +274,7 @@ char *sb_prepare_agent_config(const char *body, size_t len,
             sbj *server;
             SBJ_ARR_FOREACH(servers, i, server) {
                 if (!sbj_is_object(server)) continue;
-                const char *tag;
+                const char *tag = NULL;
                 if (value_string(server, "tag", &tag, err) != 0) goto out;
                 if (strcmp(tag, "proxy-dns") == 0) {
                     present = true;
@@ -292,7 +292,7 @@ char *sb_prepare_agent_config(const char *body, size_t len,
             sbj *item;
             SBJ_ARR_FOREACH(rules, i, item) {
                 if (!sbj_is_object(item)) continue;
-                const char *server_tag;
+                const char *server_tag = NULL;
                 if (value_string(item, "server", &server_tag, err) != 0) goto out;
                 if (strcmp(server_tag, "proxy-dns") == 0) {
                     present = true;
@@ -362,7 +362,7 @@ static sbj *server_overrides_from_json(const sbj *value, sb_err *err) {
         sb_fail(err, SB_ERR_VALIDATION, "outbound_server_overrides must be a JSON object");
         return NULL;
     }
-    const char *tag;
+    const char *tag = NULL;
     const sbj *server;
     SBJ_OBJ_FOREACH(value, i, tag, server) {
         if (tag[0] == '\0' || !sbj_is_string(server) || server->v.str.len == 0) {
@@ -379,7 +379,7 @@ static sbj *outbound_overrides_from_json(const sbj *value, sb_err *err) {
         sb_fail(err, SB_ERR_VALIDATION, "outbound_overrides must be a JSON object");
         return NULL;
     }
-    const char *tag;
+    const char *tag = NULL;
     const sbj *outbound;
     SBJ_OBJ_FOREACH(value, i, tag, outbound) {
         if (tag[0] == '\0' || !sbj_is_object(outbound)) {

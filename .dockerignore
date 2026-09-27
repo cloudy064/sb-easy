@@ -13,3 +13,9 @@ data/
 *.db-*
 **/*.tsbuildinfo
 .env
+
+# Local experiments and runtime credentials are never image inputs.
+tmp/
+agent-data/
+backups/
+**/__pycache__/

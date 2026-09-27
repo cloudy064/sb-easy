@@ -899,14 +899,14 @@ static int read_local_proxy(const sbj *config, local_proxy *out, sb_err *err) {
     const sbj *inbound;
     SBJ_ARR_FOREACH(inbounds, i, inbound) {
         if (!sbj_is_object(inbound)) continue;
-        const char *type;
+        const char *type = NULL;
         if (value_string(inbound, "type", "", &type, err) != 0) return -1;
         if (strcmp(type, "mixed") != 0 && strcmp(type, "http") != 0) continue;
         const sbj *port = sbj_get(inbound, "listen_port");
         if (!sbj_is_integer(port)) continue;
         uint32_t number = as_uint32(port);
         if (number == 0u || number > 65535u) continue;
-        const char *listen;
+        const char *listen = NULL;
         if (value_string(inbound, "listen", "127.0.0.1", &listen, err) != 0) return -1;
         if (listen[0] == '\0' || strcmp(listen, "0.0.0.0") == 0) listen = "127.0.0.1";
         else if (strcmp(listen, "::") == 0 || strcmp(listen, "[::]") == 0) listen = "::1";
@@ -1013,7 +1013,7 @@ static sbj *route_result(const url_target *target, const sbj *connection, sb_err
     else if (strcmp(normalized, "block") == 0 || strcmp(normalized, "reject") == 0) kind = "block";
     else if (outbound[0] == '\0') kind = "unknown";
     free(normalized);
-    const char *rule, *rule_payload;
+    const char *rule = NULL, *rule_payload = NULL;
     if (value_string(connection, "rule", "", &rule, err) != 0 ||
         value_string(connection, "rulePayload", "", &rule_payload, err) != 0) {
         sbj_free(chains);

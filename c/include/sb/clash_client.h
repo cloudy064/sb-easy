@@ -47,10 +47,6 @@ int sb_clash_remove(sb_clash_client *client, const sb_clash_target *target, cons
 int sb_clash_put(sb_clash_client *client, const sb_clash_target *target, const char *path,
                  const sbj *body, sb_clash_response *out, sb_err *err);
 
-/* Maps an sb_http_perform transport error message to Drogon's ReqResult
- * wording ("Timeout", "Network failure", ...). Shared with agent_client. */
-const char *sb_http_failure_reason(const char *message);
-
 #ifdef __cplusplus
 }
 #endif

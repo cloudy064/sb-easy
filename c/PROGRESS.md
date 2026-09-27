@@ -107,6 +107,9 @@ not start a runtime service or modify host interfaces.
 - C++ also passes the profile lifecycle/enrollment/rendering scenario. Offline
   renderer outputs are byte-identical, and all 16 production DB snapshot
   comparisons still pass. Logs: `/tmp/sb-c-profile-*.log`.
+- Versioned images `sb-easy:c-panel-f181f96` and
+  `sb-easy:c-unified-f181f96` built successfully with GCC 12 Release warnings
+  as errors; the embedded engine smoke test passed during the agent build.
 - These source changes are not deployed yet. Host names, proxy tags and the
   wider non-authentication model audit remain in progress; Android receipt
   remains dependent on the two offline devices reconnecting.

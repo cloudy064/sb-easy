@@ -126,7 +126,7 @@ static int value_string(const sbj *object, const char *key, const char *fallback
         return sb_fail(err, SB_ERR_UPSTREAM,
                        "[json.exception.type_error.302] type must be string, but is %s",
                        sbj_type_name(found));
-    *out = sb_strdup(found->v.str.ptr);
+    *out = sb_strndup(found->v.str.ptr, found->v.str.len);
     return 0;
 }
 
@@ -185,6 +185,8 @@ int sb_enroll_device(const sb_device_enrollment_options *options, sb_device_cred
     if (!value_rc) value_rc |= value_string(body, "agent_token", "", &out->token, err);
     if (!value_rc) value_rc |= value_string(profile, "id", "", &out->profile_id, err);
     if (!value_rc) value_rc |= value_string(profile, "name", "", &out->profile_name, err);
+    const sbj *profile_name = sbj_get(profile, "name");
+    out->profile_name_len = sbj_is_string(profile_name) ? profile_name->v.str.len : 0;
     sbj_free(empty_profile);
     if (value_rc) goto out;
     if (sb_str_empty(out->server) || sb_str_empty(out->host_id) || sb_str_empty(out->token)) {

@@ -54,6 +54,7 @@ typedef struct {
     sbj *priority_route_rules;  /* array */
     char *control_plane_server; /* "" when unset */
     char *rule_script;          /* NULL == std::nullopt */
+    size_t rule_script_len;     /* exact byte length when present */
     char *clash_controller;
     char *clash_secret;
 } sb_render_request;

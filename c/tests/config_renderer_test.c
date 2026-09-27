@@ -68,6 +68,7 @@ TEST(managed_rendering_injects_outbounds_and_script_rules) {
     r.rule_script = sb_strdup(
         "\nfunction buildRules(context) {\n  return [{\n    domain_suffix: [\".example.com\"],\n"
         "    outbound: context.outboundTags.includes(\"hk\") ? \"hk\" : \"direct\"\n  }];\n}\n");
+    r.rule_script_len = strlen(r.rule_script);
     sb_str_set(&r.clash_controller, "0.0.0.0:9090");
     sb_str_set(&r.clash_secret, "controller-secret");
 
@@ -166,6 +167,7 @@ TEST(generated_rules_cannot_reference_unknown_outbounds) {
     set_profile(&r, "{\"route\":{\"rules\":[]}}");
     shadowsocks(sb_proxy_node_vec_push(&r.nodes), "hk");
     r.rule_script = sb_strdup("function buildRules() { return [{outbound: 'missing'}]; }");
+    r.rule_script_len = strlen(r.rule_script);
     sb_err err = {0};
     sbj *config = render(&r, &err);
     CHECK(config == NULL);
@@ -186,6 +188,7 @@ TEST(server_priority_routes_survive_quickjs_rule_replacement) {
         sbj_parse_cstr("[{\"ip_cidr\":[\"10.59.32.0/24\"],\"outbound\":\"sb-easy-network\"}]");
     r.rule_script = sb_strdup("function buildRules() { return [{ domain_suffix: ['.example.com'], "
                               "outbound: 'hk' }]; }");
+    r.rule_script_len = strlen(r.rule_script);
     sbj *config = render(&r, NULL);
     REQUIRE(config != NULL);
     CHECK(sbj_arr_len(at(config, "route.rules")) >= 6);
@@ -202,6 +205,7 @@ TEST(control_plane_route_survives_quickjs_and_uses_the_exact_server_host) {
     shadowsocks(sb_proxy_node_vec_push(&r.nodes), "hk");
     sb_str_set(&r.control_plane_server, "http://39.108.98.208:51821/api");
     r.rule_script = sb_strdup("function buildRules() { return [{ outbound: 'hk' }]; }");
+    r.rule_script_len = strlen(r.rule_script);
     sbj *config = render(&r, NULL);
     REQUIRE(config != NULL);
     CHECK(at_json(config, "route.rules.0.ip_cidr", "[\"39.108.98.208/32\"]"));

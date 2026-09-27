@@ -212,6 +212,7 @@ TEST(profile_scripts_persist_and_render_through_the_host_repository) {
                "  }\n"
                "  return [{ domain_suffix: [\".example.com\"], outbound: \"direct\" }];\n"
                "}\n");
+    p.rule_script_len = strlen(p.rule_script);
     p.rule_script_enabled = true;
     REQUIRE(sb_store_update_profile(s, &p, &saved, &err) == 0);
     CHECK(saved.rule_script_enabled);
@@ -293,6 +294,7 @@ TEST(profile_crud_uses_the_existing_config_profiles_schema) {
     sb_config_profile_init(&created);
     sb_config_profile_init(&saved);
     sb_str_set(&p.name, "Full profile");
+    p.name_len = strlen(p.name);
     sbj_free(p.profile);
     p.profile = sbj_parse_cstr("{\"log\":{\"level\":\"warn\"}}");
     p.mode = SB_PROFILE_FULL;
@@ -320,6 +322,7 @@ TEST(profile_crud_uses_the_existing_config_profiles_schema) {
 
     sb_config_profile_copy(&p, &created);
     sb_str_set(&p.name, "Renamed profile");
+    p.name_len = strlen(p.name);
     REQUIRE(sb_store_update_profile(s, &p, &saved, &err) == 0);
     CHECK_STR(saved.name, "Renamed profile");
     sb_str_set(&p.id, "missing");
@@ -436,6 +439,7 @@ TEST(profile_deletion_resets_assigned_hosts_to_default) {
     sb_config_profile_init(&p);
     sb_config_profile_init(&cp);
     sb_str_set(&p.name, "Temporary profile");
+    p.name_len = strlen(p.name);
     REQUIRE(sb_store_create_profile(s, &p, &cp, &err) == 0);
     sb_host host, ch;
     sb_host_init(&host);

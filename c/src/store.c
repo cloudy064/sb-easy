@@ -172,10 +172,12 @@ void sb_config_profile_free(sb_config_profile *p) {
 void sb_config_profile_copy(sb_config_profile *dst, const sb_config_profile *src) {
     sb_config_profile_free(dst);
     dst->id = sb_strdup(S(src->id));
-    dst->name = sb_strdup(S(src->name));
+    dst->name = sb_strndup(S(src->name), src->name_len);
+    dst->name_len = src->name_len;
     dst->profile = src->profile ? sbj_clone(src->profile) : sbj_object();
     dst->mode = src->mode;
-    dst->rule_script = sb_strdup(S(src->rule_script));
+    dst->rule_script = sb_strndup(S(src->rule_script), src->rule_script_len);
+    dst->rule_script_len = src->rule_script_len;
     dst->rule_script_enabled = src->rule_script_enabled;
     dst->created_at = sb_strdup(S(src->created_at));
     dst->updated_at = sb_strdup(S(src->updated_at));
@@ -183,10 +185,10 @@ void sb_config_profile_copy(sb_config_profile *dst, const sb_config_profile *src
 sbj *sb_config_profile_to_json(const sb_config_profile *p) {
     sbj *v = sbj_object();
     sbj_set_str(v, "id", S(p->id));
-    sbj_set_str(v, "name", S(p->name));
+    sbj_set(v, "name", sbj_strn(S(p->name), p->name_len));
     sbj_set(v, "template", sbj_str_take(sbj_dump(p->profile, -1)));
     sbj_set_str(v, "mode", sb_profile_mode_name(p->mode));
-    sbj_set_str(v, "rule_script", S(p->rule_script));
+    sbj_set(v, "rule_script", sbj_strn(S(p->rule_script), p->rule_script_len));
     sbj_set_bool(v, "rule_script_enabled", p->rule_script_enabled);
     sbj_set_str(v, "created_at", S(p->created_at));
     sbj_set_str(v, "updated_at", S(p->updated_at));
@@ -323,6 +325,7 @@ void sb_agent_enrollment_result_init(sb_agent_enrollment_result *r) {
     r->agent_token = sb_strdup("");
     r->profile_id = sb_strdup("");
     r->profile_name = sb_strdup("");
+    r->profile_name_len = 0;
 }
 void sb_agent_enrollment_result_free(sb_agent_enrollment_result *r) {
     free(r->host_id);
@@ -338,7 +341,7 @@ sbj *sb_agent_enrollment_result_to_json(const sb_agent_enrollment_result *r) {
     sbj_set_str(v, "host_name", S(r->host_name));
     sbj_set_str(v, "agent_token", S(r->agent_token));
     sbj_set_str(v, "profile_id", S(r->profile_id));
-    sbj_set_str(v, "profile_name", S(r->profile_name));
+    sbj_set(v, "profile_name", sbj_strn(S(r->profile_name), r->profile_name_len));
     return v;
 }
 
@@ -536,11 +539,13 @@ static int read_profile(sqlite3_stmt *st, sb_config_profile *p, sb_err *err) {
     sb_config_profile_free(p);
     p->id = sbq_text(st, 0);
     p->name = sbq_text(st, 1);
+    p->name_len = (size_t)sqlite3_column_bytes(st, 1);
     p->profile = profile;
     char *mode = sbq_text(st, 3);
     p->mode = parse_profile_mode(mode);
     free(mode);
     p->rule_script = sbq_text(st, 4);
+    p->rule_script_len = (size_t)sqlite3_column_bytes(st, 4);
     p->rule_script_enabled = sbq_int(st, 5) != 0;
     p->created_at = sbq_text(st, 6);
     p->updated_at = sbq_text(st, 7);
@@ -1709,7 +1714,7 @@ int sb_store_find_profile(sb_store *s, const char *id, sb_config_profile *out, s
 
 int sb_store_create_profile(sb_store *s, const sb_config_profile *profile, sb_config_profile *out,
                             sb_err *err) {
-    if (sb_str_empty(profile->name) || !sbj_is_object(profile->profile))
+    if (!profile->name || profile->name_len == 0 || !sbj_is_object(profile->profile))
         return sb_fail(err, SB_ERR_VALIDATION, "Profile name and object template are required");
     char *id = sb_str_empty(profile->id) ? sb_uuid_v4() : sb_strdup(profile->id);
     int rc = -1;
@@ -1724,10 +1729,10 @@ int sb_store_create_profile(sb_store *s, const sb_config_profile *profile, sb_co
                                    err);
     if (st) {
         sbq_bind_text(st, 1, id);
-        sbq_bind_text(st, 2, profile->name);
-        int bound = bind_dump(st, 3, profile->profile, err);
+        int bound = sbq_bind_text_n(st, 2, profile->name, profile->name_len, err);
+        if (bound == 0) bound = bind_dump(st, 3, profile->profile, err);
         sbq_bind_text(st, 4, sb_profile_mode_name(profile->mode));
-        sbq_bind_text(st, 5, S(profile->rule_script));
+        if (bound == 0) bound = sbq_bind_text_n(st, 5, S(profile->rule_script), profile->rule_script_len, err);
         sbq_bind_bool(st, 6, profile->rule_script_enabled);
         if (exec_bound(st, bound, err) == 0) rc = reload_profile(h, id, out, err);
     }
@@ -1738,7 +1743,7 @@ int sb_store_create_profile(sb_store *s, const sb_config_profile *profile, sb_co
 
 int sb_store_update_profile(sb_store *s, const sb_config_profile *profile, sb_config_profile *out,
                             sb_err *err) {
-    if (sb_str_empty(profile->id) || sb_str_empty(profile->name) || !sbj_is_object(profile->profile))
+    if (sb_str_empty(profile->id) || !profile->name || profile->name_len == 0 || !sbj_is_object(profile->profile))
         return sb_fail(err, SB_ERR_VALIDATION, "Profile id, name, and object template are required");
     int rc = -1;
     LOCK(s);
@@ -1749,10 +1754,10 @@ int sb_store_update_profile(sb_store *s, const sb_config_profile *profile, sb_co
                                    "updated_at = datetime('now') WHERE id = ?6",
                                    err);
     if (st) {
-        sbq_bind_text(st, 1, profile->name);
-        int bound = bind_dump(st, 2, profile->profile, err);
+        int bound = sbq_bind_text_n(st, 1, profile->name, profile->name_len, err);
+        if (bound == 0) bound = bind_dump(st, 2, profile->profile, err);
         sbq_bind_text(st, 3, sb_profile_mode_name(profile->mode));
-        sbq_bind_text(st, 4, S(profile->rule_script));
+        if (bound == 0) bound = sbq_bind_text_n(st, 4, S(profile->rule_script), profile->rule_script_len, err);
         sbq_bind_bool(st, 5, profile->rule_script_enabled);
         sbq_bind_text(st, 6, profile->id);
         if (exec_bound(st, bound, err) == 0) {
@@ -2190,6 +2195,7 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
                 result.agent_token = sbq_text(st, 3);
                 result.profile_id = sbq_text(st, 4);
                 result.profile_name = sbq_text(st, 5);
+                result.profile_name_len = (size_t)sqlite3_column_bytes(st, 5);
                 char *caps = sbq_text(st, 6);
                 capabilities = parse_object_or_empty(caps);
                 free(caps);
@@ -2908,8 +2914,10 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
     free(clash_api);
     free(out->clash_secret);
     out->clash_secret = sbq_text(host, 5);
-    if (profile.rule_script_enabled && !sb_str_empty(profile.rule_script))
-        out->rule_script = sb_strdup(profile.rule_script);
+    if (profile.rule_script_enabled && profile.rule_script_len > 0) {
+        out->rule_script = sb_strndup(profile.rule_script, profile.rule_script_len);
+        out->rule_script_len = profile.rule_script_len;
+    }
 
     const sbj *endpoints = sbj_get(out->profile, "endpoints");
     const sbj *endpoint;

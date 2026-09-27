@@ -66,6 +66,7 @@ char *sb_trim_dup(const char *s); /* ASCII whitespace trimmed copy */
 char *sb_lower_dup(const char *s);
 /* Replace *slot with a copy of value (frees the old one). */
 void sb_str_set(char **slot, const char *value);
+void sb_str_setn(char **slot, const char *value, size_t len);
 
 /* ---- growable byte buffer ------------------------------------------- */
 typedef struct {

@@ -327,7 +327,7 @@ static int save_device_credential(const char *path, const sb_device_credential *
     sbj_set_str(value, "host_name", credential->host_name);
     sbj_set_str(value, "agent_token", credential->token);
     sbj_set_str(value, "profile_id", credential->profile_id);
-    sbj_set_str(value, "profile_name", credential->profile_name);
+    sbj_set(value, "profile_name", sbj_strn(credential->profile_name, credential->profile_name_len));
     char *dumped = sbj_dump(value, 2);
     sbj_free(value);
     char *serialized = sb_asprintf("%s\n", dumped);

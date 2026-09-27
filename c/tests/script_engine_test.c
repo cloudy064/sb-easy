@@ -21,6 +21,28 @@ TEST(quickjs_builds_json_route_rules) {
     sbj_free(context);
 }
 
+TEST(quickjs_counts_source_bytes_after_embedded_nul) {
+    const char source[] = "function buildRules() { return [{value:'left\0right'}]; }";
+    sb_script_limits limits = sb_script_limits_default();
+    limits.source_bytes = sizeof source - 2;
+    sb_rule_script_engine engine;
+    REQUIRE(sb_rule_script_engine_init(&engine, &limits, NULL) == 0);
+    sb_err err = {0};
+    sbj *rules = sb_rule_script_engine_build_rules_n(&engine, source, sizeof source - 1, NULL, &err);
+    CHECK(rules == NULL);
+    CHECK_STR(err.msg, "rule script exceeds the configured source limit");
+    limits.source_bytes++;
+    REQUIRE(sb_rule_script_engine_init(&engine, &limits, NULL) == 0);
+    char unterminated[sizeof source - 1];
+    memcpy(unterminated, source, sizeof unterminated);
+    rules = sb_rule_script_engine_build_rules_n(&engine, unterminated, sizeof unterminated, NULL, &err);
+    REQUIRE(rules);
+    sbj *expected = sbj_strn("left\0right", 10);
+    CHECK(sbj_equal(sbj_get(sbj_arr_at(rules, 0), "value"), expected));
+    sbj_free(expected);
+    sbj_free(rules);
+}
+
 TEST(quickjs_interrupts_infinite_loops) {
     sb_script_limits limits = sb_script_limits_default();
     limits.timeout_ms = 20;

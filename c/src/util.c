@@ -127,7 +127,11 @@ char *sb_lower_dup(const char *s) {
 }
 
 void sb_str_set(char **slot, const char *value) {
-    char *copy = sb_strdup(value);
+    sb_str_setn(slot, value, value ? strlen(value) : 0);
+}
+
+void sb_str_setn(char **slot, const char *value, size_t len) {
+    char *copy = sb_strndup(value, len);
     free(*slot);
     *slot = copy;
 }

@@ -90,7 +90,10 @@ static int parse_request(const sbj *value, sb_render_request *request, sb_err *e
     sb_str_set(&request->control_plane_server, control);
 
     const sbj *script = sbj_get(value, "rule_script");
-    if (sbj_is_string(script)) sb_str_set(&request->rule_script, script->v.str.ptr);
+    if (sbj_is_string(script)) {
+        sb_str_setn(&request->rule_script, script->v.str.ptr, script->v.str.len);
+        request->rule_script_len = script->v.str.len;
+    }
 
     const sbj *clash = sbj_get(value, "clash");
     if (sbj_is_object(clash)) {

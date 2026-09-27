@@ -40,6 +40,10 @@ int sb_rule_script_engine_init(sb_rule_script_engine *engine, const sb_script_li
 sbj *sb_rule_script_engine_build_rules(const sb_rule_script_engine *engine, const char *source,
                                        const sbj *context, sb_err *err);
 
+/* Explicit source length, including embedded NUL bytes. */
+sbj *sb_rule_script_engine_build_rules_n(const sb_rule_script_engine *engine, const char *source,
+                                         size_t source_len, const sbj *context, sb_err *err);
+
 #ifdef __cplusplus
 }
 #endif

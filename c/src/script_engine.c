@@ -95,8 +95,13 @@ static const char kDeterministicPrelude[] =
 
 sbj *sb_rule_script_engine_build_rules(const sb_rule_script_engine *engine, const char *source,
                                        const sbj *context, sb_err *err) {
+    return sb_rule_script_engine_build_rules_n(engine, source, source ? strlen(source) : 0, context, err);
+}
+
+sbj *sb_rule_script_engine_build_rules_n(const sb_rule_script_engine *engine, const char *source,
+                                         size_t source_len, const sbj *context, sb_err *err) {
     const sb_script_limits *limits = &engine->limits;
-    size_t source_len = source ? strlen(source) : 0;
+    if (!source) source_len = 0;
     if (source_len == 0) {
         sb_fail(err, SB_ERR_SCRIPT, "rule script is empty");
         return NULL;
@@ -133,7 +138,11 @@ sbj *sb_rule_script_engine_build_rules(const sb_rule_script_engine *engine, cons
     if (evaluate(ctx, kDeterministicPrelude, sizeof kDeterministicPrelude - 1,
                  "<sb-easy-bootstrap>", err) != 0)
         goto done;
-    if (evaluate(ctx, source, source_len, "<rule-script>", err) != 0) goto done;
+    /* QuickJS requires a terminator after the specified input bytes. */
+    char *source_copy = sb_strndup(source, source_len);
+    int evaluated = evaluate(ctx, source_copy, source_len, "<rule-script>", err);
+    free(source_copy);
+    if (evaluated != 0) goto done;
 
     global = JS_GetGlobalObject(ctx);
     function = JS_GetPropertyStr(ctx, global, "buildRules");

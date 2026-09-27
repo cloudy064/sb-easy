@@ -41,6 +41,7 @@ typedef struct {
     char *token;
     char *profile_id;
     char *profile_name;
+    size_t profile_name_len;
 } sb_device_credential;
 void sb_device_credential_free(sb_device_credential *c);
 

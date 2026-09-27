@@ -136,11 +136,15 @@ static int profile_from_request(const sbj *body, sb_config_profile *profile, sb_
     if (enabled && !sbj_is_bool(enabled))
         return sb_fail(err, SB_ERR_VALIDATION, "rule_script_enabled must be a boolean");
 
-    sb_str_set(&profile->name, name_value->v.str.ptr);
+    sb_str_setn(&profile->name, name_value->v.str.ptr, name_value->v.str.len);
+    profile->name_len = name_value->v.str.len;
     sbj_free(profile->profile);
     profile->profile = sbj_clone(template_value);
     profile->mode = mode;
-    if (script) sb_str_set(&profile->rule_script, script->v.str.ptr);
+    if (script) {
+        sb_str_setn(&profile->rule_script, script->v.str.ptr, script->v.str.len);
+        profile->rule_script_len = script->v.str.len;
+    }
     if (enabled) profile->rule_script_enabled = enabled->v.b;
     if (profile->rule_script_enabled) {
         /* trim(rule_script).empty(), judged on the full JSON bytes when the
@@ -149,7 +153,7 @@ static int profile_from_request(const sbj *body, sb_config_profile *profile, sb_
         if (script)
             trim_span(script->v.str.ptr, script->v.str.len, &start, &len);
         else
-            trim_span(S(profile->rule_script), strlen(S(profile->rule_script)), &start, &len);
+            trim_span(S(profile->rule_script), profile->rule_script_len, &start, &len);
         if (len == 0)
             return sb_fail(err, SB_ERR_VALIDATION, "rule_script must not be empty when rule_script_enabled is true");
     }
@@ -227,7 +231,7 @@ static int handle_rule_script_test(sb_http_req *req, sb_http_resp *resp, sb_err 
     }
     sb_rule_script_engine engine;
     if (sb_rule_script_engine_init(&engine, NULL, err) != 0) goto done;
-    rules = sb_rule_script_engine_build_rules(&engine, script, context, err);
+    rules = sb_rule_script_engine_build_rules_n(&engine, script, sbj_get(body, "rule_script")->v.str.len, context, err);
     if (!rules) goto done;
     sbj *out = sbj_object();
     sbj_set_bool(out, "success", true);
@@ -933,7 +937,7 @@ static int handle_redeem_device_enrollment(sb_http_req *req, sb_http_resp *resp,
     sbj_set_str(out, "agent_token", S(enrollment.agent_token));
     sbj *profile = sbj_object();
     sbj_set_str(profile, "id", S(enrollment.profile_id));
-    sbj_set_str(profile, "name", S(enrollment.profile_name));
+    sbj_set(profile, "name", sbj_strn(S(enrollment.profile_name), enrollment.profile_name_len));
     sbj_set(out, "profile", profile);
     sb_resp_json(resp, 200, out);
     rc = 0;

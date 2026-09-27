@@ -93,3 +93,20 @@ not start a runtime service or modify host interfaces.
   survive C++ storage/response but are truncated by C. Evidence:
   `/tmp/sb-c-model-audit.log`. These fields still require fixes; this audit
   is not a claim that other model fields have been exhaustively covered.
+
+## Profile string compatibility follow-up
+
+- Profile names and rule scripts preserve byte lengths through create/update,
+  list, copy, SQLite, script preview, rendering and the offline renderer CLI.
+- Enrollment responses and saved agent credentials preserve profile names.
+- Source limits count bytes after embedded NUL; QuickJS receives a terminated
+  copy of the complete byte sequence, including when the caller buffer has
+  no trailing terminator.
+- All 18 normal and ASan/UBSan suites passed. Follow-up targeted engine/store/
+  enrollment and end-to-end tests passed in both builds after final changes.
+- C++ also passes the profile lifecycle/enrollment/rendering scenario. Offline
+  renderer outputs are byte-identical, and all 16 production DB snapshot
+  comparisons still pass. Logs: `/tmp/sb-c-profile-*.log`.
+- These source changes are not deployed yet. Host names, proxy tags and the
+  wider non-authentication model audit remain in progress; Android receipt
+  remains dependent on the two offline devices reconnecting.

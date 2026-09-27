@@ -110,6 +110,32 @@ def run(args, root):
             assert request("/api/auth/login", wrong, authenticated=False)[0] == 401
             api("/api/users/" + created["id"], method="DELETE")
         print("PASS: NUL usernames and passwords preserve distinct identities, sessions and audit actors")
+        script = "function buildRules() { return [{domain_suffix:['left\0right'],outbound:'direct'}]; }"
+        preview = api("/api/hosts/rule-script/test", {"rule_script": script})
+        assert preview["rules"][0]["domain_suffix"] == ["left\0right"]
+        body = {"name": "profile\0tail", "mode": "full", "template": {
+                    "outbounds": [{"type": "direct", "tag": "direct"}], "route": {}},
+                "rule_script": script, "rule_script_enabled": False}
+        prof = api("/api/hosts/profiles", body)
+        assert prof["name"] == body["name"] and prof["rule_script"] == script
+        listed = next(p for p in api("/api/hosts/profiles") if p["id"] == prof["id"])
+        assert listed["name"] == body["name"] and listed["rule_script"] == script
+        # Updating unrelated profile fields must retain all stored script bytes.
+        body.pop("rule_script")
+        body["rule_script_enabled"] = True
+        body["name"] = "\0renamed"
+        prof = api("/api/hosts/profiles/" + prof["id"], body, "PUT")
+        assert prof["name"] == body["name"] and prof["rule_script"] == script
+        host = api("/api/hosts", {"name": "script identity host", "profile_id": prof["id"],
+                    "capabilities": {"runs_singbox": False, "is_wg_member": False}})
+        enrollment = api("/api/devices/" + host["id"] + "/enrollment-codes", method="POST")
+        redeemed = api("/api/devices/enroll", {"code": enrollment["code"], "device": {}})
+        assert redeemed["profile"]["name"] == body["name"]
+        config = api("/api/hosts/" + host["id"] + "/config")
+        assert any(rule.get("domain_suffix") == ["left\0right"] for rule in config["route"]["rules"])
+        api("/api/hosts/" + host["id"], method="DELETE")
+        api("/api/hosts/profiles/" + prof["id"], method="DELETE")
+        print("PASS: profile name and script bytes survive create, update, list, preview and rendering")
         shared = api("/api/hosts/profiles", profile("jp-fixed-a"))
         agents = []
         for n in range(2):

@@ -75,7 +75,8 @@ test in this configuration.
   responses is rejected with the existing type-error response.
 - Passwords, usernames, JWT username claims and audit actors preserve explicit
   byte lengths, including embedded NUL bytes. Agent UI credentials are matched
-  against the full JSON strings. Other model strings still use C strings;
+  against the full JSON strings. Profile names and rule scripts also preserve
+  byte lengths through storage, rendering and enrollment. Other model strings still use C strings;
   their NUL compatibility requires further audit before claiming byte-exact
   parity for arbitrary inputs.
 - The agent does not serve arbitrary working-directory files on unmatched UI

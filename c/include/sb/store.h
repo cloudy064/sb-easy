@@ -98,6 +98,7 @@ typedef struct {
     sbj *profile; /* object */
     sb_profile_mode mode;
     char *rule_script;
+    size_t name_len, rule_script_len; /* exact byte lengths; update with the strings */
     bool rule_script_enabled;
     char *created_at, *updated_at;
 } sb_config_profile;
@@ -152,6 +153,7 @@ sbj *sb_agent_enrollment_to_json(const sb_agent_enrollment *e);
 
 typedef struct {
     char *host_id, *host_name, *agent_token, *profile_id, *profile_name;
+    size_t profile_name_len;
 } sb_agent_enrollment_result;
 void sb_agent_enrollment_result_init(sb_agent_enrollment_result *r);
 void sb_agent_enrollment_result_free(sb_agent_enrollment_result *r);

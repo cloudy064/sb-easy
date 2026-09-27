@@ -585,7 +585,7 @@ static int render_rule_script(const sb_config_renderer *renderer,
     sbj_set(context, "currentRules", current_rules ? sbj_clone(current_rules) : sbj_array());
 
     sbj *rules =
-        sb_rule_script_engine_build_rules(&renderer->scripts, request->rule_script, context, err);
+        sb_rule_script_engine_build_rules_n(&renderer->scripts, request->rule_script, request->rule_script_len, context, err);
     sbj_free(context);
     if (!rules || validate_rule_tags(rules, &allowed, err) != 0) {
         sbj_free(rules);
@@ -610,7 +610,7 @@ sbj *sb_config_renderer_render(const sb_config_renderer *renderer,
         render_managed(request, config, &managed_has_proxy, err) != 0)
         goto fail;
 
-    if (request->rule_script && *request->rule_script &&
+    if (request->rule_script && request->rule_script_len > 0 &&
         render_rule_script(renderer, request, config, err) != 0)
         goto fail;
 

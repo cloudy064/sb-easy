@@ -30,6 +30,7 @@ object CoreGraph {
                 configStore,
                 ControlPlaneClient(application),
                 installId,
+                LocalRoutingStore(application),
             )
             initialized = true
         }

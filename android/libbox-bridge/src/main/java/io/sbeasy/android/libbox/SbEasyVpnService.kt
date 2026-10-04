@@ -275,12 +275,28 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         server.start()
         try {
             server.startOrReloadService(config.content, OverrideOptions())
+            restoreLocalDefaults(config)
         } catch (error: Throwable) {
+            runCatching { server.closeService() }
             runCatching { server.close() }
             throw error
         }
         commandServer = server
         commandMonitor = LibboxCommandMonitor(::restoreRememberedSelections).also { it.connect() }
+    }
+
+    private fun restoreLocalDefaults(config: ManagedConfig) {
+        // The core caches selector choices as well as rule sets. Restore our
+        // authoritative local policy synchronously before reporting connected;
+        // keeping the cache namespace preserves rule sets for offline startup.
+        val client = io.nekohasekai.libbox.Libbox.newStandaloneCommandClient()
+        try {
+            io.sbeasy.android.core.LocalRouting.selectionsFromConfig(config.content).forEach { (tag, selected) ->
+                client.selectOutbound(tag, selected)
+            }
+        } finally {
+            runCatching { client.disconnect() }
+        }
     }
 
     private fun powerState(): String {
@@ -403,9 +419,14 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
             val previous = CoreGraph.repository.activeConfig()
             try {
                 server.startOrReloadService(config.content, OverrideOptions())
+                restoreLocalDefaults(config)
+                restoredSelectionGroups.clear()
             } catch (error: Throwable) {
                 if (previous != null) {
-                    runCatching { server.startOrReloadService(previous.content, OverrideOptions()) }
+                    runCatching {
+                        server.startOrReloadService(previous.content, OverrideOptions())
+                        restoreLocalDefaults(previous)
+                    }
                 }
                 throw error
             }
@@ -458,6 +479,9 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private fun restoreRememberedSelections(groups: List<ProxyGroupSnapshot>) {
         val preferences = getSharedPreferences(SELECTION_PREFERENCES, MODE_PRIVATE)
         groups.filter { it.selectable }.forEach { group ->
+            // Device-owned groups get their authoritative defaults from the
+            // local routing policy, including changes made while disconnected.
+            if (group.tag.startsWith(io.sbeasy.android.core.LocalRouting.TAG_PREFIX)) return@forEach
             if (!restoredSelectionGroups.add(group.tag)) return@forEach
             val remembered = preferences.getString(group.tag, null) ?: return@forEach
             if (remembered == group.selected || group.items.none { it.tag == remembered }) return@forEach

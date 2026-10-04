@@ -19,12 +19,27 @@ class AgentRepository internal constructor(
     private val configStore: AtomicConfigStore,
     private val client: ControlPlaneClient,
     private val installId: String,
+    private val routingStore: LocalRoutingStore,
 ) {
     private val syncMutex = Mutex()
+    private val initialEnrollment = secureStore.load()
+    private val storedPolicy = routingStore.load()
+    private var localPolicy = configStore.active()?.let { base ->
+        LocalRouting.migrateProvisionedDefaults(base.content, storedPolicy ?: LocalRouting.defaults(base.content))
+    } ?: storedPolicy
+    private var policyPersisted = storedPolicy != null && storedPolicy == localPolicy
+    private val mutableRouting = MutableStateFlow(
+        configStore.active()?.let { base ->
+            LocalRouting.render(base.content, requireNotNull(localPolicy), initialEnrollment?.server.orEmpty()).snapshot
+        } ?: LocalRoutingSnapshot(),
+    )
+    val routing: StateFlow<LocalRoutingSnapshot> = mutableRouting.asStateFlow()
     private val mutableState = MutableStateFlow(
         ControlPlaneSnapshot(
-            enrollment = secureStore.load(),
-            config = configStore.active(),
+            enrollment = initialEnrollment,
+            config = configStore.active()?.let { base ->
+                base.copy(content = LocalRouting.render(base.content, requireNotNull(localPolicy), initialEnrollment?.server.orEmpty()).content)
+            },
         ),
     )
     val state: StateFlow<ControlPlaneSnapshot> = mutableState.asStateFlow()
@@ -63,8 +78,19 @@ class AgentRepository internal constructor(
                 client.fetchConfig(enrollment, active?.etag, force)
             }) {
                 ConfigFetchResult.NotModified -> {
+                    if (active != null) {
+                        val previous = localPolicy ?: LocalRouting.defaults(active.content)
+                        val policy = LocalRouting.migrateProvisionedDefaults(active.content, previous)
+                        if (policy != previous) updateLocalRoutingLocked(policy)
+                        if (!policyPersisted) {
+                            withContext(Dispatchers.IO) { routingStore.save(policy) }
+                            policyPersisted = true
+                        }
+                        localPolicy = policy
+                        publishRouting(active, policy)
+                    }
                     mutableState.value = mutableState.value.copy(
-                        config = active,
+                        config = active?.let { effectiveConfig(it) },
                         syncPhase = SyncPhase.CURRENT,
                     )
                     false
@@ -72,30 +98,51 @@ class AgentRepository internal constructor(
                 is ConfigFetchResult.Updated -> {
                     require(result.config.etag.isNotBlank()) { "服务器配置缺少 ETag" }
                     configStore.saveCandidate(result.config)
+                    val previousPolicy = localPolicy
+                    val policy = LocalRouting.migrateProvisionedDefaults(
+                        result.config.content, previousPolicy ?: LocalRouting.defaults(result.config.content),
+                    )
+                    val effective = effectiveConfig(result.config, policy)
                     val control = RuntimeBridge.control
                     if (control != null) {
-                        control.applyConfiguration(result.config)
+                        control.applyConfiguration(effective)
                     } else {
                         requireNotNull(RuntimeBridge.validator) { "sing-box 核心尚未初始化" }
-                            .validate(result.config.content)
+                            .validate(effective.content)
                     }
-                    val promoted = configStore.promoteCandidate()
+                    val promoted = try {
+                        if (!policyPersisted || policy != previousPolicy) {
+                            withContext(Dispatchers.IO) { routingStore.save(policy) }
+                        }
+                        withContext(Dispatchers.IO) { configStore.promoteCandidate() }
+                    } catch (error: Throwable) {
+                        withContext(Dispatchers.IO) {
+                            runCatching { if (previousPolicy == null) routingStore.clear() else routingStore.save(previousPolicy) }
+                        }
+                        active?.let { previous ->
+                            if (control != null) runCatching { control.applyConfiguration(effectiveConfig(previous)) }
+                        }
+                        throw error
+                    }
+                    policyPersisted = true
+                    localPolicy = policy
+                    publishRouting(promoted, policy)
                     // Route observations describe one concrete generated config.
                     // Do not mix historical decisions from an older rule set with
                     // the newly applied policy.
                     RuntimeObservability.resetDomainRouteStats()
                     mutableState.value = mutableState.value.copy(
-                        config = promoted,
+                        config = effectiveConfig(promoted, policy),
                         syncPhase = SyncPhase.CURRENT,
                         lastError = null,
                     )
-                    VpnRuntimeState.configurationChanged(promoted)
+                    VpnRuntimeState.configurationChanged(effective)
                     true
                 }
             }
         } catch (error: Throwable) {
             mutableState.value = mutableState.value.copy(
-                config = configStore.active(),
+                config = configStore.active()?.let { effectiveConfig(it) },
                 syncPhase = SyncPhase.ERROR,
                 lastError = friendly(error),
             )
@@ -228,9 +275,64 @@ class AgentRepository internal constructor(
         }
     }
 
-    suspend fun selectOutbound(groupTag: String, outboundTag: String) {
-        requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.selectOutbound(groupTag, outboundTag)
-        RuntimeObservability.markSelection(groupTag, outboundTag)
+    suspend fun selectOutbound(groupTag: String, outboundTag: String) = syncMutex.withLock {
+        val snapshot = mutableRouting.value
+        val policy = snapshot.policy
+        val id = snapshot.groupTags.entries.firstOrNull { it.value == groupTag }?.key
+        if (policy != null && (id != null || groupTag == snapshot.defaultTag)) {
+            require(snapshot.availableNodes.any { it.tag == outboundTag }) { "节点已失效，请重新选择" }
+            val updated = if (id == null) policy.copy(defaultOutbound = outboundTag) else policy.copy(
+                groups = policy.groups.map { if (it.id == id) it.copy(outbound = outboundTag) else it },
+            )
+            updateLocalRoutingLocked(updated)
+        } else {
+            requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.selectOutbound(groupTag, outboundTag)
+            RuntimeObservability.markSelection(groupTag, outboundTag)
+        }
+    }
+
+    suspend fun updateLocalRouting(policy: LocalRoutingPolicy) = syncMutex.withLock {
+        updateLocalRoutingLocked(policy)
+    }
+
+    private suspend fun updateLocalRoutingLocked(policy: LocalRoutingPolicy) {
+        LocalRouting.validate(policy)
+        val base = requireNotNull(configStore.active()) { "请先同步服务器配置" }
+        val previous = effectiveConfig(base)
+        val rendered = effectiveConfig(base, policy)
+        val control = RuntimeBridge.control
+        withContext(Dispatchers.IO) {
+            requireNotNull(RuntimeBridge.validator) { "sing-box 核心尚未初始化" }.validate(rendered.content)
+        }
+        val previousSnapshot = mutableRouting.value
+        val selectionOnly = previousSnapshot.policy?.let { old ->
+            old.groups.map { it.copy(outbound = "") } == policy.groups.map { it.copy(outbound = "") }
+        } == true
+        val nextSnapshot = LocalRouting.render(base.content, policy, mutableState.value.enrollment?.server.orEmpty()).snapshot
+        val changedSelections = nextSnapshot.selections.filter { (tag, selection) ->
+            previousSnapshot.selections[tag] != selection
+        }
+        try {
+            if (control != null) {
+                if (selectionOnly) changedSelections.forEach { (tag, selection) -> control.selectOutbound(tag, selection) }
+                else control.applyConfiguration(rendered)
+            }
+            withContext(Dispatchers.IO) { routingStore.save(policy) }
+        } catch (error: Throwable) {
+            if (control != null) {
+                if (selectionOnly) changedSelections.keys.forEach { tag ->
+                    previousSnapshot.selections[tag]?.let { selection -> runCatching { control.selectOutbound(tag, selection) } }
+                } else runCatching { control.applyConfiguration(previous) }
+            }
+            throw error
+        }
+        policyPersisted = true
+        localPolicy = policy
+        publishRouting(base, policy)
+        mutableState.value = mutableState.value.copy(config = rendered, lastError = null)
+        if (selectionOnly) changedSelections.forEach { (tag, selection) -> RuntimeObservability.markSelection(tag, selection) }
+        RuntimeObservability.resetDomainRouteStats()
+        VpnRuntimeState.configurationChanged(rendered)
     }
 
     suspend fun testGroup(groupTag: String): GroupTestResult {
@@ -277,16 +379,31 @@ class AgentRepository internal constructor(
         ClientDiagnostics.clear()
     }
 
-    fun forgetDevice() {
+    suspend fun forgetDevice() = syncMutex.withLock {
         check(VpnRuntimeState.state.value.phase == VpnPhase.DISCONNECTED ||
             VpnRuntimeState.state.value.phase == VpnPhase.ERROR) { "请先断开 VPN" }
         secureStore.clear()
         configStore.clear()
+        routingStore.clear()
+        localPolicy = null
+        policyPersisted = false
+        mutableRouting.value = LocalRoutingSnapshot()
         RuntimeObservability.resetDomainRouteStats()
         mutableState.value = ControlPlaneSnapshot()
     }
 
-    fun activeConfig(): ManagedConfig? = configStore.active()
+    fun activeConfig(): ManagedConfig? = mutableState.value.config
+
+    private fun effectiveConfig(base: ManagedConfig, policy: LocalRoutingPolicy? = localPolicy): ManagedConfig =
+        base.copy(content = LocalRouting.render(
+            base.content,
+            policy ?: LocalRouting.defaults(base.content),
+            mutableState.value.enrollment?.server.orEmpty(),
+        ).content)
+
+    private fun publishRouting(base: ManagedConfig, policy: LocalRoutingPolicy) {
+        mutableRouting.value = LocalRouting.render(base.content, policy, mutableState.value.enrollment?.server.orEmpty()).snapshot
+    }
 
     private fun friendly(error: Throwable): String =
         error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName

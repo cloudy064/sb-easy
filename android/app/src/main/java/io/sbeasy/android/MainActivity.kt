@@ -46,6 +46,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -62,6 +63,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -95,6 +97,10 @@ import io.sbeasy.android.core.CoreGraph
 import io.sbeasy.android.core.DomainRouteStat
 import io.sbeasy.android.core.EnrollmentUriParser
 import io.sbeasy.android.core.ManagedConfig
+import io.sbeasy.android.core.LocalRouting
+import io.sbeasy.android.core.LocalRoutingGroup
+import io.sbeasy.android.core.LocalRoutingPolicy
+import io.sbeasy.android.core.LocalRoutingSnapshot
 import io.sbeasy.android.core.ProxyGroupSnapshot
 import io.sbeasy.android.core.RouteDecision
 import io.sbeasy.android.core.RouteTestResult
@@ -310,6 +316,7 @@ private fun SbEasyApp(
     val domainRoutes by RuntimeObservability.domainRoutes.collectAsStateWithLifecycle()
     val logs by RuntimeObservability.logs.collectAsStateWithLifecycle()
     val diagnosticLogs by ClientDiagnostics.entries.collectAsStateWithLifecycle()
+    val routing by CoreGraph.repository.routing.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var selectedTab by remember { mutableIntStateOf(0) }
     var actionError by remember { mutableStateOf<String?>(null) }
@@ -363,8 +370,8 @@ private fun SbEasyApp(
                 header = { AppHeader(control, vpn.phase) },
             ) {
                 when (selectedTab) {
-                    0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, onConnect, onDisconnect)
-                    1 -> ProxiesScreen(groups, vpn.phase)
+                    0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, routing, onConnect, onDisconnect)
+                    1 -> ProxiesScreen(groups, routing, vpn.phase)
                     2 -> ToolsScreen(control.config, connections.size, domainRoutes, logs, diagnosticLogs, vpn.phase, vpn.coreVersion)
                     else -> SettingsScreen(control, vpn.coreVersion, vpn.phase, onDisconnect)
                 }
@@ -555,14 +562,15 @@ private fun HomeScreen(
     runtimeError: String?,
     traffic: TrafficSnapshot,
     groups: List<ProxyGroupSnapshot>,
+    routing: LocalRoutingSnapshot,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val connected = phase == VpnPhase.CONNECTED
     val busy = phase == VpnPhase.STARTING || phase == VpnPhase.STOPPING
-    val selectedProxy = groups.firstOrNull { it.selectable && it.selected.isNotBlank() }?.selected
-        ?: groups.firstOrNull { it.selected.isNotBlank() }?.selected
+    val selectedProxy = groups.firstOrNull { it.tag == routing.defaultTag && it.selected.isNotBlank() }?.selected
+        ?: routing.selections[routing.defaultTag]
         ?: "等待代理组数据"
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
@@ -629,138 +637,233 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun ProxiesScreen(groups: List<ProxyGroupSnapshot>, phase: VpnPhase) {
+private fun ProxiesScreen(
+    groups: List<ProxyGroupSnapshot>,
+    routing: LocalRoutingSnapshot,
+    phase: VpnPhase,
+) {
     val scope = rememberCoroutineScope()
-    var busyGroup by remember { mutableStateOf<String?>(null) }
-    var selectingTag by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var testing by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
+    var expandedTag by remember { mutableStateOf<String?>(null) }
+    var editor by remember { mutableStateOf<LocalRoutingGroup?>(null) }
+    var deleting by remember { mutableStateOf<LocalRoutingGroup?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
-    if (groups.isEmpty()) {
-        EmptyPanel(if (phase == VpnPhase.CONNECTED) "正在读取真实代理组…" else "连接 VPN 后可查看、切换和测速节点")
+    val policy = routing.policy
+    if (policy == null) {
+        EmptyPanel("先同步服务器配置，即可设置默认代理和服务分组")
         return
     }
-    val selectableGroups = groups.filter { it.selectable }
-        .sortedWith(compareBy<ProxyGroupSnapshot> { it.tag != "Proxy" }.thenBy { it.tag })
+    val changingVpn = phase == VpnPhase.STARTING || phase == VpnPhase.STOPPING
+    val canEdit = !busy && !changingVpn
     val latencyGroup = groups.firstOrNull { it.type.equals("urltest", ignoreCase = true) }
     val latencyByTag = latencyGroup?.items?.associateBy { it.tag }.orEmpty()
-    if (selectableGroups.isEmpty()) {
-        EmptyPanel("当前运行配置没有可手动选择的代理组，请立即同步配置后重连 VPN")
-        return
+    val rows = listOf(Triple(routing.defaultTag, "默认代理", null)) + policy.groups.map {
+        Triple(routing.groupTags.getValue(it.id), it.name, it)
     }
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             AppCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("代理节点", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                        Text(
-                            latencyGroup?.let { "${it.items.size} 个节点 · 真实 libbox 延迟" } ?: "当前配置没有测速组",
-                            color = Muted,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(top = 3.dp),
-                        )
+                Text("服务分组", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                Text("每组使用一个固定节点，国内和局域网直连，其余流量使用默认代理。",
+                    color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+                Text("设置保存在本机，重启和服务器同步后继续生效。",
+                    color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
+                    Button(onClick = {
+                        error = null
+                        editor = LocalRoutingGroup(java.util.UUID.randomUUID().toString(), "", emptyList(),
+                            routing.selections[routing.defaultTag] ?: policy.defaultOutbound)
+                    }, enabled = canEdit && policy.groups.size < 32) { Text("创建分组") }
+                    OutlinedButton(onClick = {
+                        scope.launch {
+                            val target = latencyGroup ?: return@launch
+                            testing = true
+                            error = null
+                            message = null
+                            runCatching { CoreGraph.repository.testGroup(target.tag) }
+                                .onSuccess { message = "测速完成：${it.tested}/${it.total} 个节点返回结果" }
+                                .onFailure { error = it.message }
+                            testing = false
+                        }
+                    }, enabled = canEdit && !testing && phase == VpnPhase.CONNECTED && latencyGroup != null) {
+                        Text(if (testing) "测速中…" else "节点测速")
                     }
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                val target = latencyGroup ?: return@launch
-                                busyGroup = target.tag
-                                error = null
-                                message = null
-                                runCatching { CoreGraph.repository.testGroup(target.tag) }
-                                    .onSuccess {
-                                        message = "测速完成：${it.tested}/${it.total} 个节点返回结果 · ${it.elapsedMillis} ms"
-                                    }
-                                    .onFailure { error = it.message }
-                                busyGroup = null
-                            }
-                        },
-                        enabled = phase == VpnPhase.CONNECTED && busyGroup == null && latencyGroup != null,
-                    ) { Text(if (busyGroup != null) "测速中…" else "全部测速") }
                 }
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = { Text("搜索节点") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                )
                 if (phase != VpnPhase.CONNECTED) {
-                    Text("请先连接 VPN，连接后才能切换或测速", color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp))
+                    Text("可在未连接时设置，启动 VPN 后生效。", color = AccentDark, fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 9.dp))
                 }
+                if (busy) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 9.dp)) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
+                    Text("正在应用设置…", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(start = 8.dp))
+                }
+                routing.warnings.forEach { Text(it, color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp)) }
                 message?.let { Text(it, color = AccentDark, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp)) }
                 error?.let { ErrorText(it) }
             }
         }
-        items(selectableGroups, key = { it.tag }) { group ->
-            val visibleItems = group.items.filter { proxy ->
-                query.isBlank() || proxy.tag.contains(query.trim(), ignoreCase = true)
-            }
+        items(rows, key = { it.first }) { (tag, name, group) ->
+            val selected = groups.firstOrNull { it.tag == tag }?.selected
+                ?: routing.selections[tag].orEmpty()
+            val expanded = expandedTag == tag
             AppCard {
-                Text(group.tag, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                Text(
-                    "当前：${group.selected.ifBlank { "自动选择" }} · 点击整行即可切换",
-                    color = Muted,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 3.dp, bottom = 10.dp),
-                )
-                visibleItems.forEach { proxy ->
-                    val selected = group.selected == proxy.tag
-                    val latency = latencyByTag[proxy.tag] ?: proxy
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 3.dp)
-                            .clip(RoundedCornerShape(13.dp))
-                            .background(if (selected) AccentSoft else Color.Transparent)
-                            .clickable(enabled = phase == VpnPhase.CONNECTED && selectingTag == null) {
-                                scope.launch {
-                                    selectingTag = proxy.tag
-                                    error = null
-                                    message = null
-                                    runCatching { CoreGraph.repository.selectOutbound(group.tag, proxy.tag) }
-                                        .onSuccess { message = "已切换到 ${proxy.tag}" }
-                                        .onFailure { error = it.message }
-                                    selectingTag = null
-                                }
-                            }
-                            .padding(horizontal = 5.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(
-                            selected = selected,
-                            onClick = null,
-                            enabled = phase == VpnPhase.CONNECTED,
-                        )
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                proxy.tag,
-                                color = if (selected) AccentDark else Ink,
-                                fontSize = 14.sp,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                if (proxy.tag == "auto") "自动选择最低延迟" else proxy.type,
-                                color = Muted,
-                                fontSize = 11.sp,
-                            )
-                        }
-                        if (selectingTag == proxy.tag) {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Accent)
-                        } else {
-                            DelayBadge(latency.urlTestDelay)
-                        }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(name, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Text(selected.ifBlank { "尚未选择" }, color = AccentDark, fontSize = 13.sp,
+                            modifier = Modifier.padding(top = 5.dp))
+                    }
+                    TextButton(onClick = { expandedTag = if (expanded) null else tag; query = "" }, enabled = canEdit) {
+                        Text(if (expanded) "收起" else "选择节点")
                     }
                 }
-                if (visibleItems.isEmpty()) Text("没有匹配的节点", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
-                message?.let { Text(it, color = AccentDark, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp)) }
-                error?.let { ErrorText(it) }
+                if (group == null) {
+                    Text("未命中服务分组且需要代理的流量", color = Muted, fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp))
+                } else {
+                    val appName = LocalRouting.officialAppName(group.id)?.takeIf { group.includeOfficialApp }
+                    Text((appName?.let { "官方 $it App · " } ?: "") + "${group.domains.size} 个域名及其子域名", color = Muted, fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp))
+                    Text(group.domains.take(3).joinToString(" · ") + if (group.domains.size > 3) " …" else "",
+                        color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+                    Row {
+                        TextButton(onClick = { editor = group; error = null }, enabled = canEdit) { Text("编辑规则") }
+                        TextButton(onClick = { deleting = group }, enabled = canEdit) { Text("删除分组", color = Danger) }
+                    }
+                }
+                if (expanded) {
+                    OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索节点") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+                    val visible = routing.availableNodes.filter { query.isBlank() || it.tag.contains(query.trim(), ignoreCase = true) }
+                    visible.forEach { proxy ->
+                        val isSelected = selected == proxy.tag
+                        val latency = latencyByTag[proxy.tag] ?: proxy
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(13.dp))
+                                .background(if (isSelected) AccentSoft else Color.Transparent)
+                                .clickable(enabled = canEdit) {
+                                    scope.launch {
+                                        busy = true
+                                        error = null
+                                        message = null
+                                        runCatching { CoreGraph.repository.selectOutbound(tag, proxy.tag) }
+                                            .onSuccess { message = "$name 已使用 ${proxy.tag}"; expandedTag = null }
+                                            .onFailure { error = it.message }
+                                        busy = false
+                                    }
+                                }.padding(horizontal = 5.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = isSelected, onClick = null, enabled = canEdit)
+                            Column(Modifier.weight(1f)) {
+                                Text(proxy.tag, color = if (isSelected) AccentDark else Ink, fontSize = 14.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(if (proxy.tag == "direct") "直接连接" else "固定节点 · ${proxy.type}",
+                                    color = Muted, fontSize = 11.sp)
+                            }
+                            if (proxy.tag != "direct") DelayBadge(latency.urlTestDelay)
+                        }
+                    }
+                    if (visible.isEmpty()) Text("没有匹配的节点", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
+                }
+            }
+        }
+        item {
+            AppCard {
+                Text("直连", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("国内域名、国内 IP、局域网和管理服务器 → direct", color = Muted, fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 7.dp))
+                Text("网页按域名匹配，Claude 和 GPT 组也包含官方 App 的流量。新增服务域名或第三方网关可在对应组补充。",
+                    color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 7.dp))
             }
         }
     }
+    editor?.let { original ->
+        RoutingGroupEditor(original, policy, busy, error, onDismiss = { if (!busy) editor = null }) { updated ->
+            scope.launch {
+                busy = true
+                error = null
+                message = null
+                val fresh = CoreGraph.repository.routing.value.policy ?: policy
+                val next = fresh.copy(groups = if (fresh.groups.any { it.id == updated.id }) {
+                    fresh.groups.map { if (it.id == updated.id) updated else it }
+                } else fresh.groups + updated)
+                runCatching { CoreGraph.repository.updateLocalRouting(next) }
+                    .onSuccess { message = "${updated.name} 分组已保存"; editor = null }
+                    .onFailure { error = it.message }
+                busy = false
+            }
+        }
+    }
+    deleting?.let { group ->
+        AlertDialog(onDismissRequest = { if (!busy) deleting = null },
+            title = { Text("删除 ${group.name} 分组？") },
+            text = { Text("该组域名将重新按直连规则或默认代理处理。") },
+            dismissButton = { TextButton(onClick = { deleting = null }, enabled = !busy) { Text("取消") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        busy = true
+                        error = null
+                        val fresh = CoreGraph.repository.routing.value.policy ?: policy
+                        runCatching { CoreGraph.repository.updateLocalRouting(fresh.copy(groups = fresh.groups.filterNot { it.id == group.id })) }
+                            .onSuccess { message = "${group.name} 分组已删除"; deleting = null }
+                            .onFailure { error = it.message }
+                        busy = false
+                    }
+                }, enabled = !busy) { Text("删除", color = Danger) }
+            })
+    }
+}
+
+@Composable
+private fun RoutingGroupEditor(
+    original: LocalRoutingGroup,
+    policy: LocalRoutingPolicy,
+    busy: Boolean,
+    saveError: String?,
+    onDismiss: () -> Unit,
+    onSave: (LocalRoutingGroup) -> Unit,
+) {
+    var name by remember(original.id) { mutableStateOf(original.name) }
+    var domains by remember(original.id) { mutableStateOf(original.domains.joinToString("\n")) }
+    var includeApp by remember(original.id) { mutableStateOf(original.includeOfficialApp) }
+    var error by remember(original.id) { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (original.name.isBlank()) "创建服务分组" else "编辑 ${original.name}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(name, { name = it }, label = { Text("分组名称") }, singleLine = true,
+                    enabled = !busy, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(domains, { domains = it }, label = { Text("域名，每行一个") }, minLines = 5, maxLines = 10,
+                    enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
+                Text("例如 anthropic.com，会同时匹配其子域名。保存后可单独选择该组的固定节点。",
+                    color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                LocalRouting.officialAppName(original.id)?.let { appName ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("包含官方 $appName App 的流量", color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(checked = includeApp, onCheckedChange = { includeApp = it }, enabled = !busy)
+                    }
+                }
+                (error ?: saveError)?.let { ErrorText(it) }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") } },
+        confirmButton = {
+            TextButton(onClick = {
+                runCatching {
+                    val updated = original.copy(name = name.trim(), domains = LocalRouting.normalizeDomains(domains), includeOfficialApp = includeApp)
+                    LocalRouting.validate(policy.copy(groups = policy.groups.filterNot { it.id == updated.id } + updated))
+                    updated
+                }.onSuccess(onSave).onFailure { error = it.message }
+            }, enabled = !busy) { Text(if (busy) "保存中…" else "保存") }
+        },
+    )
 }
 
 @Composable
@@ -995,7 +1098,13 @@ private fun ConfigurationScreen(config: ManagedConfig?) {
         } else when (tab) {
             0 -> LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 item { AppCard { InfoRow("入口", summary.inboundTypes.joinToString().ifBlank { "无" }); InfoRow("DNS 服务器", summary.dnsServers.toString()); InfoRow("路由规则", summary.routeRules.size.toString()); InfoRow("默认出站", summary.routeFinal); InfoRow("出站节点", summary.outboundTags.size.toString()) } }
-                item { AppCard { Text(if (config.ruleSource == "quickjs") "中心 QuickJS 已执行" else "Profile 模板规则", color = Ink, fontWeight = FontWeight.Bold); Text(if (config.ruleSource == "quickjs") "下面展示的是脚本生成并由手机核心校验后的最终规则；脚本本身仍只在中心端运行。" else "当前规则直接来自中心 Profile。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 6.dp)) } }
+                item {
+                    AppCard {
+                        Text("服务器配置 + 本机服务分组", color = Ink, fontWeight = FontWeight.Bold)
+                        Text("下面展示合并后的实际运行规则。Claude、GPT、自定义分组和默认代理使用手机保存的设置，配置版本标识服务器同步版本。",
+                            color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
             }
             1 -> LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(summary.routeRules) { rule -> AppCard { Text(rule, color = Ink, fontSize = 13.sp, lineHeight = 19.sp) } }
@@ -1119,10 +1228,10 @@ private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, 
         item {
             AppCard {
                 Text("重新注册", color = Danger, fontWeight = FontWeight.Bold)
-                Text("会清除本机加密凭据和配置快照。中心端设备不会被删除。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+                Text("会清除本机凭据、配置和服务分组设置。中心端设备不会被删除。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
                 OutlinedButton(
-                    onClick = { runCatching { CoreGraph.repository.forgetDevice() }.onFailure { message = it.message } },
-                    enabled = phase != VpnPhase.CONNECTED,
+                    onClick = { scope.launch { runCatching { CoreGraph.repository.forgetDevice() }.onFailure { message = it.message } } },
+                    enabled = (phase == VpnPhase.DISCONNECTED || phase == VpnPhase.ERROR) && control.syncPhase != SyncPhase.SYNCING,
                     modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
                 ) { Text("清除本机并重新注册", color = Danger) }
             }

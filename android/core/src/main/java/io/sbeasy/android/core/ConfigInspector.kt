@@ -42,6 +42,7 @@ object ConfigInspector {
         val conditions = buildList {
             addValues(rule, "domain", "域名", this)
             addValues(rule, "domain_suffix", "域名后缀", this)
+            addValues(rule, "package_name", "应用", this)
             addValues(rule, "ip_cidr", "IP 网段", this)
             addValues(rule, "protocol", "协议", this)
             addValues(rule, "port", "端口", this)

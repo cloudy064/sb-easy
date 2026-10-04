@@ -16,6 +16,8 @@ server, or administrator account is required on the phone.
 - debounced, Network-identity-aware Wi-Fi/cellular recovery with bounded restart
   retries and post-handover control-plane/proxy probes;
 - live libbox traffic, connections, proxy groups, node selection, URLTest, and logs;
+- device-owned Claude/GPT and custom domain groups, independent fixed exits,
+  a fixed default exit, and private/China direct routing;
 - a real HTTP/HTTPS route test correlated with libbox connection events;
 - an adaptive dark control surface with status/navigation/cutout safe areas and
   dedicated compact-phone and wide-screen navigation;
@@ -26,6 +28,66 @@ server, or administrator account is required on the phone.
 The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
+
+## Local service groups (1.2.1)
+
+The Proxies tab now contains **Default proxy**, **Claude**, and **GPT** cards.
+Each selects a concrete provisioned node or `direct`; local selectors never
+choose a URL-test group. Initial defaults independently read the centrally
+provisioned Claude domain rule, GPT domain rule, and concrete route final.
+Fallbacks use a concrete provisioned node. Users can choose different exits
+for each card while connected or offline.
+
+The Android profile preset on 2026-10-04 is Claude → MonoCloud **🇺🇸 Los Angeles 5**,
+GPT → MonoCloud **🇯🇵 Tokyo 2**, default → iKuuu **🇯🇵 日本Z03 | IEPL**.
+Three HTTPS latency rounds from the development host to Google's 204 endpoint
+measured medians of 839 / 321 / 279 ms. Los Angeles 5 had the lowest median
+among MonoCloud's 14 enabled US nodes; Japan exits were verified reachable.
+This is a latency comparison from that network, not a bandwidth or handset
+measurement. Choices stay fixed until the user changes them.
+
+For an existing 1.2.0 policy, a complete three-exit server preset migrates the
+default and existing built-in group exits once (`preset_revision: 1`). Edited
+names, domains, app matching toggles, custom groups and deleted built-in groups
+are preserved. Subsequent syncs and upgrades retain the user's selected exits.
+
+Claude/GPT rules cover the service domains and their subdomains. Seeds follow
+the [MetaCubeX Anthropic list](https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/anthropic.list)
+and [OpenAI list](https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.list),
+with the previously used `anyrouter.top` gateway included in Claude. Domain lists
+are editable. The built-in groups also match the official Android apps
+(`com.anthropic.claude`, `com.openai.chatgpt`) using the platform's connection-owner
+lookup; this can be disabled in **Edit rules**. Browser and external-login traffic
+is matched by domain, so additional third-party hosts may need to be added.
+
+**Create group** adds a named group with domain suffixes and an independently
+selected exit. Up to 32 groups and 256 domains per group are supported. Domain
+normalization accepts one domain per line, Unicode names and `*.example.com`;
+URLs, IP literals and overlapping domains between groups are rejected. Deleting
+a group returns its domains to the remaining direct/default policy.
+
+Sniffing, DNS hijacking, control-plane access and management endpoint routes are
+preserved. Private addresses go direct; local group rules then precede the
+private/China domain and China-IP direct rules. Other public traffic uses the
+default local selector. Centrally pinned proxy route rules are superseded by
+the local groups/default. Provisioned direct and non-routing rules are retained.
+Each group has a separate HTTPS DNS server through its selector; direct DNS
+and proxy-node bootstrap resolution use direct AliDNS without an explicit
+empty-direct detour. DNS reverse mapping assists domain-based routing.
+
+The original server snapshot and ETag remain in `managed-config`; the local
+policy is atomically saved in `local-routing.json`. Every server sync renders
+from the untouched snapshot and reapplies the user's policy. Switching only a
+node updates that selector, interrupting its existing connections. Editing
+groups/domains reloads the configuration. Startup/reload restores local choices
+synchronously through libbox before reporting ready, overriding historical
+selector choices while preserving the existing rule-cache namespace. A removed
+node produces a visible warning and a concrete fallback; its saved selection is
+retained in case the node returns. Forgetting the device clears its local policy.
+
+The config/routing views show the resulting local configuration; the displayed
+configuration version continues to identify the server snapshot. No server
+upgrade or administrator credential is required for this feature.
 
 ## Build
 
@@ -79,6 +141,21 @@ lint, APK signing/ABI inspection, C++ enrollment/rendering/HTTP contract tests,
 and an end-to-end preflight that feeds a rendered Android profile to sing-box
 1.13.12 `check`. A physical Android device remains necessary for the final VPN,
 network-switch, Doze, and vendor-ROM acceptance pass.
+
+For a native routing preflight, generate the Kotlin fixtures and run the loopback
+mock-exit test with a CLI built from the pinned Android source (include
+`with_clash_api` for its test control endpoint):
+
+```sh
+export SB_EASY_ROUTING_FIXTURE_DIR=/private/tmp/sb-routing-fixtures
+./gradlew :core:testDebugUnitTest --tests '*LocalRoutingTest' --rerun-tasks
+python3 scripts/test-local-routing.py /path/to/pinned/sing-box "$SB_EASY_ROUTING_FIXTURE_DIR"
+```
+
+This checks actual Claude/GPT/custom/default routing, direct destinations,
+independent selector changes, and restoration after restarts including changing
+back to an earlier choice. Android application-owner matching still requires
+on-device verification.
 
 ## Licensing
 

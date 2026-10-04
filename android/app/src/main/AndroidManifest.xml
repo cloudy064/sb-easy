@@ -11,6 +11,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <queries>
+        <package android:name="com.anthropic.claude" />
+        <package android:name="com.openai.chatgpt" />
+    </queries>
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />

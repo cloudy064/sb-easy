@@ -5,6 +5,22 @@ release images/CI, and centrally managed Claude egress rollout.
 
 ## Current release state
 
+- Android DNS correction (2026-10-04): removed only `bootstrap-dns.detour`
+  from the central `android-client` profile, preserving the private/CN DNS
+  rules and all other host configuration. The September 27 explicit `direct`
+  detour below was invalid: sing-box 1.13.12 rejects a detour to an empty
+  direct outbound during DNS startup. Typed HTTPS DNS already dials directly
+  when `detour` is omitted. The exact pinned Android source revision reproduced
+  the reported startup failure before removal and started the isolated DNS
+  configuration successfully afterwards. Both full configurations pass
+  `check`, demonstrating that configuration checking alone misses this error.
+  The production API update was read back and every host render compared;
+  only the intended Android DNS field changed. Rollback is retained on the
+  center at `backups/android-dns-detour-20261004.json`. At verification,
+  `adrd` had not acknowledged the new configuration; phone VPN startup still
+  requires an on-device sync and retry. Both Linux agents remained running
+  with matching ETags and no reported error.
+
 - Android DNS follow-up: the `android-client` central profile now routes DNS
   for `geosite-private` and `geosite-cn` to `bootstrap-dns` (AliDNS HTTPS),
   explicitly using the `direct` outbound. Other DNS settings and traffic
@@ -313,3 +329,27 @@ not start a runtime service or modify host interfaces.
 - Deployment shell syntax and whitespace checks pass. Evidence is in
   `/tmp/sb-c-combined-*.log`; generated credentials and configuration are never
   included in those verification summaries.
+
+
+## Android independent service exits (2026-10-04, app 1.2.1)
+
+- Updated only the managed `android-client` profile: Claude uses MonoCloud
+  `🇺🇸 Los Angeles 5`, GPT uses MonoCloud `🇯🇵 Tokyo 2`, and the concrete route
+  final uses iKuuu `🇯🇵 日本Z03 | IEPL`. Subscription IDs and enabled-node
+  membership were checked before the update. Each service's DNS follows its
+  fixed exit; domestic/private traffic retains direct rules.
+- Three isolated HTTPS latency rounds across all 14 MonoCloud US nodes and
+  6 Japanese nodes measured medians of 839 ms (Los Angeles 5), 321 ms
+  (Tokyo 2), and 279 ms (iKuuu Japan Z03). Los Angeles 5 had the lowest US
+  median on the development network. These are latency measurements, not
+  bandwidth or handset results.
+- Profile backup and exact rendered preflight/read-back snapshots are under
+  `/root/workspace/sb-easy/backups/service-routing-20261004`; all other host
+  configurations remained identical. sing-box 1.13.12 accepted both the
+  provisioned config and Android's resulting local overlay.
+- Android defaults now read Claude/GPT rules and concrete final independently.
+  A one-time preset revision migrates existing 1.2.0 exits while preserving
+  custom groups, domain edits, app toggles and deleted built-in groups. Later
+  local selections survive syncs. JVM tests (51), lint, all-ABI APK assembly,
+  native group switching/direct routing/restart tests and signature verification
+  passed. ARM64 app 1.2.1/code 16 uses the prior signing certificate.

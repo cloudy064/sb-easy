@@ -29,7 +29,7 @@ The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
 
-## Local service groups (1.2.1)
+## Local service groups (1.2.2)
 
 The Proxies tab now contains **Default proxy**, **Claude**, and **GPT** cards.
 Each selects a concrete provisioned node or `direct`; local selectors never
@@ -71,7 +71,7 @@ preserved. Private addresses go direct; local group rules then precede the
 private/China domain and China-IP direct rules. Other public traffic uses the
 default local selector. Centrally pinned proxy route rules are superseded by
 the local groups/default. Provisioned direct and non-routing rules are retained.
-Each group has a separate HTTPS DNS server through its selector; direct DNS
+Each group has a separate Google HTTPS DNS server (`dns.google`) through its selector; direct DNS
 and proxy-node bootstrap resolution use direct AliDNS without an explicit
 empty-direct detour. DNS reverse mapping assists domain-based routing.
 
@@ -88,6 +88,30 @@ retained in case the node returns. Forgetting the device clears its local policy
 The config/routing views show the resulting local configuration; the displayed
 configuration version continues to identify the server snapshot. No server
 upgrade or administrator credential is required for this feature.
+
+Version 1.2.2 fixes the Claude DNS failure observed on MonoCloud Los Angeles 5:
+its HTTP exit timed out/rejected connections to the literal `1.1.1.1:443`
+DoH destination. Keeping `dns.google:443` as a hostname lets the selected proxy
+resolve and connect remotely; the app does not bootstrap this DoH hostname
+through direct DNS. TLS verification remains enabled.
+
+For groups/defaults selecting HTTP nodes, A/AAAA requests return FakeIP addresses.
+The core maps browser connections back to the original hostname before HTTP
+CONNECT, avoiding the same literal-IP failure for Claude's HTTPS traffic.
+HTTPS/SVCB address hints are suppressed for these HTTP routes so they cannot
+bypass the mapping. IPv4-only Android TUN configurations suppress synthetic
+AAAA answers instead of advertising an IPv6 address without a VPN route.
+Non-HTTP exits, domestic/management DNS and groups set to
+`direct` use real DNS answers. FakeIP mappings persist in the existing cache
+namespace, including switches away from HTTP nodes while a browser still holds
+older synthetic addresses. Changing between HTTP/non-HTTP/direct DNS policies
+reloads the core; otherwise node changes update only the selector. Node
+selections and preset revision are unchanged, including edits on the handset.
+
+The native DNS regression script exercises actual DNS wire requests through
+mock HTTP CONNECT exits that reject literal IP destinations. It checks Claude,
+GPT, custom/default and direct DNS answers, browser IP + TLS SNI connections,
+IPv6, independent switching and mapping restoration after restarts.
 
 ## Build
 
@@ -150,6 +174,7 @@ mock-exit test with a CLI built from the pinned Android source (include
 export SB_EASY_ROUTING_FIXTURE_DIR=/private/tmp/sb-routing-fixtures
 ./gradlew :core:testDebugUnitTest --tests '*LocalRoutingTest' --rerun-tasks
 python3 scripts/test-local-routing.py /path/to/pinned/sing-box "$SB_EASY_ROUTING_FIXTURE_DIR"
+python3 scripts/test-local-routing-dns.py /path/to/pinned/sing-box "$SB_EASY_ROUTING_FIXTURE_DIR"
 ```
 
 This checks actual Claude/GPT/custom/default routing, direct destinations,

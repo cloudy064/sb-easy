@@ -276,34 +276,68 @@ object LocalRouting {
         fun dnsServer(baseTag: String, detour: String?): String {
             val tag = allocateTag(baseTag, dnsTags)
             val server = JSONObject().put("type", "https").put("tag", tag)
-                .put("server", if (detour == null) "223.5.5.5" else "1.1.1.1")
+                .put("server", if (detour == null) "223.5.5.5" else "dns.google")
                 .put("server_port", 443).put("path", "/dns-query")
                 .put("tls", JSONObject().put("enabled", true)
-                    .put("server_name", if (detour == null) "dns.alidns.com" else "cloudflare-dns.com"))
+                    .put("server_name", if (detour == null) "dns.alidns.com" else "dns.google"))
+            // Keep the DoH hostname on the detour. HTTP exits can reach domains
+            // while refusing a literal DNS IP; resolving here would undo this.
             if (detour != null) server.put("detour", detour)
             servers.put(server)
             return tag
         }
         val directDns = dnsServer(TAG_PREFIX + "dns-direct", null)
-        val defaultDns = dnsServer(TAG_PREFIX + "dns-default", defaultTag)
+        val nodeTypes = nodes.associate { it.tag to it.type }
+        fun useFakeIP(tag: String) = nodeTypes[selections[tag]] == "http"
+        // Keep the mapping store present across switches to non-HTTP/direct
+        // nodes: browsers may still hold addresses returned before the switch.
+        val fakeDns = objects(servers).firstOrNull { it.optString("type") == "fakeip" }?.getString("tag")
+            ?: allocateTag(TAG_PREFIX + "dns-fakeip", dnsTags).also { tag ->
+                servers.put(JSONObject().put("type", "fakeip").put("tag", tag)
+                    .put("inet4_range", "198.18.0.0/15").put("inet6_range", "fc00::/18"))
+            }
+        val experimental = root.optJSONObject("experimental") ?: JSONObject().also { root.put("experimental", it) }
+        val cache = experimental.optJSONObject("cache_file") ?: JSONObject().also { experimental.put("cache_file", it) }
+        cache.put("enabled", true).put("store_fakeip", true)
+        val defaultDns = if (selections[defaultTag] == "direct") directDns
+            else dnsServer(TAG_PREFIX + "dns-default", defaultTag)
+        val tunInbounds = objects(root.optJSONArray("inbounds")).filter { it.optString("type") == "tun" }
+        val ipv4OnlyTun = tunInbounds.isNotEmpty() && tunInbounds.none {
+            it.opt("address")?.toString()?.contains(':') == true || it.opt("inet6_address")?.toString()?.contains(':') == true
+        }
+        fun fakeAddressRule(rule: JSONObject): JSONObject = rule
+            .put("query_type", JSONArray(listOf("A", "AAAA"))).put("action", "route").put("server", fakeDns)
+            .also { if (ipv4OnlyTun) it.put("strategy", "ipv4_only") }
         val dnsRules = JSONArray()
         if (!controlHost.isNullOrBlank() && !controlHost.contains(':') && !controlHost.matches(Regex("[0-9.]+"))) {
             dnsRules.put(JSONObject().put("domain", JSONArray(listOf(controlHost)))
                 .put("action", "route").put("server", directDns))
         }
         policy.groups.forEach { group ->
-            val groupDns = dnsServer(TAG_PREFIX + "dns-" + group.id, groupTags.getValue(group.id))
-            officialPackage(group)?.let { packageName ->
-                dnsRules.put(JSONObject().put("package_name", JSONArray(listOf(packageName)))
-                    .put("action", "route").put("server", groupDns))
+            val tag = groupTags.getValue(group.id)
+            val groupDns = if (selections[tag] == "direct") directDns
+                else dnsServer(TAG_PREFIX + "dns-" + group.id, tag)
+            fun addRule(field: String, values: List<String>) {
+                if (useFakeIP(tag)) {
+                    // Do not let HTTPS/SVCB address hints bypass the FakeIP mapping.
+                    dnsRules.put(JSONObject().put(field, JSONArray(values)).put("query_type", JSONArray(listOf("HTTPS", "SVCB")))
+                        .put("action", "predefined").put("rcode", "NOERROR"))
+                    dnsRules.put(fakeAddressRule(JSONObject().put(field, JSONArray(values))))
+                }
+                dnsRules.put(JSONObject().put(field, JSONArray(values)).put("action", "route").put("server", groupDns))
             }
-            dnsRules.put(JSONObject().put("domain_suffix", JSONArray(group.domains))
-                .put("action", "route").put("server", groupDns))
+            officialPackage(group)?.let { addRule("package_name", listOf(it)) }
+            addRule("domain_suffix", group.domains)
         }
         dnsRules.put(JSONObject().put("rule_set", JSONArray(listOf("geosite-private", "geosite-cn")))
             .put("action", "route").put("server", directDns))
         dnsRules.put(JSONObject().put("domain_suffix", JSONArray(listOf("lan", "local")))
             .put("action", "route").put("server", directDns))
+        if (useFakeIP(defaultTag)) {
+            dnsRules.put(JSONObject().put("query_type", JSONArray(listOf("HTTPS", "SVCB")))
+                .put("action", "predefined").put("rcode", "NOERROR"))
+            dnsRules.put(fakeAddressRule(JSONObject()))
+        }
         // Routing DNS decisions now belong to the local policy; retain blocking
         // and other non-route DNS actions from the server.
         objects(dns.optJSONArray("rules")).filter {
@@ -320,6 +354,10 @@ object LocalRouting {
                 defaultTag, groupTags, warnings, selections),
         )
     }
+
+    /** HTTP/FakeIP and direct DNS transitions require a reload, not just a selector command. */
+    fun sameDnsConfiguration(previous: String, next: String): Boolean =
+        JSONObject(previous).optJSONObject("dns").toString() == JSONObject(next).optJSONObject("dns").toString()
 
     /** Restore these through libbox after every start/reload, before reporting ready. */
     fun selectionsFromConfig(content: String): Map<String, String> =

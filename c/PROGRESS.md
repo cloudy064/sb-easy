@@ -353,3 +353,37 @@ not start a runtime service or modify host interfaces.
   local selections survive syncs. JVM tests (51), lint, all-ABI APK assembly,
   native group switching/direct routing/restart tests and signature verification
   passed. ARM64 app 1.2.1/code 16 uses the prior signing certificate.
+
+
+## Android Claude DNS and browser CONNECT repair (2026-10-04, app 1.2.2)
+
+- The adrd handset reported app 1.2.1/core 1.13.12, VPN running, with
+  `503 Service Unavailable` for claude.ai/claude.com/Anthropic DNS requests.
+  Isolated tests reproduced Los Angeles 5's literal `1.1.1.1:443` failure.
+  DoH sent as `dns.google:443` through the same exit returned valid answers.
+- A complete browser-style probe uncovered a second failure: even after DNS
+  succeeded, HTTP CONNECT to the resolved Claude IP timed out. HTTP groups now
+  receive FakeIP A/AAAA answers, which the core maps to the original domain
+  before connecting to the selected exit. HTTPS/SVCB hints cannot bypass the
+  mapping. IPv4-only TUN profiles suppress unroutable synthetic AAAA answers.
+- Non-HTTP groups and domestic/management DNS keep real answers; groups/default
+  set to direct use direct AliDNS. Mapping storage remains present, with
+  `store_fakeip` enabled in the existing cache namespace, so browser-cached
+  synthetic addresses survive switching away from HTTP nodes and restarting.
+  DNS-policy changes reload the core; other selection changes use selector
+  commands. User node choices and the preset migration revision are retained.
+- Only Android profile proxy DNS endpoints were changed centrally, with exact
+  all-host rendered read-back verification. Selected nodes and routing rules
+  remain unchanged. Rollback/evidence:
+  `/root/workspace/sb-easy/backups/claude-dns-20261004`.
+- JVM tests (54), lint, all-ABI APK assembly and native DNS/browser/switch/restart
+  regression tests passed. The loopback regression rejects literal CONNECT IPs
+  and verifies TLS using a temporary trusted CA. It reproduces 1.2.1's DNS 503
+  and tests hostname DoH, FakeIP, IPv6, IPv4-only TUN, hints and direct DNS.
+- Live production-overlay probes verified DNS plus browser IP/SNI routing
+  through Los Angeles 5: claude.com returned 200, claude.ai returned a Cloudflare
+  challenge (`cf-mitigated: challenge`), and the Anthropic API root returned
+  its expected unauthenticated-path 404. This verifies transport, not handset
+  login or successful completion of the site's browser challenge.
+- Android 1.2.2 / code 17 uses the previous signing certificate; users must
+  upgrade, reconnect the VPN and reopen the browser to replace cached DNS.

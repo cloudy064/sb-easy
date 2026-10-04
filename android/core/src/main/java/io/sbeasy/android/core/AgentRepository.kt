@@ -307,7 +307,7 @@ class AgentRepository internal constructor(
         val previousSnapshot = mutableRouting.value
         val selectionOnly = previousSnapshot.policy?.let { old ->
             old.groups.map { it.copy(outbound = "") } == policy.groups.map { it.copy(outbound = "") }
-        } == true
+        } == true && LocalRouting.sameDnsConfiguration(previous.content, rendered.content)
         val nextSnapshot = LocalRouting.render(base.content, policy, mutableState.value.enrollment?.server.orEmpty()).snapshot
         val changedSelections = nextSnapshot.selections.filter { (tag, selection) ->
             previousSnapshot.selections[tag] != selection

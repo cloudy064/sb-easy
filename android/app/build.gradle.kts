@@ -12,8 +12,8 @@ android {
         applicationId = "io.sbeasy.android"
         minSdk = 24
         targetSdk = 36
-        versionCode = 16
-        versionName = "1.2.1"
+        versionCode = 17
+        versionName = "1.2.2"
     }
 
     buildTypes {

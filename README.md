@@ -10,6 +10,7 @@ install.
 - **Frontend**: Vue 3 + TS + Pinia.
 
 Build and compatibility notes for the C implementation: [c/README.md](c/README.md).
+The default `master` branch contains the C11 server and Linux agent.
 The previous C++ implementation remains in `cpp/` for rollback and comparisons.
 
 ## Features
@@ -130,11 +131,11 @@ that image.
 
 ## Development
 ```sh
-cmake -S cpp -B build/cpp -DSB_EASY_WARNINGS_AS_ERRORS=ON
-cmake --build build/cpp --parallel 2
-ctest --test-dir build/cpp --output-on-failure
+cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Release -DSB_EASY_WARNINGS_AS_ERRORS=ON
+cmake --build build/c --parallel 4
+ctest --test-dir build/c --output-on-failure --timeout 180 --parallel 4
 cd frontend && npm ci && npm run build
-scripts/check-cpp-parity.sh           # C++ vs legacy Rust shadow rendering
 ```
-CI builds and tests the C++ backend, keeps the Rust rollback implementation
-tested for parity, type-checks/builds the frontend, and builds the Docker image.
+CI builds and tests the C backend in release and sanitizer configurations,
+builds the C agent with embedded sing-box, type-checks/builds the frontend,
+and builds the Docker image. C++ and Rust checks remain as rollback baselines.

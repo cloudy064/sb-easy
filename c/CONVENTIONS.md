@@ -1,7 +1,8 @@
 # sb-easy C port — conventions
 
-`c/` is a C11 port of the C++20 implementation in `cpp/` (which is the
-production system). It must be a drop-in replacement: same HTTP API paths,
+`c/` is the production C11 implementation. The previous C++20 implementation
+in `cpp/` is retained for rollback and compatibility comparisons. The C
+implementation must remain a drop-in replacement: same HTTP API paths,
 payloads and status codes, same SQLite schema (`migrations/`), same generated
 sing-box JSON (byte-for-byte, including ETags), same env vars and CLI flags.
 The Vue (`frontend/`) and Svelte (`agent-ui/`) UIs are reused unchanged.
@@ -13,12 +14,9 @@ edge cases, error messages and validation rules. When C++ and the Rust
 ## Build & test
 
 ```sh
-cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Debug \
-  -DFETCHCONTENT_SOURCE_DIR_QRCODEGEN=$PWD/build/cpp/_deps/qrcodegen-src \
-  -DFETCHCONTENT_SOURCE_DIR_ARGON2_SOURCE=$PWD/build/cpp/_deps/argon2_source-src \
-  -DFETCHCONTENT_SOURCE_DIR_QUICKJS_NG=$PWD/build/cpp/_deps/quickjs_ng-src
-cmake --build build/c -j
-ctest --test-dir build/c --output-on-failure
+cmake -S c -B build/c -DCMAKE_BUILD_TYPE=Debug -DSB_EASY_WARNINGS_AS_ERRORS=ON
+cmake --build build/c --parallel 4
+ctest --test-dir build/c --output-on-failure --timeout 180 --parallel 4
 ```
 
 * Every `c/src/*.c` is compiled into `sb_core` automatically (glob) — do not

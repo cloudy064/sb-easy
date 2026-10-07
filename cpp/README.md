@@ -1,6 +1,12 @@
-# sb-easy C++ rewrite
+# Archived sb-easy C++ implementation
 
-This directory is the incremental C++20 replacement for the Rust backend and
+This directory is a historical reference only. Active server and agent
+development uses C11 in [`c/`](../c/README.md); Windows native development uses
+C11 in [`windows/`](../windows/README.md). This implementation receives no new
+features or fixes and is excluded from primary CI and release builds. The
+remaining notes describe the earlier migration.
+
+This directory was the incremental C++20 replacement for the Rust backend and
 agent. The Vue frontend, SQLite database format, HTTP API contract, and sing-box
 configuration format stay compatible during the migration.
 

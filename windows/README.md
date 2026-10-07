@@ -67,7 +67,7 @@ A separate real
 sing-box test forwarded HTTP through its SOCKS listener, verified graceful exit
 (`stop_forced=false`) and listener closure, and rejected an unelevated TUN start.
 These local checks do not replace elevated TUN acceptance or the Linux CI
-regression runs for the server-side C/C++ changes.
+regression runs for the server-side C changes.
 
 ## Build
 

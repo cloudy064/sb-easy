@@ -11,10 +11,12 @@ install.
 
 Build and compatibility notes for the C implementation: [c/README.md](c/README.md).
 The default `master` branch contains the C11 server and Linux agent.
-The previous C++ implementation remains in `cpp/` for rollback and comparisons.
+The server, Linux agent and Windows native application are maintained in C11.
+The old `cpp/` and Rust `backend/` directories are historical references only;
+they receive no new features and are excluded from primary CI and release builds.
 
 A C11 Windows x64 desktop development preview is available in
-[Windows Preview 0.3.0](https://github.com/cloudy064/sb-easy/releases/tag/windows-v0.3.0-preview.1).
+[Windows Preview 0.3.0](https://github.com/cloudy064/sb-easy/releases/tag/windows-v0.3.0-preview.2).
 Extract the complete Windows ZIP and launch only `sb-easy.exe`; it starts its
 local backend automatically. Build, optional sing-box preparation and current
 limitations are documented in [windows/README.md](windows/README.md).
@@ -91,7 +93,7 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 Node mode in the production image remains `sb-easy agent`; it dispatches to the
 dedicated C agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
 `agent/.env.example`). The agent supervises the bundled sing-box process and
-preserves the Rust node-local egress/override environment variables. Set a
+preserves the established node-local egress/override environment variables. Set a
 separate `AGENT_UI_PASSWORD` to enable its local management page on
 `0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
 The local console is an independent Svelte build served from `AGENT_UI_PATH`;
@@ -143,5 +145,7 @@ ctest --test-dir build/c --output-on-failure --timeout 180 --parallel 4
 cd frontend && npm ci && npm run build
 ```
 CI builds and tests the C backend in release and sanitizer configurations,
-builds the C agent with embedded sing-box, type-checks/builds the frontend,
-and builds the Docker image. C++ and Rust checks remain as rollback baselines.
+builds the C agent with embedded sing-box, builds/tests the Windows C11 desktop
+and its UI, type-checks/builds the management frontend, and builds the Docker image.
+The C implementation and its tests are authoritative for new development;
+features and fixes are not mirrored into the historical implementations.

@@ -147,9 +147,10 @@ The service, native host, platform adapters and native tests are built as C11
 with MSVC and CMake. Windows APIs and COM interfaces are called directly from C.
 Shared business logic comes from the current C11 implementation in `c/`; the
 Windows build already compiles `c/src/json.c` and its sbj interfaces through a
-small Windows utility adapter. The existing rollback implementation in `cpp/`
-remains a behavioral reference. Windows does not link that runtime or introduce
-a second JSON library. The current POSIX entry point cannot be compiled unchanged.
+small Windows utility adapter. The old `cpp/` implementation is a historical
+reference only; new behavior and tests are maintained in C. Windows does not
+link that runtime or introduce a second JSON library. The current POSIX entry
+point cannot be compiled unchanged.
 
 Reusable concepts and code include:
 

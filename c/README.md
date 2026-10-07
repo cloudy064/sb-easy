@@ -2,8 +2,9 @@
 
 The C11 control plane and Linux agent replace the C++ implementation. Vue,
 Svelte, Android, the SQLite migrations and the official Go sing-box engine
-are shared with the existing system. The previous implementation remains in
-`cpp/` as a reference and rollback source.
+are shared with the existing system. New server and agent features, fixes and
+tests are maintained in `c/`. The old `cpp/` and Rust `backend/` implementations
+remain as historical references only, outside primary CI and release builds.
 
 ## Build and verify
 
@@ -20,7 +21,7 @@ Programs:
 
 | Binary | Purpose |
 | --- | --- |
-| `sb-easy-c-server` | Central HTTP service, same arguments and environment as C++ |
+| `sb-easy-c-server` | Central HTTP service, preserving the established CLI and environment |
 | `sb-easy-c-agent` | Polling agent, enrollment, local Svelte UI and `--once` |
 | `sb-easy-c-render` | JSON configuration renderer |
 | `sb-easy` | Agent entry point for the unified image |
@@ -105,7 +106,9 @@ agent container and automatically restores it if the health/proxy checks fail.
 It also migrates the stopped engine's rule cache to `agent-data/sing-box-cache`
 and mounts it at `/var/lib/sing-box`, so replacing the container retains cached
 rule sets. Later data backups include this directory.
-Use `DOCKERFILE=cpp/Dockerfile.unified` to build the previous implementation.
+Historical deployments used `DOCKERFILE=cpp/Dockerfile.unified`; this archived
+implementation does not receive current fixes. Use a previously validated C
+image for rollback during new deployments.
 
 For the established central bridge-network deployment, load the tested panel
 image, update the effective Compose image, then run on the central host:
@@ -137,7 +140,9 @@ than relying on per-node edits. Offline nodes receive the change when they
 reconnect. Existing conflicting local overrides need to be removed during
 migration. Roll back using `--rollback /private/claude-route-before.json`.
 
-Verify a private database snapshot (reports hashes, not proxy credentials):
+For historical migration comparisons only, the following optional tool compares
+a private database snapshot against an archived C++ binary (reports hashes, not
+proxy credentials). This is not a current CI or release requirement:
 
 ```sh
 python3 c/tools/verify_database.py --database /private/snapshot.db \

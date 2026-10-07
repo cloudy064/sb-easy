@@ -1,15 +1,17 @@
-# sb-easy C port — conventions
+# sb-easy C11 development conventions
 
-`c/` is the production C11 implementation. The previous C++20 implementation
-in `cpp/` is retained for rollback and compatibility comparisons. The C
-implementation must remain a drop-in replacement: same HTTP API paths,
-payloads and status codes, same SQLite schema (`migrations/`), same generated
-sing-box JSON (byte-for-byte, including ETags), same env vars and CLI flags.
-The Vue (`frontend/`) and Svelte (`agent-ui/`) UIs are reused unchanged.
+`c/` is the authoritative production C11 server and Linux agent implementation.
+Windows native code is also C11, in `windows/`. Implement new native features,
+fixes and tests in C; do not introduce C++ or mirror changes into `cpp/` or the
+Rust `backend/`. Those directories are historical references only, excluded
+from primary CI and release builds.
 
-**The C++ source is the specification.** Port behaviour faithfully, including
-edge cases, error messages and validation rules. When C++ and the Rust
-`backend/` disagree, C++ wins.
+The current C implementation, its tests and the documented public contracts
+define behavior. Preserve existing HTTP paths, payloads and status codes,
+SQLite schema (`migrations/`), generated sing-box JSON and ETags, environment
+variables and CLI flags unless a task explicitly changes that contract.
+Historical code may help explain old behavior but is not the specification
+for current development. Frontend applications retain their existing languages.
 
 ## Build & test
 
@@ -25,42 +27,42 @@ ctest --test-dir build/c --output-on-failure --timeout 180 --parallel 4
 * Every `c/tests/<name>_test.c` becomes a ctest (cwd = repo root, env
   `SB_EASY_MIGRATIONS` points at `migrations/`). Use `c/tests/test.h`
   (`TEST(name)`, `CHECK`, `REQUIRE`, `CHECK_STR`, `CHECK_EQ_INT`,
-  `CHECK_CONTAINS`). Port the matching `cpp/tests/*_test.cpp` cases.
+  `CHECK_CONTAINS`). Add regression cases directly here for the current C
+  behavior; historical tests may inform compatibility checks when relevant.
 * Private helpers shared between .c files of one module go in
   `c/src/<module>_internal.h`. `.inc` files are fine for generated tables.
 
-## Libraries (replacing the C++ ones)
+## Libraries
 
-| C++ | C |
+| Purpose | C API |
 |---|---|
-| nlohmann::json | `sb/json.h` (`sbj`) — sorted keys, dump identical to nlohmann |
-| Drogon server/WebSocket | civetweb (`civetweb.h`, built with USE_WEBSOCKET, NO_SSL) |
-| Drogon HTTP client | `sb/http_client.h` (libcurl) |
-| yaml-cpp | libyaml (`<yaml.h>`) |
-| QuickJS-NG, argon2, qrcodegen | same libraries, C APIs (`quickjs.h`, `argon2.h`, `qrcodegen.h`) |
-| OpenSSL, SQLite | same |
+| JSON | `sb/json.h` (`sbj`) — sorted keys and stable serialization |
+| HTTP server/WebSocket | civetweb (`civetweb.h`, built with USE_WEBSOCKET, NO_SSL) |
+| HTTP client | `sb/http_client.h` (libcurl) |
+| YAML | libyaml (`<yaml.h>`) |
+| Scripts, password hashing, QR codes | `quickjs.h`, `argon2.h`, `qrcodegen.h` |
+| Crypto, database | OpenSSL, SQLite |
 
 ## Style
 
 * Public API in `c/include/sb/<module>.h`, prefix `sb_`, snake_case.
-  Header comments say what, not how; mirror the C++ doc comments.
+  Header comments describe behavior, ownership and error contracts.
 * Errors: functions that can fail return `int` (0 ok / -1 fail) or a pointer
   (NULL on failure) and take a trailing `sb_err *err` (may be NULL). Use
-  `sb_fail(err, SB_ERR_<KIND>, fmt, ...)`; kinds map from the C++ exception
-  types (NotFoundError → SB_ERR_NOT_FOUND, ValidationError /
-  std::invalid_argument → SB_ERR_VALIDATION, ConflictError →
-  SB_ERR_CONFLICT, ScriptError → SB_ERR_SCRIPT, others → SB_ERR_GENERIC /
-  SB_ERR_IO / SB_ERR_UPSTREAM). Keep C++'s exception messages verbatim — the
-  HTTP layer returns them to clients.
+  `sb_fail(err, SB_ERR_<KIND>, fmt, ...)` with the appropriate category:
+  `SB_ERR_NOT_FOUND`, `SB_ERR_VALIDATION`, `SB_ERR_CONFLICT`, `SB_ERR_SCRIPT`,
+  `SB_ERR_GENERIC`, `SB_ERR_IO` or `SB_ERR_UPSTREAM`. Preserve established
+  client-visible error messages when fixing behavior; the HTTP layer returns
+  them to clients.
 * Ownership: returned `char *` / `sbj *` are owned by the caller unless the
   doc says "borrowed". Structs have `*_init` / `*_free` (free releases
-  members, not the struct). `std::optional<std::string>` → `char *` that may
-  be NULL. `std::vector<T>` → `{T *items; size_t len, cap;}` + push/free.
-* `std::function` callbacks → function pointer + `void *user`.
-* Classes with pImpl → opaque `typedef struct sb_x sb_x;` with
+  members, not the struct). Optional owned strings are nullable `char *`.
+  Dynamic arrays use `{T *items; size_t len, cap;}` with push/free helpers.
+* Callbacks use a function pointer plus `void *user`.
+* Encapsulated modules use opaque `typedef struct sb_x sb_x;` with
   `sb_x_new(...)` / `sb_x_free(...)`.
 * Threads: pthreads. Anything shared across civetweb worker threads must be
-  guarded (the Store serialises on one mutex, like the C++ Database).
+  guarded; the Store serialises on one mutex.
 * Compile cleanly with `-Wall -Wextra -Wshadow`. No VLAs, no GNU nested
   functions. Check every allocation via `sb_x*` helpers (they abort on OOM).
 * Logging: `SB_INFO(...)` etc. from `sb/util.h`.

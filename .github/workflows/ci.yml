@@ -7,6 +7,37 @@ on:
     branches: [master]
 
 jobs:
+  windows:
+    name: Windows C11 desktop preview (x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: windows/ui/package-lock.json
+      - name: Build UI, native service and desktop; run tests
+        shell: pwsh
+        run: ./windows/scripts/build.ps1
+      - name: Package optional core preparation script
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path build/windows-release/scripts -Force | Out-Null
+          Copy-Item -LiteralPath windows/scripts/prepare-core.ps1 -Destination build/windows-release/scripts/prepare-core.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sb-easy-windows-x64-development-preview
+          path: |
+            build/windows-release/sb-easy.exe
+            build/windows-release/sb-easy-service.exe
+            build/windows-release/WebView2Loader.dll
+            build/windows-release/scripts/prepare-core.ps1
+            build/windows-release/ui/
+            build/windows-release/licenses/
+            build/windows-release/README.md
+            build/windows-release/THIRD_PARTY_NOTICES.md
+
   c:
     name: C backend (${{ matrix.mode }})
     runs-on: ubuntu-latest

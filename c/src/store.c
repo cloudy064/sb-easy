@@ -2247,6 +2247,16 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
                                      sb_agent_enrollment_result *out, sb_err *err) {
     if (strlen(S(code)) < 32U || !sbj_is_object(device))
         return sb_fail(err, SB_ERR_VALIDATION, "A valid enrollment code and device are required");
+    /* These describe local UI features, never server-owned roles or topology. */
+    static const char *const feature_keys[] = {
+        "interactive_client", "supports_proxy_selection", "supports_local_route_stats",
+        "supports_diagnostic_upload"};
+    for (size_t i = 0; i < sizeof feature_keys / sizeof *feature_keys; ++i) {
+        const sbj *found = sbj_get(device, feature_keys[i]);
+        if (found && !sbj_is_bool(found))
+            return sb_fail(err, SB_ERR_VALIDATION, "Device capability '%s' must be a boolean",
+                           feature_keys[i]);
+    }
     char *code_hash = sb_sha256_hex(code, strlen(code));
     sb_agent_enrollment_result result;
     sb_agent_enrollment_result_init(&result);
@@ -2299,6 +2309,10 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
             const sbj *found = sbj_get(device, keys[i]);
             if (sbj_is_string(found) && found->v.str.len > 0)
                 sbj_set(capabilities, keys[i], sbj_clone(found));
+        }
+        for (size_t i = 0; i < sizeof feature_keys / sizeof *feature_keys; ++i) {
+            const sbj *found = sbj_get(device, feature_keys[i]);
+            if (found) sbj_set(capabilities, feature_keys[i], sbj_clone(found));
         }
         sqlite3_stmt *st = sbq_prepare(h,
                                        "UPDATE agent_enrollments SET redeemed_at = datetime('now') "

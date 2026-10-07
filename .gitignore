@@ -10,6 +10,10 @@ frontend/*.tsbuildinfo
 agent-ui/node_modules/
 agent-ui/dist/
 agent-ui/*.tsbuildinfo
+windows/ui/node_modules/
+windows/ui/dist/
+windows/ui/.test-build/
+windows/ui/*.tsbuildinfo
 
 # Environment
 .env

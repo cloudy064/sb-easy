@@ -401,6 +401,79 @@ SB_EASY_TEST("device enrollment codes are platform-neutral, expiring, and single
         "the built-in self host must not create an enrollment code");
 }
 
+SB_EASY_TEST("enrollment accepts only boolean client features and preserves server roles") {
+    const TemporaryDatabase database;
+    sbeasy::Store store{database.path(), migration_directory()};
+    sbeasy::Host host;
+    host.name = "Windows device";
+    host.capabilities = {{"is_self", false}, {"is_wg_hub", true},
+                         {"runs_singbox", true}, {"is_wg_member", false}};
+    const auto created = store.create_host(std::move(host));
+    auto enrollment = store.create_agent_enrollment(created.id);
+    static constexpr const char* keys[] = {
+        "interactive_client", "supports_proxy_selection", "supports_local_route_stats",
+        "supports_diagnostic_upload"};
+    const nlohmann::json invalid = nlohmann::json::array({
+        "true", 1, nullptr, nlohmann::json::object(), nlohmann::json::array(),
+    });
+    for (const auto* key : keys) {
+        for (const auto& value : invalid) {
+            const nlohmann::json device = {{"platform", "windows"}, {key, value}};
+            bool rejected = false;
+            try {
+                static_cast<void>(store.redeem_agent_enrollment(enrollment.code, device));
+            } catch (const sbeasy::ValidationError& error) {
+                rejected = true;
+                sbeasy::test::require(error.what() == std::string{"Device capability '"} +
+                                          key + "' must be a boolean",
+                                      "invalid feature types must name the rejected capability");
+            }
+            sbeasy::test::require(rejected, "non-boolean client capabilities must be rejected");
+        }
+    }
+    sbeasy::test::require(store.find_host(created.id)->capabilities == created.capabilities,
+                          "invalid enrollment must not change host metadata");
+    nlohmann::json device = {
+        {"platform", "windows"}, {"is_self", true}, {"is_wg_hub", false},
+        {"runs_singbox", false}, {"is_wg_member", true}, {"unknown_feature", true},
+    };
+    for (const auto* key : keys) {
+        device[key] = true;
+    }
+    // Every invalid attempt must leave the same enrollment available.
+    static_cast<void>(store.redeem_agent_enrollment(enrollment.code, device));
+    auto reloaded = store.find_host(created.id);
+    sbeasy::test::require(reloaded.has_value(), "enrolled host should exist");
+    for (const auto* key : keys) {
+        sbeasy::test::require(reloaded->capabilities.at(key) == true,
+                              "boolean client features should be stored");
+    }
+    sbeasy::test::require(reloaded->capabilities.at("platform") == "windows" &&
+                              reloaded->capabilities.at("is_self") == false &&
+                              reloaded->capabilities.at("is_wg_hub") == true &&
+                              reloaded->capabilities.at("runs_singbox") == true &&
+                              reloaded->capabilities.at("is_wg_member") == false &&
+                              !reloaded->capabilities.contains("unknown_feature"),
+                          "client feature reporting must preserve server roles and topology");
+
+    enrollment = store.create_agent_enrollment(created.id);
+    device = nlohmann::json::object();
+    for (const auto* key : keys) {
+        device[key] = false;
+    }
+    static_cast<void>(store.redeem_agent_enrollment(enrollment.code, device));
+    reloaded = store.find_host(created.id);
+    sbeasy::test::require(reloaded.has_value(), "re-enrolled host should exist");
+    for (const auto* key : keys) {
+        sbeasy::test::require(reloaded->capabilities.at(key) == false,
+                              "explicit false should replace old feature values");
+    }
+    sbeasy::test::require(reloaded->capabilities.at("platform") == "windows" &&
+                              reloaded->capabilities.at("is_self") == false &&
+                              reloaded->capabilities.at("is_wg_hub") == true,
+                          "omitted metadata and server roles should be retained");
+}
+
 SB_EASY_TEST("agent repository isolates tokens, status, commands, and latency") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};

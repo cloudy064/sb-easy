@@ -129,7 +129,7 @@ void disable_clash_dashboard(json& config) {
 
 void normalize_managed_dns_detours(
     json& config, bool has_auto,
-    const std::optional<std::string>& android_selector) {
+    const std::optional<std::string>& proxy_selector) {
     if (!config.contains("dns") || !config["dns"].is_object()) {
         return;
     }
@@ -138,7 +138,7 @@ void normalize_managed_dns_detours(
         return;
     }
     const auto target = !has_auto ? std::string{"direct"} :
-                                    android_selector.value_or("auto");
+                                    proxy_selector.value_or("auto");
     for (auto& server : servers) {
         if (!server.is_object() || !server.contains("detour") ||
             !server["detour"].is_string()) {
@@ -440,6 +440,12 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
             request.host_context.value("capabilities", json::object());
         const bool is_android = capabilities.is_object() &&
                                 capabilities.value("platform", "") == "android";
+        // Old Android clients predate feature negotiation. Other clients must opt
+        // in explicitly; being interactive alone does not imply proxy selection.
+        const auto selection = capabilities.find("supports_proxy_selection");
+        const bool supports_proxy_selection =
+            is_android || (selection != capabilities.end() && selection->is_boolean() &&
+                           selection->get<bool>());
         const bool has_direct =
             std::ranges::any_of(outbounds, [](const auto& outbound) {
                 return outbound.value("tag", "") == "direct";
@@ -447,8 +453,8 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
         if (!has_direct) {
             outbounds.push_back({{"type", "direct"}, {"tag", "direct"}});
         }
-        std::optional<std::string> android_selector;
-        if (has_auto && is_android) {
+        std::optional<std::string> proxy_selector;
+        if (has_auto && supports_proxy_selection) {
             auto selector_tag = std::string{"Proxy"};
             while (std::ranges::any_of(outbounds, [&selector_tag](const auto& outbound) {
                 return outbound.value("tag", "") == selector_tag;
@@ -468,10 +474,10 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
                 {"outbounds", std::move(selector_outbounds)},
                 {"default", "auto"},
             });
-            android_selector = std::move(selector_tag);
+            proxy_selector = std::move(selector_tag);
         }
         config["outbounds"] = std::move(outbounds);
-        normalize_managed_dns_detours(config, has_auto, android_selector);
+        normalize_managed_dns_detours(config, has_auto, proxy_selector);
 
         if (config.contains("route") && config["route"].is_object()) {
             auto& route = config["route"];
@@ -479,10 +485,10 @@ nlohmann::json ConfigRenderer::render(const RenderRequest& request) const {
                 const auto current = route["final"].get<std::string>();
                 if (!has_auto) {
                     route["final"] = "direct";
-                } else if (android_selector.has_value() &&
+                } else if (proxy_selector.has_value() &&
                            (current == "Proxy" || current == "Auto" ||
                             current == "auto")) {
-                    route["final"] = *android_selector;
+                    route["final"] = *proxy_selector;
                 } else if (current == "Proxy" || current == "Auto") {
                     route["final"] = "auto";
                 }

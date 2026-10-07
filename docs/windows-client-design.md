@@ -2,6 +2,40 @@
 
 Status: **approved for implementation**
 
+Implementation update (2026-10-05): an executable development preview
+now lives in `windows/`. All native service, host, adapter and test code is C11;
+the frontend remains Vue/TypeScript. The preview includes Windows Service/console
+entry points, authorized named-pipe IPC, a C COM WebView2 host, WinHTTP
+enrollment/config download, shared sbj JSON, DPAPI persistence and ETag refresh.
+`config.validate` invokes the separately prepared sing-box 1.13.12 executable's
+real `check` command. `connection.start` and `connection.stop` now connect the GUI
+to real core lifecycle control, Windows configuration adaptation, authenticated
+local API health, active ETag commit, durable last-good rollback and background
+monitoring. Downloading or validating a candidate alone does not activate it.
+The desktop now has overview, proxies, live connections/traffic, profiles,
+readable rules, session activity and settings pages. Authorized display-only
+`config.inspect` and `runtime.snapshot` keep candidate/active revisions distinct
+and project bounded credential-free data from the owned sing-box API. Theme
+selection and automatic refresh are local preferences. Node selection, active
+latency testing and Android-style editable local routing groups are not yet implemented.
+API health proves local core readiness, not internet reachability or TUN routing.
+The current session is unelevated: actual TUN adapter, route and DNS acceptance
+requires a separately elevated service. Non-TUN actual-core validation and TUN
+acceptance must be recorded separately; this update does not claim either passed.
+The remaining sections describe the full target unless explicitly marked as
+implemented. See [windows/README.md](../windows/README.md) for current build,
+optional core preparation, limitations and smoke-test commands.
+
+Implementation update (2026-10-07): the development preview now requires only
+launching `sb-easy.exe`. Its C11 host serializes background startup, verifies and
+reuses a running backend, starts a matching installed SCM service if permitted,
+or launches the bundled current-user backend without a console window. Refresh
+recovers a missing portable backend using the existing DPAPI data directory.
+It does not replay enrollment or connection operations, install a privileged
+service automatically, or restore an active core connection after a backend crash.
+The two-process architecture below remains internal to the application; users
+are not expected to start two executables.
+
 Decision date: 2026-08-04
 
 Initial target: Windows 10 22H2 and Windows 11, x64
@@ -37,7 +71,7 @@ a separate Windows device collection.
 │  enrollment · sync · rollback · telemetry · local database   │
 │             │                    │                           │
 │             ▼                    └──────► sb-easy control plane│
-│  sing-box.exe + wintun.dll                                   │
+│  sing-box.exe (embeds Wintun)                                │
 │  local Clash API on 127.0.0.1 with a random secret           │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -107,10 +141,15 @@ of the initial release.
 
 ## 4. Technology selection
 
-### 4.1 Service: native C++20
+### 4.1 Service and platform adapters: native C11
 
-The service will be built with MSVC and CMake. It will reuse portable sb-easy
-logic rather than attempt to compile the current POSIX entry point unchanged.
+The service, native host, platform adapters and native tests are built as C11
+with MSVC and CMake. Windows APIs and COM interfaces are called directly from C.
+Shared business logic comes from the current C11 implementation in `c/`; the
+Windows build already compiles `c/src/json.c` and its sbj interfaces through a
+small Windows utility adapter. The existing rollback implementation in `cpp/`
+remains a behavioral reference. Windows does not link that runtime or introduce
+a second JSON library. The current POSIX entry point cannot be compiled unchanged.
 
 Reusable concepts and code include:
 
@@ -137,13 +176,18 @@ Windows-specific adapters are required for:
 The current Linux implementation uses `posix_spawn`, `waitpid`, Unix signals,
 `chmod`, `uname`, and other POSIX APIs. Those calls should move behind platform
 interfaces rather than accumulating large `_WIN32` branches inside
-`agent_main.cpp` and `singbox_supervisor.cpp`.
+the portable C orchestration code.
 
 ### 4.2 UI: Win32 host + WebView2 + Vue
 
-The visible application will use a small native C++ Win32 shell for window,
+The visible application uses a small native C11 Win32 shell for window,
 tray, protocol activation, and WebView2 hosting. Its content will be a dedicated
 Vue/Vite client UI bundled as local static assets.
+
+WebView2 is hosted through the SDK's C COM interfaces with explicit reference
+counting. The host links the loader import library and packages the matching
+`WebView2Loader.dll` beside `sb-easy.exe`; the Evergreen Runtime remains a
+separate prerequisite. The native build has no C++ source targets.
 
 This choice provides:
 
@@ -206,8 +250,10 @@ The service is the only trusted local authority. It owns:
 - service/core logs and diagnostic uploads;
 - all calls to the remote control plane.
 
-It will support `--console` for development and automated tests, while the
-production entry point uses `StartServiceCtrlDispatcherW`.
+Implemented: `--console` for development and automated tests, and an SCM entry
+point using `StartServiceCtrlDispatcherW`. No installer or service registration
+command is added in this increment; production installation and recovery policy
+remain work for the installer milestone.
 
 The service initially runs as LocalSystem because sing-box must manage
 machine-wide networking. Hardening requirements are:
@@ -221,18 +267,40 @@ machine-wide networking. Hardening requirements are:
 
 ### 5.2 `sing-box.exe`
 
-The initial release pins sing-box 1.13.12, matching the server and Android core.
-The official Windows x64 binary and official `wintun.dll` are bundled and
-checksum-pinned.
+The core version is pinned to sing-box 1.13.12. The development archive does not
+bundle the core. Its optional `scripts/prepare-core.ps1` downloads the
+official Windows x64 archive and verifies a fixed SHA-256 before copying
+`sing-box.exe`, `libcronet.dll` and `LICENSE` into the executable directory's
+`core/` subdirectory. In a checkout this is `build/windows-release/core/` by
+default. Preparation does not execute the core; an already running service must
+be restarted to discover it. This upstream executable already embeds Wintun;
+it does not require a separate adjacent `wintun.dll`.
 
-The child process is placed in a Job Object with
-`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The service redirects stdout/stderr to
-rotating logs and supervises health through both process state and the local
-Clash API.
+The versioned source chain is [sing-box v1.13.12 go.mod](https://github.com/SagerNet/sing-box/blob/v1.13.12/go.mod)
+pinning sing-tun v0.8.9, [the amd64 DLL embedding](https://github.com/SagerNet/sing-tun/blob/v0.8.9/internal/wintun/dll_windows_amd64.go),
+and [its in-memory DLL loader](https://github.com/SagerNet/sing-tun/blob/v0.8.9/internal/wintun/dll_windows.go).
+The future installer must retain the relevant dependency versions and notices,
+without adding an unused second Wintun download.
 
-The Clash API must never bind `0.0.0.0` or assume port `9090`. The service picks
-and persists an available loopback port, generates a random secret, and rewrites
-those protected local fields after receiving the server configuration.
+Implemented now: `config.validate` runs `sing-box check -c <private-file>` with
+bounded execution and cancellation. The GUI receives a redacted validation
+result for the candidate's ETag. Validation does not activate configuration,
+start a VPN, or change `active_etag` or `core_running`.
+The validation result is cleared on service restart or a changed candidate.
+
+The C process adapter places child processes in a Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assigns the suspended process before resume,
+and restricts inherited handles. GUI/IPC start and stop use this adapter. Stop
+first requests a bounded graceful shutdown, then uses Job termination if needed.
+A forced TUN stop cannot claim DNS/route cleanup; it is reported as degraded.
+Core exit or failure of its local API clears active state, even with the UI closed.
+
+Each activation chooses an available `127.0.0.1` port and a cryptographically
+random ephemeral secret, replacing server-supplied Clash API settings. Health
+checks verify the listener PID before sending an authenticated `/version` request,
+disable proxies and redirects, and bound response size and elapsed time. Ports
+and secrets are runtime-only and never returned through UI IPC. The API never
+binds `0.0.0.0` and does not assume port `9090`.
 
 ### 5.3 `sb-easy.exe`
 
@@ -260,7 +328,7 @@ Transport:
   limit;
 - request IDs for correlation;
 - explicit protocol version negotiation;
-- bounded subscriptions for status, traffic, and log events.
+- request/response status polling; bounded status/traffic/log subscriptions remain future work.
 
 Example request:
 
@@ -268,7 +336,7 @@ Example request:
 {
   "id": "10",
   "version": 1,
-  "method": "vpn.start",
+  "method": "connection.start",
   "params": {}
 }
 ```
@@ -280,18 +348,26 @@ Example response:
   "id": "10",
   "ok": true,
   "result": {
-    "phase": "starting"
+    "phase": "RUNNING",
+    "core_running": true
   }
 }
 ```
 
-Initial methods:
+Implemented methods:
 
 | Category | Methods |
 | --- | --- |
+| Protocol | `protocol.hello` |
 | Enrollment | `enrollment.status`, `enrollment.apply`, `enrollment.forget` |
-| Runtime | `status.get`, `vpn.start`, `vpn.stop`, `vpn.restart` |
-| Sync | `config.refresh`, `config.summary`, `config.redacted` |
+| Runtime | `status.get`, `connection.start`, `connection.stop` |
+| Sync | `config.refresh`, `config.summary`, `config.validate` |
+
+Further target methods (not implemented by the current preview):
+
+| Category | Methods |
+| --- | --- |
+| Sync | `config.redacted` |
 | Proxies | `proxies.list`, `proxy.select`, `proxies.test` |
 | Routing | `route.test`, `routes.stats` |
 | Logs | `logs.tail`, `logs.clear`, `logs.export`, `logs.upload` |
@@ -299,8 +375,8 @@ Initial methods:
 | Events | `events.subscribe`, `events.unsubscribe` |
 
 The pipe DACL permits System, administrators, and local interactive users and
-explicitly denies the Network SID. Sensitive mutations additionally validate
-the pipe client PID and require either the active console session or an
+explicitly denies the Network SID. Sensitive mutations impersonate the pipe
+client and inspect its actual token, requiring either the active console session or an
 administrator. No method returns the Agent token, proxy passwords, UUIDs, or
 the unredacted generated configuration.
 
@@ -311,21 +387,16 @@ References:
 
 ## 7. Local storage
 
-Service-owned state:
+Implemented service-owned state (console mode uses
+`%LocalAppData%\sb-easy\dev-service` instead):
 
 ```text
 %ProgramData%\sb-easy\
-├── credential.dat              DPAPI-protected Agent identity
-├── settings.json               machine/runtime settings
-├── config\
-│   ├── candidate.json
-│   ├── active.json
-│   └── last-good.json
-├── cache\                      sing-box rule-set and selector cache
-├── runtime.db                  local route statistics and durable state
-└── logs\
-    ├── service.log
-    └── sing-box.log
+├── device-state.dat            DPAPI identity + candidate + last-good envelope
+├── state.lock                  exclusive service state owner
+└── core-work\
+    ├── state.lock              exclusive private runtime directory owner
+    └── core-<32hex>.json       temporary check/run configuration, removed on stop
 ```
 
 UI-owned state:
@@ -336,10 +407,15 @@ UI-owned state:
 └── WebView2\
 ```
 
-`credential.dat` is encrypted by DPAPI under the service identity. File ACLs
-remain mandatory even when DPAPI is used. Generated configurations contain
-proxy credentials and therefore receive the same restricted ACL as the device
-credential.
+`device-state.dat` is encrypted by DPAPI under the service identity. Filesystem
+owners and ACLs are checked, ancestors are pinned, reparse points are rejected,
+and updates use flushed atomic replacement. Runtime configurations contain proxy
+credentials and receive the same restricted directory ACL. Normal completion
+removes them. A hard service termination closes the Job and kills the child tree;
+owned `core-<32hex>.json` remnants are removed safely at the next startup and
+remain ACL-protected until then. Active state and API secrets are not restored
+as a running connection after restart. Cache databases, telemetry and rotating
+log files shown elsewhere in this design remain future work.
 
 ## 8. Runtime state and recovery
 
@@ -356,18 +432,32 @@ STOPPED ── start ──► STARTING ── healthy ──► RUNNING
    └─────────────── ERROR/DEGRADED ◄────── ROLLING_BACK
 ```
 
-Configuration activation:
+Implemented configuration activation:
 
 1. Download a candidate with `If-None-Match`.
 2. Apply bounded Windows-specific local transformations.
 3. Run `sing-box check` against the candidate.
-4. Atomically install it while retaining the last-good file.
-5. Start/reload sing-box.
-6. Require the process and local Clash API to become healthy within a deadline.
-7. Save the ETag only after successful activation.
-8. Restore last-good and restart if activation fails.
+4. Keep a healthy old process running if candidate adaptation or checking fails.
+5. Stop the old process and start sing-box with private adapted configuration.
+6. Require process existence and its authenticated local Clash API within a deadline.
+7. Persist last-good atomically, then publish `RUNNING` and `active_etag`.
+8. On activation or durable-commit failure, attempt the previous last-good if safe;
+   otherwise report `DEGRADED` without an active ETag.
 
-Failure policy:
+`downloaded_etag` can differ from `active_etag`; refresh alone never switches the
+running process. A successful rollback publishes the restored ETag and a
+`ROLLED_BACK` notice. Normal stop clears active state but keeps last-good. An
+observed crash or failed API probe also clears active state and reports an error.
+The monitor runs independently of the UI. No automatic reconnect/backoff is
+implemented yet. The service restarts in `STOPPED`, retaining credentials,
+candidate and last-good but requiring a new explicit start.
+
+`RUNNING` means the local process/API checks passed, not that internet access,
+DNS leakage, proxy reachability or actual TUN routes have been tested. A non-TUN
+Profile remains a local proxy. `tun_active` additionally requires a TUN with the
+server's `auto_route:true`; `auto_route:false` is preserved.
+
+Further target failure policy (not a current recovery guarantee):
 
 - restart sing-box with bounded exponential backoff;
 - let the Service Control Manager restart the service after a service crash;
@@ -375,7 +465,7 @@ Failure policy:
   the known TUN state, enter `DEGRADED`, and leave ordinary networking usable;
 - retain sufficient redacted diagnostics for the user to upload.
 
-Network events:
+Further target network-event handling:
 
 - subscribe to interface, address, route, power suspend, and resume events;
 - debounce changes before rebuilding the core;
@@ -386,9 +476,24 @@ Network events:
 
 ## 9. Windows routing defaults
 
-Initial defaults:
+Implemented adaptation preserves the candidate's `auto_route` value and supports
+at most one TUN. The interface name defaults to `sb-easy`; an explicit name must
+contain 1–48 ASCII letters, digits, `_` or `-`. Linux TUN/dialer options are removed,
+`route.auto_detect_interface` is enabled, and control-plane/service/core direct
+rules precede server rules. HTTP/SOCKS/mixed listeners are restricted to loopback.
+No TUN is added to a Profile which does not contain one.
 
-- TUN `auto_route` enabled;
+The initial adapter rejects multiple TUNs, platform hooks, endpoints, services,
+local rule-set and hosts files, certificate/key/ECH paths, ACME and executable
+plugins. It replaces external Clash/UI/cache/debug settings, disables file logs
+and NTP, and retains remote rule-set downloads. WireGuard endpoint profiles and
+other rejected configurations need explicit support rather than silently losing
+their semantics. The field contract is pinned to sing-box 1.13.12, not newer
+online documentation. Actual adapter/route/DNS recovery needs elevated tests.
+
+Target routing defaults for centrally managed Windows Profiles:
+
+- TUN `auto_route` enabled only when selected in the central policy;
 - central private/CN domain and IP rules remain direct;
 - LAN access enabled;
 - multicast and local discovery traffic preserved where possible;
@@ -524,58 +629,84 @@ The control plane should receive capability metadata similar to:
 }
 ```
 
-## 13. Planned repository layout
+## 13. Repository layout and remaining extraction
 
 ```text
 windows/
 ├── CMakeLists.txt
 ├── README.md
+├── common.c / common.h       # Windows utilities for shared c/src/json.c
+├── runtime/
+│   └── state.c / state.h
 ├── service/
-│   ├── service_main.cpp
-│   ├── windows_service.cpp
-│   ├── windows_process.cpp
-│   ├── windows_network.cpp
-│   ├── windows_credentials.cpp
-│   └── named_pipe_server.cpp
+│   ├── service_main.c
+│   ├── controller.c / controller.h
+│   ├── core_process.c / core_process.h
+│   ├── runtime_config.c / runtime_config.h
+│   ├── control_plane.c / control_plane.h
+│   ├── secure_store.c / secure_store.h
+│   ├── protocol.c / protocol.h
+│   └── pipe_server.c / pipe_server.h
 ├── ui-host/
-│   ├── main.cpp
-│   ├── tray.cpp
-│   ├── webview_host.cpp
-│   └── named_pipe_client.cpp
+│   ├── main.c
+│   ├── webview_guids.c
+│   ├── server_identity.c / server_identity.h
+│   └── pipe_client.c / pipe_client.h
 ├── ui/
 │   ├── package.json
 │   └── src/
-├── installer/
-│   ├── Bundle.wxs
-│   └── Product.wxs
-├── tests/
-└── third-party-notices/
+├── scripts/
+│   ├── build.ps1
+│   ├── prepare-core.ps1
+│   ├── smoke.ps1
+│   ├── enrollment-smoke.ps1
+│   └── connection-smoke.ps1
+├── tests/                   # C11 native tests and local fixtures
+└── licenses/
 ```
 
-Portable agent orchestration should be extracted into the existing C++ tree,
-for example:
+The WiX installer directory, network-change handling and elevated networking
+acceptance remain future work.
+
+Portable agent orchestration should be extracted from the current C11 tree,
+for example (these production-loop extractions remain future work):
 
 ```text
-cpp/include/sbeasy/agent_runtime.hpp
-cpp/include/sbeasy/platform_process.hpp
-cpp/include/sbeasy/platform_storage.hpp
-cpp/src/agent_runtime.cpp
-cpp/src/platform/posix_*.cpp
+c/include/sb/agent_runtime.h
+c/include/sb/platform_process.h
+c/include/sb/platform_storage.h
+c/src/agent_runtime.c
+c/src/platform/posix_*.c
 ```
 
 The exact filenames may change during implementation, but the boundary between
 portable policy/orchestration and operating-system mechanics is mandatory.
+The initial `windows/runtime/state.c` module establishes a small OS-independent
+test boundary; it does not yet replace or extract the Linux Agent loop.
 
 ## 14. Build and dependency policy
 
 Windows build prerequisites:
 
-- Visual Studio 2022 Build Tools with the MSVC C++ and Windows SDK workloads;
+- Visual Studio 2022 Build Tools with MSVC C11 and Windows SDK support (the
+  installer labels these components as C++ tools);
 - CMake 3.24 or newer;
 - Ninja or the Visual Studio CMake generator;
-- Node.js 20 or newer for the UI;
-- a repository-pinned WiX Toolset version;
-- WebView2 SDK restored from a pinned package version.
+- Node.js 22 LTS or a compatible version >=20.19 for the UI;
+- WebView2 SDK restored from a pinned package version and SHA-256;
+- WebView2 Evergreen Runtime for the GUI and actual GUI smoke tests.
+
+WiX is not required for this development preview; pin it at project level when
+implementing the installer. The native project uses `LANGUAGES C`, C11 and
+`/W4 /WX`. Ordinary CI uses local test doubles and does not download sing-box.
+Its archive includes `WebView2Loader.dll`, packaged UI/licenses and
+`scripts/prepare-core.ps1`, while the core remains an optional direct upstream
+download. `enrollment-smoke.ps1 -ValidateCore` exercises actual-core checking;
+`-ConnectCore` exercises non-TUN start/stop through the GUI.
+`connection-smoke.ps1` separately exercises actual-core loopback SOCKS forwarding
+and stop. Its optional elevated `-Tun` mode checks a unique adapter and isolated
+`198.18.255.0/30` route; it does not certify full routing, internet access or DNS
+recovery. The current unelevated session cannot perform that TUN acceptance.
 
 Third-party artifacts must be version- and checksum-pinned. The build must not
 download an unversioned “latest” sing-box or Wintun binary.

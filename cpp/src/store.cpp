@@ -1424,6 +1424,17 @@ Store::redeem_agent_enrollment(const std::string& code,
     if (code.size() < 32U || !device.is_object()) {
         throw ValidationError("A valid enrollment code and device are required");
     }
+    // These describe local UI features, never server-owned roles or topology.
+    static constexpr const char* feature_keys[] = {
+        "interactive_client", "supports_proxy_selection", "supports_local_route_stats",
+        "supports_diagnostic_upload"};
+    for (const auto* key : feature_keys) {
+        const auto found = device.find(key);
+        if (found != device.end() && !found->is_boolean()) {
+            throw ValidationError(std::string{"Device capability '"} + key +
+                                  "' must be a boolean");
+        }
+    }
     const auto code_hash = sha256_hex(code);
     const std::scoped_lock lock{database_.mutex_};
     sqlite::Transaction transaction{database_.handle_};
@@ -1459,6 +1470,13 @@ Store::redeem_agent_enrollment(const std::string& code,
         const auto found = device.find(key);
         if (found != device.end() && found->is_string() &&
             !found->get_ref<const std::string&>().empty()) {
+            capabilities[key] = *found;
+        }
+    }
+
+    for (const auto* key : feature_keys) {
+        const auto found = device.find(key);
+        if (found != device.end()) {
             capabilities[key] = *found;
         }
     }

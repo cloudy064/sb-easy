@@ -13,6 +13,12 @@ Build and compatibility notes for the C implementation: [c/README.md](c/README.m
 The default `master` branch contains the C11 server and Linux agent.
 The previous C++ implementation remains in `cpp/` for rollback and comparisons.
 
+A C11 Windows x64 desktop development preview is available in
+[Windows Preview 0.3.0](https://github.com/cloudy064/sb-easy/releases/tag/windows-v0.3.0-preview.1).
+Extract the complete Windows ZIP and launch only `sb-easy.exe`; it starts its
+local backend automatically. Build, optional sing-box preparation and current
+limitations are documented in [windows/README.md](windows/README.md).
+
 ## Features
 - Multi-host central management: register hosts, assign proxies, edit config
   profiles (managed = panel-built, or **full** = paste a complete config).

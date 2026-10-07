@@ -558,6 +558,87 @@ TEST(device_enrollment_codes_are_platform_neutral_expiring_and_single_use) {
     temp_db_free(&t);
 }
 
+TEST(enrollment_accepts_only_boolean_client_features_and_preserves_server_roles) {
+    temp_db t;
+    sb_store *s = open_store(&t);
+    REQUIRE(s);
+    sb_err err = {0};
+    sb_host host, created, reloaded;
+    sb_host_init(&host);
+    sb_host_init(&created);
+    sb_host_init(&reloaded);
+    sb_str_set(&host.name, "Windows device");
+    host.name_len = strlen(host.name);
+    sbj_set_bool(host.capabilities, "is_self", false);
+    sbj_set_bool(host.capabilities, "is_wg_hub", true);
+    sbj_set_bool(host.capabilities, "runs_singbox", true);
+    sbj_set_bool(host.capabilities, "is_wg_member", false);
+    REQUIRE(sb_store_create_host(s, &host, &created, &err) == 0);
+    sb_agent_enrollment e;
+    sb_agent_enrollment_init(&e);
+    REQUIRE(sb_store_create_agent_enrollment(s, created.id, &e, &err) == 0);
+    sb_agent_enrollment_result r;
+    sb_agent_enrollment_result_init(&r);
+    static const char *const keys[] = {
+        "interactive_client", "supports_proxy_selection", "supports_local_route_stats",
+        "supports_diagnostic_upload"};
+    static const char *const invalid[] = {"\"true\"", "1", "null", "{}", "[]"};
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i) {
+        for (size_t j = 0; j < sizeof invalid / sizeof *invalid; ++j) {
+            sbj *device = sbj_object();
+            sbj_set_str(device, "platform", "windows");
+            sbj_set(device, keys[i], sbj_parse_cstr(invalid[j]));
+            CHECK_EQ_INT(sb_store_redeem_agent_enrollment(s, e.code, device, &r, &err), -1);
+            CHECK(err.code == SB_ERR_VALIDATION);
+            char *message = sb_asprintf("Device capability '%s' must be a boolean", keys[i]);
+            CHECK_STR(err.msg, message);
+            free(message);
+            sbj_free(device);
+        }
+    }
+    REQUIRE(sb_store_find_host(s, created.id, &reloaded, &err) == 1);
+    CHECK(sbj_equal(reloaded.capabilities, created.capabilities));
+
+    sbj *device = sbj_parse_cstr("{\"platform\":\"windows\",\"is_self\":true,\"is_wg_hub\":false,"
+                                 "\"runs_singbox\":false,\"is_wg_member\":true,\"unknown_feature\":true}");
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
+        sbj_set_bool(device, keys[i], true);
+    /* Every invalid attempt must leave the same enrollment available. */
+    REQUIRE(sb_store_redeem_agent_enrollment(s, e.code, device, &r, &err) == 0);
+    sbj_free(device);
+    REQUIRE(sb_store_find_host(s, created.id, &reloaded, &err) == 1);
+    CHECK_STR(sbj_get_str(reloaded.capabilities, "platform", NULL), "windows");
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
+        CHECK(sbj_get_bool(reloaded.capabilities, keys[i], false));
+    CHECK(!sbj_get_bool(reloaded.capabilities, "is_self", true));
+    CHECK(sbj_get_bool(reloaded.capabilities, "is_wg_hub", false));
+    CHECK(sbj_get_bool(reloaded.capabilities, "runs_singbox", false));
+    CHECK(!sbj_get_bool(reloaded.capabilities, "is_wg_member", true));
+    CHECK(!sbj_has(reloaded.capabilities, "unknown_feature"));
+
+    REQUIRE(sb_store_create_agent_enrollment(s, created.id, &e, &err) == 0);
+    device = sbj_object();
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i)
+        sbj_set_bool(device, keys[i], false);
+    REQUIRE(sb_store_redeem_agent_enrollment(s, e.code, device, &r, &err) == 0);
+    sbj_free(device);
+    REQUIRE(sb_store_find_host(s, created.id, &reloaded, &err) == 1);
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; ++i) {
+        CHECK(sbj_is_bool(sbj_get(reloaded.capabilities, keys[i])));
+        CHECK(!sbj_get_bool(reloaded.capabilities, keys[i], true));
+    }
+    CHECK_STR(sbj_get_str(reloaded.capabilities, "platform", NULL), "windows");
+    CHECK(!sbj_get_bool(reloaded.capabilities, "is_self", true));
+    CHECK(sbj_get_bool(reloaded.capabilities, "is_wg_hub", false));
+    sb_agent_enrollment_free(&e);
+    sb_agent_enrollment_result_free(&r);
+    sb_host_free(&host);
+    sb_host_free(&created);
+    sb_host_free(&reloaded);
+    sb_store_free(s);
+    temp_db_free(&t);
+}
+
 TEST(agent_repository_isolates_tokens_status_commands_and_latency) {
     temp_db t;
     sb_store *s = open_store(&t);

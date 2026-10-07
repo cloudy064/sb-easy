@@ -192,12 +192,12 @@ static sbj *control_plane_route(const char *server) {
 /* ---- managed DNS / geo policy ----------------------------------------- */
 
 static void normalize_managed_dns_detours(sbj *config, bool has_auto,
-                                          const char *android_selector) {
+                                          const char *proxy_selector) {
     sbj *dns = sbj_get(config, "dns");
     if (!sbj_is_object(dns)) return;
     sbj *servers = index_or_null(dns, "servers"); /* nlohmann operator[] inserts null */
     if (!sbj_is_array(servers)) return;
-    const char *target = !has_auto ? "direct" : (android_selector ? android_selector : "auto");
+    const char *target = !has_auto ? "direct" : (proxy_selector ? proxy_selector : "auto");
     sbj *server;
     SBJ_ARR_FOREACH(servers, i, server) {
         const sbj *detour = sbj_get(server, "detour");
@@ -465,14 +465,18 @@ static int render_managed(const sb_render_request *request, sbj *config, bool *h
         }
         is_android = sbj_string_is(sbj_get(capabilities, "platform"), "android");
     }
+    /* Old Android clients predate feature negotiation. Other clients must opt in
+     * explicitly; being interactive alone does not imply proxy selection. */
+    const bool supports_proxy_selection =
+        is_android || sbj_get_bool(capabilities, "supports_proxy_selection", false);
     if (!outbounds_have_tag(outbounds, "direct")) {
         sbj *direct = sbj_object();
         sbj_set_str(direct, "type", "direct");
         sbj_set_str(direct, "tag", "direct");
         sbj_arr_push(outbounds, direct);
     }
-    char *android_selector = NULL;
-    if (has_auto && is_android) {
+    char *proxy_selector = NULL;
+    if (has_auto && supports_proxy_selection) {
         char *selector_tag = sb_strdup("Proxy");
         while (outbounds_have_tag(outbounds, selector_tag)) {
             char *next = sb_asprintf("%s group", selector_tag);
@@ -493,10 +497,10 @@ static int render_managed(const sb_render_request *request, sbj *config, bool *h
         sbj_set(selector, "outbounds", selector_outbounds);
         sbj_set_str(selector, "default", "auto");
         sbj_arr_push(outbounds, selector);
-        android_selector = selector_tag;
+        proxy_selector = selector_tag;
     }
     sbj_set(config, "outbounds", outbounds);
-    normalize_managed_dns_detours(config, has_auto, android_selector);
+    normalize_managed_dns_detours(config, has_auto, proxy_selector);
 
     sbj *route = sbj_get(config, "route");
     if (sbj_is_object(route)) {
@@ -505,14 +509,14 @@ static int render_managed(const sb_render_request *request, sbj *config, bool *h
             const bool legacy = sbj_string_is(final_value, "Proxy") || sbj_string_is(final_value, "Auto");
             if (!has_auto) {
                 sbj_set_str(route, "final", "direct");
-            } else if (android_selector && (legacy || sbj_string_is(final_value, "auto"))) {
-                sbj_set_str(route, "final", android_selector);
+            } else if (proxy_selector && (legacy || sbj_string_is(final_value, "auto"))) {
+                sbj_set_str(route, "final", proxy_selector);
             } else if (legacy) {
                 sbj_set_str(route, "final", "auto");
             }
         }
     }
-    free(android_selector);
+    free(proxy_selector);
     return 0;
 }
 

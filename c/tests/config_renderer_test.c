@@ -167,6 +167,74 @@ TEST(android_dns_follows_a_renamed_selector_when_proxy_is_a_node_tag) {
     sb_render_request_free(&r);
 }
 
+TEST(proxy_selection_requires_explicit_capability_or_legacy_android) {
+    sb_render_request r;
+    sb_render_request_init(&r);
+    set_profile(&r, "{\"dns\":{\"servers\":[{\"type\":\"https\",\"tag\":\"secure-dns\","
+                    "\"server\":\"1.1.1.1\",\"detour\":\"Proxy\"}]},\"route\":{\"final\":\"auto\"}}");
+    shadowsocks(sb_proxy_node_vec_push(&r.nodes), "hk");
+    sbj *baseline = render(&r, NULL);
+    REQUIRE(baseline);
+    char *baseline_json = sbj_dump(baseline, -1);
+    sbj_free(baseline);
+
+    static const struct { const char *host; bool selectable; } cases[] = {
+        {"{\"capabilities\":{\"platform\":\"linux\"}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\"}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"interactive_client\":true}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"supports_proxy_selection\":false}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"supports_proxy_selection\":\"true\"}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"supports_proxy_selection\":1}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"supports_proxy_selection\":null}}", false},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"supports_proxy_selection\":true}}", true},
+        {"{\"capabilities\":{\"platform\":\"windows\",\"interactive_client\":false,\"supports_proxy_selection\":true}}", true},
+        {"{\"capabilities\":{\"platform\":\"linux\",\"supports_proxy_selection\":true}}", true},
+        {"{\"capabilities\":{\"platform\":\"android\"}}", true},
+        {"{\"capabilities\":{\"platform\":\"android\",\"supports_proxy_selection\":false}}", true},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        set_host(&r, cases[i].host);
+        sbj *config = render(&r, NULL);
+        REQUIRE(config);
+        CHECK_STR(at_str(config, "route.final"), cases[i].selectable ? "Proxy" : "auto");
+        CHECK_STR(at_str(config, "dns.servers.0.detour"), cases[i].selectable ? "Proxy" : "auto");
+        if (cases[i].selectable) {
+            CHECK_STR(at_str(config, "outbounds.3.type"), "selector");
+            CHECK(at_json(config, "outbounds.3.outbounds", "[\"auto\",\"hk\",\"direct\"]"));
+        } else {
+            char *config_json = sbj_dump(config, -1);
+            CHECK_STR(config_json, baseline_json);
+            free(config_json);
+        }
+        sbj_free(config);
+    }
+    free(baseline_json);
+    sb_render_request_free(&r);
+}
+
+TEST(windows_proxy_selection_preserves_collision_and_empty_node_behavior) {
+    sb_render_request r;
+    sb_render_request_init(&r);
+    set_profile(&r, "{\"dns\":{\"servers\":[{\"type\":\"https\",\"server\":\"1.1.1.1\","
+                    "\"detour\":\"Proxy\"}]},\"route\":{\"final\":\"Proxy\"}}");
+    set_host(&r, "{\"capabilities\":{\"platform\":\"windows\",\"supports_proxy_selection\":true}}");
+    sbj *empty = render(&r, NULL);
+    REQUIRE(empty);
+    CHECK_STR(at_str(empty, "route.final"), "direct");
+    CHECK_STR(at_str(empty, "dns.servers.0.detour"), "direct");
+    CHECK_EQ_INT(sbj_arr_len(at(empty, "outbounds")), 1);
+    sbj_free(empty);
+
+    shadowsocks(sb_proxy_node_vec_push(&r.nodes), "Proxy");
+    sbj *config = render(&r, NULL);
+    REQUIRE(config);
+    CHECK_STR(at_str(config, "outbounds.3.tag"), "Proxy group");
+    CHECK_STR(at_str(config, "route.final"), "Proxy group");
+    CHECK_STR(at_str(config, "dns.servers.0.detour"), "Proxy group");
+    sbj_free(config);
+    sb_render_request_free(&r);
+}
+
 TEST(generated_rules_cannot_reference_unknown_outbounds) {
     sb_render_request r;
     sb_render_request_init(&r);

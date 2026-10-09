@@ -175,6 +175,10 @@ object LocalRouting {
     fun render(content: String, policy: LocalRoutingPolicy, controlPlaneServer: String = ""): LocalRoutingResult {
         validate(policy)
         val root = JSONObject(content)
+        // Android's mixed stack still sends TCP through the vendor kernel. Use
+        // libbox's userspace TCP/UDP stack consistently across Wi-Fi handovers.
+        objects(root.optJSONArray("inbounds")).filter { it.optString("type") == "tun" }
+            .forEach { it.put("stack", "gvisor") }
         val nodes = availableNodes(content)
         val nodeTags = nodes.map { it.tag }.toSet()
         val warnings = mutableListOf<String>()

@@ -4,6 +4,10 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import okhttp3.Call
@@ -19,6 +23,29 @@ class ConnectivityProbe(private val client: OkHttpClient = OkHttpClient.Builder(
     .callTimeout(8, TimeUnit.SECONDS)
     .retryOnConnectionFailure(false)
     .build(), private val timeoutMillis: Long = 10_000) {
+    /** Only a failed primary triggers the independent confirmation request. */
+    suspend fun checkAny(urls: List<String>): ConnectivityProbeResult {
+        require(urls.isNotEmpty())
+        val failures = mutableListOf<String>()
+        for (url in urls.distinct().take(2)) {
+            // Do not include credentials or query strings in diagnostics.
+            val host = runCatching { java.net.URI(url).host }.getOrNull() ?: "invalid-host"
+            try {
+                val status = check(url)
+                if (status in 200..399) return ConnectivityProbeResult(true, host, failures)
+                failures += "$host: HTTP $status"
+            } catch (_: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                failures += "$host: probe deadline exceeded"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                failures += "$host: ${error.javaClass.simpleName}"
+            }
+        }
+        return ConnectivityProbeResult(false, null, failures)
+    }
+
     suspend fun check(url: String): Int = withTimeout(timeoutMillis) {
         val call = client.newCall(Request.Builder().url(url)
             .header("Cache-Control", "no-cache").header("Connection", "close").get().build())
@@ -36,3 +63,5 @@ class ConnectivityProbe(private val client: OkHttpClient = OkHttpClient.Builder(
         }
     }
 }
+
+data class ConnectivityProbeResult(val healthy: Boolean, val reachedHost: String?, val failures: List<String>)

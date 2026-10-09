@@ -50,6 +50,24 @@ class LocalRoutingTest {
         } + LocalRoutingGroup("custom", "工作", listOf("work.example.org"), "US"))
     }
 
+    @Test fun androidTunUsesUserspaceTcpWithoutChangingRoutingChoicesOrSource() {
+        val source = JSONObject(base).put("inbounds", JSONArray().put(JSONObject()
+            .put("type", "tun").put("tag", "tun-in").put("stack", "mixed")
+            .put("address", JSONArray(listOf("172.19.0.1/30"))).put("mtu", 9000))
+            .put(JSONObject().put("type", "mixed").put("tag", "local-proxy").put("listen_port", 2080)))
+        val before = source.toString()
+        val policy = independentPolicy()
+        val rendered = LocalRouting.render(before, policy).content
+        val inbounds = JSONObject(rendered).getJSONArray("inbounds")
+        assertEquals("gvisor", inbounds.getJSONObject(0).getString("stack"))
+        assertEquals("172.19.0.1/30", inbounds.getJSONObject(0).getJSONArray("address").getString(0))
+        assertEquals(9000, inbounds.getJSONObject(0).getInt("mtu"))
+        assertFalse(inbounds.getJSONObject(1).has("stack"))
+        assertEquals(before, source.toString())
+        assertEquals(LocalRouting.selectionsFromConfig(LocalRouting.render(base, policy).content),
+            LocalRouting.selectionsFromConfig(rendered))
+    }
+
     @Test fun defaultsReuseTheProvisionedFixedClaudeNode() {
         val policy = LocalRouting.defaults(base)
         assertEquals("Tokyo", policy.defaultOutbound)

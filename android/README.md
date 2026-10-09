@@ -113,6 +113,41 @@ mock HTTP CONNECT exits that reject literal IP destinations. It checks Claude,
 GPT, custom/default and direct DNS answers, browser IP + TLS SNI connections,
 IPv6, independent switching and mapping restoration after restarts.
 
+## Wi-Fi recovery (1.2.3)
+
+The October 9 handset report recorded 25 watchdog core/TUN rebuilds after
+switching to Wi-Fi. The old policy treated two failures of one remote URL as a
+broken core, repeatedly dropping every active connection. Physical-network
+control-plane fallbacks succeeded while requests through the VPN failed.
+This establishes the rebuild loop, but does not by itself establish why the
+first TCP request failed on the handset.
+
+Android-rendered TUN inbounds now use `gvisor`, bypassing the vendor system TCP
+path used by `mixed`. This is a compatibility mitigation pending handset
+verification, not proof of a vendor-kernel defect. Addresses, MTU, routing,
+FakeIP persistence and saved node choices are retained; the server's original
+configuration is unchanged. Diagnostics include the effective TUN stack.
+
+The watchdog confirms a failed configured URL with Cloudflare's HTTPS 204
+endpoint through the normal VPN route. Each attempt includes DNS in its
+10-second deadline; successful primary probes do not send the extra request.
+Screen-on/handover events cannot start checks less than 15 seconds after the
+previous completed check. Three or more consecutive failed checks spanning
+at least 90 seconds allow one core rebuild for that outage. Further failures,
+isolated successful checks and network churn cannot trigger repeated rebuilds.
+At least two minutes of regularly sampled success rearm recovery, with a
+five-minute minimum between repairs. Long sleep gaps do not count as health.
+The health-check wake lock is bounded to 25 seconds for two sequential probes.
+Missing cores/reset failures during actual handovers retain their existing
+recovery path. Notifications distinguish failed probes from an active repair.
+
+Acceptance on the affected phone remains required: upgrade without clearing
+data, verify `tunStacks=[gvisor]`, switch between cellular and multiple Wi-Fi
+networks, browse for at least 15 minutes, then repeat with the screen off.
+Upload diagnostics if requests still fail; look for the reached probe host,
+failure type and absence of repeated core rebuilds. JVM tests and loopback
+DNS/routing tests cannot validate Xiaomi/Android 16 Wi-Fi behavior.
+
 ## Build
 
 Requirements:
@@ -207,6 +242,8 @@ rapid-toggle acceptance pass; JVM tests cannot reproduce Android/vendor routing.
 
 ## Background recovery (1.1.8)
 
+Historical behavior below is superseded by the 1.2.3 policy above.
+
 A service-owned watchdog reconciles physical networks and probes the configured
 URL-test endpoint every 30 seconds and after handovers/power-state events. The
 probe has a 10-second caller deadline including DNS and does not wait for UI
@@ -228,6 +265,9 @@ cannot silently grant itself an exemption. Test screen-off Wi-Fi/cellular change
 airplane-mode recovery, background-only browsing, and forced Doze on a device.
 
 ## Tiered network recovery (1.1.9)
+
+The handover path below remains; the repeated probe-driven escalation policy
+is superseded by 1.2.3.
 
 A handover now uses the existing libbox CommandServer.resetNetwork() to reset
 connections and DNS transports while retaining the Android TUN. This closes old

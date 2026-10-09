@@ -1,18 +1,46 @@
 package io.sbeasy.android.libbox
 
-/** Two failures on one network trigger repair, with a service-wide restart cooldown. */
-internal class BackgroundRecoveryPolicy(private val cooldownMillis: Long = 60_000) {
+/** A failed remote endpoint is not proof of a broken core. Allow one repair per outage. */
+internal class BackgroundRecoveryPolicy(
+    private val failureWindowMillis: Long = 90_000,
+    private val stableWindowMillis: Long = 120_000,
+    private val cooldownMillis: Long = 300_000,
+) {
     private var network: UnderlyingNetwork? = null
     private var failures = 0
+    private var failedSince: Long? = null
+    private var healthySince: Long? = null
+    private var lastSample: Long? = null
     private var lastRepair: Long? = null
+    private var repairedThisOutage = false
 
     fun record(current: UnderlyingNetwork?, healthy: Boolean, now: Long): Boolean {
-        if (network != current) { network = current; failures = 0 }
-        if (current == null || healthy) { failures = 0; return false }
+        // Screen-on bursts must not count as sustained failure, and a long sleep must
+        // not count as sustained health. Network churn cannot refill the repair budget.
+        if (network != current || lastSample?.let { now - it > 60_000 } == true) {
+            network = current
+            failures = 0
+            failedSince = null
+            healthySince = null
+        }
+        lastSample = now
+        if (current == null || healthy) {
+            failures = 0
+            failedSince = null
+            if (current == null) healthySince = null
+            else {
+                val since = healthySince ?: now.also { healthySince = it }
+                if (now - since >= stableWindowMillis) repairedThisOutage = false
+            }
+            return false
+        }
+        healthySince = null
+        val since = failedSince ?: now.also { failedSince = it }
         failures++
-        if (failures < 2 || lastRepair?.let { now - it < cooldownMillis } == true) return false
+        if (failures < 3 || now - since < failureWindowMillis || repairedThisOutage ||
+            lastRepair?.let { now - it < cooldownMillis } == true) return false
         lastRepair = now
-        failures = 0
+        repairedThisOutage = true
         return true
     }
 }

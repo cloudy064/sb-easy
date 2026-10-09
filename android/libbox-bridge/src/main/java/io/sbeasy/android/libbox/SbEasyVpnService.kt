@@ -271,6 +271,11 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     private fun startCore(config: ManagedConfig) {
         io.nekohasekai.libbox.Libbox.checkConfig(config.content)
+        val inbounds = org.json.JSONObject(config.content).optJSONArray("inbounds")
+        val stacks = (0 until (inbounds?.length() ?: 0)).mapNotNull { index ->
+            inbounds?.optJSONObject(index)?.takeIf { it.optString("type") == "tun" }?.optString("stack", "default")
+        }
+        ClientDiagnostics.info(TAG, "starting core tunStacks=$stacks")
         val server = CommandServer(this, platform)
         server.start()
         try {
@@ -310,12 +315,16 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         if (networkHealthJob?.isActive == true) return
         networkHealthJob = serviceScope.launch {
             healthSignals.trySend(Unit)
+            var lastCheckFinished: Long? = null
             while (currentCoroutineContext().isActive && runtimeWanted) {
                 withTimeoutOrNull(30_000) { healthSignals.receive() }
                 if (!runtimeWanted) break
+                // Handover completion and screen-on can arrive together. Do not
+                // turn those notifications into back-to-back failed samples.
+                if (lastCheckFinished?.let { SystemClock.elapsedRealtime() - it < 15_000 } == true) continue
                 val wakeLock = getSystemService(PowerManager::class.java)
                     .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sb-easy:health-check")
-                wakeLock.acquire(20_000)
+                wakeLock.acquire(25_000)
                 try {
                     platform.reconcileNetworks()
                     val network = platform.underlyingNetwork
@@ -333,12 +342,14 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                         .firstOrNull { it.optString("type") == "urltest" }
                         ?.optString("url")?.takeIf { it.isNotBlank() }
                     var failure: String? = null
+                    var reachedHost: String? = null
                     val healthy = if (appliedNetwork != network || commandServer == null) false else try {
                         if (url != null) {
-                            val status = connectivityProbe.check(url)
-                            check(status in 200..399) { "HTTP $status" }
-                        }
-                        true
+                            val result = connectivityProbe.checkAny(listOf(url, "https://cp.cloudflare.com/generate_204"))
+                            reachedHost = result.reachedHost
+                            failure = result.failures.takeIf { it.isNotEmpty() }?.joinToString("; ")
+                            result.healthy
+                        } else true
                     } catch (error: TimeoutCancellationException) {
                         failure = "connectivity probe exceeded 10s deadline"
                         false
@@ -350,18 +361,21 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                     }
                     // Never apply a result for a network that disappeared during the request.
                     if (!runtimeWanted || platform.underlyingNetwork != network || recoveryEpoch != epoch) continue
+                    lastCheckFinished = SystemClock.elapsedRealtime()
                     ClientDiagnostics.info(TAG, "background health network=${network.handle} ok=$healthy " +
                         "probe=${url != null} elapsedMs=${SystemClock.elapsedRealtime() - started} " +
-                        "error=$failure ${powerState()}")
+                        "reached=$reachedHost error=$failure ${powerState()}")
                     if (healthy) {
                         VpnRuntimeState.connected(config)
                         startForegroundNotification(if (url == null) "代理运行中（未配置检测地址）" else "${config.profileName} · 网络已恢复")
                     } else {
-                        VpnRuntimeState.runtimeWarning("后台检测连接异常，正在自动恢复")
-                        startForegroundNotification("后台检测连接异常，正在自动恢复")
+                        VpnRuntimeState.runtimeWarning("连接检测未通过，请检查当前节点或网络")
+                        startForegroundNotification("连接检测未通过 · 保留现有连接")
                     }
                     if (recoveryPolicy.record(network, healthy, SystemClock.elapsedRealtime())) {
-                        ClientDiagnostics.warn(TAG, "background watchdog escalating to core rebuild network=${network.handle}")
+                        ClientDiagnostics.warn(TAG, "sustained probe failure; one core rebuild for this outage network=${network.handle}")
+                        VpnRuntimeState.runtimeWarning("连接持续异常，正在尝试一次自动恢复")
+                        startForegroundNotification("连接持续异常 · 正在恢复")
                         rebuildRequestedFor = network
                         appliedNetwork = null
                         handover.changed(network, force = true)

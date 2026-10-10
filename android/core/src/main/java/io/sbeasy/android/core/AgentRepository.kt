@@ -388,6 +388,7 @@ class AgentRepository internal constructor(
         localPolicy = null
         policyPersisted = false
         mutableRouting.value = LocalRoutingSnapshot()
+        AppTrafficStore.clear()
         RuntimeObservability.resetDomainRouteStats()
         mutableState.value = ControlPlaneSnapshot()
     }

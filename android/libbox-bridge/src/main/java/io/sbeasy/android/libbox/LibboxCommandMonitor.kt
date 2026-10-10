@@ -11,6 +11,7 @@ import io.nekohasekai.libbox.LogIterator
 import io.nekohasekai.libbox.OutboundGroupIterator
 import io.nekohasekai.libbox.StatusMessage
 import io.nekohasekai.libbox.StringIterator
+import io.sbeasy.android.core.AppTrafficStore
 import io.sbeasy.android.core.ConnectionSnapshot
 import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ProxyGroupSnapshot
@@ -24,6 +25,7 @@ internal class LibboxCommandMonitor(
 ) : CommandClientHandler {
     private val connections = linkedMapOf<String, ConnectionSnapshot>()
     private var client: CommandClient? = null
+    private var closed = false
 
     fun connect() {
         if (client != null) return
@@ -38,11 +40,18 @@ internal class LibboxCommandMonitor(
     }
 
     fun close() {
-        client?.let { runCatching { it.disconnect() } }
-        client = null
-        connections.clear()
-        RuntimeObservability.persistDomainRouteStats()
-        RuntimeObservability.resetRuntime()
+        val previous = synchronized(this) {
+            if (closed) return
+            closed = true
+            val previous = client
+            client = null
+            connections.clear()
+            AppTrafficStore.endCore()
+            RuntimeObservability.persistDomainRouteStats()
+            RuntimeObservability.resetRuntime()
+            previous
+        }
+        previous?.let { runCatching { it.disconnect() } }
     }
 
     fun selectOutbound(groupTag: String, outboundTag: String) {
@@ -83,7 +92,9 @@ internal class LibboxCommandMonitor(
         RuntimeObservability.appendLogs(values)
     }
 
+    @Synchronized
     override fun writeStatus(message: StatusMessage) {
+        if (closed) return
         RuntimeObservability.updateTraffic(
             TrafficSnapshot(
                 uplink = message.uplink,
@@ -136,8 +147,9 @@ internal class LibboxCommandMonitor(
 
     override fun updateClashMode(newMode: String?) = Unit
 
+    @Synchronized
     override fun writeConnectionEvents(events: ConnectionEvents?) {
-        if (events == null) return
+        if (closed || events == null) return
         if (events.reset) {
             connections.clear()
             RuntimeObservability.resetConnectionAccounting()
@@ -150,24 +162,29 @@ internal class LibboxCommandMonitor(
                     val snapshot = it.toSnapshot()
                     connections[event.id] = snapshot
                     RuntimeObservability.recordConnectionOpened(event.id, snapshot)
+                    AppTrafficStore.record(snapshot)
                 }
                 Libbox.ConnectionEventUpdate -> connections[event.id]?.let { current ->
                     RuntimeObservability.recordConnectionTraffic(event.id, event.uplinkDelta, event.downlinkDelta)
                     connections[event.id] = current.copy(
                         uplink = event.uplinkDelta,
                         downlink = event.downlinkDelta,
-                        uplinkTotal = current.uplinkTotal + event.uplinkDelta,
-                        downlinkTotal = current.downlinkTotal + event.downlinkDelta,
-                    )
+                        uplinkTotal = current.uplinkTotal + event.uplinkDelta.coerceAtLeast(0),
+                        downlinkTotal = current.downlinkTotal + event.downlinkDelta.coerceAtLeast(0),
+                    ).also { AppTrafficStore.record(it) }
                 }
                 Libbox.ConnectionEventClosed -> {
                     val closed = event.connection?.toSnapshot()
                     RuntimeObservability.recordConnectionClosed(event.id, closed)
-                    if (closed != null) connections[event.id] = closed
-                    else connections[event.id]?.let { connections[event.id] = it.copy(closedAt = event.closedAt) }
+                    val final = closed ?: connections[event.id]?.copy(closedAt = event.closedAt)
+                    if (final != null) {
+                        connections[event.id] = final
+                        AppTrafficStore.record(final)
+                    }
                 }
             }
         }
+        AppTrafficStore.publish()
         val cutoff = System.currentTimeMillis() - 5 * 60_000L
         connections.entries.removeAll { it.value.closedAt in 1 until cutoff }
         RuntimeObservability.updateConnections(connections.values.toList())
@@ -196,6 +213,11 @@ internal class LibboxCommandMonitor(
             outbound = outbound.orEmpty(),
             outboundType = outboundType.orEmpty(),
             chain = chain,
+            appUid = processInfo?.userID,
+            appPackages = buildList {
+                val names = processInfo?.packageNames()
+                while (names != null && names.hasNext()) add(names.next().orEmpty())
+            },
         )
     }
 

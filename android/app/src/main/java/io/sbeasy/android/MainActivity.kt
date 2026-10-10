@@ -94,6 +94,8 @@ import io.sbeasy.android.core.ConfigInspector
 import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ControlPlaneSnapshot
 import io.sbeasy.android.core.CoreGraph
+import io.sbeasy.android.core.AppTrafficStore
+import io.sbeasy.android.core.AppTrafficStat
 import io.sbeasy.android.core.DomainRouteStat
 import io.sbeasy.android.core.EnrollmentUriParser
 import io.sbeasy.android.core.ManagedConfig
@@ -878,12 +880,70 @@ private fun ToolsScreen(
 ) {
     var section by remember { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize()) {
-        SegmentTabs(listOf("路由测试", "路由记录", "运行配置", "日志"), section) { section = it }
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+            listOf("应用流量", "路由测试", "路由记录", "运行配置", "日志").forEachIndexed { index, label ->
+                TextButton(onClick = { section = index }) {
+                    Text(label, color = if (section == index) AccentDark else Muted)
+                }
+            }
+        }
         when (section) {
-            0 -> RouteTestScreen(connectionCount, phase)
-            1 -> DomainRouteStatsScreen(domainRoutes)
-            2 -> ConfigurationScreen(config)
+            0 -> AppTrafficScreen()
+            1 -> RouteTestScreen(connectionCount, phase)
+            2 -> DomainRouteStatsScreen(domainRoutes)
+            3 -> ConfigurationScreen(config)
             else -> LogsScreen(logs, diagnosticLogs, coreVersion)
+        }
+    }
+}
+
+@Composable
+private fun AppTrafficScreen() {
+    val stats by AppTrafficStore.stats.collectAsStateWithLifecycle()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var query by remember { mutableStateOf("") }
+    val identities = stats.map { it.key to it.packages }
+    val names = remember(identities) {
+        stats.associate { stat ->
+            stat.key to stat.packages.joinToString(" / ") { name ->
+                runCatching {
+                    context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(name, 0)).toString()
+                }.getOrDefault(name)
+            }.ifBlank { if (stat.uid == null) "未知应用" else "系统 / 未识别应用" }
+        }
+    }
+    val visible = stats.filter {
+        query.isBlank() || names[it.key].orEmpty().contains(query.trim(), true) ||
+            it.packages.any { name -> name.contains(query.trim(), true) } || it.uid?.toString() == query.trim()
+    }
+    LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            AppCard {
+                Text("应用流量", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                Text("自启用统计起累计，仅统计经过本机 VPN 的直连和代理流量；数据只保存在本机。", color = Muted, fontSize = 12.sp)
+                HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Line)
+                InfoRow("累计上传", formatBytes(stats.sumOf(AppTrafficStat::uploaded)))
+                InfoRow("累计下载", formatBytes(stats.sumOf(AppTrafficStat::downloaded)))
+                Text("按总流量排序 · 共享 UID 的应用合并统计 · 未知归属单独列出", color = Muted, fontSize = 11.sp)
+            }
+        }
+        item {
+            OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索应用名称、包名或 UID") },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
+        }
+        if (visible.isEmpty()) item {
+            Text(if (stats.isEmpty()) "暂无记录，连接 VPN 并使用应用后显示流量。" else "没有匹配的应用", color = Muted)
+        }
+        items(visible, key = { it.key }) { stat ->
+            AppCard {
+                Text(names[stat.key].orEmpty(), color = Ink, fontWeight = FontWeight.SemiBold)
+                if (stat.packages.isNotEmpty()) Text(stat.packages.joinToString("\n"), color = Muted, fontSize = 11.sp)
+                stat.uid?.let { Text("UID $it", color = Muted, fontSize = 11.sp) }
+                if (stat.packages.size > 1) Text("共享 UID，无法进一步区分应用", color = Muted, fontSize = 11.sp)
+                HorizontalDivider(Modifier.padding(vertical = 10.dp), color = Line)
+                InfoRow("↑ 上传", formatBytes(stat.uploaded))
+                InfoRow("↓ 下载", formatBytes(stat.downloaded))
+            }
         }
     }
 }

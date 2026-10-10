@@ -266,7 +266,7 @@ object LocalRouting {
                 rule.optString("outbound") !in endpointTags &&
                 rule.optString("outbound") !in proxyRouteTags
         }.forEach(rules::put)
-        route.put("rules", rules).put("final", defaultTag)
+        route.put("rules", rules).put("final", defaultTag).put("find_process", true)
 
         val dns = root.optJSONObject("dns") ?: JSONObject().also { root.put("dns", it) }
         val servers = dns.optJSONArray("servers") ?: JSONArray().also { dns.put("servers", it) }

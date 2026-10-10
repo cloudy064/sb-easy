@@ -29,6 +29,36 @@ The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
 
+## Per-application traffic (1.2.4)
+
+Open **Tools → 应用流量** for cumulative upload/download totals, sorted by
+combined bytes, searchable by application name, package or UID. Accounting uses
+libbox connection payload counters for traffic passing through the VPN,
+including direct and proxy routes. It is not the Android system's device-wide
+or carrier-billed usage; bypassed traffic, transport overhead and pre-upgrade
+history are not included. Shared-UID packages appear as one group, and missing
+owner information remains visible as unknown/UID-only traffic.
+
+Android-rendered configurations enable process lookup even when app-based
+routing rules are disabled. Package visibility is used to resolve arbitrary
+connection-owner UIDs to package names and labels. Owner lookup can still fail
+on short-lived connections or older/vendor Android systems.
+
+Totals stay exclusively in `app-traffic.json` in app-private storage, with
+atomic checkpoints every 30 seconds while connection events arrive and a flush
+on normal VPN shutdown. Force-stop/crash can lose the unsaved interval; the
+last interval before shutdown can also be missed when the core stops sending
+events. Totals survive configuration changes, core rebuilds and app restarts;
+forgetting the device or clearing app data removes them. They are not uploaded
+as telemetry. Replayed connection snapshots and final close counters are
+reconciled against per-core checkpoints to avoid double counting.
+
+JVM tests cover cumulative/replayed/final counters, shared UIDs, unknown owners,
+restarts, persistence and recent closed-history pruning. Device acceptance:
+upgrade without clearing data, transfer data with two different apps, verify
+separate upload/download rows, switch nodes/reconnect/restart, and check that
+saved totals remain and shared/unknown owners are shown honestly.
+
 ## Local service groups (1.2.2)
 
 The Proxies tab now contains **Default proxy**, **Claude**, and **GPT** cards.

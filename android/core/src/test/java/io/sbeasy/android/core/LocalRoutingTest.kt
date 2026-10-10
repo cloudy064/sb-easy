@@ -68,6 +68,13 @@ class LocalRoutingTest {
             LocalRouting.selectionsFromConfig(rendered))
     }
 
+    @Test fun applicationAccountingFindsOwnersWithoutApplicationRoutingRules() {
+        val policy = independentPolicy().copy(groups = emptyList())
+        val rendered = JSONObject(LocalRouting.render(base, policy).content)
+        assertTrue(rendered.getJSONObject("route").getBoolean("find_process"))
+        assertFalse(JSONObject(base).getJSONObject("route").has("find_process"))
+    }
+
     @Test fun defaultsReuseTheProvisionedFixedClaudeNode() {
         val policy = LocalRouting.defaults(base)
         assertEquals("Tokyo", policy.defaultOutbound)

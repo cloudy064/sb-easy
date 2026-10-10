@@ -82,6 +82,8 @@ data class ConnectionSnapshot(
     val outbound: String,
     val outboundType: String,
     val chain: List<String>,
+    val appUid: Int? = null,
+    val appPackages: List<String> = emptyList(),
 )
 
 data class DomainRouteStat(

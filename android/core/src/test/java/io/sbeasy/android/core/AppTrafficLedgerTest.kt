@@ -167,4 +167,46 @@ class AppTrafficLedgerTest {
         assertEquals(setOf("203.0.113.7", "2001:db8::1"), ledger.detailSnapshot().map { it.key.host }.toSet())
     }
 
+    @Test fun clearKeepsLiveBaselineAndDoesNotResurrectUnchangedOrClosedRows() {
+        val ledger = AppTrafficLedger()
+        val initial = connection(up = 100, down = 200).copy(domain = "api.example.com", outbound = "Tokyo", outboundType = "http")
+        ledger.record(initial)
+        ledger.clearStatistics(nowMillis = 100)
+        assertEquals(TrafficStatisticsSnapshot(), ledger.statistics())
+        ledger.record(initial)
+        assertEquals(TrafficStatisticsSnapshot(), ledger.statistics())
+        ledger.record(initial.copy(uplinkTotal = 130, downlinkTotal = 250))
+        assertEquals(30L, ledger.snapshot().single().uploaded)
+        assertEquals(50L, ledger.detailSnapshot().single().downloaded)
+        ledger.clearStatistics(nowMillis = 200)
+        ledger.record(initial.copy(uplinkTotal = 130, downlinkTotal = 250, closedAt = 300))
+        assertEquals(TrafficStatisticsSnapshot(), ledger.statistics())
+        val restored = AppTrafficLedger().apply { restore(ledger.encode()) }
+        assertEquals(TrafficStatisticsSnapshot(), restored.statistics())
+    }
+
+    @Test fun clearAdoptsUnseenOldConnectionsAsBaselineButCountsNewConnections() {
+        val ledger = AppTrafficLedger()
+        ledger.clearStatistics(nowMillis = 100)
+        ledger.record(connection(id = "old", up = 500, down = 600))
+        assertEquals(TrafficStatisticsSnapshot(), ledger.statistics())
+        ledger.record(connection(id = "old", up = 510, down = 620))
+        ledger.record(connection(id = "new", up = 30, down = 40).copy(createdAt = 101))
+        assertEquals(40L, ledger.snapshot().single().uploaded)
+        assertEquals(60L, ledger.domainSnapshot().single().downloaded)
+        ledger.newCore()
+        ledger.record(connection(id = "new-core", up = 5, down = 10))
+        assertEquals(45L, ledger.snapshot().single().uploaded)
+    }
+
+    @Test fun clearRetainsAppIdentityWhenFinalSnapshotOmitsIt() {
+        val ledger = AppTrafficLedger()
+        ledger.record(connection(up = 100, down = 200))
+        ledger.clearStatistics(nowMillis = 100)
+        ledger.record(connection(up = 110, down = 230, uid = null, packages = emptyList(), closed = 200))
+        assertEquals(10001, ledger.snapshot().single().uid)
+        assertEquals(listOf("example.app"), ledger.snapshot().single().packages)
+        assertEquals(10L, ledger.snapshot().single().uploaded)
+    }
+
 }

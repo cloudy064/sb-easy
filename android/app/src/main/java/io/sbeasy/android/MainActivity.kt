@@ -918,7 +918,8 @@ private fun AppTrafficScreen() {
             }
         }
     }
-    TrafficStatisticsContent(state.apps, state.domains, labels, state.details)
+    TrafficStatisticsContent(state.apps, state.domains, labels, state.details,
+        onClearStatistics = { withContext(Dispatchers.IO) { AppTrafficStore.clearStatistics() } })
 }
 
 @Composable
@@ -927,7 +928,12 @@ internal fun TrafficStatisticsContent(
     domains: List<DomainTrafficStat>,
     labels: Map<String, String>,
     details: List<TrafficDetailStat> = emptyList(),
+    onClearStatistics: suspend () -> Unit = {},
 ) {
+    val scope = rememberCoroutineScope()
+    var confirmClear by remember { mutableStateOf(false) }
+    var clearing by remember { mutableStateOf(false) }
+    var clearError by remember { mutableStateOf<String?>(null) }
     var dimension by remember { mutableIntStateOf(0) }
     var query by remember(dimension) { mutableStateOf("") }
     var selectedApp by remember { mutableStateOf<String?>(null) }
@@ -954,6 +960,29 @@ internal fun TrafficStatisticsContent(
             )
         }
         return
+    }
+    if (confirmClear) {
+        AlertDialog(onDismissRequest = { if (!clearing) confirmClear = false }, containerColor = SurfaceColor,
+            title = { Text("清空全部流量统计？") },
+            text = { Column {
+                Text("将删除所有应用、Domain、host 和出口路径的累计记录。VPN 保持连接，之后从新的流量重新累计。此操作无法撤销。")
+                clearError?.let { Text(it, color = Warn, modifier = Modifier.padding(top = 8.dp)) }
+            } },
+            confirmButton = { TextButton(enabled = !clearing, onClick = {
+                scope.launch {
+                    clearing = true
+                    clearError = null
+                    try {
+                        onClearStatistics()
+                        query = ""
+                        confirmClear = false
+                    } catch (error: Exception) {
+                        if (error is kotlinx.coroutines.CancellationException) throw error
+                        clearError = "清空失败：${error.message ?: error.javaClass.simpleName}"
+                    } finally { clearing = false }
+                }
+            }) { Text(if (clearing) "正在清空…" else "确认清空", color = Warn) } },
+            dismissButton = { TextButton(enabled = !clearing, onClick = { confirmClear = false }) { Text("取消") } })
     }
     val wanted = query.trim()
     val visibleApps = stats.filter { stat ->
@@ -983,8 +1012,10 @@ internal fun TrafficStatisticsContent(
                 placeholder = { Text(if (dimension == 0) "搜索应用、包名或 UID" else "搜索主域名，例如 example.com") },
                 singleLine = true, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(if (dimension == 0) "${visibleApps.size} 个应用 / 分组" else "${visibleDomains.size} 个 Domain / 分组", color = Muted, fontSize = 11.sp)
-                Text("总流量从高到低", color = Muted, fontSize = 11.sp)
+                Text(if (dimension == 0) "${visibleApps.size} 个应用 / 分组 · 按流量排序" else "${visibleDomains.size} 个 Domain / 分组 · 按流量排序", color = Muted, fontSize = 11.sp)
+                TextButton(onClick = { clearError = null; confirmClear = true }, enabled = !clearing) {
+                    Text("清空统计", color = Muted, fontSize = 11.sp)
+                }
             }
             Text(if (dimension == 0) "点击应用，查看访问的 host、直连和代理节点"
                 else "按可注册主域名聚合 · 点击查看各 host 与出口",

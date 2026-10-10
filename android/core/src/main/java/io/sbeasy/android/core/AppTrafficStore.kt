@@ -70,6 +70,25 @@ object AppTrafficStore {
         ledger.newCore()
     }
 
+    /** User reset: persist first so a failed write leaves the visible history intact. */
+    @Synchronized
+    fun clearStatistics() {
+        val target = checkNotNull(file) { "流量统计尚未初始化" }
+        val output = target.startWrite()
+        try {
+            output.write(AppTrafficLedger().encode().toByteArray(Charsets.UTF_8))
+            target.finishWrite(output)
+        } catch (error: Throwable) {
+            target.failWrite(output)
+            throw error
+        }
+        ledger.clearStatistics()
+        dirty = false
+        lastSave = SystemClock.elapsedRealtime()
+        lastPublish = lastSave
+        mutableState.value = ledger.statistics()
+    }
+
     @Synchronized
     fun clear() {
         ledger = AppTrafficLedger()

@@ -29,6 +29,21 @@ The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
 
+## Clear traffic statistics (1.2.7)
+
+Use **诊断 → 流量统计 → 清空统计** and confirm to reset all app, domain,
+host and exit counters together. The action is available from either dimension,
+does not disconnect the VPN, and persists an empty snapshot immediately. A failed
+save leaves the existing history visible and reports an error.
+
+Live connection baselines are retained: unchanged/replayed counters do not
+recreate rows, and subsequent samples count only their positive increments.
+Old connections first observed after the reset adopt their first sample as a
+baseline instead of restoring older history. Counter sampling means the exact
+instant of reset cannot split bytes between samples. Fresh core lifetimes start
+with fresh baselines. Tests cover cancellation/confirmation, both dimensions,
+active/replayed/closed connections, identity retention and persisted empty data.
+
 ## Domain, host and exit drilldowns (1.2.6)
 
 **诊断 → 流量统计 → 按域名** groups by the registrable domain using

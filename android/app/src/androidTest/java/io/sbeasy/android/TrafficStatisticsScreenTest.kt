@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -19,6 +20,8 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
+import io.sbeasy.android.core.AppTrafficStore
+import io.sbeasy.android.core.CoreGraph
 import io.sbeasy.android.core.AppTrafficLedger
 import io.sbeasy.android.core.ConnectionSnapshot
 import io.sbeasy.android.core.TrafficDetailKey
@@ -105,6 +108,67 @@ class TrafficStatisticsScreenTest {
         screenshot("traffic-domain-hosts.png")
         compose.onNodeWithText("cdn.example.co.uk").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("代理 · 美国").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test fun clearRequiresConfirmationAndResetsBothDimensionsWhileKeepingLiveBaseline() {
+        val ledger = AppTrafficLedger()
+        val connection = ConnectionSnapshot("live", "tcp", "", "", "api.example.com", "tls", 1, 0, 0, 0,
+            1024, 2048, "", "Tokyo", "http", listOf("Tokyo"), 10001, listOf("com.example.browser"))
+        ledger.record(connection)
+        val state = mutableStateOf(ledger.statistics())
+        compose.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Box(Modifier.width(360.dp).fillMaxSize().background(Color(0xFF090E14))) {
+                    TrafficStatisticsContent(state.value.apps, state.value.domains,
+                        mapOf("com.example.browser" to "浏览器"), state.value.details,
+                        onClearStatistics = { ledger.clearStatistics(); state.value = ledger.statistics() })
+                }
+            }
+        }
+        compose.onNodeWithText("清空统计").performClick()
+        compose.onNodeWithText("取消").performClick()
+        compose.onNodeWithText("浏览器").assertIsDisplayed()
+        compose.onNodeWithText("清空统计").performClick()
+        compose.onNodeWithText("确认清空").performClick()
+        compose.onNodeWithText("暂无流量，连接 VPN 并使用应用后显示").assertIsDisplayed()
+        compose.onNodeWithText("按域名").performClick()
+        compose.onNodeWithText("暂无流量，连接 VPN 并使用应用后显示").assertIsDisplayed()
+        compose.runOnIdle {
+            ledger.record(connection)
+            state.value = ledger.statistics()
+        }
+        compose.onNodeWithText("暂无流量，连接 VPN 并使用应用后显示").assertIsDisplayed()
+        compose.runOnIdle {
+            ledger.record(connection.copy(uplinkTotal = 1034, downlinkTotal = 2068))
+            state.value = ledger.statistics()
+        }
+        compose.onNodeWithText("example.com").assertIsDisplayed()
+        compose.onNodeWithText("↑ 10 B").assertIsDisplayed()
+        compose.onNodeWithText("↓ 20 B").assertIsDisplayed()
+    }
+
+    @Test fun clearingImmediatelyPersistsEmptyHistoryAndKeepsConnectionBaseline() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        CoreGraph.initialize(context)
+        AppTrafficStore.clear()
+        try {
+            val connection = ConnectionSnapshot("store-live", "tcp", "", "", "api.example.com", "tls", 1, 0,
+                0, 0, 100, 200, "", "Tokyo", "http", listOf("Tokyo"), 10001, listOf("com.example.browser"))
+            AppTrafficStore.record(connection)
+            AppTrafficStore.publish(force = true)
+            AppTrafficStore.flush()
+            val file = File(context.filesDir, "app-traffic.json")
+            org.junit.Assert.assertEquals(100L, AppTrafficLedger().apply { restore(file.readText()) }.snapshot().single().uploaded)
+            AppTrafficStore.clearStatistics()
+            org.junit.Assert.assertEquals(io.sbeasy.android.core.TrafficStatisticsSnapshot(),
+                AppTrafficLedger().apply { restore(file.readText()) }.statistics())
+            AppTrafficStore.record(connection)
+            AppTrafficStore.publish(force = true)
+            org.junit.Assert.assertEquals(io.sbeasy.android.core.TrafficStatisticsSnapshot(), AppTrafficStore.state.value)
+            AppTrafficStore.record(connection.copy(uplinkTotal = 110, downlinkTotal = 220))
+            AppTrafficStore.publish(force = true)
+            org.junit.Assert.assertEquals(10L, AppTrafficStore.state.value.apps.single().uploaded)
+        } finally { AppTrafficStore.clear() }
     }
 
     private fun screenshot(name: String) {

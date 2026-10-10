@@ -37,11 +37,12 @@ data class TrafficStatisticsSnapshot(
 
 /** One ledger per embedded-core lifetime; totals alone survive process restarts. */
 class AppTrafficLedger(private val maxDetailRows: Int = 20_000) {
-    private data class Checkpoint(val appKey: String, val detail: TrafficDetailKey, val up: Long, val down: Long, val closedAt: Long)
+    private data class Checkpoint(val app: AppTrafficStat, val detail: TrafficDetailKey, val up: Long, val down: Long, val closedAt: Long)
     private val totals = linkedMapOf<String, AppTrafficStat>()
     private val domains = linkedMapOf<String, DomainTrafficStat>()
     private val details = linkedMapOf<TrafficDetailKey, TrafficDetailStat>()
     private val checkpoints = mutableMapOf<String, Checkpoint>()
+    private var clearedAtMillis = 0L
 
     fun record(value: ConnectionSnapshot) {
         if (value.id.isBlank()) return
@@ -49,18 +50,23 @@ class AppTrafficLedger(private val maxDetailRows: Int = 20_000) {
         val packages = value.appPackages.filter { it.isNotBlank() }.distinct().sorted()
         val uid = value.appUid?.takeIf { it >= 0 }
         // Preserve original attribution when final/replayed snapshots omit metadata.
-        val appKey = previous?.appKey ?: "${uid ?: -1}:${packages.joinToString(",")}"
-        val total = totals[appKey] ?: AppTrafficStat(appKey, uid, packages)
+        val appKey = previous?.app?.key ?: "${uid ?: -1}:${packages.joinToString(",")}"
+        val identity = previous?.app ?: AppTrafficStat(appKey, uid, packages)
+        val total = totals[appKey] ?: identity
         val up = value.uplinkTotal.coerceAtLeast(previous?.up ?: 0)
         val down = value.downlinkTotal.coerceAtLeast(previous?.down ?: 0)
-        val deltaUp = up - (previous?.up ?: 0)
-        val deltaDown = down - (previous?.down ?: 0)
-        totals[appKey] = total.copy(uploaded = total.uploaded + deltaUp, downloaded = total.downloaded + deltaDown)
+        // An old connection first replayed after clear has no known baseline. Adopt
+        // its current counters without resurrecting pre-clear history.
+        val baselineOnly = previous == null && clearedAtMillis > 0 && value.createdAt <= clearedAtMillis
+        val deltaUp = if (baselineOnly) 0 else up - (previous?.up ?: 0)
+        val deltaDown = if (baselineOnly) 0 else down - (previous?.down ?: 0)
         val detail = previous?.detail ?: detailKey(appKey, value).let {
             if (it in details || details.size < maxDetailRows) it else overflowKey()
         }
+        checkpoints[value.id] = Checkpoint(identity, detail, up, down, maxOf(value.closedAt, previous?.closedAt ?: 0))
+        if (deltaUp == 0L && deltaDown == 0L) return
+        totals[appKey] = total.copy(uploaded = total.uploaded + deltaUp, downloaded = total.downloaded + deltaDown)
         addDetail(detail, deltaUp, deltaDown)
-        checkpoints[value.id] = Checkpoint(appKey, detail, up, down, maxOf(value.closedAt, previous?.closedAt ?: 0))
     }
 
     private fun detailKey(appKey: String, value: ConnectionSnapshot): TrafficDetailKey {
@@ -90,7 +96,18 @@ class AppTrafficLedger(private val maxDetailRows: Int = 20_000) {
             .forEach { checkpoints.remove(it.key) }
     }
 
-    fun newCore() = checkpoints.clear()
+    fun clearStatistics(nowMillis: Long = System.currentTimeMillis()) {
+        totals.clear()
+        domains.clear()
+        details.clear()
+        clearedAtMillis = nowMillis
+        // Keep live/recent connection baselines and immutable app identity.
+    }
+
+    fun newCore() {
+        checkpoints.clear()
+        clearedAtMillis = 0L
+    }
     fun snapshot(): List<AppTrafficStat> = totals.values.sortedByDescending { it.uploaded + it.downloaded }
     fun domainSnapshot(): List<DomainTrafficStat> = domains.values.sortedByDescending { it.uploaded + it.downloaded }
     fun detailSnapshot(): List<TrafficDetailStat> = details.values.sortedByDescending { it.uploaded + it.downloaded }
@@ -151,7 +168,7 @@ class AppTrafficLedger(private val maxDetailRows: Int = 20_000) {
         domains.clear()
         details.clear()
         restoredDetails.forEach { addDetail(it.key, it.uploaded, it.downloaded) }
-        checkpoints.clear()
+        newCore()
     }
 
     private fun JSONArray.strings(): List<String> = (0 until length()).map { getString(it) }

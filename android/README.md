@@ -29,9 +29,36 @@ The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
 
+## Traffic statistics (1.2.5)
+
+Open **Tools → 流量统计**, then choose **按应用** or **按域名**. Both views
+show independently accumulated upload/download totals, ranked compact rows,
+search and each row's share of the selected dimension's total. Shared system
+UIDs show a short title (for example Android 系统); package names and component
+labels are available in a bounded, scrollable details dialog instead of filling
+the traffic list. Package-label lookups run off the main thread.
+
+Domain accounting aggregates full observed hostnames across apps and exits,
+normalizes case and a trailing dot, and keeps unknown/IP-only connections in a
+separate bucket. It does not infer domains from destination IPs. Up to 10,000
+named domain buckets are retained; additional domains contribute to an explicit
+other-domains bucket so their bytes are not lost. These totals are independent
+of domain route observations and survive route/configuration changes.
+
+The v2 storage format migrates 1.2.4's application totals without loss. Domain
+history starts with this version; pre-upgrade application bytes cannot be
+retrospectively attributed to domains, so the two historical totals can differ.
+Both dimensions remain local and share the same checkpoint/retention lifecycle.
+
+Validation includes migration, per-domain aggregation across apps/routes,
+replayed and final connection counters, restart persistence and domain overflow.
+An Android Compose test uses 50 shared-UID components at 360dp width to verify
+that traffic and the next application stay visible, details open separately,
+and domain switching/search work.
+
 ## Per-application traffic (1.2.4)
 
-Open **Tools → 应用流量** for cumulative upload/download totals, sorted by
+The initial 1.2.4 **Tools → 应用流量** view provided cumulative upload/download totals, sorted by
 combined bytes, searchable by application name, package or UID. Accounting uses
 libbox connection payload counters for traffic passing through the VPN,
 including direct and proxy routes. It is not the Android system's device-wide

@@ -15,6 +15,8 @@ object AppTrafficStore {
     private var dirty = false
     private val mutableStats = MutableStateFlow<List<AppTrafficStat>>(emptyList())
     val stats = mutableStats.asStateFlow()
+    private val mutableDomains = MutableStateFlow<List<DomainTrafficStat>>(emptyList())
+    val domains = mutableDomains.asStateFlow()
 
     @Synchronized
     fun initialize(context: Context) {
@@ -26,6 +28,7 @@ object AppTrafficStore {
                 .onFailure { ClientDiagnostics.warn("app-traffic", "Could not restore application traffic: ${it.message}") }
         }
         mutableStats.value = ledger.snapshot()
+        mutableDomains.value = ledger.domainSnapshot()
     }
 
     @Synchronized
@@ -38,6 +41,7 @@ object AppTrafficStore {
     fun publish() {
         ledger.prune()
         mutableStats.value = ledger.snapshot()
+        mutableDomains.value = ledger.domainSnapshot()
         if (SystemClock.elapsedRealtime() - lastSave >= 30_000) flush()
     }
 
@@ -72,5 +76,6 @@ object AppTrafficStore {
         file?.delete()
         dirty = false
         mutableStats.value = emptyList()
+        mutableDomains.value = emptyList()
     }
 }

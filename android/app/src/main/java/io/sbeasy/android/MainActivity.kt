@@ -94,6 +94,8 @@ import io.sbeasy.android.core.ConfigInspector
 import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ControlPlaneSnapshot
 import io.sbeasy.android.core.CoreGraph
+import io.sbeasy.android.core.AppTrafficLedger
+import io.sbeasy.android.core.DomainTrafficStat
 import io.sbeasy.android.core.AppTrafficStore
 import io.sbeasy.android.core.AppTrafficStat
 import io.sbeasy.android.core.DomainRouteStat
@@ -881,7 +883,7 @@ private fun ToolsScreen(
     var section by remember { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
-            listOf("应用流量", "路由测试", "路由记录", "运行配置", "日志").forEachIndexed { index, label ->
+            listOf("流量统计", "路由测试", "路由记录", "运行配置", "日志").forEachIndexed { index, label ->
                 TextButton(onClick = { section = index }) {
                     Text(label, color = if (section == index) AccentDark else Muted)
                 }
@@ -900,50 +902,150 @@ private fun ToolsScreen(
 @Composable
 private fun AppTrafficScreen() {
     val stats by AppTrafficStore.stats.collectAsStateWithLifecycle()
+    val domains by AppTrafficStore.domains.collectAsStateWithLifecycle()
     val context = androidx.compose.ui.platform.LocalContext.current
-    var query by remember { mutableStateOf("") }
-    val identities = stats.map { it.key to it.packages }
-    val names = remember(identities) {
-        stats.associate { stat ->
-            stat.key to stat.packages.joinToString(" / ") { name ->
+    val packages = stats.flatMap { it.packages }.distinct().sorted()
+    val labels by androidx.compose.runtime.produceState<Map<String, String>>(emptyMap(), packages) {
+        value = withContext(Dispatchers.IO) {
+            packages.associateWith { name ->
                 runCatching {
                     context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(name, 0)).toString()
                 }.getOrDefault(name)
-            }.ifBlank { if (stat.uid == null) "未知应用" else "系统 / 未识别应用" }
-        }
-    }
-    val visible = stats.filter {
-        query.isBlank() || names[it.key].orEmpty().contains(query.trim(), true) ||
-            it.packages.any { name -> name.contains(query.trim(), true) } || it.uid?.toString() == query.trim()
-    }
-    LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item {
-            AppCard {
-                Text("应用流量", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                Text("自启用统计起累计，仅统计经过本机 VPN 的直连和代理流量；数据只保存在本机。", color = Muted, fontSize = 12.sp)
-                HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Line)
-                InfoRow("累计上传", formatBytes(stats.sumOf(AppTrafficStat::uploaded)))
-                InfoRow("累计下载", formatBytes(stats.sumOf(AppTrafficStat::downloaded)))
-                Text("按总流量排序 · 共享 UID 的应用合并统计 · 未知归属单独列出", color = Muted, fontSize = 11.sp)
             }
         }
-        item {
-            OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索应用名称、包名或 UID") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-        }
-        if (visible.isEmpty()) item {
-            Text(if (stats.isEmpty()) "暂无记录，连接 VPN 并使用应用后显示流量。" else "没有匹配的应用", color = Muted)
-        }
-        items(visible, key = { it.key }) { stat ->
-            AppCard {
-                Text(names[stat.key].orEmpty(), color = Ink, fontWeight = FontWeight.SemiBold)
-                if (stat.packages.isNotEmpty()) Text(stat.packages.joinToString("\n"), color = Muted, fontSize = 11.sp)
-                stat.uid?.let { Text("UID $it", color = Muted, fontSize = 11.sp) }
-                if (stat.packages.size > 1) Text("共享 UID，无法进一步区分应用", color = Muted, fontSize = 11.sp)
-                HorizontalDivider(Modifier.padding(vertical = 10.dp), color = Line)
-                InfoRow("↑ 上传", formatBytes(stat.uploaded))
-                InfoRow("↓ 下载", formatBytes(stat.downloaded))
+    }
+    TrafficStatisticsContent(stats, domains, labels)
+}
+
+@Composable
+internal fun TrafficStatisticsContent(
+    stats: List<AppTrafficStat>,
+    domains: List<DomainTrafficStat>,
+    labels: Map<String, String>,
+) {
+    var dimension by remember { mutableIntStateOf(0) }
+    var query by remember(dimension) { mutableStateOf("") }
+    var selected by remember { mutableStateOf<AppTrafficStat?>(null) }
+    val wanted = query.trim()
+    val visibleApps = stats.filter { stat ->
+        wanted.isEmpty() || trafficAppTitle(stat, labels).contains(wanted, true) ||
+            stat.packages.any { it.contains(wanted, true) || labels[it].orEmpty().contains(wanted, true) } ||
+            stat.uid?.toString() == wanted
+    }
+    val visibleDomains = domains.filter { wanted.isEmpty() || trafficDomainTitle(it.domain).contains(wanted, true) }
+    val up = if (dimension == 0) stats.sumOf { it.uploaded } else domains.sumOf { it.uploaded }
+    val down = if (dimension == 0) stats.sumOf { it.downloaded } else domains.sumOf { it.downloaded }
+    val total = up + down
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatCard("↑ 累计上传", formatBytes(up), Modifier.weight(1f))
+                StatCard("↓ 累计下载", formatBytes(down), Modifier.weight(1f))
             }
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(SurfaceRaised).padding(4.dp)) {
+                listOf("按应用", "按域名").forEachIndexed { index, title ->
+                    TextButton(onClick = { dimension = index },
+                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(9.dp))
+                            .background(if (dimension == index) AccentSoft else Color.Transparent)) {
+                        Text(title, color = if (dimension == index) AccentDark else Muted,
+                            fontWeight = if (dimension == index) FontWeight.Bold else FontWeight.Normal)
+                    }
+                }
+            }
+            OutlinedTextField(value = query, onValueChange = { query = it },
+                placeholder = { Text(if (dimension == 0) "搜索应用、包名或 UID" else "搜索域名") },
+                singleLine = true, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(if (dimension == 0) "${visibleApps.size} 个应用 / 分组" else "${visibleDomains.size} 个域名 / 分组", color = Muted, fontSize = 11.sp)
+                Text("总流量从高到低", color = Muted, fontSize = 11.sp)
+            }
+            Text(if (dimension == 0) "仅本机 VPN 流量 · 本地累计 · 点击查看应用详情"
+                else "独立累计完整域名 · 未识别域名单列 · 从本版本开始记录",
+                color = Muted, fontSize = 10.sp)
+        }
+        androidx.compose.runtime.key(dimension) {
+            LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (dimension == 0) {
+                    items(visibleApps, key = { it.key }) { stat ->
+                        TrafficUsageRow(trafficAppTitle(stat, labels),
+                            if (stat.packages.size > 1) "共享 UID · ${stat.packages.size} 个组件"
+                            else stat.packages.firstOrNull() ?: stat.uid?.let { "UID $it · 未识别应用" } ?: "无法识别连接所属应用",
+                            stat.uploaded, stat.downloaded, total, "APP", onClick = { selected = stat })
+                    }
+                } else {
+                    items(visibleDomains, key = { it.domain }) { stat ->
+                        TrafficUsageRow(trafficDomainTitle(stat.domain),
+                            when (stat.domain) {
+                                AppTrafficLedger.UNKNOWN_DOMAIN -> "连接未提供域名，可能是 IP 直连"
+                                AppTrafficLedger.OTHER_DOMAINS -> "超出域名保存上限的流量合计"
+                                else -> "直连与代理合计"
+                            }, stat.uploaded, stat.downloaded, total, "DNS")
+                    }
+                }
+                if ((dimension == 0 && visibleApps.isEmpty()) || (dimension == 1 && visibleDomains.isEmpty())) item {
+                    EmptyPanel(if (wanted.isNotEmpty()) "没有匹配的记录" else "暂无流量，连接 VPN 并使用应用后显示")
+                }
+            }
+        }
+    }
+    selected?.let { stat ->
+        AlertDialog(onDismissRequest = { selected = null }, containerColor = SurfaceColor,
+            title = { Text(trafficAppTitle(stat, labels), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column {
+                    Text("UID ${stat.uid ?: "未知"} · ↑ ${formatBytes(stat.uploaded)} · ↓ ${formatBytes(stat.downloaded)}", color = Muted, fontSize = 12.sp)
+                    if (stat.packages.size > 1) Text("这些组件共享 UID，流量无法进一步拆分到单个组件。", color = Muted, fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 8.dp))
+                    LazyColumn(Modifier.height(300.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(stat.packages, key = { it }) { name ->
+                            Column {
+                                Text(labels[name] ?: name, color = Ink, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(name, color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }, confirmButton = { TextButton(onClick = { selected = null }) { Text("关闭") } })
+    }
+}
+
+private fun trafficAppTitle(stat: AppTrafficStat, labels: Map<String, String>): String = when {
+    stat.uid?.rem(100_000) == 1000 -> "Android 系统"
+    stat.packages.size > 1 -> "共享应用（${stat.packages.size} 个）"
+    stat.packages.size == 1 -> labels[stat.packages.single()] ?: stat.packages.single()
+    stat.uid == null -> "未知应用"
+    else -> "系统 / 未识别应用"
+}
+
+private fun trafficDomainTitle(domain: String): String = when (domain) {
+    AppTrafficLedger.UNKNOWN_DOMAIN -> "未知域名 / IP 连接"
+    AppTrafficLedger.OTHER_DOMAINS -> "其他域名"
+    else -> domain
+}
+
+@Composable
+private fun TrafficUsageRow(title: String, subtitle: String, up: Long, down: Long, total: Long, badge: String, onClick: (() -> Unit)? = null) {
+    val bytes = up + down
+    val fraction = if (total > 0) (bytes.toDouble() / total).toFloat().coerceIn(0f, 1f) else 0f
+    AppCard(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(AccentSoft), contentAlignment = Alignment.Center) {
+                Text(badge, color = AccentDark, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, color = Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text(formatBytes(bytes), color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("↑ ${formatBytes(up)}", color = AccentDark, fontSize = 12.sp)
+            Text("↓ ${formatBytes(down)}", color = Ink, fontSize = 12.sp)
+            Text("${(fraction * 100).toInt()}%", color = Muted, fontSize = 11.sp)
+        }
+        Box(Modifier.padding(top = 8.dp).fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Line)) {
+            Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(AccentDark))
         }
     }
 }

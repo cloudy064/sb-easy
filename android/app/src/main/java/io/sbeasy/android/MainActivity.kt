@@ -96,6 +96,11 @@ import io.sbeasy.android.core.ControlPlaneSnapshot
 import io.sbeasy.android.core.CoreGraph
 import io.sbeasy.android.core.AppTrafficLedger
 import io.sbeasy.android.core.DomainTrafficStat
+import io.sbeasy.android.core.TrafficDetailStat
+import io.sbeasy.android.core.HostTrafficStat
+import io.sbeasy.android.core.TrafficExit
+import io.sbeasy.android.core.TrafficRoute
+import io.sbeasy.android.core.trafficHosts
 import io.sbeasy.android.core.AppTrafficStore
 import io.sbeasy.android.core.AppTrafficStat
 import io.sbeasy.android.core.DomainRouteStat
@@ -901,10 +906,9 @@ private fun ToolsScreen(
 
 @Composable
 private fun AppTrafficScreen() {
-    val stats by AppTrafficStore.stats.collectAsStateWithLifecycle()
-    val domains by AppTrafficStore.domains.collectAsStateWithLifecycle()
+    val state by AppTrafficStore.state.collectAsStateWithLifecycle()
     val context = androidx.compose.ui.platform.LocalContext.current
-    val packages = stats.flatMap { it.packages }.distinct().sorted()
+    val packages = state.apps.flatMap { it.packages }.distinct().sorted()
     val labels by androidx.compose.runtime.produceState<Map<String, String>>(emptyMap(), packages) {
         value = withContext(Dispatchers.IO) {
             packages.associateWith { name ->
@@ -914,7 +918,7 @@ private fun AppTrafficScreen() {
             }
         }
     }
-    TrafficStatisticsContent(stats, domains, labels)
+    TrafficStatisticsContent(state.apps, state.domains, labels, state.details)
 }
 
 @Composable
@@ -922,10 +926,35 @@ internal fun TrafficStatisticsContent(
     stats: List<AppTrafficStat>,
     domains: List<DomainTrafficStat>,
     labels: Map<String, String>,
+    details: List<TrafficDetailStat> = emptyList(),
 ) {
     var dimension by remember { mutableIntStateOf(0) }
     var query by remember(dimension) { mutableStateOf("") }
-    var selected by remember { mutableStateOf<AppTrafficStat?>(null) }
+    var selectedApp by remember { mutableStateOf<String?>(null) }
+    var selectedDomain by remember { mutableStateOf<String?>(null) }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val app = stats.find { it.key == selectedApp }
+    val domain = domains.find { it.domain == selectedDomain }
+    val scopeDetails = remember(details, selectedApp, selectedDomain) {
+        when {
+            selectedApp != null -> details.filter { it.key.appKey == selectedApp }
+            selectedDomain != null -> details.filter { it.key.domain == selectedDomain }
+            else -> emptyList()
+        }
+    }
+    if (selectedApp != null || selectedDomain != null) {
+        androidx.compose.runtime.key(selectedApp, selectedDomain) {
+            TrafficBreakdownScreen(
+                title = app?.let { trafficAppTitle(it, labels) } ?: trafficDomainTitle(selectedDomain.orEmpty()),
+                subtitle = if (selectedApp != null) "应用访问的 host 与实际出口" else "Domain 下的 host 与实际出口",
+                uploaded = app?.uploaded ?: domain?.uploaded ?: 0,
+                downloaded = app?.downloaded ?: domain?.downloaded ?: 0,
+                details = scopeDetails, app = app, labels = labels,
+                onBack = { selectedApp = null; selectedDomain = null },
+            )
+        }
+        return
+    }
     val wanted = query.trim()
     val visibleApps = stats.filter { stat ->
         wanted.isEmpty() || trafficAppTitle(stat, labels).contains(wanted, true) ||
@@ -933,15 +962,13 @@ internal fun TrafficStatisticsContent(
             stat.uid?.toString() == wanted
     }
     val visibleDomains = domains.filter { wanted.isEmpty() || trafficDomainTitle(it.domain).contains(wanted, true) }
+    val hostCounts = remember(details) { details.groupBy { it.key.domain }.mapValues { (_, rows) -> rows.map { it.key.host }.distinct().size } }
     val up = if (dimension == 0) stats.sumOf { it.uploaded } else domains.sumOf { it.uploaded }
     val down = if (dimension == 0) stats.sumOf { it.downloaded } else domains.sumOf { it.downloaded }
     val total = up + down
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 18.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                StatCard("↑ 累计上传", formatBytes(up), Modifier.weight(1f))
-                StatCard("↓ 累计下载", formatBytes(down), Modifier.weight(1f))
-            }
+            TrafficTotals(up, down)
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(SurfaceRaised).padding(4.dp)) {
                 listOf("按应用", "按域名").forEachIndexed { index, title ->
                     TextButton(onClick = { dimension = index },
@@ -953,34 +980,31 @@ internal fun TrafficStatisticsContent(
                 }
             }
             OutlinedTextField(value = query, onValueChange = { query = it },
-                placeholder = { Text(if (dimension == 0) "搜索应用、包名或 UID" else "搜索域名") },
+                placeholder = { Text(if (dimension == 0) "搜索应用、包名或 UID" else "搜索主域名，例如 example.com") },
                 singleLine = true, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(if (dimension == 0) "${visibleApps.size} 个应用 / 分组" else "${visibleDomains.size} 个域名 / 分组", color = Muted, fontSize = 11.sp)
+                Text(if (dimension == 0) "${visibleApps.size} 个应用 / 分组" else "${visibleDomains.size} 个 Domain / 分组", color = Muted, fontSize = 11.sp)
                 Text("总流量从高到低", color = Muted, fontSize = 11.sp)
             }
-            Text(if (dimension == 0) "仅本机 VPN 流量 · 本地累计 · 点击查看应用详情"
-                else "独立累计完整域名 · 未识别域名单列 · 从本版本开始记录",
+            Text(if (dimension == 0) "点击应用，查看访问的 host、直连和代理节点"
+                else "按可注册主域名聚合 · 点击查看各 host 与出口",
                 color = Muted, fontSize = 10.sp)
         }
         androidx.compose.runtime.key(dimension) {
-            LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 18.dp),
+            LazyColumn(state = listState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (dimension == 0) {
                     items(visibleApps, key = { it.key }) { stat ->
                         TrafficUsageRow(trafficAppTitle(stat, labels),
-                            if (stat.packages.size > 1) "共享 UID · ${stat.packages.size} 个组件"
-                            else stat.packages.firstOrNull() ?: stat.uid?.let { "UID $it · 未识别应用" } ?: "无法识别连接所属应用",
-                            stat.uploaded, stat.downloaded, total, "APP", onClick = { selected = stat })
+                            if (stat.packages.size > 1) "共享 UID · ${stat.packages.size} 个组件 · 查看明细 ›"
+                            else "${stat.packages.firstOrNull() ?: stat.uid?.let { "UID $it" } ?: "未知应用"} · 查看明细 ›",
+                            stat.uploaded, stat.downloaded, total, "APP", onClick = { selectedApp = stat.key })
                     }
                 } else {
                     items(visibleDomains, key = { it.domain }) { stat ->
                         TrafficUsageRow(trafficDomainTitle(stat.domain),
-                            when (stat.domain) {
-                                AppTrafficLedger.UNKNOWN_DOMAIN -> "连接未提供域名，可能是 IP 直连"
-                                AppTrafficLedger.OTHER_DOMAINS -> "超出域名保存上限的流量合计"
-                                else -> "直连与代理合计"
-                            }, stat.uploaded, stat.downloaded, total, "DNS")
+                            "${hostCounts[stat.domain] ?: 0} 个 host · 查看流量与出口 ›",
+                            stat.uploaded, stat.downloaded, total, "域名", onClick = { selectedDomain = stat.domain })
                     }
                 }
                 if ((dimension == 0 && visibleApps.isEmpty()) || (dimension == 1 && visibleDomains.isEmpty())) item {
@@ -989,16 +1013,85 @@ internal fun TrafficStatisticsContent(
             }
         }
     }
-    selected?.let { stat ->
-        AlertDialog(onDismissRequest = { selected = null }, containerColor = SurfaceColor,
-            title = { Text(trafficAppTitle(stat, labels), maxLines = 2, overflow = TextOverflow.Ellipsis) },
+}
+
+@Composable
+private fun TrafficBreakdownScreen(
+    title: String, subtitle: String, uploaded: Long, downloaded: Long,
+    details: List<TrafficDetailStat>, app: AppTrafficStat?, labels: Map<String, String>, onBack: () -> Unit,
+) {
+    var selectedHost by remember { mutableStateOf<String?>(null) }
+    var showPackages by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val hosts = remember(details) { trafficHosts(details) }
+    val host = hosts.find { it.host == selectedHost }
+    androidx.activity.compose.BackHandler { if (selectedHost != null) selectedHost = null else onBack() }
+    if (host != null) {
+        TrafficHostScreen(title, host, onBack = { selectedHost = null })
+        return
+    }
+    val knownUp = details.sumOf { it.uploaded }
+    val knownDown = details.sumOf { it.downloaded }
+    val missingUp = (uploaded - knownUp).coerceAtLeast(0)
+    val missingDown = (downloaded - knownDown).coerceAtLeast(0)
+    val wanted = query.trim()
+    val visible = hosts.filter { row ->
+        wanted.isEmpty() || trafficHostTitle(row.host).contains(wanted, true) ||
+            row.exits.any { trafficExitTitle(it.exit).contains(wanted, true) || it.exit.chain.any { tag -> tag.contains(wanted, true) } }
+    }
+    Column(Modifier.fillMaxSize()) {
+        TrafficDetailHeader(title, subtitle, onBack)
+        LazyColumn(state = listState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { TrafficTotals(uploaded, downloaded) }
+            if (app != null) item {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("UID ${app.uid ?: "未知"}" + if (app.packages.size > 1) " · ${app.packages.size} 个组件共享流量" else "",
+                        color = Muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { showPackages = true }) { Text("应用信息") }
+                }
+            }
+            if (missingUp > 0 || missingDown > 0) item {
+                Text("未记录 host 明细：↑ ${formatBytes(missingUp)} · ↓ ${formatBytes(missingDown)}。来自旧版历史或超出保存上限的记录，无法反推访问目标和出口。",
+                    color = Warn, fontSize = 11.sp)
+            }
+            item {
+                OutlinedTextField(value = query, onValueChange = { query = it }, placeholder = { Text("搜索 host 或代理节点") },
+                    singleLine = true, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth())
+            }
+            item { Text("${visible.size} 个 host · 按总流量排序 · 点击查看全部路径", color = Muted, fontSize = 11.sp) }
+            items(visible, key = { it.host }) { row ->
+                AppCard(Modifier.clickable { selectedHost = row.host }) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(trafficHostTitle(row.host), color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Text(formatBytes(row.uploaded + row.downloaded), color = Ink, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    TrafficBytes(row.uploaded, row.downloaded)
+                    HorizontalDivider(Modifier.padding(vertical = 9.dp), color = Line)
+                    row.exits.take(2).forEach { exit ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(trafficExitTitle(exit.exit), color = trafficExitColor(exit.exit), fontSize = 12.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            Text(formatBytes(exit.uploaded + exit.downloaded), color = Muted, fontSize = 12.sp)
+                        }
+                    }
+                    Text(if (row.exits.size > 2) "全部 ${row.exits.size} 条路径 ›" else "查看路径上传 / 下载明细 ›",
+                        color = AccentDark, fontSize = 10.sp, modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+            if (visible.isEmpty()) item { EmptyPanel(if (wanted.isEmpty()) "暂无可关联的 host 明细，新连接会自动记录" else "没有匹配的 host 或出口") }
+        }
+    }
+    if (showPackages && app != null) {
+        AlertDialog(onDismissRequest = { showPackages = false }, containerColor = SurfaceColor,
+            title = { Text(trafficAppTitle(app, labels), maxLines = 2, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
-                    Text("UID ${stat.uid ?: "未知"} · ↑ ${formatBytes(stat.uploaded)} · ↓ ${formatBytes(stat.downloaded)}", color = Muted, fontSize = 12.sp)
-                    if (stat.packages.size > 1) Text("这些组件共享 UID，流量无法进一步拆分到单个组件。", color = Muted, fontSize = 12.sp,
-                        modifier = Modifier.padding(vertical = 8.dp))
+                    Text(if (app.packages.size > 1) "这些组件共享 UID，流量无法进一步拆分到单个组件。" else "UID ${app.uid ?: "未知"}",
+                        color = Muted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
                     LazyColumn(Modifier.height(300.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(stat.packages, key = { it }) { name ->
+                        items(app.packages, key = { it }) { name ->
                             Column {
                                 Text(labels[name] ?: name, color = Ink, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Text(name, color = Muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1006,7 +1099,61 @@ internal fun TrafficStatisticsContent(
                         }
                     }
                 }
-            }, confirmButton = { TextButton(onClick = { selected = null }) { Text("关闭") } })
+            }, confirmButton = { TextButton(onClick = { showPackages = false }) { Text("关闭") } })
+    }
+}
+
+@Composable
+private fun TrafficHostScreen(scope: String, host: HostTrafficStat, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        TrafficDetailHeader(trafficHostTitle(host.host), scope, onBack)
+        LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { TrafficTotals(host.uploaded, host.downloaded) }
+            item { Text("${host.exits.size} 条实际路径 · 分别累计，不随当前节点选择变化", color = Muted, fontSize = 11.sp) }
+            items(host.exits) { stat ->
+                AppCard {
+                    Text(trafficExitTitle(stat.exit), color = trafficExitColor(stat.exit), fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    TrafficBytes(stat.uploaded, stat.downloaded)
+                    if (stat.exit.legacy) {
+                        Text("旧版只保存了 host 总量，未记录所属应用与出口。", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                    } else {
+                        if (stat.exit.type.isNotBlank()) Text("出口类型：${stat.exit.type}", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                        if (stat.exit.chain.isNotEmpty()) {
+                            Text("选择路径", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                            SelectionContainer { Text(stat.exit.chain.asReversed().joinToString(" → "), color = Ink, fontSize = 12.sp) }
+                        }
+                        if (stat.exit.route == TrafficRoute.UNKNOWN) Text("连接未提供可确认的最终出口信息。", color = Muted, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrafficDetailHeader(title: String, subtitle: String, onBack: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = onBack) { Text("‹ 返回", color = AccentDark) }
+        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+            Text(title, color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun TrafficTotals(up: Long, down: Long) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        StatCard("↑ 累计上传", formatBytes(up), Modifier.weight(1f))
+        StatCard("↓ 累计下载", formatBytes(down), Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun TrafficBytes(up: Long, down: Long) {
+    Row(Modifier.fillMaxWidth().padding(top = 9.dp), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+        Text("↑ ${formatBytes(up)}", color = AccentDark, fontSize = 12.sp)
+        Text("↓ ${formatBytes(down)}", color = Ink, fontSize = 12.sp)
     }
 }
 
@@ -1019,9 +1166,30 @@ private fun trafficAppTitle(stat: AppTrafficStat, labels: Map<String, String>): 
 }
 
 private fun trafficDomainTitle(domain: String): String = when (domain) {
-    AppTrafficLedger.UNKNOWN_DOMAIN -> "未知域名 / IP 连接"
-    AppTrafficLedger.OTHER_DOMAINS -> "其他域名"
+    AppTrafficLedger.UNKNOWN_DOMAIN -> "未知域名"
+    AppTrafficLedger.IP_DOMAIN -> "IP 连接"
+    AppTrafficLedger.OTHER_DOMAINS -> "其他域名（超出保存上限）"
     else -> domain
+}
+
+private fun trafficHostTitle(host: String): String = when (host) {
+    AppTrafficLedger.UNKNOWN_HOST -> "未知 host"
+    AppTrafficLedger.OTHER_HOST -> "未保留的 host 明细"
+    else -> host
+}
+
+private fun trafficExitTitle(exit: TrafficExit): String = when {
+    exit.legacy -> "历史流量 · 出口未记录"
+    exit.route == TrafficRoute.DIRECT -> "直连" + if (exit.outbound.isNotBlank() && exit.outbound != "direct") " · ${exit.outbound}" else ""
+    exit.route == TrafficRoute.PROXY -> "代理 · ${exit.outbound.ifBlank { "节点未知" }}"
+    exit.route == TrafficRoute.BLOCK -> "拦截 · ${exit.outbound}"
+    else -> "出口未知" + if (exit.outbound.isNotBlank()) " · ${exit.outbound}" else ""
+}
+
+private fun trafficExitColor(exit: TrafficExit): Color = when (exit.route) {
+    TrafficRoute.DIRECT -> AccentDark
+    TrafficRoute.PROXY -> Color(0xFF8FB9FF)
+    else -> Muted
 }
 
 @Composable

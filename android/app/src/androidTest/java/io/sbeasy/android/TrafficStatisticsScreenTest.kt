@@ -16,8 +16,14 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
+import io.sbeasy.android.core.AppTrafficLedger
+import io.sbeasy.android.core.ConnectionSnapshot
+import io.sbeasy.android.core.TrafficDetailKey
+import io.sbeasy.android.core.TrafficDetailStat
+import io.sbeasy.android.core.TrafficRoute
 import io.sbeasy.android.core.AppTrafficStat
 import io.sbeasy.android.core.DomainTrafficStat
 import java.io.File
@@ -35,8 +41,9 @@ class TrafficStatisticsScreenTest {
                     TrafficStatisticsContent(
                         listOf(AppTrafficStat("system", 1000, packages, 1_048_576, 2_097_152),
                             AppTrafficStat("browser", 10001, listOf("com.example.browser"), 1024, 2048)),
-                        listOf(DomainTrafficStat("cdn.example.com", 512, 1024)),
+                        listOf(DomainTrafficStat("example.com", 512, 1024)),
                         packages.associateWith { "名称很长的系统组件 $it" } + ("com.example.browser" to "浏览器"),
+                        listOf(TrafficDetailStat(TrafficDetailKey("browser", "example.com", "cdn.example.com", TrafficRoute.DIRECT, "direct", "direct"), 512, 1024)),
                     )
                 }
             }
@@ -46,13 +53,58 @@ class TrafficStatisticsScreenTest {
         compose.onNodeWithText("浏览器").assertIsDisplayed()
         screenshot("traffic-apps.png")
         compose.onNodeWithText("Android 系统").performClick()
+        compose.onNodeWithText("应用信息").performClick()
         compose.onNodeWithText("这些组件共享 UID，流量无法进一步拆分到单个组件。").assertIsDisplayed()
         compose.onNodeWithText("关闭").performClick()
+        compose.onNodeWithText("‹ 返回").performClick()
         compose.onNodeWithText("按域名").performClick()
-        compose.onNodeWithText("cdn.example.com").assertIsDisplayed()
+        compose.onNodeWithText("example.com").assertIsDisplayed()
         screenshot("traffic-domains.png")
-        compose.onNodeWithText("搜索域名").performTextInput("does-not-exist")
+        compose.onNodeWithText("搜索主域名，例如 example.com").performTextInput("does-not-exist")
         compose.onNodeWithText("没有匹配的记录").assertIsDisplayed()
+    }
+
+    @Test fun applicationsAndDomainsDrillIntoHostsAndActualProxyExits() {
+        val ledger = AppTrafficLedger()
+        fun record(id: String, host: String, outbound: String, type: String, up: Long, uid: Int = 10001) {
+            ledger.record(ConnectionSnapshot(id, "tcp", "", "", host, "tls", 1, 0, 0, 0, up, up * 2,
+                "", outbound, type, if (type == "direct") listOf("direct") else listOf(outbound, "默认代理"),
+                uid, listOf(if (uid == 10001) "com.example.browser" else "com.example.other")))
+        }
+        record("proxy", "api.example.co.uk", "东京", "http", 1_048_576)
+        record("direct", "api.example.co.uk", "direct", "direct", 524_288)
+        record("cdn", "cdn.example.co.uk", "美国", "trojan", 262_144)
+        record("other", "api.example.co.uk", "direct", "direct", 131_072, 10002)
+        val state = ledger.statistics()
+        compose.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Box(Modifier.width(360.dp).fillMaxSize().background(Color(0xFF090E14))) {
+                    TrafficStatisticsContent(state.apps, state.domains,
+                        mapOf("com.example.browser" to "浏览器", "com.example.other" to "另一个应用"), state.details)
+                }
+            }
+        }
+        compose.onNodeWithText("浏览器").performClick()
+        compose.onNodeWithText("api.example.co.uk").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("代理 · 东京").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("直连").performScrollTo().assertIsDisplayed()
+        screenshot("traffic-app-hosts.png")
+        compose.onNodeWithText("api.example.co.uk").performClick()
+        compose.onNodeWithText("代理 · 东京").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("默认代理 → 东京").performScrollTo().assertIsDisplayed()
+        screenshot("traffic-host-exits.png")
+        compose.onNodeWithText("直连").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("‹ 返回").performClick()
+        compose.onNodeWithText("‹ 返回").performClick()
+        compose.onNodeWithText("按域名").performClick()
+        compose.onNodeWithText("example.co.uk").assertIsDisplayed()
+        compose.onNodeWithText("api.example.co.uk").assertDoesNotExist()
+        screenshot("traffic-root-domains.png")
+        compose.onNodeWithText("example.co.uk").performClick()
+        compose.onNodeWithText("api.example.co.uk").performScrollTo().assertIsDisplayed()
+        screenshot("traffic-domain-hosts.png")
+        compose.onNodeWithText("cdn.example.co.uk").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("代理 · 美国").performScrollTo().assertIsDisplayed()
     }
 
     private fun screenshot(name: String) {

@@ -12,11 +12,10 @@ object AppTrafficStore {
     private var ledger = AppTrafficLedger()
     private var file: AtomicFile? = null
     private var lastSave = 0L
+    private var lastPublish = 0L
     private var dirty = false
-    private val mutableStats = MutableStateFlow<List<AppTrafficStat>>(emptyList())
-    val stats = mutableStats.asStateFlow()
-    private val mutableDomains = MutableStateFlow<List<DomainTrafficStat>>(emptyList())
-    val domains = mutableDomains.asStateFlow()
+    private val mutableState = MutableStateFlow(TrafficStatisticsSnapshot())
+    val state = mutableState.asStateFlow()
 
     @Synchronized
     fun initialize(context: Context) {
@@ -27,8 +26,7 @@ object AppTrafficStore {
             runCatching { ledger.restore(target.openRead().bufferedReader().use { it.readText() }) }
                 .onFailure { ClientDiagnostics.warn("app-traffic", "Could not restore application traffic: ${it.message}") }
         }
-        mutableStats.value = ledger.snapshot()
-        mutableDomains.value = ledger.domainSnapshot()
+        mutableState.value = ledger.statistics()
     }
 
     @Synchronized
@@ -38,10 +36,12 @@ object AppTrafficStore {
     }
 
     @Synchronized
-    fun publish() {
+    fun publish(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastPublish < 1_000) return
+        lastPublish = now
         ledger.prune()
-        mutableStats.value = ledger.snapshot()
-        mutableDomains.value = ledger.domainSnapshot()
+        mutableState.value = ledger.statistics()
         if (SystemClock.elapsedRealtime() - lastSave >= 30_000) flush()
     }
 
@@ -65,7 +65,7 @@ object AppTrafficStore {
 
     @Synchronized
     fun endCore() {
-        publish()
+        publish(force = true)
         flush()
         ledger.newCore()
     }
@@ -75,7 +75,6 @@ object AppTrafficStore {
         ledger = AppTrafficLedger()
         file?.delete()
         dirty = false
-        mutableStats.value = emptyList()
-        mutableDomains.value = emptyList()
+        mutableState.value = TrafficStatisticsSnapshot()
     }
 }

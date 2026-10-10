@@ -29,7 +29,52 @@ The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
 
-## Traffic statistics (1.2.5)
+## Domain, host and exit drilldowns (1.2.6)
+
+**诊断 → 流量统计 → 按域名** groups by the registrable domain using
+OkHttp's bundled Public Suffix List (including private suffixes), rather than
+by complete hostname. For example `api.example.co.uk` and `cdn.example.co.uk`
+share the `example.co.uk` row; unrelated `alice.github.io` and `bob.github.io`
+remain separate. Hostnames are normalized to lowercase ASCII/IDNA without a
+trailing dot. Local/suffix-only names retain their own label. IP destinations
+are listed separately and never assigned a guessed domain.
+
+Both dimensions now open real detail screens:
+
+- **App → hosts → exits** shows the application's individual host counters and
+  their actual direct/proxy exits. Shared UIDs stay grouped; component names
+  remain available under **应用信息**.
+- **Domain → hosts → exits** shows the specific hosts within that registrable
+  domain, with counters aggregated across apps and broken down by actual exit.
+- Each host previews its busiest paths; opening it shows every path's upload,
+  download, outbound type and selector chain. Search matches hosts and nodes.
+  System Back and the visible Back button return one level.
+
+The persisted grain is application identity + registrable domain + host +
+observed concrete outbound/type/chain. The pinned libbox tracker supplies the
+final outbound and a final-first chain; the UI reverses the chain for display.
+Changing the selected proxy never rewrites previous traffic. Unknown metadata
+is labelled as unknown rather than inferred from the current configuration.
+Connection replay/final totals share a per-core checkpoint so all dimensions
+count the same byte increments.
+
+Storage v3 retains 1.2.4/1.2.5 app totals. Existing 1.2.5 full-host totals are
+regrouped into registrable domains and retained as explicitly historical host
+rows with unknown application/exit. App detail screens show the amount lacking
+host attribution; older app totals cannot be joined to independent host totals.
+New connections provide the complete relationship. Up to 20,000 detailed keys
+are retained; excess keys contribute to an explicit overflow bucket while app
+totals continue to count their bytes. Statistics publish at most once per
+second, including on status ticks, and force publication/persistence on stop.
+
+Tests cover public/private/multi-label suffixes and exceptions, IDN/IP/local
+names, app/domain filtering, cross-app host aggregation, direct vs multiple
+proxy exits, replay, final counters, storage migration and overflow. Android UI
+tests cover the three-level navigation, actual exit labels and paths, and the
+compact shared-UID view at 360dp width.
+
+## Traffic statistics (1.2.5, historical)
+
 
 Open **Tools → 流量统计**, then choose **按应用** or **按域名**. Both views
 show independently accumulated upload/download totals, ranked compact rows,

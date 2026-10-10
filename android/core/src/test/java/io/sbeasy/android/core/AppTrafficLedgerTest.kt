@@ -85,7 +85,7 @@ class AppTrafficLedgerTest {
         assertEquals(ledger.domainSnapshot(), restored.domainSnapshot())
         restored.newCore()
         restored.record(connection(up = 5, down = 6).copy(domain = "cdn.example.com"))
-        assertEquals(DomainTrafficStat("cdn.example.com", 8, 10), restored.domainSnapshot().first())
+        assertEquals(DomainTrafficStat("example.com", 8, 10), restored.domainSnapshot().first())
         assertEquals(DomainTrafficStat(AppTrafficLedger.UNKNOWN_DOMAIN, 1, 2), restored.domainSnapshot().last())
     }
 
@@ -100,12 +100,71 @@ class AppTrafficLedgerTest {
         assertEquals(listOf(DomainTrafficStat("example.com", 5, 10)), restored.domainSnapshot())
     }
 
-    @Test fun domainLimitRetainsOverflowBytesInsteadOfDroppingTraffic() {
+    @Test fun detailLimitRetainsOverflowBytesInsteadOfDroppingTraffic() {
+        val ledger = AppTrafficLedger(maxDetailRows = 3)
+        repeat(5) { ledger.record(connection(id = "$it", up = 1).copy(domain = "host$it.example.com")) }
+        assertEquals(4, ledger.detailSnapshot().size)
+        assertEquals(2L, ledger.domainSnapshot().single { it.domain == AppTrafficLedger.OTHER_DOMAINS }.uploaded)
+        assertEquals(5L, ledger.domainSnapshot().sumOf { it.uploaded })
+        assertEquals(5L, ledger.snapshot().sumOf { it.uploaded })
+    }
+
+
+    @Test fun registrableDomainKeepsHostsAppsAndActualExitsSeparate() {
         val ledger = AppTrafficLedger()
-        repeat(10005) { ledger.record(connection(id = "$it", up = 1).copy(domain = "host$it.example.com")) }
-        assertEquals(10001, ledger.domainSnapshot().size)
-        assertEquals(5L, ledger.domainSnapshot().single { it.domain == AppTrafficLedger.OTHER_DOMAINS }.uploaded)
-        assertEquals(10005L, ledger.domainSnapshot().sumOf { it.uploaded })
+        ledger.record(connection(id = "api-proxy", up = 100, down = 200).copy(domain = "api.example.co.uk", outbound = "Tokyo", outboundType = "http", chain = listOf("Tokyo", "default")))
+        ledger.record(connection(id = "api-direct", up = 10, down = 20).copy(domain = "api.example.co.uk"))
+        ledger.record(connection(id = "cdn", up = 30, down = 40).copy(domain = "cdn.example.co.uk", outbound = "US", outboundType = "trojan"))
+        ledger.record(connection(id = "second-app", uid = 10002, up = 1, down = 2).copy(domain = "api.example.co.uk"))
+        assertEquals(listOf(DomainTrafficStat("example.co.uk", 141, 262)), ledger.domainSnapshot())
+        val appKey = ledger.snapshot().single { it.uid == 10001 }.key
+        val appHosts = trafficHosts(ledger.detailSnapshot().filter { it.key.appKey == appKey })
+        assertEquals(setOf("api.example.co.uk", "cdn.example.co.uk"), appHosts.map { it.host }.toSet())
+        val api = appHosts.single { it.host == "api.example.co.uk" }
+        assertEquals(110L, api.uploaded)
+        assertEquals(setOf(TrafficRoute.DIRECT, TrafficRoute.PROXY), api.exits.map { it.exit.route }.toSet())
+        assertEquals("Tokyo", api.exits.single { it.exit.route == TrafficRoute.PROXY }.exit.outbound)
+        assertEquals(listOf("Tokyo", "default"), api.exits.single { it.exit.route == TrafficRoute.PROXY }.exit.chain)
+        val domainHosts = trafficHosts(ledger.detailSnapshot().filter { it.key.domain == "example.co.uk" })
+        assertEquals(111L, domainHosts.single { it.host == "api.example.co.uk" }.uploaded)
+    }
+
+    @Test fun replayAndMissingClosingMetadataDoNotMoveHistoricalExit() {
+        val ledger = AppTrafficLedger()
+        val first = connection(up = 10, down = 20).copy(domain = "api.example.com", outbound = "Tokyo", outboundType = "http")
+        ledger.record(first)
+        ledger.record(first.copy(uplinkTotal = 30, downlinkTotal = 40))
+        ledger.record(connection(up = 35, down = 45, closed = 100))
+        ledger.record(first.copy(uplinkTotal = 35, downlinkTotal = 45, closedAt = 100))
+        ledger.record(connection(id = "after-switch", up = 5, down = 10).copy(domain = "api.example.com", outbound = "US", outboundType = "http"))
+        assertEquals(40L, ledger.domainSnapshot().single().uploaded)
+        assertEquals(2, ledger.detailSnapshot().size)
+        assertEquals(35L, ledger.detailSnapshot().single { it.key.outbound == "Tokyo" }.uploaded)
+        val restored = AppTrafficLedger().apply { restore(ledger.encode()) }
+        assertEquals(ledger.statistics(), restored.statistics())
+    }
+
+    @Test fun upgrading125GroupsHostsButDoesNotInventAppOrExitAttribution() {
+        val ledger = AppTrafficLedger()
+        ledger.restore("""{"version":2,"apps":[{"key":"10001:example.app","uid":10001,"packages":["example.app"],"uploaded":300,"downloaded":600}],
+            "domains":[{"domain":"API.EXAMPLE.CO.UK.","uploaded":100,"downloaded":200},{"domain":"cdn.example.co.uk","uploaded":200,"downloaded":400}]}""")
+        assertEquals(listOf(DomainTrafficStat("example.co.uk", 300, 600)), ledger.domainSnapshot())
+        assertEquals(setOf("api.example.co.uk", "cdn.example.co.uk"), ledger.detailSnapshot().map { it.key.host }.toSet())
+        assertEquals(0, ledger.detailSnapshot().count { it.key.appKey == "10001:example.app" })
+        assertEquals(true, ledger.detailSnapshot().all { it.key.legacy && it.key.route == TrafficRoute.UNKNOWN })
+        ledger.record(connection(up = 5, down = 10).copy(domain = "api.example.co.uk"))
+        assertEquals(305L, ledger.snapshot().single().uploaded)
+        assertEquals(5L, ledger.detailSnapshot().single { !it.key.legacy }.uploaded)
+        val restored = AppTrafficLedger().apply { restore(ledger.encode()) }
+        assertEquals(ledger.statistics(), restored.statistics())
+    }
+
+    @Test fun ipDestinationsStayVisibleWithoutPretendingTheyAreDomains() {
+        val ledger = AppTrafficLedger()
+        ledger.record(connection(up = 5).copy(destination = "203.0.113.7:443"))
+        ledger.record(connection(id = "ipv6", up = 7).copy(destination = "[2001:db8::1]:443"))
+        assertEquals(listOf(DomainTrafficStat(AppTrafficLedger.IP_DOMAIN, 12, 0)), ledger.domainSnapshot())
+        assertEquals(setOf("203.0.113.7", "2001:db8::1"), ledger.detailSnapshot().map { it.key.host }.toSet())
     }
 
 }

@@ -95,6 +95,7 @@ internal class LibboxCommandMonitor(
     @Synchronized
     override fun writeStatus(message: StatusMessage) {
         if (closed) return
+        AppTrafficStore.publish()
         RuntimeObservability.updateTraffic(
             TrafficSnapshot(
                 uplink = message.uplink,

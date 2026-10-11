@@ -84,6 +84,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }) { network, isCurrent ->
         recoverNetwork(network, isCurrent)
     }
+    private var captureUploadJob: Job? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
 
     override fun onCreate() {
@@ -211,6 +212,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 VpnRuntimeState.connected(config)
                 startForegroundNotification("${config.profileName} · 代理运行中")
                 startControlLoop()
+                startCaptureUploadLoop()
                 startNetworkWatchdog()
                 ClientDiagnostics.info(TAG, "libbox runtime connected profile=${config.profileName}")
             }
@@ -237,6 +239,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         handover.close()
         networkHealthJob?.cancel()
         networkHealthJob = null
+        captureUploadJob?.cancel()
+        captureUploadJob = null
         controlLoopJob?.cancel()
         controlLoopJob = null
         if (RuntimeBridge.control === this) RuntimeBridge.control = null
@@ -249,6 +253,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         commandServer = null
         tunDescriptor?.close()
         tunDescriptor = null
+        runCatching { io.nekohasekai.libbox.Libbox.configureCapture("{}") }
         restoredSelectionGroups.clear()
         if (::platform.isInitialized) platform.stop()
         appliedNetwork = null
@@ -266,10 +271,22 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         commandServer = null
         tunDescriptor?.close()
         tunDescriptor = null
+        runCatching { io.nekohasekai.libbox.Libbox.configureCapture("{}") }
         restoredSelectionGroups.clear()
     }
 
     private fun startCore(config: ManagedConfig) {
+        io.sbeasy.android.core.PacketCapture.nativeStatus = { io.nekohasekai.libbox.Libbox.captureStatus() }
+        io.sbeasy.android.core.PacketCapture.rotate = { io.nekohasekai.libbox.Libbox.rotateCapture() }
+        io.sbeasy.android.core.PacketCapture.runtimeError = ""
+        runCatching {
+            io.nekohasekai.libbox.Libbox.configureCapture(io.sbeasy.android.core.PacketCapture.nativeConfig(
+                requireNotNull(CoreGraph.repository.state.value.enrollment)))
+        }.onFailure {
+            io.nekohasekai.libbox.Libbox.configureCapture("{}")
+            io.sbeasy.android.core.PacketCapture.runtimeError = "采集未启动：${it.message}"
+            ClientDiagnostics.error(TAG, "capture initialization failed", it)
+        }
         io.nekohasekai.libbox.Libbox.checkConfig(config.content)
         val inbounds = org.json.JSONObject(config.content).optJSONArray("inbounds")
         val stacks = (0 until (inbounds?.length() ?: 0)).mapNotNull { index ->
@@ -387,6 +404,18 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 } finally {
                     if (wakeLock.isHeld) wakeLock.release()
                 }
+            }
+        }
+    }
+
+    private fun startCaptureUploadLoop() {
+        if (captureUploadJob?.isActive == true) return
+        captureUploadJob = serviceScope.launch {
+            while (currentCoroutineContext().isActive) {
+                try { CoreGraph.repository.uploadCaptures(manual = false) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) { ClientDiagnostics.error(TAG, "capture upload failed", error) }
+                delay(5_000)
             }
         }
     }

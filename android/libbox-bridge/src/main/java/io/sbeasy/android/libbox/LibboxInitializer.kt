@@ -33,6 +33,12 @@ object LibboxInitializer {
                 debug = false
             },
         )
+        io.sbeasy.android.core.PacketCapture.nativeStatus = { Libbox.captureStatus() }
+        io.sbeasy.android.core.PacketCapture.rotate = { Libbox.rotateCapture() }
+        io.sbeasy.android.core.CoreGraph.repository.state.value.enrollment?.let { enrollment ->
+            runCatching { Libbox.recoverCapture(io.sbeasy.android.core.PacketCapture.directory(enrollment).path) }
+                .onFailure { ClientDiagnostics.error("PacketCapture", "capture recovery failed", it) }
+        }
         val stderrFile = File(workingDirectory, "libbox-stderr.log")
         Libbox.redirectStderr(stderrFile.path)
         ClientDiagnostics.registerAdditionalLog("libbox-stderr", stderrFile)

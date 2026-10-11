@@ -355,6 +355,11 @@ int sb_store_record_subscription_fetch(sb_store *s, const char *id,
 int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render_request *out,
                                      sb_err *err);
 
+int sb_store_save_capture(sb_store *s, const char *host_id, const char *digest, const void *data, size_t len, sb_err *err);
+sbj *sb_store_list_captures(sb_store *s, const char *host_id, sb_err *err);
+char *sb_store_get_capture(sb_store *s, const char *host_id, const char *digest, size_t *len, sb_err *err);
+int sb_store_delete_capture(sb_store *s, const char *host_id, const char *digest, sb_err *err);
+
 #ifdef __cplusplus
 }
 #endif

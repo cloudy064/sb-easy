@@ -190,6 +190,16 @@ class AgentRepository internal constructor(
         }
     }
 
+    suspend fun saveCaptureConfiguration(config: CaptureConfig) = withContext(Dispatchers.IO) {
+        PacketCapture.save(config)
+        RuntimeBridge.control?.restart()
+    }
+
+    suspend fun uploadCaptures(manual: Boolean = true) {
+        val enrollment = state.value.enrollment ?: return
+        PacketCapture.upload(enrollment, client, manual = manual)
+    }
+
     suspend fun reportTelemetry() {
         val enrollment = mutableState.value.enrollment ?: return
         val traffic = RuntimeObservability.traffic.value
@@ -382,6 +392,7 @@ class AgentRepository internal constructor(
     suspend fun forgetDevice() = syncMutex.withLock {
         check(VpnRuntimeState.state.value.phase == VpnPhase.DISCONNECTED ||
             VpnRuntimeState.state.value.phase == VpnPhase.ERROR) { "请先断开 VPN" }
+        PacketCapture.save(PacketCapture.config().copy(enabled = false, autoUpload = false))
         secureStore.clear()
         configStore.clear()
         routingStore.clear()

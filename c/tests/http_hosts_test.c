@@ -1653,3 +1653,42 @@ TEST(embedded_managed_network) {
     free(profile);
     sb_test_server_stop(&t);
 }
+
+TEST(packet_capture_roundtrip) {
+    sb_test_server t; REQUIRE(sb_test_server_start(&t) == 0);
+    char *host = create_host(&t, "{\"name\":\"Capture phone\",\"capabilities\":{}}");
+    REQUIRE(host);
+    char *token = host_token(&t, host);
+    unsigned char pcap[80] = {0xd4,0xc3,0xb2,0xa1,2,0,4,0};
+    pcap[16]=255;pcap[17]=255;pcap[20]=101;
+    pcap[32]=40;pcap[36]=40;pcap[40]=0x45;
+    char *digest = sb_sha256_hex(pcap, sizeof pcap);
+    char *url = sb_asprintf("%s/api/agent/captures/%s", t.base_url, digest);
+    char *auth = sb_asprintf("Authorization: Bearer %s", token);
+    const char *headers[] = {auth,"Content-Type: application/vnd.tcpdump.pcap",NULL};
+    sb_http_request req = {.method="POST",.url=url,.headers=headers,.body=(const char *)pcap,.body_len=sizeof pcap,.timeout_ms=10000,.max_body_bytes=1024*1024};
+    sb_http_response response; sb_err err = {0};
+    for (int i=0;i<2;i++) {
+        REQUIRE(sb_http_perform(&req,&response,&err)==0);
+        CHECK_EQ_INT(response.status,200); sb_http_response_free(&response);
+    }
+    char *list = sb_asprintf("/api/hosts/%s/captures",host);
+    sb_test_response r = call(&t,"GET",list,NULL);
+    CHECK_EQ_INT(r.status,200); CHECK_EQ_INT(jlen(r.json,NULL),1); CHECK_EQ_INT(jint(r.json,"0.size"),80); sb_test_response_free(&r);
+    char *path = sb_asprintf("%s/%s",list,digest);
+    r=call(&t,"GET",path,NULL); CHECK_EQ_INT(r.status,200); CHECK_EQ_INT(r.body_len,80); CHECK(memcmp(r.body,pcap,80)==0); sb_test_response_free(&r);
+    r=call_as(&t,token,"GET",path,NULL); CHECK_EQ_INT(r.status,401); sb_test_response_free(&r);
+    char *viewer = sb_auth_create_token(t.jwt_secret,"viewer","viewer","viewer");
+    r=call_as(&t,viewer,"GET",path,NULL); CHECK_EQ_INT(r.status,403); sb_test_response_free(&r); free(viewer);
+    char *other_host_path = sb_asprintf("/api/hosts/self/captures/%s", digest);
+    r=call(&t,"GET",other_host_path,NULL); CHECK_EQ_INT(r.status,404); sb_test_response_free(&r); free(other_host_path);
+    const char *denied_headers[] = {"Authorization: Bearer invalid-agent-token", NULL};
+    req.headers=denied_headers;
+    REQUIRE(sb_http_perform(&req,&response,&err)==0); CHECK_EQ_INT(response.status,401); sb_http_response_free(&response);
+    req.headers=headers;
+    pcap[32]=255; /* Truncated record, also wrong digest. */
+    REQUIRE(sb_http_perform(&req,&response,&err)==0); CHECK_EQ_INT(response.status,400); sb_http_response_free(&response);
+    r=call(&t,"DELETE",path,NULL); CHECK_EQ_INT(r.status,200); sb_test_response_free(&r);
+    r=call(&t,"GET",path,NULL); CHECK_EQ_INT(r.status,404); sb_test_response_free(&r);
+    free(auth);free(url);free(digest);free(path);free(list);free(token);free(host);sb_test_server_stop(&t);
+}

@@ -21,6 +21,18 @@
       <button v-for="tb in tabs" :key="tb.key" :class="['tab', { active: tab === tb.key }]" @click="tab = tb.key">{{ tb.label }}</button>
     </div>
 
+    <div v-if="tab === 'captures'" class="card">
+      <div class="flex-between mb-3"><h3>PCAP 流量采集</h3><button class="btn-secondary btn-sm" @click="loadCaptures">刷新</button></div>
+      <p class="text-sm text-muted">在 Android 的“诊断 → 流量采集”中配置并上传。每台设备最多保留 128 MiB / 1000 个文件，满后请下载并删除。仅管理员可访问。</p>
+      <p v-if="captureError">{{ captureError }}</p>
+      <p v-if="!captures.length" class="text-muted">暂无采集文件</p>
+      <div v-for="capture in captures" :key="capture.digest" class="flex-between mb-3" style="gap:1rem;flex-wrap:wrap">
+        <span>{{ capture.created_at }} · {{ bytes(capture.size) }} · {{ capture.digest.slice(0, 12) }}</span>
+        <div><button class="btn-secondary btn-sm" @click="downloadCapture(capture.digest)">下载 PCAP</button>
+        <button class="btn-ghost btn-sm" @click="deleteCapture(capture.digest)">删除</button></div>
+      </div>
+    </div>
+
     <!-- CONFIG -->
     <div v-if="tab === 'config'">
       <div class="flex-between mb-3">
@@ -180,12 +192,13 @@ const route = useRoute()
 const hostsStore = useHostsStore()
 
 const id = computed(() => String(route.params.id || ''))
-const tab = ref<'config' | 'monitor' | 'domains' | 'logs' | 'diagnostics'>('config')
+const tab = ref<'config' | 'monitor' | 'domains' | 'logs' | 'diagnostics' | 'captures'>('config')
 const tabs = computed(() => [
   { key: 'config' as const, label: t('device.tab.config') },
   { key: 'monitor' as const, label: t('device.tab.monitor') },
   { key: 'domains' as const, label: t('device.tab.domains') },
   { key: 'logs' as const, label: t('device.tab.logs') },
+  { key: 'captures' as const, label: 'PCAP 采集' },
   { key: 'diagnostics' as const, label: t('device.tab.diagnostics') },
 ])
 
@@ -221,6 +234,27 @@ const visibleDomainStats = computed(() => {
     .filter((stat) => !query || [stat.domain, stat.outbound, stat.rule, ...(stat.chain || [])].some((value) => String(value || '').toLocaleLowerCase().includes(query)))
     .sort((left, right) => Number(right.connection_count || 0) - Number(left.connection_count || 0) || Number(right.downlink_total || 0) + Number(right.uplink_total || 0) - Number(left.downlink_total || 0) - Number(left.uplink_total || 0))
 })
+const captures = ref<{digest: string; size: number; created_at: string}[]>([])
+const captureError = ref('')
+async function loadCaptures() {
+  captureError.value = ''
+  try { captures.value = (await client.get(`/hosts/${id.value}/captures`)).data }
+  catch (error: any) { captureError.value = error.response?.data?.error || '加载失败' }
+}
+async function downloadCapture(digest: string) {
+  try {
+    const { data } = await client.get(`/hosts/${id.value}/captures/${digest}`, { responseType: 'blob' })
+    const url = URL.createObjectURL(data)
+    const a = document.createElement('a'); a.href = url; a.download = `${digest}.pcap`; a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch { captureError.value = '下载失败' }
+}
+async function deleteCapture(digest: string) {
+  if (!window.confirm('删除服务器上的此 PCAP 文件？此操作无法恢复。')) return
+  try { await client.delete(`/hosts/${id.value}/captures/${digest}`); await loadCaptures() }
+  catch { captureError.value = '删除失败' }
+}
+
 const diagnosticReports = ref<any[]>([])
 const selectedDiagnosticId = ref('')
 const selectedDiagnostic = computed(() =>
@@ -238,6 +272,7 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
 
 watch(tab, (value) => {
   if (value === 'monitor' || value === 'domains' || value === 'logs') refreshTel()
+  if (value === 'captures') loadCaptures()
   if (value === 'diagnostics') loadDiagnostics()
 })
 

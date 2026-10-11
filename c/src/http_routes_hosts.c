@@ -1168,11 +1168,69 @@ done:
     return rc == 0 ? 0 : fail_json_aware(err);
 }
 
+static uint32_t pcap_u32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+static bool valid_pcap(const char *data, size_t len) {
+    const unsigned char *p = (const unsigned char *)data;
+    if (len < 40 || len > 768*1024 || pcap_u32(p) != 0xa1b2c3d4 ||
+        p[4] != 2 || p[5] != 0 || p[6] != 4 || p[7] != 0 ||
+        pcap_u32(p+16) != 65535 || pcap_u32(p+20) != 101) return false;
+    size_t offset = 24;
+    while (offset < len) {
+        if (len-offset < 16) return false;
+        uint32_t size = pcap_u32(p+offset+8);
+        if (size == 0 || size > 65535 || size != pcap_u32(p+offset+12) ||
+            pcap_u32(p+offset+4) >= 1000000 || size > len-offset-16) return false;
+        offset += 16+size;
+    }
+    return offset == len;
+}
+static int handle_agent_capture(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    sb_host host; sb_host_init(&host);
+    int rc = resolve_agent_host(req, &host, err);
+    if (rc != 0) { sb_host_free(&host); return fail_json_aware(err); }
+    const char *digest = route_param(req);
+    char *actual = sb_sha256_hex(req->body, req->body_len);
+    if (!valid_pcap(req->body, req->body_len) || !sb_streq(digest, actual))
+        rc = sb_fail(err, SB_ERR_VALIDATION, "Invalid raw-IP PCAP or SHA-256 digest");
+    else rc = sb_store_save_capture(req->server->store, host.id, digest, req->body, req->body_len, err);
+    free(actual); sb_host_free(&host);
+    if (rc != 0) return fail_json_aware(err);
+    sbj *out = sbj_object(); sbj_set_bool(out, "ok", true); sbj_set_str(out, "digest", digest);
+    sb_resp_json(resp, 200, out); return 0;
+}
+static int handle_host_captures(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    if (sb_require_admin(req, err) != 0) return -1;
+    sbj *out = sb_store_list_captures(req->server->store, route_param(req), err);
+    if (!out) return fail_json_aware(err);
+    sb_resp_json(resp, 200, out); return 0;
+}
+static int handle_host_capture(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    if (sb_require_admin(req, err) != 0) return -1;
+    if (req->param_count != 2) return sb_fail(err, SB_ERR_VALIDATION, "Missing capture digest");
+    const char *host = req->params[0], *digest = req->params[1];
+    if (strcmp(req->method, "DELETE") == 0) {
+        if (sb_store_delete_capture(req->server->store, host, digest, err) != 0) return fail_json_aware(err);
+        sbj *out = sbj_object(); sbj_set_bool(out, "ok", true); sb_resp_json(resp, 200, out); return 0;
+    }
+    size_t len = 0;
+    char *data = sb_store_get_capture(req->server->store, host, digest, &len, err);
+    if (!data) return fail_json_aware(err);
+    sb_resp_text(resp, 200, "application/vnd.tcpdump.pcap", data, len);
+    sb_resp_attachment(resp, digest, strlen(digest), ".pcap");
+    sb_resp_header(resp, "Cache-Control", "no-store");
+    return 0;
+}
+
 /* ======================================================================
  * registration
  * ====================================================================== */
 
 void sb_http_register_hosts_routes(sb_http_server *srv) {
+    sb_http_route(srv, "POST", "/api/agent/captures/{digest}", handle_agent_capture);
+    sb_http_route(srv, "GET", "/api/hosts/{id}/captures", handle_host_captures);
+    sb_http_route(srv, "GET,DELETE", "/api/hosts/{id}/captures/{digest}", handle_host_capture);
     sb_http_route(srv, "GET", "/api/hosts/profiles", handle_list_profiles);
     sb_http_route(srv, "POST", "/api/hosts/profiles", handle_create_profile);
     sb_http_route(srv, "POST", "/api/hosts/rule-script/test", handle_rule_script_test);

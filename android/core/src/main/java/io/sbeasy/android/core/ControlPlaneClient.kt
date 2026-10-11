@@ -119,6 +119,27 @@ class ControlPlaneClient(context: Context) {
         }
     }
 
+    fun uploadCapture(enrollment: Enrollment, digest: String, data: ByteArray, wifiOnly: Boolean) {
+        val request = authenticatedRequest(enrollment, "/api/agent/captures/$digest")
+            .post(data.toRequestBody("application/vnd.tcpdump.pcap".toMediaType())).build()
+        // Bind uploads to a physical network so PCAP uploads cannot capture
+        // themselves and feed an endless upload/capture loop.
+        val network = preferredUnderlyingNetworks().firstOrNull {
+            !wifiOnly || connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        } ?: throw IOException(if (wifiOnly) "等待 Wi-Fi" else "没有可用的物理网络")
+        val response = baseClient.newBuilder().socketFactory(network.socketFactory).dns(object : Dns {
+            override fun lookup(hostname: String) = network.getAllByName(hostname).toList()
+        }).build().newCall(request).execute()
+        response.use {
+            val raw = it.body?.string().orEmpty()
+            if (!it.isSuccessful) throw apiError(it.code, raw)
+            val ack = requireJson(it.code, raw)
+            if (!ack.optBoolean("ok") || ack.optString("digest") != digest) {
+                throw ControlPlaneException("服务器未确认 PCAP 文件校验值")
+            }
+        }
+    }
+
     fun networkSnapshot(): JSONObject {
         val networks = JSONArray()
         preferredUnderlyingNetworks().forEach { network ->

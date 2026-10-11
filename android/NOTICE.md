@@ -11,10 +11,14 @@ The sb-easy Android client links the sing-box `libbox` library into the APK.
 
 The libbox build is reproducible through [`scripts/build-libbox.sh`](scripts/build-libbox.sh).
 The script fetches the exact corresponding source, verifies its revision, and
-builds the AAR with the pinned gomobile and Android NDK versions.
+applies the GPL capture extension in `libbox-overlay/` with
+`scripts/apply-capture-overlay.py`, and builds the AAR with the pinned gomobile
+and Android NDK versions. The extension preserves the upstream networking stack
+and adds opt-in raw TUN packet capture and connection attribution.
 
 Each sb-easy Android GitHub release also carries
-`sing-box-1.13.12-source.tar.gz`, exported from the exact embedded revision, so
+`sing-box-1.13.12-sb-capture-source.tar.gz`, containing the pinned upstream
+source plus the capture extension and routing hooks used in the embedded build, so
 APK recipients can obtain the corresponding source without relying on a moving
 branch or tag.
 

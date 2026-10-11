@@ -149,3 +149,25 @@ python3 c/tools/verify_database.py --database /private/snapshot.db \
   --c-server build/c/sb-easy-c-server --cpp-server build/cpp/sb-easy-cpp-server \
   --check-claude-route
 ```
+
+## Packet capture uploads
+
+Migration `012_packet_captures.sql` adds per-host, content-addressed PCAP blobs.
+Android 1.3.0 captures only after local opt-in and uses its existing agent token.
+
+- `POST /api/agent/captures/{sha256}`: raw `application/vnd.tcpdump.pcap` body.
+  The authenticated device determines the owner. Accepts little-endian PCAP 2.4,
+  raw IP link type 101, snaplen 65535, complete records, at most 768 KiB.
+  A wrong hash or malformed PCAP returns 400. Retrying the same file is idempotent.
+- `GET /api/hosts/{id}/captures`: admin-only list of digest, size and upload time.
+- `GET /api/hosts/{id}/captures/{sha256}`: admin-only PCAP attachment, `no-store`.
+- `DELETE /api/hosts/{id}/captures/{sha256}`: admin-only deletion.
+
+The per-host bound is 128 MiB or 1000 files. A full store returns 409; clients keep
+pending files. Existing captures are never evicted automatically. Deleting a host
+cascades to its captures. The normal SQLite backup includes captures; deleting rows
+allows SQLite to reuse space rather than immediately shrinking the database file.
+The frontend device detail page includes listing, download and explicit deletion.
+
+Validation: `http_hosts_test packet_capture` exercises binary round trips, retries,
+malformed uploads, agent/admin/viewer authorization, isolation and deletion.

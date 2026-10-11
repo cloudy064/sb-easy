@@ -46,6 +46,8 @@ if [[ "$CHECKED_OUT_REVISION" != "$LIBBOX_REVISION" ]]; then
     exit 1
 fi
 
+python3 "$SCRIPT_DIR/apply-capture-overlay.py" "$SOURCE_DIR"
+
 go install "github.com/sagernet/gomobile/cmd/gomobile@$GOMOBILE_VERSION"
 go install "github.com/sagernet/gomobile/cmd/gobind@$GOMOBILE_VERSION"
 readonly GO_MOBILE_BIN="$(go env GOPATH)/bin"

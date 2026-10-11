@@ -894,7 +894,7 @@ private fun ToolsScreen(
     var section by remember { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
-            listOf("流量统计", "路由测试", "路由记录", "运行配置", "日志").forEachIndexed { index, label ->
+            listOf("流量统计", "路由测试", "路由记录", "运行配置", "日志", "流量采集").forEachIndexed { index, label ->
                 TextButton(onClick = { section = index }) {
                     Text(label, color = if (section == index) AccentDark else Muted)
                 }
@@ -905,7 +905,8 @@ private fun ToolsScreen(
             1 -> RouteTestScreen(connectionCount, phase)
             2 -> DomainRouteStatsScreen(domainRoutes)
             3 -> ConfigurationScreen(config)
-            else -> LogsScreen(logs, diagnosticLogs, coreVersion)
+            4 -> LogsScreen(logs, diagnosticLogs, coreVersion)
+            else -> CaptureScreen()
         }
     }
 }

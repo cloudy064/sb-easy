@@ -39,10 +39,29 @@ class CaptureScreenTest {
             compose.onNodeWithText("保存并应用").performScrollTo().performClick()
             compose.waitUntil(5000) { PacketCapture.config().enabled }
             assertEquals(listOf("io.sbeasy.android"), PacketCapture.config().packages)
+            compose.onNodeWithText("App 包名，每行一个").assertDoesNotExist()
             compose.onNodeWithText("启用采集").performScrollTo()
             val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
             val context = InstrumentationRegistry.getInstrumentation().targetContext
             File(context.getExternalFilesDir(null), "capture-settings.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }
+        } finally { PacketCapture.save(previous) }
+    }
+
+    @Test fun bpfValidationDoesNotReplaceSavedConfiguration() {
+        val previous = PacketCapture.config()
+        try {
+            PacketCapture.save(CaptureConfig())
+            compose.setContent { MaterialTheme { Box(Modifier.width(360.dp).fillMaxSize()) { CaptureScreen() } } }
+            compose.onAllNodes(isToggleable())[0].performClick()
+            compose.onNodeWithText("BPF 抓包过滤（可选）").performScrollTo().performTextInput("tcp.port == 443")
+            compose.onNodeWithText("保存并应用").performScrollTo().performClick()
+            compose.waitUntil(5000) { compose.onAllNodesWithText("保存失败：BPF:", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            assertEquals(CaptureConfig(), PacketCapture.config())
+            compose.onNodeWithText("BPF 抓包过滤（可选）").performScrollTo().performTextReplacement("tcp port 443")
+            compose.onNodeWithText("保存并应用").performScrollTo().performClick()
+            compose.waitUntil(5000) { PacketCapture.config().enabled }
+            assertEquals("tcp port 443", PacketCapture.config().bpf)
+            assertTrue(PacketCapture.config().packages.isEmpty())
         } finally { PacketCapture.save(previous) }
     }
 }

@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CaptureConfigTest {
+    @Test fun bpfOnlyRoundTripAndRejectsTruncation() {
+        val c = CaptureConfig(enabled = true, bpf = " tcp port 443 ").validated()
+        assertEquals("tcp port 443", c.bpf)
+        assertEquals(c, CaptureConfig.parse(c.json().toString()))
+        assertTrue(runCatching { c.copy(bpf = "tcp\u0000or udp").validated() }.isFailure)
+        assertTrue(runCatching { c.copy(bpf = "a".repeat(4097)).validated() }.isFailure)
+        assertFalse(CaptureConfig.parse("{}").enabled)
+    }
     @Test fun normalizesAndRoundTrips() {
         val c = CaptureConfig(enabled = true, packages = listOf("com.example.app"), domains = listOf("EXAMPLE.COM."), hosts = listOf("API.EXAMPLE.COM", "2001:db8::1"), autoUpload = true).validated()
         assertEquals(listOf("example.com"), c.domains)

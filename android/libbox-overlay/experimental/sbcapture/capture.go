@@ -24,14 +24,16 @@ type Config struct {
 	Packages      []string `json:"packages"`
 	Domains       []string `json:"domains"`
 	Hosts         []string `json:"hosts"`
+	BPF           string   `json:"bpf"`
 	FileKB        int      `json:"file_kb"`
 	QuotaMB       int      `json:"quota_mb"`
 	RotateSeconds int      `json:"rotate_seconds"`
 }
 type Status struct {
-	Packets uint64 `json:"packets"`
-	Dropped uint64 `json:"dropped"`
-	Error   string `json:"error"`
+	Packets  uint64 `json:"packets"`
+	Dropped  uint64 `json:"dropped"`
+	Filtered uint64 `json:"filtered"`
+	Error    string `json:"error"`
 }
 type key struct {
 	proto    uint8
@@ -74,6 +76,7 @@ type session struct {
 	pending    int
 	flows      map[key]*flow
 	retryAt    time.Time
+	filter     *packetFilter
 }
 
 var current atomic.Pointer[session]
@@ -88,13 +91,21 @@ func Configure(raw string) error {
 		return err
 	}
 	if c.Enabled {
-		if len(c.Packages)+len(c.Domains)+len(c.Hosts) == 0 {
+		if len(c.Packages)+len(c.Domains)+len(c.Hosts) == 0 && strings.TrimSpace(c.BPF) == "" {
 			return errors.New("capture requires a filter")
 		}
 		if !filepath.IsAbs(c.Directory) || c.FileKB < 128 || c.FileKB > 768 || c.QuotaMB < 8 || c.QuotaMB > 256 || c.RotateSeconds < 10 || c.RotateSeconds > 600 {
 			return errors.New("invalid capture limits")
 		}
 		if err := os.MkdirAll(c.Directory, 0700); err != nil {
+			return err
+		}
+	}
+	var filter *packetFilter
+	if c.Enabled {
+		var err error
+		filter, err = compileFilter(c.BPF)
+		if err != nil {
 			return err
 		}
 	}
@@ -106,8 +117,10 @@ func Configure(raw string) error {
 		return nil
 	}
 	s := &session{generation: nextGeneration.Add(1), config: c, events: make(chan event, 128), done: make(chan struct{}), finished: make(chan struct{}), flows: make(map[key]*flow)}
+	s.filter = filter
 	// A crash may leave .part; only complete records are retained before sealing.
 	if err := recoverFiles(c.Directory); err != nil {
+		filter.close()
 		return err
 	}
 	current.Store(s)
@@ -232,6 +245,9 @@ func Classify(generation uint64, original, metadata adapter.InboundContext) {
 	}
 }
 func matches(c Config, host, ip string, packages []string) bool {
+	if len(c.Packages)+len(c.Domains)+len(c.Hosts) == 0 && strings.TrimSpace(c.BPF) != "" {
+		return true
+	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	for _, p := range packages {
 		for _, want := range c.Packages {
@@ -296,6 +312,7 @@ func parsePacket(p []byte) (key, bool) {
 }
 func (s *session) run() {
 	defer close(s.finished)
+	defer s.filter.close()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -410,6 +427,13 @@ func (s *session) fail(err error) {
 	s.retryAt = time.Now().Add(time.Second)
 }
 func (s *session) write(e event) {
+	// Run on the capture worker, never on the VPN forwarding path.
+	if !s.filter.match(e.packet) {
+		s.mu.Lock()
+		s.status.Filtered++
+		s.mu.Unlock()
+		return
+	}
 	if time.Now().Before(s.retryAt) {
 		s.dropped.Add(1)
 		return

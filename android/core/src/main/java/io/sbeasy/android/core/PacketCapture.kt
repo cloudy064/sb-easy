@@ -29,6 +29,7 @@ data class CaptureConfig(
     val wifiOnly: Boolean = true,
     val uploadSeconds: Int = 60,
     val deleteAfterUpload: Boolean = false,
+    val bpf: String = "",
 ) {
     fun validated(): CaptureConfig {
         require(fileKB in 128..768 && quotaMB in 8..256 && rotateSeconds in 10..600 && uploadSeconds in 30..3600) {
@@ -44,9 +45,10 @@ data class CaptureConfig(
             require(url != null && url.port == 443) { "请填写域名或 IP，不要包含端口：$value" }
             return url.host
         }
-        val result = copy(packages = packages.distinct(), domains = domains.map(::normalize).distinct(), hosts = hosts.map(::normalize).distinct())
+        require(bpf.toByteArray(Charsets.UTF_8).size <= 4096 && !bpf.contains('\u0000')) { "BPF 表达式最长 4096 字节且不能包含空字符" }
+        val result = copy(packages = packages.distinct(), domains = domains.map(::normalize).distinct(), hosts = hosts.map(::normalize).distinct(), bpf = bpf.trim())
         require(result.domains.none { it.contains(':') || it.matches(Regex("[0-9.]+")) }) { "IP 请填入精确 host/IP" }
-        require(!enabled || result.packages.isNotEmpty() || result.domains.isNotEmpty() || result.hosts.isNotEmpty()) { "开启采集前至少设置一个筛选条件" }
+        require(!enabled || result.packages.isNotEmpty() || result.domains.isNotEmpty() || result.hosts.isNotEmpty() || result.bpf.isNotEmpty()) { "开启采集前至少设置一个筛选条件" }
         return result
     }
     fun json(): JSONObject = JSONObject().put("enabled", enabled)
@@ -54,6 +56,7 @@ data class CaptureConfig(
         .put("file_kb", fileKB).put("quota_mb", quotaMB).put("rotate_seconds", rotateSeconds)
         .put("auto_upload", autoUpload).put("wifi_only", wifiOnly).put("upload_seconds", uploadSeconds)
         .put("delete_after_upload", deleteAfterUpload)
+        .put("bpf", bpf)
     companion object {
         fun parse(raw: String): CaptureConfig {
             val j = JSONObject(raw)
@@ -61,7 +64,7 @@ data class CaptureConfig(
             return CaptureConfig(j.optBoolean("enabled"), strings("packages"), strings("domains"), strings("hosts"),
                 j.optInt("file_kb", 512), j.optInt("quota_mb", 64), j.optInt("rotate_seconds", 60),
                 j.optBoolean("auto_upload"), j.optBoolean("wifi_only", true), j.optInt("upload_seconds", 60),
-                j.optBoolean("delete_after_upload")).validated()
+                j.optBoolean("delete_after_upload"), j.optString("bpf")).validated()
         }
     }
 }
@@ -77,6 +80,9 @@ object PacketCapture {
     @Volatile var runtimeError: String = ""
     @Volatile var nativeStatus: () -> String = { "{}" }
     @Volatile var rotate: () -> Unit = {}
+    @Volatile var validateFilter: (String) -> Unit = { expression ->
+        check(expression.isBlank()) { "BPF 引擎尚未初始化" }
+    }
     fun initialize(context: Context) { this.context = context.applicationContext }
     private fun preferences() = context.getSharedPreferences("packet_capture", Context.MODE_PRIVATE)
     fun config(): CaptureConfig = runCatching { CaptureConfig.parse(preferences().getString("config", "{}")!!) }.getOrDefault(CaptureConfig())

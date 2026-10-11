@@ -95,7 +95,35 @@ class PacketCaptureIntegrationTest {
             assertTrue("UDP capture absent", all.contains("UDP-APP-POSITIVE-13579"))
             CoreGraph.repository.uploadCaptures()
             assertTrue(PacketCapture.uploadStatus, PacketCapture.files(enrollment).all { it.uploaded })
-            java.io.File(context.getExternalFilesDir(null), "capture-integration-result.txt").writeText("PASS: domain suffix, exact host, package attribution, TCP handshake, bidirectional TCP/UDP, PCAP upload")
+            files.forEach { PacketCapture.delete(it) }
+            configure(CaptureConfig(enabled = true, packages = listOf(context.packageName), bpf = "udp", wifiOnly = false))
+            request("other.test", "BPF-EXCLUDED-TCP-13579")
+            DatagramSocket().use { socket ->
+                socket.soTimeout = 10_000
+                val data = "BPF-INCLUDED-UDP-13579".toByteArray()
+                socket.send(DatagramPacket(data, data.size, InetAddress.getByName(address), (args.getString("captureUdpPort") ?: "18998").toInt()))
+                val answer = DatagramPacket(ByteArray(2048), 2048)
+                socket.receive(answer)
+                assertEquals(String(data), String(answer.data, 0, answer.length))
+            }
+            delay(300)
+            PacketCapture.rotate()
+            files = PacketCapture.files(enrollment)
+            all = files.flatMap { it.file.readBytes().toList() }.toByteArray().toString(Charsets.ISO_8859_1)
+            assertTrue("BPF UDP missing", all.contains("BPF-INCLUDED-UDP-13579"))
+            assertFalse("BPF excluded TCP leaked", all.contains("BPF-EXCLUDED-TCP-13579"))
+            assertTrue(org.json.JSONObject(PacketCapture.nativeStatus()).getLong("filtered") > 0)
+            files.forEach { PacketCapture.delete(it) }
+            configure(CaptureConfig(enabled = true, bpf = "tcp port $port", wifiOnly = false))
+            request("other.test", "BPF-ONLY-TCP-24680")
+            PacketCapture.rotate()
+            files = PacketCapture.files(enrollment)
+            all = files.flatMap { it.file.readBytes().toList() }.toByteArray().toString(Charsets.ISO_8859_1)
+            assertTrue("BPF-only capture missing", all.contains("BPF-ONLY-TCP-24680"))
+            files.forEach { validatePcap(it.file.readBytes()) }
+            CoreGraph.repository.uploadCaptures()
+            assertTrue(PacketCapture.uploadStatus, PacketCapture.files(enrollment).all { it.uploaded })
+            java.io.File(context.getExternalFilesDir(null), "capture-integration-result.txt").writeText("PASS: domain suffix, exact host, package attribution, TCP handshake, bidirectional TCP/UDP, native BPF conjunction and exclusion, BPF-only capture, PCAP upload")
         } finally {
             context.startService(Intent(context, SbEasyVpnService::class.java).setAction(SbEasyVpnService.ACTION_STOP))
             withTimeout(10_000) { while (RuntimeBridge.control != null) delay(100) }

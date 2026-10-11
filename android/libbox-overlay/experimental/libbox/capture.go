@@ -8,3 +8,5 @@ func CaptureStatus() string                { return sbcapture.Snapshot() }
 func RotateCapture()                       { sbcapture.Rotate() }
 
 func RecoverCapture(directory string) error { return sbcapture.Recover(directory) }
+
+func ValidateCaptureFilter(expression string) error { return sbcapture.ValidateFilter(expression) }

@@ -29,6 +29,7 @@ internal fun CaptureScreen() {
     var packages by remember { mutableStateOf(saved.packages.joinToString("\n")) }
     var domains by remember { mutableStateOf(saved.domains.joinToString("\n")) }
     var hosts by remember { mutableStateOf(saved.hosts.joinToString("\n")) }
+    var bpf by remember { mutableStateOf(saved.bpf) }
     var fileKB by remember { mutableStateOf(saved.fileKB.toString()) }
     var quotaMB by remember { mutableStateOf(saved.quotaMB.toString()) }
     var rotateSeconds by remember { mutableStateOf(saved.rotateSeconds.toString()) }
@@ -57,7 +58,7 @@ internal fun CaptureScreen() {
             withContext(Dispatchers.IO) {
                 files = CoreGraph.repository.state.value.enrollment?.let(PacketCapture::files).orEmpty()
                 val native = runCatching { JSONObject(PacketCapture.nativeStatus()) }.getOrDefault(JSONObject())
-                status = "${if (PacketCapture.config().enabled && RuntimeBridge.control != null && PacketCapture.runtimeError.isEmpty()) "采集中" else "未采集"} · 已采集 ${native.optLong("packets")} 包 · 丢弃/未识别 ${native.optLong("dropped")} 包\n${native.optString("error")}\n${PacketCapture.runtimeError}\n${PacketCapture.uploadStatus}".trim()
+                status = "${if (PacketCapture.config().enabled && RuntimeBridge.control != null && PacketCapture.runtimeError.isEmpty()) "采集中" else "未采集"} · 已采集 ${native.optLong("packets")} 包 · BPF 排除 ${native.optLong("filtered")} 包 · 丢弃/未识别 ${native.optLong("dropped")} 包\n${native.optString("error")}\n${PacketCapture.runtimeError}\n${PacketCapture.uploadStatus}".trim()
             }
             delay(2000)
         }
@@ -68,10 +69,22 @@ internal fun CaptureScreen() {
         Text("原始流量采集 · PCAP", style = MaterialTheme.typography.titleLarge)
         Text("仅采集经过本机 VPN 的 TCP/UDP 流量。条件之间为“或”；域名包含子域名，host/IP 精确匹配。HTTPS 保持加密；无法识别域名的连接请用 App 或 IP 筛选。", style = MaterialTheme.typography.bodySmall)
         CaptureToggle("启用采集", enabled) { enabled = it }
-        OutlinedTextField(packages, { packages = it }, label = { Text("App 包名，每行一个") }, placeholder = { Text("com.openai.chatgpt") }, modifier = Modifier.fillMaxWidth())
-        TextButton(onClick = { pickingApp = true }) { Text("选择已安装的应用") }
+        OutlinedButton(onClick = { pickingApp = true }, modifier = Modifier.fillMaxWidth()) { Text("选择已安装的应用") }
+        if (list(packages).isEmpty()) Text("尚未选择应用；也可只按域名、host 或 BPF 采集。", style = MaterialTheme.typography.bodySmall)
+        CaptureSelectedApps(list(packages)) { removed -> packages = list(packages).filterNot { it == removed }.joinToString("\n") }
         OutlinedTextField(domains, { domains = it }, label = { Text("域名（含子域名）") }, placeholder = { Text("example.com") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(hosts, { hosts = it }, label = { Text("精确 host / IP") }, placeholder = { Text("api.example.com") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(bpf, { bpf = it }, label = { Text("BPF 抓包过滤（可选）") }, placeholder = { Text("tcp port 443 or udp port 53") }, modifier = Modifier.fillMaxWidth())
+        Text("BPF 与上方已选条件同时满足才保存；只填 BPF 时筛选全部 VPN TCP/UDP 流量。支持标准 libpcap 抓包语法，不是 tcp.port == 443 这类显示过滤语法。IP 为原始包中的地址（可能是 FakeIP）；按网站筛选请用上方域名。", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { bpf = "tcp port 443" }) { Text("HTTPS") }
+            TextButton(onClick = { bpf = "udp port 53" }) { Text("DNS") }
+            TextButton(onClick = { bpf = "not udp port 443" }) { Text("排除 QUIC") }
+        }
+        OutlinedButton(enabled = !busy, onClick = { busy = true; scope.launch {
+            message = runCatching { withContext(Dispatchers.IO) { PacketCapture.validateFilter(bpf) }; "BPF 语法有效" }.getOrElse { "BPF 校验失败：${it.message}" }
+            busy = false
+        } }) { Text("检查 BPF 语法") }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(fileKB, { fileKB = it }, label = { Text("单文件 KB") }, modifier = Modifier.weight(1f), singleLine = true)
             OutlinedTextField(quotaMB, { quotaMB = it }, label = { Text("本地上限 MB") }, modifier = Modifier.weight(1f), singleLine = true)
@@ -89,7 +102,7 @@ internal fun CaptureScreen() {
             scope.launch {
                 message = runCatching {
                     CoreGraph.repository.saveCaptureConfiguration(CaptureConfig(enabled, list(packages), list(domains), list(hosts),
-                        number(fileKB), number(quotaMB), number(rotateSeconds), auto, wifi, number(uploadSeconds), deleteUploaded))
+                        number(fileKB), number(quotaMB), number(rotateSeconds), auto, wifi, number(uploadSeconds), deleteUploaded, bpf))
                     "配置已保存"
                 }.getOrElse { "保存失败：${it.message}" }
                 busy = false
@@ -128,6 +141,24 @@ internal fun CaptureScreen() {
 }
 
 @Composable
+private fun CaptureSelectedApps(packages: List<String>, onRemove: (String) -> Unit) {
+    val context = LocalContext.current
+    val labels by produceState<Map<String, String>>(emptyMap(), packages) {
+        value = withContext(Dispatchers.IO) { packages.associateWith { name ->
+            runCatching { @Suppress("DEPRECATION")
+                context.packageManager.getApplicationLabel(context.packageManager.getApplicationInfo(name, 0)).toString()
+            }.getOrDefault("未安装的应用：$name")
+        } }
+    }
+    packages.forEach { name ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(labels[name] ?: "正在读取应用名称…", modifier = Modifier.weight(1f).padding(top = 12.dp))
+            TextButton(onClick = { onRemove(name) }) { Text("移除") }
+        }
+    }
+}
+
+@Composable
 private fun CaptureToggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, modifier = Modifier.weight(1f).padding(top = 12.dp))
@@ -140,21 +171,29 @@ private fun CaptureAppPicker(initial: Set<String>, onDismiss: () -> Unit, onSele
     val context = LocalContext.current
     var search by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf(initial) }
-    val apps by produceState<List<Pair<String, String>>?>(null) {
+    var showSystem by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf("") }
+    val apps by produceState<List<Triple<String, String, Boolean>>?>(null) {
         value = withContext(Dispatchers.IO) {
+            runCatching {
             @Suppress("DEPRECATION")
             context.packageManager.getInstalledApplications(0).map {
-                it.packageName to context.packageManager.getApplicationLabel(it).toString()
-            }.sortedBy { it.second.lowercase() }
+                Triple(it.packageName, context.packageManager.getApplicationLabel(it).toString(), it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0)
+            }.sortedWith(compareBy({ it.first !in initial }, { it.second.lowercase() }))
+            }.getOrElse { loadError = "无法读取应用列表：${it.message}"; emptyList() }
         }
     }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("选择应用 · 已选 ${selected.size}") },
         text = { Column {
             OutlinedTextField(search, { search = it }, label = { Text("搜索应用名称或包名") }, singleLine = true)
             Text("共享 UID 的应用无法进一步区分。", style = MaterialTheme.typography.bodySmall)
+            CaptureToggle("显示系统应用", showSystem) { showSystem = it }
             if (apps == null) Text("正在读取应用列表…")
+            if (loadError.isNotEmpty()) Text(loadError)
+            val visible = apps.orEmpty().filter { (showSystem || !it.third || it.first in selected || search.isNotBlank()) && (it.first.contains(search, true) || it.second.contains(search, true)) }
+            if (apps != null && visible.isEmpty() && loadError.isEmpty()) Text("没有匹配的应用")
             LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                items(apps.orEmpty().filter { it.first.contains(search, true) || it.second.contains(search, true) }, key = { it.first }) { app ->
+                items(visible, key = { it.first }) { app ->
                     Row(Modifier.fillMaxWidth().clickable { selected = if (app.first in selected) selected - app.first else selected + app.first }.padding(vertical = 6.dp)) {
                         Checkbox(app.first in selected, onCheckedChange = null)
                         Column(Modifier.weight(1f)) { Text(app.second); Text(app.first, style = MaterialTheme.typography.bodySmall) }

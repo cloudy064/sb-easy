@@ -34,6 +34,7 @@ object LibboxInitializer {
             },
         )
         io.sbeasy.android.core.PacketCapture.nativeStatus = { Libbox.captureStatus() }
+        io.sbeasy.android.core.PacketCapture.validateFilter = { Libbox.validateCaptureFilter(it) }
         io.sbeasy.android.core.PacketCapture.rotate = { Libbox.rotateCapture() }
         io.sbeasy.android.core.CoreGraph.repository.state.value.enrollment?.let { enrollment ->
             runCatching { Libbox.recoverCapture(io.sbeasy.android.core.PacketCapture.directory(enrollment).path) }

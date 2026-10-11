@@ -191,6 +191,7 @@ class AgentRepository internal constructor(
     }
 
     suspend fun saveCaptureConfiguration(config: CaptureConfig) = withContext(Dispatchers.IO) {
+        PacketCapture.validateFilter(config.validated().bpf)
         PacketCapture.save(config)
         RuntimeBridge.control?.restart()
     }

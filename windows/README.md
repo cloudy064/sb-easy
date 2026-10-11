@@ -13,6 +13,9 @@ This is not a completed or signed VPN release.
   WebView2 uses C COM interfaces and the packaged dynamic `WebView2Loader.dll`.
 - C11 state transitions without OS headers or I/O.
 - Windows Service Control Manager entry point and `--console` development mode.
+- x64 MSI installer alongside the portable ZIP: automatic LocalSystem service,
+  Start menu/desktop shortcuts, repair, major upgrades with rollback and downgrade
+  prevention. Uninstall stops/removes the service and preserves device data.
 - One desktop entry: automatically reuse a verified backend, start a matching
   installed Windows service, or launch the bundled backend invisibly for the
   current user. Refresh can recover a stopped portable backend. Concurrent starts
@@ -133,7 +136,64 @@ To create a portable development archive after building:
 This writes `build/sb-easy-windows-x64-development-preview.zip` and prints its
 SHA-256. An explicit file list includes the desktop, service, loader, UI, notices
 and preparation script; an optional core already present in the build directory
-is not included.
+is not included unless `-IncludeCore` is supplied. That switch verifies and
+extracts the pinned upstream core again; it never trusts an arbitrary core binary
+left in the build directory. The native C runtime is statically linked (`/MT` in
+Release), so the desktop and service need no separate VC runtime installation.
+
+### MSI and portable packages
+
+Install .NET SDK 8 for the **build machine only**, then run:
+
+```powershell
+$env:DOTNET_ROLL_FORWARD = 'Major'
+dotnet tool install wix --version 5.0.2 --tool-path build/wix
+./build/wix/wix.exe extension add -g WixToolset.UI.wixext/5.0.2
+./windows/scripts/package.ps1 -Msi -IncludeCore -WixPath ./build/wix/wix.exe
+```
+
+This produces both `build/sb-easy-0.4.0-windows-x64.msi` and the portable ZIP
+above, from the same staged payload, with sing-box and its license included.
+Omit `-IncludeCore` for lightweight packages. MSI requires the machine-wide
+[WebView2 Evergreen Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703);
+setup gives a prerequisite error if it is missing. The application requires
+64-bit Windows 10 or later. These are unsigned development packages.
+
+Double-click the MSI and accept the administrator prompt. It installs under
+`C:\Program Files\sb-easy`, registers and starts the `sb-easy` LocalSystem service,
+and adds Start menu and desktop shortcuts. Open the desktop normally; no second
+service launch or elevated desktop is required. Setup does **not** connect the VPN.
+Service startup after reboot also remains disconnected until the user connects.
+
+Before switching from portable, disconnect and exit the portable UI and stop its
+background process. A conflicting running backend makes installation fail and
+roll back rather than taking over that process. Portable device data is encrypted
+for the current user; the installed service uses its own DPAPI identity and
+`%ProgramData%\sb-easy`. Register the installed edition again; do not copy encrypted
+portable state into the service store. Launch from the installed shortcut after
+installation, since a portable executable from another directory is deliberately
+rejected by service identity verification.
+
+Windows Settings → Apps can repair/remove the MSI. A later MSI with a higher
+three-part version upgrades in place, stops the old service and starts the new
+one. Downgrades are rejected. Uninstall stops the core, removes packaged files,
+service and shortcuts, but retains `%ProgramData%\sb-easy` and the user's UI
+preferences. Use **忘记设备** before uninstall to clear locally stored registration.
+
+For a quiet installation/removal with logs, from an administrator terminal:
+
+```powershell
+msiexec /i "build\sb-easy-0.4.0-windows-x64.msi" /qn /norestart /l*v install.log
+msiexec /x "build\sb-easy-0.4.0-windows-x64.msi" /qn /norestart /l*v uninstall.log
+```
+
+`scripts/installer-smoke.ps1 -Msi <new.msi> -PreviousMsi <older.msi>` exercises
+install, upgrade, missing-file repair, downgrade rejection, real service IPC and
+uninstall/data retention. Run elevated on a disposable clean Windows machine;
+it refuses an existing service, app, device store or running backend. CI builds
+a 0.3.99 test baseline from the same payload and runs this lifecycle test. That
+baseline is a test fixture, not a release. Actual elevated TUN route/DNS acceptance
+is separate from installer testing.
 
 ## Run
 
@@ -157,12 +217,12 @@ evaluated without elevation. TUN startup returns `CORE_ELEVATION_REQUIRED` from
 an unelevated backend. The desktop also queries and starts a matching installed
 SCM service when permitted, without launching a second portable backend. A stopped
 installed service that denies start permission reports the required elevation.
-This preview does not install an elevated service automatically; a production
-installation still needs a signed installer and the appropriate service account.
+The MSI installs that elevated service automatically. Portable operation still
+uses the current user's permissions. Production code signing remains pending.
 
 For a downloaded CI/development archive, keep both executables,
 `WebView2Loader.dll`, `ui/`, `licenses/` and `scripts/` together. The archive does
-not include sing-box. From the extracted directory, optionally prepare the core,
+includes sing-box only when built with `-IncludeCore`. For a lightweight archive, prepare the core,
 then double-click `sb-easy.exe`:
 
 ```powershell

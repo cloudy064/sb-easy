@@ -20,23 +20,47 @@ jobs:
       - name: Build UI, native service and desktop; run tests
         shell: pwsh
         run: ./windows/scripts/build.ps1
-      - name: Package optional core preparation script
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install pinned MSI build tools
+        shell: pwsh
+        env:
+          DOTNET_ROLL_FORWARD: Major
+        run: |
+          dotnet tool install wix --version 5.0.2 --tool-path build/wix
+          if ($LASTEXITCODE -ne 0) { throw 'WiX install failed' }
+          ./build/wix/wix.exe extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX UI install failed' }
+      - name: Package portable ZIP and MSI with verified core
+        shell: pwsh
+        env:
+          DOTNET_ROLL_FORWARD: Major
+        run: |
+          ./windows/scripts/package.ps1 -Msi -IncludeCore -WixPath ./build/wix/wix.exe
+          $payload = Get-ChildItem build -Directory -Filter 'windows-package-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          ./windows/scripts/package-msi.ps1 -Payload $payload.FullName -Version 0.3.99 -WixPath ./build/wix/wix.exe
+      - name: Verify MSI install, upgrade, repair, downgrade rejection and uninstall
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path build/windows-release/scripts -Force | Out-Null
-          Copy-Item -LiteralPath windows/scripts/prepare-core.ps1 -Destination build/windows-release/scripts/prepare-core.ps1
+          $runtime = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue
+          if (-not $runtime.pv -or $runtime.pv -eq '0.0.0.0') {
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile build/WebView2Setup.exe
+            $setup = Start-Process ./build/WebView2Setup.exe -ArgumentList '/silent /install' -Wait -PassThru
+            if ($setup.ExitCode -ne 0) { throw 'WebView2 Runtime installation failed' }
+          }
+          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.4.0-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
       - uses: actions/upload-artifact@v4
         with:
-          name: sb-easy-windows-x64-development-preview
+          name: sb-easy-windows-x64-packages
           path: |
-            build/windows-release/sb-easy.exe
-            build/windows-release/sb-easy-service.exe
-            build/windows-release/WebView2Loader.dll
-            build/windows-release/scripts/prepare-core.ps1
-            build/windows-release/ui/
-            build/windows-release/licenses/
-            build/windows-release/README.md
-            build/windows-release/THIRD_PARTY_NOTICES.md
+            build/sb-easy-windows-x64-development-preview.zip
+            build/sb-easy-0.4.0-windows-x64.msi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-installer-test-logs
+          path: build/windows-installer-smoke-*/
 
   c:
     name: C backend (${{ matrix.mode }})

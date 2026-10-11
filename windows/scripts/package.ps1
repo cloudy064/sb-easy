@@ -1,4 +1,9 @@
-param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release')
+param(
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
+    [switch]$Msi,
+    [switch]$IncludeCore,
+    [string]$WixPath = 'wix'
+)
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $buildRoot = Join-Path $repoRoot 'build'
@@ -19,7 +24,19 @@ foreach ($name in @('README.md', 'THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "windows\$name") -Destination $stage
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prepare-core.ps1') -Destination (Join-Path $stage 'scripts')
+if ($IncludeCore) {
+    # Re-verify the pinned upstream archive; do not package arbitrary core files
+    # found in a developer's build directory.
+    & (Join-Path $PSScriptRoot 'prepare-core.ps1') -Configuration $Configuration
+    New-Item -ItemType Directory -Path (Join-Path $stage 'core') | Out-Null
+    foreach ($name in @('sing-box.exe', 'libcronet.dll', 'LICENSE')) {
+        Copy-Item -LiteralPath (Join-Path $binaryRoot "core\$name") -Destination (Join-Path $stage 'core')
+    }
+}
 $archive = Join-Path $buildRoot 'sb-easy-windows-x64-development-preview.zip'
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
 Write-Output "Windows preview packaged at $archive"
 Get-FileHash -LiteralPath $archive -Algorithm SHA256
+if ($Msi) {
+    & (Join-Path $PSScriptRoot 'package-msi.ps1') -Payload $stage -WixPath $WixPath
+}

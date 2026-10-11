@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="sb-easy" Manufacturer="sb-easy" Version="$(Version)"
+           UpgradeCode="78E985E7-0CDC-4782-B1EA-52DCE6B3E544"
+           Scope="perMachine" InstallerVersion="500" Language="1033">
+    <SummaryInformation Description="sb-easy Windows desktop and background service" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of sb-easy is already installed."
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/cloudy064/sb-easy" />
+    <Property Id="WEBVIEW2_MACHINE">
+      <RegistrySearch Id="WebViewMachine" Root="HKLM" Bitness="always32"
+        Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+        Name="pv" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR (WEBVIEW2_MACHINE AND WEBVIEW2_MACHINE &lt;&gt; &quot;0.0.0.0&quot;)"
+      Message="Install Microsoft Edge WebView2 Evergreen Runtime (for all users) first: https://go.microsoft.com/fwlink/p/?LinkId=2124703" />
+    <Property Id="WINDOWS_BUILD">
+      <RegistrySearch Id="WindowsBuild" Root="HKLM" Bitness="always64"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWS_BUILD &gt;= 10240)"
+      Message="sb-easy requires 64-bit Windows 10 or later." />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="sb-easy">
+        <Component Id="DesktopExecutable" Guid="*">
+          <File Id="DesktopExe" Source="$(Payload)\sb-easy.exe" KeyPath="yes">
+            <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="sb-easy"
+                      Advertise="yes" WorkingDirectory="INSTALLFOLDER" />
+            <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="sb-easy"
+                      Advertise="yes" WorkingDirectory="INSTALLFOLDER" />
+          </File>
+        </Component>
+        <Component Id="ServiceExecutable" Guid="*">
+          <File Id="ServiceExe" Source="$(Payload)\sb-easy-service.exe" KeyPath="yes" />
+          <ServiceInstall Id="BackgroundService" Name="sb-easy" DisplayName="sb-easy"
+            Description="Manages sb-easy configuration and the sing-box connection."
+            Type="ownProcess" Start="auto" Account="LocalSystem" ErrorControl="normal" Vital="yes" />
+          <ServiceControl Id="BackgroundServiceControl" Name="sb-easy"
+                          Stop="both" Start="install" Remove="uninstall" Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+    <Feature Id="Complete" Title="sb-easy" Level="1">
+      <ComponentRef Id="DesktopExecutable" />
+      <ComponentRef Id="ServiceExecutable" />
+      <Files Directory="INSTALLFOLDER" Include="$(Payload)\**">
+        <Exclude Files="$(Payload)\sb-easy.exe" />
+        <Exclude Files="$(Payload)\sb-easy-service.exe" />
+      </Files>
+    </Feature>
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)PreviewNotice.rtf" />
+  </Package>
+</Wix>

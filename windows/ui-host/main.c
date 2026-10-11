@@ -531,6 +531,11 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message_id, WPARAM wparam,
         bounds->ptMinTrackSize.x = MulDiv(760, (int)dpi, 96); bounds->ptMinTrackSize.y = MulDiv(560, (int)dpi, 96); return 0;
     }
     case WM_CLOSE: if (app->tray_added && !app->screenshot) ShowWindow(window, SW_HIDE); else DestroyWindow(window); return 0;
+    /* Restart Manager uses session-ending messages during MSI upgrades. A
+     * normal close still hides to tray, but an installer shutdown must release
+     * executable and WebView2 resources instead of leaving a hidden process. */
+    case WM_QUERYENDSESSION: return TRUE;
+    case WM_ENDSESSION: if (wparam) DestroyWindow(window); return 0;
     case WM_DESTROY: app_shutdown(app); PostQuitMessage(app->exit_code); return 0;
     case TRAY_MESSAGE: tray_action(app, lparam); return 0;
     case REPLY_MESSAGE: deliver(app); return 0;

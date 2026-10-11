@@ -17,12 +17,21 @@ The WebView2 SDK archive is SHA-256 pinned in `CMakeLists.txt`. The WebView2
 Evergreen Runtime is installed separately and receives its own updates. There is
 no separate C++ JSON library in the Windows build.
 
-This preview does not bundle sing-box, Wintun or an installer. The optional
-`scripts/prepare-core.ps1` downloads the official **sing-box 1.13.12 Windows x64**
+The optional `scripts/prepare-core.ps1` downloads the official **sing-box 1.13.12 Windows x64**
 archive directly from its upstream release and verifies the pinned SHA-256
 `e93fc531134eb1beb4efa3c74990a24e48456098a31c03b60d5ddf17f223cf98`.
 It preserves that archive's `LICENSE` beside the extracted executable and
 `libcronet.dll`. See the [official release](https://github.com/SagerNet/sing-box/releases/tag/v1.13.12)
 and its [license](https://github.com/SagerNet/sing-box/blob/v1.13.12/LICENSE).
-A distributable VPN release that bundles these components must add their notices,
-corresponding-source obligations and signed artifacts before shipping them.
+Packages built with `package.ps1 -IncludeCore` contain these unmodified upstream
+binaries and `core/LICENSE`. Wintun is embedded by upstream sing-tun v0.8.9;
+its sources and notices are at <https://github.com/SagerNet/sing-tun/tree/v0.8.9>.
+Corresponding upstream source and build instructions:
+<https://github.com/SagerNet/sing-box/tree/v1.13.12> (including its pinned `go.mod`
+dependencies), <https://sing-box.sagernet.org/installation/build-from-source/>.
+When publishing bundled binaries, provide their corresponding source in accordance
+with `core/LICENSE`. Local preview packages are unsigned.
+
+MSI packages are authored using WiX Toolset 5.0.2 with its UI extension. WiX is a
+build-time tool, not a C++ implementation of the sb-easy service or desktop. End
+users do not need WiX, .NET SDK or Visual Studio installed.

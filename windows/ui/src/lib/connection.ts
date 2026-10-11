@@ -13,7 +13,7 @@ export function connectionActions(status: StatusResult | null, config: ConfigMet
 }
 
 export function runtimeDetail(status: StatusResult): string {
-  if (status.phase === 'STARTING') return '正在校验并启动候选配置，等待本地内核健康检查完成。'
+  if (status.phase === 'STARTING') return '正在校验并启动配置。首次启动可能需要下载远程规则，请稍候。'
   if (status.phase === 'ROLLING_BACK') return '新配置未能正常启动，服务正在恢复上一次可用配置。'
   if (status.phase === 'STOPPING') return '正在停止内核并清理本机连接。'
   if (status.core_running) {

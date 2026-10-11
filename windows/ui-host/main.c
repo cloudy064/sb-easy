@@ -20,7 +20,7 @@
 static const wchar_t app_uri[] = L"https://sbeasy.local/index.html";
 static const wchar_t default_pipe[] = L"\\\\.\\pipe\\sb-easy-control-v1";
 enum { TRAY_MESSAGE = WM_APP + 1, REPLY_MESSAGE = WM_APP + 2,
-       COMMAND_OPEN = 100, COMMAND_EXIT = 101, SMOKE_TIMER = 1 };
+       COMMAND_OPEN = 100, COMMAND_EXIT = 101, COMMAND_EXPORT = 102, SMOKE_TIMER = 1 };
 typedef struct message { char *text; struct message *next; } message;
 typedef struct desktop {
     LONG refs, alive;
@@ -109,7 +109,7 @@ static void receive(desktop *app, ICoreWebView2WebMessageReceivedEventArgs *args
     const sbj *id = NULL, *version, *method;
     bool allowed = false, queued = false;
     static const char *methods[] = {"protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
-                                   "enrollment.forget", "config.summary", "config.refresh", "config.validate",
+                                   "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server",
                                    "connection.start", "connection.stop", "config.inspect", "runtime.snapshot"};
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source))) return;
     allowed = source && wcscmp(source, app_uri) == 0; CoTaskMemFree(source);
@@ -167,7 +167,8 @@ static unsigned __stdcall work(void *context) {
             ready = sbw_service_ensure(&options, app->cancel, 12000, NULL, &error);
             free(binary);
         }
-        if (parsed_request && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, 35000, &response, &error)) {
+        DWORD request_timeout = sbj_string_is(sbj_get(parsed_request, "method"), "connection.start") ? 90000 : 35000;
+        if (parsed_request && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, request_timeout, &response, &error)) {
             parsed_response = sbw_json_parse(response, strlen(response), 32, &error);
             valid = sbj_is_object(parsed_response) && sbj_equal(sbj_get(parsed_response, "id"), id) &&
                 sbj_is_integer(sbj_get(parsed_response, "version")) && sbj_get_int(parsed_response, "version", 0) == 1 &&
@@ -376,10 +377,8 @@ static HRESULT STDMETHODCALLTYPE script_handler_invoke(ICoreWebView2ExecuteScrip
             if (wide) ICoreWebView2_ExecuteScript(app->webview, wide, NULL);
             free(wide); free(script); free(quoted); sbj_free(server_value); free(server); return S_OK;
         }
-        if (!wcscmp(value, L"\"no-candidate\"") && app->smoke_step <= 1) {
-            app->smoke_step = 2;
-            ICoreWebView2_ExecuteScript(app->webview, L"document.querySelector('[data-testid=config-refresh]')?.click()", NULL); return S_OK;
-        }
+        /* Enrollment must fetch its own candidate. Do not click refresh here:
+         * the smoke test should fail if the user would have to do that manually. */
     }
     if (SUCCEEDED(result) && value && app->smoke_connect) {
         if (!app->connection_step && !wcscmp(value, L"\"start-clicked\"")) { app->connection_step = 1; return S_OK; }
@@ -475,9 +474,16 @@ static void tray_action(desktop *app, LPARAM action) {
     if (LOWORD(action) == WM_RBUTTONUP || LOWORD(action) == WM_CONTEXTMENU) {
         POINT point; HMENU menu; UINT choice; GetCursorPos(&point); menu = CreatePopupMenu(); if (!menu) return;
         AppendMenuW(menu, MF_STRING, COMMAND_OPEN, L"打开 sb-easy"); AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, COMMAND_EXPORT, L"导出诊断包（离线）");
         AppendMenuW(menu, MF_STRING, COMMAND_EXIT, L"退出界面"); SetForegroundWindow(app->window);
         choice = (UINT)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, app->window, NULL);
         DestroyMenu(menu); if (choice == COMMAND_OPEN) show(app); if (choice == COMMAND_EXIT) DestroyWindow(app->window);
+        if (choice == COMMAND_EXPORT) {
+            wchar_t path[MAX_PATH];
+            DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+            if (length && length < MAX_PATH && PathRemoveFileSpecW(path) && PathAppendW(path, L"Export-Diagnostics.cmd"))
+                ShellExecuteW(app->window, L"open", path, NULL, NULL, SW_HIDE);
+        }
     }
 }
 static wchar_t *parent_path(const wchar_t *path) {
@@ -558,7 +564,7 @@ static bool parse_arguments(desktop *app) {
         else if (!wcscmp(arg, L"--expect-running")) app->expect_running = true;
         else if (!wcscmp(arg, L"--smoke-page") && i + 1 < count) {
             const wchar_t *page = args[++i];
-            if (wcscmp(page, L"overview") && wcscmp(page, L"proxies") && wcscmp(page, L"connections") && wcscmp(page, L"profiles") && wcscmp(page, L"rules") && wcscmp(page, L"activity") && wcscmp(page, L"settings")) goto done;
+            if (wcscmp(page, L"overview") && wcscmp(page, L"proxies") && wcscmp(page, L"connections") && wcscmp(page, L"profiles") && wcscmp(page, L"rules") && wcscmp(page, L"activity") && wcscmp(page, L"settings") && wcscmp(page, L"diagnostics")) goto done;
             free(app->smoke_page); app->smoke_page = wide_copy(page);
         }
         else if (!wcscmp(arg, L"--smoke-theme") && i + 1 < count) {

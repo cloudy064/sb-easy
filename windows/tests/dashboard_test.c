@@ -12,6 +12,24 @@ int main(void) {
     sbj_free(catalog); sbj_free(snapshot);
     CHECK(sbj_is_null(catalog = sbw_config_catalog(NULL))); sbj_free(catalog);
 
+    snapshot = sbj_object();
+    sbj_set_str(snapshot, "content", "{\"route\":{\"rules\":[{\"domain_suffix\":[\"openai.com\",\"chatgpt.com\"],\"outbound\":\"Tokyo\"},{\"rule_set\":[\"geosite-cn\",\"geoip-cn\",\"custom-private-label\"],\"outbound\":\"direct\"},{\"domain_suffix\":[\"openai.com\"],\"invert\":true,\"outbound\":\"direct\"}]}}");
+    catalog = sbw_config_catalog(snapshot);
+    const sbj *catalog_rules = sbj_get(catalog, "rules");
+    CHECK(sb_streq(sbj_get_str(sbj_arr_at(catalog_rules, 0), "title", ""), "GPT / Codex"));
+    CHECK(sb_streq(sbj_get_str(sbj_arr_at(catalog_rules, 2), "title", ""), "分流规则"));
+    const char *scope = sbj_get_str(sbj_arr_at(catalog_rules, 1), "match", "");
+    CHECK(strstr(scope, "国内域名") && strstr(scope, "国内 IP"));
+    CHECK(!strstr(scope, "rule_set") && !strstr(scope, "geosite") && !strstr(scope, "custom-private-label"));
+    sbj_free(catalog); sbj_free(snapshot);
+
+    snapshot = sbj_object();
+    sbj_set_str(snapshot, "content", "{\"endpoints\":[{\"type\":\"wireguard\",\"tag\":\"sb-easy-network\",\"private_key\":\"secret-proxy-value\",\"peers\":[{\"pre_shared_key\":\"private-agent-token\"}]}]}");
+    catalog = sbw_config_catalog(snapshot); test_redacted(catalog);
+    CHECK(sbj_get_int(catalog, "node_count", 0) == 1);
+    CHECK(sb_streq(sbj_get_str(sbj_arr_at(sbj_get(catalog, "nodes"), 0), "type", ""), "wireguard"));
+    sbj_free(catalog); sbj_free(snapshot);
+
     sbj *connections = sbj_parse_cstr("{\"uploadTotal\":1024,\"downloadTotal\":2048,\"connections\":[{\"id\":\"test-1\",\"metadata\":{\"host\":\"example.test\",\"destinationPort\":\"443\",\"processPath\":\"C:/private-user/app.exe\",\"network\":\"tcp\",\"secret\":\"private-agent-token\"},\"chains\":[\"Tokyo\"],\"upload\":512,\"download\":1024,\"rule\":\"final\"}]}");
     sbj *proxies = sbj_parse_cstr("{\"proxies\":{\"GLOBAL\":{\"name\":\"GLOBAL\"},\"Default\":{\"name\":\"Default\",\"type\":\"Selector\",\"now\":\"Tokyo\",\"all\":[\"Tokyo\"],\"history\":[{\"delay\":42}],\"password\":\"secret-proxy-value\"}}}");
     sbj *result = sbw_dashboard_snapshot(connections, proxies); test_redacted(result);

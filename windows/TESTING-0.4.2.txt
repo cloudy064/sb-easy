@@ -1,0 +1,29 @@
+sb-easy Windows 0.4.2 离线测试说明
+
+安装前
+1. 先保留 Clash 的可用配置。此版本增加诊断日志，未替换服务器分配的 GPT 节点。
+2. 双击 sb-easy-0.4.2-windows-x64.msi 升级安装。已有设备注册信息会保留。
+3. 打开 sb-easy，确认“设置”中的服务版本为 0.4.2-dev。
+   已安装 MSI 的电脑优先使用 MSI，不要另外启动便携版后台。
+
+测试（不需要与助手保持连接）
+1. 退出 Clash Verge，并确认它的代理/TUN 已关闭。
+2. 在 sb-easy 点击“启动连接”，等待显示已连接。首次加载可能需要几十秒。
+3. 分别访问普通网页、ChatGPT 网页，然后在 Codex 发起一次对话。
+4. 如果失败，记下本地时间、具体操作及错误文字。不要立刻切回 Clash。
+5. 右键任务栏托盘的 sb-easy 图标，选择“导出诊断包（离线）”。
+   或运行 C:\Program Files\sb-easy\Export-Diagnostics.cmd。
+   接受 Windows 的管理员权限提示，等待桌面生成 sb-easy-diagnostics-日期时间.zip。
+   即使界面关闭或本机服务已经停止，导出工具仍会收集已有日志和网络状态。
+6. 然后在 sb-easy 断开连接，再打开 Clash 恢复网络。
+7. 把 ZIP、失败发生的时间以及“哪个网页/哪一步失败”发给助手。
+
+日志说明
+- 无需手动开启；后台自动记录内核启动、DNS、分流出口、连接失败和停止过程。
+- 日志最多约 16 MB，循环保留最近记录；关闭界面和重启不会清空。
+- 诊断包包含访问域名、IP、节点名称与本机网络状态。
+- 凭据在落盘前过滤，不导出注册状态文件、原始配置、密码或令牌；不会自动上传。
+- 最好在故障发生时导出，切回 Clash 后的路由/DNS 状态会变化。
+
+安装版日志位置：C:\ProgramData\sb-easy\core-work\diagnostic-*.log
+便携版日志位置：%LOCALAPPDATA%\sb-easy\dev-service\core-work\diagnostic-*.log

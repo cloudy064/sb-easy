@@ -40,6 +40,7 @@ export interface StatusResult extends DeviceMetadata {
 }
 
 export interface ConfigSummary extends ConfigMetadata {
+  gpt_use_default?: boolean
   profile: ProfileSummary | null
   counts: { inbounds: number; outbounds: number; rules: number }
   validation?: ConfigValidation
@@ -57,7 +58,7 @@ export interface ProxyNode {
 export interface ConfigCatalog {
   etag: string; final: string; node_count: number; rule_count: number
   nodes: ProxyNode[]
-  rules: { index: number; match: string; action: string; outbound: string }[]
+  rules: { index: number; title?: string; match: string; action: string; outbound: string }[]
   inbounds: { type: string; listen: string; port: number; auto_route: boolean }[]
 }
 export interface ConfigInspection { candidate: ConfigCatalog | null; active: ConfigCatalog | null }
@@ -80,6 +81,8 @@ export interface ResultMap {
   'config.summary': ConfigSummary
   'config.refresh': ConfigSummary
   'config.validate': ConfigSummary
+  'routing.gpt_default': ConfigSummary
+  'routing.gpt_server': ConfigSummary
   'connection.start': StatusResult
   'connection.stop': StatusResult
   'config.inspect': ConfigInspection
@@ -131,7 +134,7 @@ function validDeviceMetadata(value: Record<string, unknown>): boolean {
 export function validParams<M extends Method>(method: M, value: unknown): value is ParamsMap[M] {
   if (!isRecord(value)) return false
   if (method === 'enrollment.apply') return Object.keys(value).length === 1 && boundedString(value.uri, 16_384)
-  if (!['protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot'].includes(method)) return false
+  if (!['protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot'].includes(method)) return false
   return Object.keys(value).length === 0
 }
 
@@ -162,8 +165,10 @@ export function validResult<M extends Method>(method: M, value: unknown): value 
         (value.runtime_error === undefined || (isRecord(value.runtime_error) && boundedString(value.runtime_error.code, 128) && boundedString(value.runtime_error.message, 2048)))
     case 'config.summary':
     case 'config.refresh':
+    case 'routing.gpt_default':
+    case 'routing.gpt_server':
     case 'config.validate':
-      return validConfigMetadata(value) && validProfile(value.profile) && isRecord(value.counts) &&
+      return (value.gpt_use_default === undefined || typeof value.gpt_use_default === 'boolean') && validConfigMetadata(value) && validProfile(value.profile) && isRecord(value.counts) &&
         (value.validation === undefined || validValidation(value.validation)) &&
         ['inbounds', 'outbounds', 'rules'].every(key => {
           const count = (value.counts as Record<string, unknown>)[key]
@@ -189,7 +194,7 @@ function validCatalog(value: unknown): boolean {
   return value === null || (isRecord(value) && nullableString(value.etag, 4096) && typeof value.etag === 'string' && displayString(value.final) &&
     safeCount(value.node_count) && safeCount(value.rule_count) && Array.isArray(value.nodes) && value.nodes.length <= 128 && value.nodes.every(validNode) &&
     Array.isArray(value.inbounds) && value.inbounds.length <= 16 && value.inbounds.every(item => isRecord(item) && displayString(item.type) && displayString(item.listen) && safeCount(item.port) && typeof item.auto_route === 'boolean') &&
-    Array.isArray(value.rules) && value.rules.length <= 128 && value.rules.every(item => isRecord(item) && safeCount(item.index) && typeof item.match === 'string' && item.match.length <= 600 && displayString(item.action) && displayString(item.outbound)))
+    Array.isArray(value.rules) && value.rules.length <= 128 && value.rules.every(item => isRecord(item) && safeCount(item.index) && (item.title === undefined || displayString(item.title)) && typeof item.match === 'string' && item.match.length <= 600 && displayString(item.action) && displayString(item.outbound)))
 }
 function validConnection(value: unknown): boolean {
   return isRecord(value) && ['id', 'host', 'destination', 'port', 'network', 'type', 'process', 'rule'].every(key => displayString(value[key])) &&

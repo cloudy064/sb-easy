@@ -125,6 +125,8 @@ int wmain(int argc, wchar_t **argv) {
     sbw_core_status process = core_status(core); CHECK(process.process_running && process.process_id);
     DWORD original_pid = process.process_id;
     result = call(controller, "connection.start", true); expect_state(result, "RUNNING", "good-1", "good-1"); sbj_free(result);
+    error_call(controller, "routing.gpt_default", true, "CONNECTION_RUNNING");
+    error_call(controller, "routing.gpt_server", true, "CONNECTION_RUNNING");
     CHECK(core_status(core).process_id == original_pid); /* Identical config is idempotent. */
     result = call(controller, "connection.stop", true); expect_state(result, "STOPPED", NULL, "good-1"); sbj_free(result);
     process = core_status(core); CHECK(!process.process_running && !process.last_stop_forced);
@@ -180,6 +182,7 @@ int wmain(int argc, wchar_t **argv) {
     result = call(controller, "connection.stop", true); expect_state(result, "STOPPED", NULL, NULL); sbj_free(result);
     sbw_controller_free(controller); test_data_free(&data); CloseHandle(health_gate);
     wchar_t *lock = sbw_path_join(directory, L"state.lock");
+    test_remove_diagnostics(directory);
     CHECK(DeleteFileW(lock)); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
     puts("C11 connection controller: local health, activation, stop, persistence, replacement, rollback, crash and redaction passed.");
     return 0;

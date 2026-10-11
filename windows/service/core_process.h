@@ -21,6 +21,7 @@ typedef struct sbw_core_status {
     bool has_exit_code;
     DWORD exit_code;
     bool last_stop_forced; /* Job termination was needed; OS routing cleanup is not proven. */
+    DWORD stop_signal_code; /* helper exit code; MAXDWORD when it could not run */
 } sbw_core_status;
 
 sbw_core *sbw_core_new(const sbw_core_options *options, sbw_error *error);
@@ -45,6 +46,8 @@ int sbw_core_config_check(sbw_core *core, const char *json, size_t length, HANDL
 int sbw_core_start(sbw_core *core, const char *json, size_t length, HANDLE cancel, sbw_error *error);
 int sbw_core_stop(sbw_core *core, sbw_error *error);
 int sbw_core_poll(sbw_core *core, sbw_core_status *status, sbw_error *error);
+/* Fixed operation names and error codes only; never pass request/config data. */
+void sbw_core_event(sbw_core *core, const char *event, const char *result);
 
 /* Concurrent operations fail with CORE_BUSY instead of waiting without a bound.
  * Remote health checks, configuration activation, rollback, and routing cleanup

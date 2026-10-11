@@ -1,6 +1,7 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$Tun,
+    [switch]$SlowRules,
     [switch]$Dashboard
 )
 $ErrorActionPreference = 'Stop'
@@ -96,6 +97,7 @@ try {
             @{page='connections';theme='dark';width='1120';name='connections'},
             @{page='profiles';theme='light';width='1120';name='profiles'},
             @{page='rules';theme='light';width='1120';name='rules'},
+            @{page='diagnostics';theme='light';width='1120';name='diagnostics'},
             @{page='activity';theme='light';width='1120';name='activity'},
             @{page='settings';theme='dark';width='760';name='settings-narrow'},
             @{page='connections';theme='light';width='760';name='connections-narrow'}
@@ -113,6 +115,11 @@ try {
     $connected = $false
     if ($stopped.phase -ne 'STOPPED' -or $stopped.core_running -or $stopped.config.active_etag) { throw 'Stop left a stale active revision.' }
     if ($stopped.stop_forced -ne $false) { throw 'The real core required forced termination instead of graceful exit.' }
+    $diagnosticPath = Join-Path $dataDir 'core-work/diagnostic-0.log'
+    $diagnostic = Get-Content -LiteralPath $diagnosticPath -Raw -Encoding UTF8
+    if ($diagnostic -notmatch 'core.launch' -or $diagnostic -notmatch 'core.stop' -or $diagnostic -notmatch 'inbound/' -or $diagnostic -notmatch 'outbound/') { throw 'Persistent diagnostics missed core lifecycle or forwarding events.' }
+    if ($diagnostic -match 'fixture-password-must-never-reach-ui|fixture-private-token|fixture-private-password') { throw 'Persistent diagnostics leaked fixture credentials.' }
+    Write-Output 'PASS: real core forwarding and lifecycle logs persisted without fixture credentials.'
     $telemetry = Invoke-TestRpc 'runtime.snapshot'
     if ($telemetry.running -or $telemetry.etag -or $telemetry.connections.Count -or $telemetry.nodes.Count) { throw 'Stopped telemetry retained stale runtime data.' }
     $listener = [Net.Sockets.TcpClient]::new()
@@ -126,6 +133,10 @@ try {
         outbounds=@(@{type='direct';tag='direct'})
         dns=@{servers=@(@{type='local';tag='local'});final='local'}
         route=@{rules=@(@{protocol='dns';action='hijack-dns'});final='direct'}
+    }
+    if ($SlowRules) {
+        $candidate.route.rule_set = @(@{ type='remote'; tag='slow-fixture'; format='source'; url="$origin/slow-rules"; download_detour='direct' })
+        $candidate.route.rules += @{rule_set=@('slow-fixture');action='route';outbound='direct'}
     }
     $candidate | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath (Join-Path $testDir 'fixture-candidate.json') -Encoding utf8
     $null = Invoke-TestRpc 'config.refresh'
@@ -148,6 +159,17 @@ try {
         } while ([DateTime]::UtcNow -lt $deadline)
         if ($routes.Count) { throw 'The test TUN route did not disappear after graceful stop.' }
         Write-Output 'PASS: actual Wintun adapter and isolated /30 route created and cleaned after stop.'
+        if ($SlowRules) {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $status = Invoke-TestRpc 'connection.start'
+            $connected = $true
+            if ($status.phase -ne 'RUNNING' -or $watch.Elapsed.TotalSeconds -ge 8) { throw 'Warm rule-set cache was not used.' }
+            $null = Invoke-TestRpc 'connection.stop'
+            $connected = $false
+            $receipt = Get-Content -LiteralPath (Join-Path $testDir 'fixture-receipt.json') -Raw | ConvertFrom-Json
+            if ($receipt.ruleRequests -ne 1) { throw 'Restart unnecessarily downloaded remote rules again.' }
+            Write-Output 'PASS: slow initial rule download and warm-cache restart, with graceful TUN teardown.'
+        }
     } elseif (-not $elevated) {
         $null = Invoke-TestRpc 'connection.start' @{} 'CORE_ELEVATION_REQUIRED'
         $status = Invoke-TestRpc 'status.get'

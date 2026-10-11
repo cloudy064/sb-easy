@@ -8,6 +8,43 @@ This is not a completed or signed VPN release.
 
 ## Implemented
 
+- Windows accepts managed WireGuard endpoints using sing-box's userspace engine,
+  preserves per-device keys/peers and the server's intranet route, and includes
+  endpoints in the node catalog without exposing keys. The center device must
+  have `capabilities.embedded_wireguard=true`; older center enrollment handlers
+  do not infer this from `platform=windows`. Enabling it on the correct host
+  causes the next config fetch to provision its own peer. No separate Windows
+  WireGuard service is needed. Unknown endpoint types remain unsupported.
+
+- GPT/Codex can use the default proxy via a persisted local routing preference.
+  Both its domain route and a dedicated clone of its DNS server use that exit;
+  other services sharing the original DNS server stay unchanged. The server
+  snapshot/ETag remain intact. Switching requires a stopped core and validates
+  the effective configuration before saving. Unsupported rule shapes or sync
+  changes are rejected without replacing the last downloaded configuration.
+  This is a manual exit selection, not automatic failover or a node repair.
+
+- The 0.4.4 diagnostic test build captures sing-box debug output through a C11
+  pipe reader, filters credentials before disk writes, and retains four 4 MiB
+  logs in the protected `core-work` directory. Service operation results and
+  forced/graceful stop details are timestamped alongside core DNS/routing errors.
+  The tray's **Export diagnostics (offline)** command (Chinese UI), or packaged
+  `Export-Diagnostics.cmd`, saves a ZIP on the desktop with these logs, projected
+  service status, adapters, routes, DNS settings/cache and relevant TCP sockets.
+  Export while the failure is present, before switching to another proxy.
+  Domain/IP/node names remain; raw configurations and encrypted device state
+  are excluded. No upload occurs. Log capture continues with the GUI closed.
+
+- Registration immediately downloads the latest candidate in the same GUI flow.
+  A download failure leaves the completed registration intact and offers sync
+  retry, without exchanging the one-time enrollment code again.
+- Cold starts with remote rule sets allow 25 seconds for readiness, and use a
+  service-owned rule cache for subsequent starts. Connection-start IPC has a
+  bounded 90-second deadline covering validation, startup, cleanup and rollback;
+  other requests retain their existing limits. Service shutdown allows five
+  seconds, including a graceful interval before bounded Job termination.
+- User actions wait for an in-progress background health/snapshot read instead
+  of intermittently returning `BUSY`; overlapping user mutations remain rejected.
 - Pure C11 service, Win32 host, platform adapters and native tests, built with MSVC.
   The frontend remains Vue/TypeScript. JSON uses the existing `c/` sbj implementation;
   WebView2 uses C COM interfaces and the packaged dynamic `WebView2Loader.dll`.
@@ -71,6 +108,13 @@ sing-box test forwarded HTTP through its SOCKS listener, verified graceful exit
 (`stop_forced=false`) and listener closure, and rejected an unelevated TUN start.
 These local checks do not replace elevated TUN acceptance or the Linux CI
 regression runs for the server-side C changes.
+
+Additional 0.4.4 validation: automatic post-registration download through the real
+GUI; an eight-second delayed remote rule-set fixture; real Wintun creation and
+cleanup with only an isolated /30 route; and the installed candidate under
+LocalSystem with global route/DNS takeover disabled for diagnosis. The original
+three-second readiness deadline reproduced `TUN_FORCE_STOPPED`; the revised
+startup reached `RUNNING`. Full global route/DNS takeover remains a separate test.
 
 ## Build
 
@@ -152,7 +196,7 @@ dotnet tool install wix --version 5.0.2 --tool-path build/wix
 ./windows/scripts/package.ps1 -Msi -IncludeCore -WixPath ./build/wix/wix.exe
 ```
 
-This produces both `build/sb-easy-0.4.0-windows-x64.msi` and the portable ZIP
+This produces both `build/sb-easy-0.4.4-windows-x64.msi` and the portable ZIP
 above, from the same staged payload, with sing-box and its license included.
 Omit `-IncludeCore` for lightweight packages. MSI requires the machine-wide
 [WebView2 Evergreen Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703);
@@ -183,8 +227,8 @@ preferences. Use **忘记设备** before uninstall to clear locally stored regis
 For a quiet installation/removal with logs, from an administrator terminal:
 
 ```powershell
-msiexec /i "build\sb-easy-0.4.0-windows-x64.msi" /qn /norestart /l*v install.log
-msiexec /x "build\sb-easy-0.4.0-windows-x64.msi" /qn /norestart /l*v uninstall.log
+msiexec /i "build\sb-easy-0.4.4-windows-x64.msi" /qn /norestart /l*v install.log
+msiexec /x "build\sb-easy-0.4.4-windows-x64.msi" /qn /norestart /l*v uninstall.log
 ```
 
 `scripts/installer-smoke.ps1 -Msi <new.msi> -PreviousMsi <older.msi>` exercises
@@ -350,5 +394,14 @@ The dashboard organization draws on [Clash Verge Rev's navigation](https://githu
 and this repository's [Android client](../android/README.md). This phase implements
 read-only nodes/groups/rules and live connections/traffic; manual node selection,
 active latency tests, Android-style local Claude/GPT/custom routing groups, route
-tests, retained domain statistics, core logs and Windows system proxy control
+tests, retained domain statistics and Windows system proxy control
 remain future work. UI activity records are not core logs.
+
+The service-routing view presents server domain groups (including Claude and
+GPT/Codex), their assigned exits, the default exit and local/domestic address
+scopes. Internal rule-set identifiers are not exposed as user-facing rules.
+These are server policy summaries, not locally editable Android routing overlays;
+a service label does not imply all traffic from its desktop process is captured.
+DNS and application traffic can use a dedicated service exit independently of
+the default proxy. When only one service fails, compare both its DNS detour and
+route exit with the default path before diagnosing TUN capture as broken.

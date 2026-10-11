@@ -58,7 +58,7 @@ static DWORD run(bool console, const wchar_t *directory, sbw_pipe_options *optio
     wchar_t *binary_dir = sbw_executable_directory(&core_error);
     wchar_t *core_binary = binary_dir ? sbw_path_join(binary_dir, L"core\\sing-box.exe") : NULL;
     wchar_t *work_directory = sbw_path_join(location, L"core-work");
-    sbw_core_options core_options = {core_binary, work_directory, 8000, 2000};
+    sbw_core_options core_options = {core_binary, work_directory, 8000, 5000};
     sbw_core *core = core_binary && work_directory ? sbw_core_new(&core_options, &core_error) : NULL;
     sbw_controller_set_core(controller, core, &core_error);
     free(binary_dir); free(core_binary); free(work_directory); free(default_directory);

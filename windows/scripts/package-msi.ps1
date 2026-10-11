@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$Payload,
-    [string]$Version = '0.4.0',
+    [string]$Version = '0.4.4',
     [string]$WixPath = 'wix'
 )
 $ErrorActionPreference = 'Stop'

@@ -117,7 +117,8 @@ int wmain(int argc, wchar_t **argv) {
         sbj_free(config);
         return 0;
     }
-    if (!strcmp(mode, "graceful") || !strcmp(mode, "ignore_break")) {
+    if (!strcmp(mode, "graceful") || !strcmp(mode, "slow_graceful") || !strcmp(mode, "ignore_break")) {
+        bool slow = !strcmp(mode, "slow_graceful");
         break_event = CreateEventW(NULL, TRUE, FALSE, NULL);
         ignore_break = !strcmp(mode, "ignore_break");
         if (!break_event || !SetConsoleCtrlHandler(control_event, TRUE)) { sbj_free(config); return 77; }
@@ -125,6 +126,7 @@ int wmain(int argc, wchar_t **argv) {
         sbj_free(config);
         if (ready) return ready;
         WaitForSingleObject(break_event, INFINITE);
+        if (slow) Sleep(2000); /* Simulate adapter/connection teardown. */
         CloseHandle(break_event);
         return 42; /* Only our handler path, never default console termination. */
     }

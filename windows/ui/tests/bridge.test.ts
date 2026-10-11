@@ -313,7 +313,7 @@ test('start and stop use real status replies and never infer internet health', a
   const bridge = new NativeBridge(transport)
   const running = { ...status, enrolled: true, phase: 'RUNNING', core_running: true, connection_available: true,
     tun_active: false, config: { ...candidate, active_etag: candidate.downloaded_etag, last_good_etag: candidate.downloaded_etag } }
-  const start = bridge.request('connection.start', {}, { timeoutMs: 45_000 })
+  const start = bridge.request('connection.start', {}, { timeoutMs: 95_000 })
   assert.equal(transport.messages[0].method, 'connection.start')
   assert.deepEqual(transport.messages[0].params, {})
   transport.respond({ id: transport.messages[0].id, ok: true, result: running })
@@ -401,4 +401,14 @@ test('timed out start does not automatically retry or claim activation', async (
   await new Promise(resolve => setTimeout(resolve, 8))
   assert.equal(transport.messages.length, 1)
   bridge.dispose()
+})
+
+test('GPT routing RPCs validate empty params and local preference results', () => {
+  const summary = { candidate_available: true, downloaded_etag: 'r1', active_etag: null, rule_source: 'profile', profile: null, counts: { inbounds: 0, outbounds: 1, rules: 1 }, gpt_use_default: true }
+  for (const method of ['routing.gpt_default', 'routing.gpt_server'] as const) {
+    assert.equal(validParams(method, {}), true)
+    assert.equal(validParams(method, { outbound: 'untrusted' }), false)
+    assert.equal(validResult(method, summary), true)
+    assert.equal(validResult(method, { ...summary, gpt_use_default: 'true' }), false)
+  }
 })

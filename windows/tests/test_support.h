@@ -13,6 +13,13 @@ typedef struct test_data {
     char *last_etag;
     HANDLE entered, release, cancel_after_enroll;
 } test_data;
+static inline void test_remove_diagnostics(const wchar_t *directory) {
+    for (int i = 0; i < 4; ++i) {
+        wchar_t name[40]; swprintf_s(name, 40, L"diagnostic-%d.log", i);
+        wchar_t *path = sbw_path_join(directory, name);
+        CHECK(DeleteFileW(path) || GetLastError() == ERROR_FILE_NOT_FOUND); free(path);
+    }
+}
 static inline int test_load(void *context, sbj **out, sbw_error *error) {
     (void)error; test_data *data = context; *out = sbj_clone(data->saved); return 0;
 }

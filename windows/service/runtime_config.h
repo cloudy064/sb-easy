@@ -9,6 +9,7 @@ typedef struct sbw_runtime_config {
     unsigned short port;       /* 127.0.0.1 only; ownership checked by health */
     bool has_tun;
     bool auto_route;            /* copied from candidate; never enabled implicitly */
+    bool remote_rule_sets;      /* first start may download rule-set data */
     wchar_t *interface_name;   /* NULL without TUN; restricted name, default sb-easy */
 } sbw_runtime_config;
 

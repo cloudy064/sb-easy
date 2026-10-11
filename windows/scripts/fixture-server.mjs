@@ -18,7 +18,7 @@ await new Promise((resolve, reject) => {
 })
 const proxyPort = proxyReservation.address().port
 fs.writeFileSync(path.join(directory, 'fixture-proxy-port.txt'), String(proxyPort))
-const receipt = { enrollments: 0, configRequests: 0, notModified: 0, rejected: 0 }
+const receipt = { enrollments: 0, configRequests: 0, notModified: 0, rejected: 0, ruleRequests: 0 }
 let origin
 function record() { fs.writeFileSync(path.join(directory, 'fixture-receipt.json'), JSON.stringify(receipt)) }
 const server = http.createServer(async (request, response) => {
@@ -36,6 +36,12 @@ const server = http.createServer(async (request, response) => {
   }
   if (request.url === '/test/connection-probe' && request.method === 'GET') {
     reply(200, { fixture: 'sb-easy-connection-probe' })
+    return
+  }
+  if (request.url === '/test/slow-rules' && request.method === 'GET') {
+    receipt.ruleRequests++
+    await new Promise(resolve => setTimeout(resolve, 8000))
+    reply(200, { version: 3, rules: [{ domain: ['fixture.invalid'] }] })
     return
   }
   if (request.url === '/test/api/devices/enroll' && request.method === 'POST') {
@@ -70,7 +76,7 @@ const server = http.createServer(async (request, response) => {
       return
     }
     if (proxyReservation.listening) await new Promise(resolve => proxyReservation.close(resolve))
-    const candidate = overridden ? JSON.parse(fs.readFileSync(override, 'utf8')) : {
+    const candidate = overridden ? JSON.parse(fs.readFileSync(override, 'utf8').replace(/^\uFEFF/, '')) : {
       inbounds: [{ type: 'mixed', tag: 'fixture-local', listen: '127.0.0.1', listen_port: proxyPort }],
       outbounds: [{ type: 'direct', tag: 'direct' }, { type: 'trojan', tag: 'fixture-node', server: 'example.invalid', server_port: 443, password: 'fixture-password-must-never-reach-ui' }],
       route: { rules: [{ domain: ['example.invalid'], outbound: 'direct' }], final: 'direct' },

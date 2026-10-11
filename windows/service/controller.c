@@ -1,14 +1,16 @@
 #include "controller.h"
 #include "runtime_config.h"
 #include "dashboard.h"
+#include "routing.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 struct sbw_controller {
     sbw_control_plane *remote;
     sbw_store *store;
     HANDLE cancel;
-    SRWLOCK state_lock, mutation_lock;
+    SRWLOCK state_lock, mutation_lock, user_operation_lock;
     sbj *identity, *candidate, *last_good, *active;
     sbw_error startup_error;
     sbw_core *core;
@@ -76,6 +78,7 @@ static sbj *enrollment_status(sbw_controller *controller) {
 }
 static sbj *config_summary(sbw_controller *controller) {
     sbj *result = sbj_object(), *counts;
+    sbj_set_bool(result, "gpt_use_default", sbj_get_bool(controller->identity, "windows_gpt_use_default", false));
     sbj_set_bool(result, "candidate_available", controller->candidate != NULL);
     sbj_set_str(result, "downloaded_etag", sbj_get_str(controller->candidate, "etag", NULL));
     sbj_set_str(result, "active_etag", sbj_get_str(controller->active, "etag", NULL));
@@ -130,6 +133,7 @@ sbw_controller *sbw_controller_new(sbw_control_plane *remote, sbw_store *store, 
     sbw_controller *controller = sb_xcalloc(1, sizeof *controller);
     controller->remote = remote; controller->store = store; controller->cancel = cancel;
     InitializeSRWLock(&controller->state_lock); InitializeSRWLock(&controller->mutation_lock);
+    InitializeSRWLock(&controller->user_operation_lock);
     sb_windows_runtime_init(&controller->runtime);
     sbj *saved = NULL;
     if (store->load(store->context, &saved, &controller->startup_error) != 0) return controller;
@@ -177,7 +181,7 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     }
 }
 bool sbw_is_mutating_method(const char *method) {
-    return sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
+    return sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
         sb_streq(method, "config.refresh") || sb_streq(method, "config.validate") ||
         sb_streq(method, "connection.start") || sb_streq(method, "connection.stop");
 }
@@ -225,8 +229,12 @@ static void record_check(sbw_controller *controller, bool valid, const sbw_error
 static int prepare_candidate(sbw_controller *controller, const sbj *source, sbw_runtime_config *config, sbw_error *error) {
     const sbj *content = sbj_get(source, "content");
     if (!content) return sbw_fail(error, "NO_CANDIDATE", "Download a candidate configuration before starting.");
-    return sbw_runtime_config_prepare(content->v.str.ptr, content->v.str.len,
+    sbj *effective = sbw_routing_snapshot(source, sbj_get_bool(controller->identity, "windows_gpt_use_default", false), error);
+    if (!effective) return -1;
+    content = sbj_get(effective, "content");
+    int result = sbw_runtime_config_prepare(content->v.str.ptr, content->v.str.len,
         sbj_get_str(controller->identity, "server", ""), config, error);
+    sbj_free(effective); return result;
 }
 static int check_config(sbw_controller *controller, sbw_runtime_config *config, sbw_error *error) {
     return sbw_core_config_check(controller->core, config->json, strlen(config->json), controller->cancel, NULL, error);
@@ -236,7 +244,10 @@ static int launch_healthy(sbw_controller *controller, sbw_runtime_config *config
     sbw_core_status status = {0};
     if (sbw_core_poll(controller->core, &status, error) != 0 || !status.process_running)
         return sbw_fail(error, "CORE_EXITED", "The core exited during startup.");
-    if (sbw_runtime_config_health(config, status.process_id, controller->cancel, 3000, error) != 0) return -1;
+    /* The Clash API starts after remote rule sets initialize. Cold downloads
+     * must not be treated as a failed TUN after the old three-second deadline. */
+    if (sbw_runtime_config_health(config, status.process_id, controller->cancel,
+                                 config->remote_rule_sets ? 25000 : 3000, error) != 0) return -1;
     if (cancelled(controller, error)) return -1;
     return 0;
 }
@@ -280,8 +291,11 @@ static int connection_stop(sbw_controller *controller, sbw_error *error) {
     int stopped = sbw_core_stop(controller->core, error);
     sbw_core_status status = {0};
     if (stopped == 0 && controller->core) (void)sbw_core_poll(controller->core, &status, NULL);
-    if (stopped == 0 && had_tun && status.last_stop_forced)
-        stopped = sbw_fail(error, "TUN_FORCE_STOPPED", "The TUN core required forced termination; network cleanup has not been verified.");
+    if (stopped == 0 && had_tun && status.last_stop_forced) {
+        char message[256];
+        (void)sprintf_s(message, sizeof(message), "The TUN core required forced termination (stop helper: %lu); network cleanup has not been verified.", status.stop_signal_code);
+        stopped = sbw_fail(error, "TUN_FORCE_STOPPED", message);
+    }
     AcquireSRWLockExclusive(&controller->state_lock);
     clear_active(controller);
     sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_STOP);
@@ -338,7 +352,13 @@ static int connection_start(sbw_controller *controller, sbw_error *error) {
         safe_to_restore = false;
         sbw_fail(&cleanup_error, "TUN_FORCE_STOPPED", "The failed TUN core required forced termination; network cleanup must be verified before restoring another configuration.");
     }
-    if (!safe_to_restore) failure = cleanup_error;
+    if (!safe_to_restore) {
+        char message[256];
+        (void)sprintf_s(message, sizeof(message),
+            "Core startup failed (%s). Cleanup also failed (%s); verify network recovery before reconnecting.",
+            failure.code, cleanup_error.code);
+        sbw_fail(&failure, cleanup_error.code, message);
+    }
     sbw_runtime_config_free(&next);
     bool rollback = safe_to_restore && controller->last_good && !cancelled(controller, NULL);
     if (rollback) {
@@ -414,8 +434,16 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         AcquireSRWLockShared(&controller->state_lock);
         if (ready(controller, error)) {
             result = sbj_object();
-            sbj_set(result, "candidate", sbw_config_catalog(controller->candidate));
-            sbj_set(result, "active", sbw_config_catalog(controller->active));
+            bool local = sbj_get_bool(controller->identity, "windows_gpt_use_default", false);
+            sbj *candidate = sbw_routing_snapshot(controller->candidate, local, error);
+            sbj *active = sbw_routing_snapshot(controller->active, local, error);
+            if ((controller->candidate && !candidate) || (controller->active && !active)) {
+                sbj_free(result); result = NULL;
+            } else {
+                sbj_set(result, "candidate", sbw_config_catalog(candidate));
+                sbj_set(result, "active", sbw_config_catalog(active));
+            }
+            sbj_free(candidate); sbj_free(active);
         }
         ReleaseSRWLockShared(&controller->state_lock); return result;
     }
@@ -433,9 +461,15 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     if (!authorized) {
         sbw_fail(error, "FORBIDDEN", "This operation requires an administrator or the active console session."); return NULL;
     }
-    if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
+    if (!TryAcquireSRWLockExclusive(&controller->user_operation_lock)) {
         sbw_fail(error, "BUSY", "Another device operation is in progress. Try again after it finishes."); return NULL;
     }
+    /* A periodic health check or telemetry snapshot is not another user action.
+     * Let its bounded I/O finish instead of randomly rejecting a stop/sync click.
+     * The separate gate still rejects overlapping mutations, never queues a
+     * duplicate enrollment or a second connection start behind the first. */
+    AcquireSRWLockExclusive(&controller->mutation_lock);
+    sbw_core_event(controller->core, method, "begin");
     sbj *result = NULL, *new_identity = NULL, *download = NULL;
     sbw_enrollment_target target = {0};
     if (cancelled(controller, error) || !ready(controller, error)) goto done;
@@ -446,6 +480,30 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             AcquireSRWLockShared(&controller->state_lock); result = runtime_status(controller);
             ReleaseSRWLockShared(&controller->state_lock);
         }
+    } else if (sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server")) {
+        if (!controller->identity) { sbw_fail(error, "NOT_ENROLLED", "Enroll this device first."); goto done; }
+        if (controller->active || controller->runtime.core_running) { sbw_fail(error, "CONNECTION_RUNNING", "Stop the connection before changing routing."); goto done; }
+        bool local = sb_streq(method, "routing.gpt_default");
+        if (local) {
+            if (!controller->candidate) { sbw_fail(error, "NO_CANDIDATE", "Download configuration first."); goto done; }
+            sbj *effective = sbw_routing_snapshot(controller->candidate, true, error);
+            if (!effective) goto done;
+            const char *content = sbj_get_str(effective, "content", "");
+            sbw_runtime_config adapted = {0};
+            int checked = sbw_runtime_config_prepare(content, strlen(content),
+                sbj_get_str(controller->identity, "server", ""), &adapted, error);
+            if (checked == 0) checked = check_config(controller, &adapted, error);
+            sbw_runtime_config_free(&adapted); sbj_free(effective);
+            if (checked != 0) goto done;
+        }
+        new_identity = sbj_clone(controller->identity);
+        sbj_set_bool(new_identity, "windows_gpt_use_default", local);
+        if (save_state(controller, new_identity, controller->candidate, controller->last_good, error) != 0) goto done;
+        AcquireSRWLockExclusive(&controller->state_lock);
+        sbj_free(controller->identity); controller->identity = new_identity; new_identity = NULL;
+        free(controller->checked_etag); controller->checked_etag = NULL; controller->checked_valid = false;
+        result = config_summary(controller);
+        ReleaseSRWLockExclusive(&controller->state_lock);
     } else if (is_apply) {
         const sbj *uri = sbj_get(params, "uri");
         if (sbj_obj_len(params) != 1 || !sbw_json_string(uri, 16384, false)) {
@@ -457,6 +515,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         if (sbw_parse_enrollment_uri(uri->v.str.ptr, &target, error) != 0 ||
             controller->remote->enroll(controller->remote->context, &target, controller->cancel, &new_identity, error) != 0) goto done;
         if (!identity_valid(new_identity)) { sbw_fail(error, "INVALID_RESPONSE", "The server returned invalid device information."); goto done; }
+        sbj_del(new_identity, "windows_gpt_use_default");
         /* A redeemed single-use identity must be saved even during shutdown. */
         if (save_state(controller, new_identity, NULL, NULL, error) != 0) goto done;
         AcquireSRWLockExclusive(&controller->state_lock);
@@ -520,6 +579,9 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
                     sbj_set_str(download, key, sbj_get_str(controller->identity, key, ""));
             }
             sbj_del(download, "not_modified");
+            sbj *effective = sbw_routing_snapshot(download, sbj_get_bool(controller->identity, "windows_gpt_use_default", false), error);
+            if (!effective) goto done;
+            sbj_free(effective);
             if (save_state(controller, controller->identity, download, controller->last_good, error) != 0) goto done;
             AcquireSRWLockExclusive(&controller->state_lock);
             sbj_free(controller->candidate); controller->candidate = download; download = NULL;
@@ -534,5 +596,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     }
 done:
     sbj_free(new_identity); sbj_free(download); sbw_enrollment_target_free(&target);
-    ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
+    sbw_core_event(controller->core, method, result ? "ok" : error && error->code[0] ? error->code : "failed");
+    ReleaseSRWLockExclusive(&controller->mutation_lock);
+    ReleaseSRWLockExclusive(&controller->user_operation_lock); return result;
 }

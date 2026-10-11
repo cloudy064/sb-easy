@@ -51,7 +51,7 @@ int sbw_pipe_request(const wchar_t *pipe, const char *body, HANDLE cancel, DWORD
     char *result = NULL;
     int rc = -1;
     *response = NULL;
-    if (!length || length > MAX_FRAME || !timeout_ms || timeout_ms > 35000)
+    if (!length || length > MAX_FRAME || !timeout_ms || timeout_ms > 90000)
         return sbw_fail(error, "INVALID_REQUEST", "Invalid request frame or deadline");
     started = GetTickCount64(); deadline = started + timeout_ms;
     while (GetTickCount64() < started + (timeout_ms < 4000 ? timeout_ms : 4000)) {

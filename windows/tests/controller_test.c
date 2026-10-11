@@ -109,8 +109,53 @@ static void test_validation(const wchar_t *fixture) {
     sbj_free(empty); sbj_free(enrollment); test_data_free(&data);
     /* Remove only the owned fixture directory and its known lock file. */
     wchar_t *lock = sbw_path_join(directory, L"state.lock");
+    test_remove_diagnostics(directory);
     CHECK(DeleteFileW(lock)); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
 }
+static const char *routing_fixture =
+ "{\"outbounds\":[{\"tag\":\"default\",\"type\":\"socks\",\"server\":\"127.0.0.1\",\"server_port\":1080}],"
+ "\"route\":{\"final\":\"default\",\"rules\":[{\"domain_suffix\":[\"openai.com\",\"chatgpt.com\"],\"outbound\":\"broken\"}]},"
+ "\"dns\":{\"servers\":[{\"type\":\"https\",\"tag\":\"shared\",\"server\":\"1.1.1.1\",\"detour\":\"broken\"}],"
+ "\"rules\":[{\"domain_suffix\":[\"openai.com\",\"chatgpt.com\"],\"server\":\"shared\"},{\"domain_suffix\":[\"claude.ai\"],\"server\":\"shared\"}]}}";
+static void test_routing(const wchar_t *fixture) {
+    wchar_t temporary[32768], name[128];
+    CHECK(GetTempPathW(32768, temporary));
+    swprintf_s(name, 128, L"sb-easy-routing-%lu-%llu", GetCurrentProcessId(), (unsigned long long)GetTickCount64());
+    wchar_t *directory = sbw_path_join(temporary, name);
+    test_data data; test_data_init(&data);
+    sbj_set_str(data.download, "content", routing_fixture);
+    sbj *empty = sbj_object(), *enrollment = test_enrollment(), *result;
+    sbw_controller *controller = test_controller(&data, NULL);
+    attach_fixture(controller, fixture, directory);
+    expect_error(controller, "routing.gpt_default", empty, false, "FORBIDDEN");
+    expect_error(controller, "routing.gpt_default", empty, true, "NOT_ENROLLED");
+    result = call(controller, "enrollment.apply", enrollment, true); sbj_free(result);
+    expect_error(controller, "routing.gpt_default", empty, true, "NO_CANDIDATE");
+    result = call(controller, "config.refresh", empty, true); sbj_free(result);
+    data.fail_write = true;
+    expect_error(controller, "routing.gpt_default", empty, true, "STORAGE_ERROR");
+    result = call(controller, "config.summary", empty, true); CHECK(!sbj_get_bool(result, "gpt_use_default", true)); sbj_free(result);
+    data.fail_write = false;
+    result = call(controller, "routing.gpt_default", empty, true); CHECK(sbj_get_bool(result, "gpt_use_default", false)); sbj_free(result);
+    CHECK(sb_streq(sbj_get_str(sbj_get(data.saved, "candidate"), "content", ""), routing_fixture));
+    sbw_controller_free(controller); controller = test_controller(&data, NULL);
+    attach_fixture(controller, fixture, directory);
+    result = call(controller, "config.summary", empty, true); CHECK(sbj_get_bool(result, "gpt_use_default", false)); sbj_free(result);
+    sbj_set_str(data.download, "etag", "revision-2");
+    result = call(controller, "config.refresh", empty, true); CHECK(sbj_get_bool(result, "gpt_use_default", false)); sbj_free(result);
+    result = call(controller, "config.inspect", empty, true);
+    CHECK(sb_streq(sbj_get_str(sbj_arr_at(sbj_get(sbj_get(result, "candidate"), "rules"), 0), "outbound", ""), "default")); sbj_free(result);
+    sbj_set_str(data.download, "content", "{}");
+    expect_error(controller, "config.refresh", empty, true, "GPT_ROUTING_UNSUPPORTED");
+    CHECK(sb_streq(sbj_get_str(sbj_get(data.saved, "candidate"), "etag", ""), "revision-2"));
+    result = call(controller, "routing.gpt_server", empty, true); CHECK(!sbj_get_bool(result, "gpt_use_default", true)); sbj_free(result);
+    result = call(controller, "config.inspect", empty, true);
+    CHECK(sb_streq(sbj_get_str(sbj_arr_at(sbj_get(sbj_get(result, "candidate"), "rules"), 0), "outbound", ""), "broken")); sbj_free(result);
+    sbw_controller_free(controller); test_data_free(&data); sbj_free(empty); sbj_free(enrollment);
+    wchar_t *lock = sbw_path_join(directory, L"state.lock"); test_remove_diagnostics(directory);
+    CHECK(DeleteFileW(lock)); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
+}
+
 typedef struct refresh_task { sbw_controller *controller; sbj *params; sbj *result; } refresh_task;
 static DWORD WINAPI refresh_worker(void *context) {
     refresh_task *task = context; task->result = call(task->controller, "config.refresh", task->params, true); return 0;
@@ -182,5 +227,6 @@ int wmain(int argc, wchar_t **argv) {
     sbw_controller_free(controller); CloseHandle(cancel);
     sbj_free(enrollment); sbj_free(empty); test_data_free(&data);
     test_validation(argv[1]);
+    test_routing(argv[1]);
     puts("C controller: enrollment, persistence, 304, fixture validation, revision binding, authorization, concurrency and redaction passed."); return 0;
 }

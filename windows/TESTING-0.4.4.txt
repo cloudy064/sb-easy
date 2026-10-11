@@ -1,0 +1,9 @@
+sb-easy Windows 0.4.4 内网修复
+
+支持中心服务端下发的 WireGuard endpoint，保留独立设备密钥、地址、peer 和内网路由。
+采用 sing-box 内置 WireGuard，不需要另开 Windows WireGuard 或 Clash。
+中心设备需要启用 embedded_wireguard；同步后节点中应出现 sb-easy-network，内网路由应指向它。
+GPT/Codex 的本机出口设置继续保留。
+
+测试：同步配置后重新连接，执行 ssh company，确认收到 SSH 握手并能登录；同时检查 Codex 仍可正常对话。
+发生故障时，可从托盘“导出诊断包（离线）”导出日志。

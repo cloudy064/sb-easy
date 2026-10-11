@@ -148,6 +148,22 @@ static int adapt_inbounds(sbj *candidate, sbw_runtime_config *out, sbw_error *er
     return 0;
 }
 
+static int adapt_endpoints(sbj *candidate, sbw_error *error) {
+    sbj *endpoints = sbj_get(candidate, "endpoints");
+    if (endpoints && !sbj_is_array(endpoints)) return fail(error, "RUNTIME_CONFIG_INVALID");
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i) {
+        sbj *endpoint = sbj_arr_at(endpoints, i);
+        if (!sbj_is_object(endpoint) || !sbj_string_is(sbj_get(endpoint, "type"), "wireguard"))
+            return fail(error, "RUNTIME_CONFIG_UNSUPPORTED");
+        /* Managed WireGuard is inside sing-box, independent of a desktop WG
+         * service. Preserve keys, peers, addresses and server-owned routes. */
+        sbj_set_bool(endpoint, "system", false);
+        sbj_del(endpoint, "name");
+        adapt_dialers(endpoint);
+    }
+    return 0;
+}
+
 static int adapt_routes(sbj *candidate, const char *host, sbw_error *error) {
     const char *direct_tag = "sb-easy-control-direct";
     sbj *outbounds = sbj_get(candidate, "outbounds");
@@ -204,7 +220,7 @@ int sbw_runtime_config_prepare(const char *json, size_t length, const char *serv
     char *host = server_host(server);
     int result = -1;
     if (!sbj_is_object(candidate) || !safe_strings(candidate) || !host) { fail(error, "RUNTIME_CONFIG_INVALID"); goto done; }
-    if (unsafe_files(candidate) || sbj_size(sbj_get(candidate, "services")) || sbj_size(sbj_get(candidate, "endpoints")) ||
+    if (unsafe_files(candidate) || sbj_size(sbj_get(candidate, "services")) ||
         sbj_has(candidate, "certificate")) { fail(error, "RUNTIME_CONFIG_UNSUPPORTED"); goto done; }
     sbj *dns_servers = sbj_get(sbj_get(candidate, "dns"), "servers");
     for (size_t i = 0; i < sbj_arr_len(dns_servers); ++i) {
@@ -216,12 +232,24 @@ int sbw_runtime_config_prepare(const char *json, size_t length, const char *serv
     adapt_dialers(sbj_get(candidate, "outbounds"));
     adapt_dialers(sbj_get(candidate, "dns"));
     sbj_del(candidate, "ntp");
-    sbj *log = sbj_object(); sbj_set_bool(log, "disabled", true); sbj_set(candidate, "log", log);
-    if (adapt_inbounds(candidate, out, error) != 0 || adapt_routes(candidate, host, error) != 0 ||
+    /* Capture stderr through the service's bounded, redacting collector. */
+    sbj *log = sbj_object(); sbj_set_str(log, "level", "debug"); sbj_set_bool(log, "timestamp", true); sbj_set(candidate, "log", log);
+    if (adapt_endpoints(candidate, error) != 0 || adapt_inbounds(candidate, out, error) != 0 || adapt_routes(candidate, host, error) != 0 ||
         choose_local_api(out, error) != 0) goto done;
     char controller[32];
     (void)sprintf_s(controller, sizeof(controller), "127.0.0.1:%u", out->port);
     sbj *experimental = sbj_object(), *clash = sbj_object(), *origins = sbj_array();
+    const sbj *rule_sets = sbj_get(sbj_get(candidate, "route"), "rule_set");
+    for (size_t i = 0; i < sbj_arr_len(rule_sets); ++i)
+        if (sbj_string_is(sbj_get(sbj_arr_at(rule_sets, i), "type"), "remote")) out->remote_rule_sets = true;
+    if (out->remote_rule_sets) {
+        /* Core working directory is the service-owned protected core-work
+         * directory. Never accept a cache path supplied by the server. */
+        sbj *cache = sbj_object();
+        sbj_set_bool(cache, "enabled", true);
+        sbj_set_str(cache, "path", "rule-set-cache.db");
+        sbj_set(experimental, "cache_file", cache);
+    }
     const char *mode = sbj_get_str(sbj_get(sbj_get(candidate, "experimental"), "clash_api"), "default_mode", "Rule");
     sbj_set_str(clash, "default_mode", mode);
     sbj_set_str(clash, "external_controller", controller); sbj_set_str(clash, "secret", out->secret);

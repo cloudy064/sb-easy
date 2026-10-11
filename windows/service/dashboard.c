@@ -35,14 +35,26 @@ static void match_value(sb_buf *buffer, const sbj *value) {
 static char *matches(const sbj *rule) {
     const char *keys[] = {"domain", "domain_suffix", "domain_keyword", "ip_cidr", "source_ip_cidr",
         "ip_is_private", "port", "network", "protocol", "process_name", "package_name", "rule_set", "clash_mode"};
+    const char *labels[] = {"域名", "域名及子域名", "域名包含", "目标 IP", "来源 IP",
+        "局域网地址", "端口", "传输协议", "应用协议", "应用", "Android 应用", "适用范围", "代理模式"};
     sb_buf buffer = {0};
     if (sbj_string_is(sbj_get(rule, "type"), "logical")) {
-        sb_buf_printf(&buffer, "logical %s · %zu subrules", text(rule, "mode"), sbj_arr_len(sbj_get(rule, "rules")));
+        sb_buf_printf(&buffer, "%s %zu 项子条件", !strcmp(text(rule, "mode"), "and") ? "同时满足" : "满足任意", sbj_arr_len(sbj_get(rule, "rules")));
     }
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
         const sbj *value = sbj_get(rule, keys[i]);
         if (!value) continue;
-        sb_buf part = {0}; sb_buf_puts(&part, keys[i]); sb_buf_puts(&part, ": "); match_value(&part, value);
+        sb_buf part = {0}; sb_buf_puts(&part, labels[i]); sb_buf_puts(&part, ": ");
+        if (!strcmp(keys[i], "rule_set")) {
+            size_t count = sbj_is_array(value) ? sbj_arr_len(value) : 1;
+            for (size_t j = 0; j < count && j < 3; ++j) {
+                const char *tag = sbj_as_str(sbj_is_array(value) ? sbj_arr_at(value, j) : value, "");
+                if (j) sb_buf_puts(&part, "、");
+                sb_buf_puts(&part, !strcmp(tag, "geosite-cn") ? "国内域名" :
+                    !strcmp(tag, "geoip-cn") ? "国内 IP" : !strcmp(tag, "geosite-private") ? "局域网域名" : "服务器维护的地址分类");
+            }
+            if (count > 3) sb_buf_puts(&part, "等");
+        } else match_value(&part, value);
         if (buffer.len + part.len > 512) { sb_buf_free(&part); sb_buf_puts(&buffer, " · …"); break; }
         if (buffer.len) sb_buf_puts(&buffer, " · ");
         sb_buf_append(&buffer, part.p, part.len); sb_buf_free(&part);
@@ -54,9 +66,32 @@ static char *matches(const sbj *rule) {
         for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); ++k) if (!strcmp(key, keys[k])) known = true;
         if (!known) additional = true;
     }
-    if (additional) sb_buf_puts(&buffer, buffer.len ? " · additional conditions" : "additional conditions");
-    if (!buffer.len) sb_buf_puts(&buffer, "all traffic");
+    if (additional) sb_buf_puts(&buffer, buffer.len ? " · 含其他限制条件" : "含其他限制条件");
+    if (!buffer.len) sb_buf_puts(&buffer, "全部流量");
     return sb_buf_detach(&buffer);
+}
+static const char *rule_title(const sbj *rule) {
+    /* Only name uncomplicated domain groups: extra restrictions must not be
+     * presented as applying to all traffic of the named service. */
+    bool simple = true;
+    for (size_t i = 0; i < sbj_obj_len(rule); ++i) {
+        const char *key = sbj_obj_key(rule, i);
+        if (strcmp(key, "domain_suffix") && strcmp(key, "outbound") && strcmp(key, "action")) simple = false;
+    }
+    if (simple) {
+        const sbj *domains = sbj_get(rule, "domain_suffix");
+        bool gpt = false, claude = false;
+        for (size_t i = 0; i < sbj_arr_len(domains); ++i) {
+            const char *domain = sbj_as_str(sbj_arr_at(domains, i), "");
+            if (!strcmp(domain, "openai.com") || !strcmp(domain, "chatgpt.com")) gpt = true;
+            if (!strcmp(domain, "anthropic.com") || !strcmp(domain, "claude.ai")) claude = true;
+        }
+        if (gpt && !claude) return "GPT / Codex";
+        if (claude && !gpt) return "Claude";
+    }
+    if (!strcmp(text(rule, "action"), "sniff")) return "识别访问目标";
+    if (!strcmp(text(rule, "action"), "hijack-dns")) return "DNS 解析";
+    return "分流规则";
 }
 sbj *sbw_config_catalog(const sbj *snapshot) {
     const sbj *content = sbj_get(snapshot, "content");
@@ -76,10 +111,19 @@ sbj *sbw_config_catalog(const sbj *snapshot) {
         sbj_set_int(node, "member_count", (int64_t)sbj_arr_len(sbj_get(source, "outbounds")));
         sbj_arr_push(nodes, node);
     }
+    const sbj *endpoints = sbj_get(config, "endpoints");
+    for (size_t i = 0; i < sbj_arr_len(endpoints) && sbj_arr_len(nodes) < 128; ++i) {
+        const sbj *endpoint = sbj_arr_at(endpoints, i);
+        sbj *node = sbj_object();
+        sbj_set_str(node, "tag", text(endpoint, "tag")); sbj_set_str(node, "type", text(endpoint, "type"));
+        sbj_set_str(node, "selected", ""); sbj_set(node, "members", sbj_array()); sbj_set_int(node, "member_count", 0);
+        sbj_arr_push(nodes, node);
+    }
     for (size_t i = 0; i < sbj_arr_len(source_rules) && i < 128; ++i) {
         const sbj *source = sbj_arr_at(source_rules, i); sbj *rule = sbj_object();
         char *match = matches(source);
         sbj_set_int(rule, "index", (int64_t)i + 1); sbj_set_str(rule, "match", match); free(match);
+        sbj_set_str(rule, "title", rule_title(source));
         sbj_set_str(rule, "action", sbj_get_str(source, "action", "route"));
         /* Enforce display bounds even for malformed but downloaded configs. */
         if (!sbw_json_string(sbj_get(rule, "action"), 128, true)) sbj_set_str(rule, "action", "unknown");
@@ -91,7 +135,7 @@ sbj *sbw_config_catalog(const sbj *snapshot) {
         sbj_set_int(inbound, "port", counter(source, "listen_port"));
         sbj_set_bool(inbound, "auto_route", sbj_get_bool(source, "auto_route", false)); sbj_arr_push(inbounds, inbound);
     }
-    sbj_set_int(result, "node_count", (int64_t)sbj_arr_len(outbounds));
+    sbj_set_int(result, "node_count", (int64_t)(sbj_arr_len(outbounds) + sbj_arr_len(endpoints)));
     sbj_set_int(result, "rule_count", (int64_t)sbj_arr_len(source_rules));
     sbj_set(result, "nodes", nodes); sbj_set(result, "rules", rules); sbj_set(result, "inbounds", inbounds);
     sbj_free(config); return result;

@@ -29,7 +29,7 @@ char *sbw_handle_request(const char *raw, size_t length, sbw_controller *control
         result = sbj_object();
         sbj_set_int(result, "protocol_version", 1); sbj_set_str(result, "service_version", SB_EASY_VERSION);
         sbj *methods = sbj_array(), *features = sbj_object();
-        const char *names[] = {"protocol.hello", "status.get", "enrollment.status", "enrollment.apply", "enrollment.forget", "config.refresh", "config.summary", "config.validate", "connection.start", "connection.stop", "config.inspect", "runtime.snapshot"};
+        const char *names[] = {"protocol.hello", "status.get", "enrollment.status", "enrollment.apply", "enrollment.forget", "config.refresh", "config.summary", "config.validate", "routing.gpt_default", "routing.gpt_server", "connection.start", "connection.stop", "config.inspect", "runtime.snapshot"};
         for (size_t i = 0; i < (controller ? sizeof(names) / sizeof(names[0]) : 3U); ++i) sbj_arr_push(methods, sbj_str(names[i]));
         sbj_set(result, "supported_methods", methods);
         sbj_set_bool(features, "enrollment", controller != NULL); sbj_set_bool(features, "config_sync", controller != NULL);

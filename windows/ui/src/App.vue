@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
-import { bytes, rates, shortVersion, nodeKind, graphPoints } from './lib/dashboard'
+import { bytes, rates, shortVersion, nodeKind, graphPoints, ruleAction } from './lib/dashboard'
 import brandMark from '../../../assets/branding/sb-easy-mark-v2.svg'
 import { BridgeError, findNativeTransport, NativeBridge } from './lib/bridge'
 import { previewEnrollment } from './lib/enrollment'
@@ -18,7 +18,7 @@ const navigation: { id: Page; label: string; description: string }[] = [
   { id: 'proxies', label: '代理节点', description: '查看代理组、配置出口和内核测速记录。' },
   { id: 'connections', label: '活动连接', description: '了解应用访问的目标、匹配规则与流量。' },
   { id: 'profiles', label: '配置管理', description: '同步、校验并管理此设备的服务端配置。' },
-  { id: 'rules', label: '路由规则', description: '按配置顺序查看流量如何分流。' },
+  { id: 'rules', label: '服务分流', description: '查看各项服务使用的节点与直连范围。' },
   { id: 'activity', label: '活动记录', description: '查看本次打开界面后的连接与操作记录。' },
 ]
 const currentPage = computed(() => navigation.find(item => item.id === page.value) ??
@@ -47,7 +47,7 @@ const filteredNodes = computed(() => displayNodes.value.filter(item =>
   (nodeFilter.value === 'all' || (nodeFilter.value === 'groups' ? item.member_count > 0 : item.member_count === 0)) &&
   `${item.tag} ${item.type} ${item.selected}`.toLowerCase().includes(search.value.toLowerCase())))
 const filteredRules = computed(() => (catalog.value?.rules ?? []).filter(item =>
-  `${item.match} ${item.outbound} ${item.action}`.toLowerCase().includes(search.value.toLowerCase())))
+  `${item.title ?? ""} ${item.match} ${item.outbound} ${ruleAction(item.action)}`.toLowerCase().includes(search.value.toLowerCase())))
 const filteredConnections = computed(() => (runtime.value?.connections ?? []).filter(item =>
   (connectionFilter.value === 'all' || item.network.toLowerCase() === connectionFilter.value) &&
   `${item.host} ${item.destination} ${item.process} ${item.rule} ${item.chains.join(' ')}`.toLowerCase().includes(search.value.toLowerCase())))
@@ -100,7 +100,7 @@ const issue = ref<BridgeError | null>(null)
 const checkedAt = ref<Date | null>(null)
 const config = ref<ConfigSummary | null>(null)
 const configIssue = ref('')
-const operation = ref<'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
+const operation = ref<'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
 const enrollmentUri = ref('')
 const confirmForget = ref(false)
 const actionNotice = ref('')
@@ -233,7 +233,15 @@ async function enroll(): Promise<void> {
   actionFailed.value = false
   try {
     enrollment.value = await bridge.request('enrollment.apply', { uri }, { timeoutMs: 45_000 })
-    actionNotice.value = '设备注册成功。现在可以下载配置；VPN 尚未启动。'
+    operation.value = 'sync'
+    actionNotice.value = '设备注册成功，正在同步最新配置…'
+    try {
+      config.value = await bridge.request('config.refresh', {}, { timeoutMs: 45_000 })
+      actionNotice.value = '设备已注册，最新配置已同步。点击启动连接即可使用。'
+    } catch (error) {
+      actionFailed.value = true
+      actionNotice.value = `设备已注册，但配置同步失败：${errorMessage(error)}。可以重试同步，无需再次注册。`
+    }
   } catch (error) {
     actionFailed.value = true
     actionNotice.value = `${errorMessage(error)}。注册链接已清空；若结果不明确，请先检查设备状态，勿重复兑换同一个注册码。`
@@ -272,6 +280,24 @@ async function downloadConfig(): Promise<void> {
   try {
     config.value = await bridge.request('config.refresh', {}, { timeoutMs: 45_000 })
     actionNotice.value = configStage(config.value, status.value).detail
+  } catch (error) {
+    actionFailed.value = true
+    actionNotice.value = errorMessage(error)
+  } finally {
+    operation.value = null
+    if (!destroyed) await refresh()
+  }
+}
+
+async function setGptRouting(local: boolean): Promise<void> {
+  const method = local ? 'routing.gpt_default' : 'routing.gpt_server'
+  if (!canAct(method) || status.value?.core_running) return
+  operation.value = 'routing'
+  actionNotice.value = ''
+  actionFailed.value = false
+  try {
+    config.value = await bridge.request(method, {}, { timeoutMs: 45_000 })
+    actionNotice.value = local ? 'GPT / Codex 的流量和 DNS 已改用默认代理；设置保存在本机。' : '已恢复服务器指定的 GPT / Codex 出口。'
   } catch (error) {
     actionFailed.value = true
     actionNotice.value = errorMessage(error)
@@ -329,7 +355,7 @@ async function changeConnection(action: 'start' | 'stop'): Promise<void> {
   actionFailed.value = false
   startRuntimePolling()
   try {
-    const result = await bridge.request(method, {}, { timeoutMs: 45_000 })
+    const result = await bridge.request(method, {}, { timeoutMs: action === 'start' ? 95_000 : 45_000 })
     stopRuntimePolling()
     status.value = result
     const completed = action === 'start'
@@ -387,7 +413,7 @@ onBeforeUnmount(() => {
         <button v-for="item in navigation" :key="item.id" :data-testid="`nav-${item.id}`" :class="{ selected: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)"><AppIcon :name="item.id" /><span>{{ item.label }}</span><span v-if="item.id === 'connections' && trafficReady" class="nav-count">{{ runtime?.connection_count }}</span></button>
       </nav>
       <div class="sidebar-bottom">
-        <button class="sidebar-service" @click="selectPage('diagnostics')"><span class="state-dot" :class="{ ready: connection === 'online' }"></span><div><strong>服务 {{ serviceLabel }}</strong><span>{{ hello ? `v${hello.service_version}` : '等待服务响应' }}</span></div><AppIcon name="arrow" /></button>
+        <button data-testid="nav-diagnostics" class="sidebar-service" @click="selectPage('diagnostics')"><span class="state-dot" :class="{ ready: connection === 'online' }"></span><div><strong>服务 {{ serviceLabel }}</strong><span>{{ hello ? `v${hello.service_version}` : '等待服务响应' }}</span></div><AppIcon name="arrow" /></button>
         <button class="settings-nav" data-testid="nav-settings" :class="{ selected: page === 'settings' }" @click="selectPage('settings')"><AppIcon name="settings" /><span>设置</span><span class="preview-badge">预览</span></button>
       </div>
     </aside>
@@ -396,7 +422,7 @@ onBeforeUnmount(() => {
       <div v-if="issue && connection !== 'host_missing'" class="error-notice" role="alert"><strong>服务通信未完成</strong><span>{{ issue.message }}</span></div>
       <div v-if="deviceStateError" class="error-notice" role="alert"><strong>设备存储需要修复</strong><span>{{ deviceStateError.message }}</span><code>{{ deviceStateError.code }}</code></div>
       <div v-if="status?.runtime_error" class="error-notice" role="alert"><strong>{{ status.runtime_error.code === 'ROLLED_BACK' ? '已恢复先前配置' : '连接操作需要检查' }}</strong><span>{{ status.runtime_error.message }}</span><code>{{ status.runtime_error.code }}</code></div>
-      <div v-if="actionNotice" class="action-notice" :class="{ failed: actionFailed }" :role="actionFailed ? 'alert' : 'status'">{{ actionNotice }}</div>
+      <div v-if="actionNotice && !(actionFailed && status?.runtime_error && actionNotice.includes(status.runtime_error.message))" class="action-notice" :class="{ failed: actionFailed }" :role="actionFailed ? 'alert' : 'status'">{{ actionNotice }}</div>
 
       <template v-if="page === 'overview'">
         <section class="connection-card" :class="{ 'is-running': status?.core_running }" aria-labelledby="connection-title" aria-live="polite" :aria-busy="locked" data-testid="connection-summary">
@@ -439,7 +465,23 @@ onBeforeUnmount(() => {
           <div class="node-grid"><article v-for="(node, index) in filteredNodes" :key="`${node.tag}-${index}`" class="node-card" :class="{ 'default-node': node.tag === catalog.final }"><div class="node-avatar">{{ node.member_count ? '组' : node.type.toLowerCase() === 'direct' ? '直' : node.tag.slice(0, 1).toUpperCase() || 'N' }}</div><div class="node-copy"><h3>{{ node.tag || '未命名出站' }}</h3><span>{{ nodeKind(node.type) }}<b v-if="node.tag === catalog.final">默认出口</b></span></div><span class="node-delay" :class="{ measured: node.delay }">{{ node.delay ? `${node.delay} ms` : '未测速' }}</span><details v-if="node.members.length"><summary>查看组成员</summary><ul><li v-for="member in node.members" :key="member">{{ member }}</li></ul><p v-if="node.member_count > node.members.length">另有 {{ node.member_count - node.members.length }} 个成员</p></details></article></div>
           <div v-if="!filteredNodes.length" class="panel empty-inline"><p>没有匹配的节点</p><button class="text-button" @click="search = ''; nodeFilter = 'all'">清除筛选</button></div><p class="collection-note">当前展示配置与内核中的代理信息；节点切换和主动测速将在后续接入。延迟仅显示内核已有的测速记录。</p><p v-if="catalog.node_count > catalog.nodes.length" class="collection-note">配置包含 {{ catalog.node_count }} 个出站，当前最多展示 128 个。</p>
         </template>
-        <template v-else><section class="panel route-summary"><div><AppIcon name="rules" /><span>默认出口</span><strong>{{ catalog.final || '由内核确定' }}</strong></div><p>规则按配置顺序匹配。下面显示服务器快照；运行时还会加入 Windows 客户端和管理服务的直连保护规则。</p></section><div class="panel table-panel"><table class="rules-table"><thead><tr><th>#</th><th>匹配条件</th><th>行为 / 出口</th></tr></thead><tbody><tr v-for="rule in filteredRules" :key="rule.index"><td class="row-index">{{ String(rule.index).padStart(2, '0') }}</td><td><code>{{ rule.match }}</code></td><td><span class="rule-chip">{{ rule.outbound || rule.action }}</span></td></tr></tbody></table><div v-if="!filteredRules.length" class="empty-inline"><p>{{ search ? '没有匹配的规则' : '没有显式路由规则，使用默认出口' }}</p></div></div><p class="collection-note">长条件显示前 3 个匹配值；逻辑规则显示组合方式与子规则数量。最多展示 128 条服务器规则。</p></template>
+        <template v-else>
+          <section class="panel route-summary"><div><AppIcon name="rules" /><span>默认代理</span><strong>{{ catalog.final === 'direct' ? '直接连接' : catalog.final || '由内核确定' }}</strong></div><p>没有命中下方分流条件的流量使用此出口。服务分组展示域名覆盖范围，应用内其他域名仍按各自规则处理。</p></section>
+          <section class="panel service-routing-card">
+            <h2>GPT / Codex 出口</h2>
+            <p>{{ config?.gpt_use_default ? '使用默认代理（本机设置）' : '使用服务器指定节点' }}。此设置同步调整 DNS 出口，刷新配置后仍会保留。请先断开连接再切换。</p>
+            <button class="secondary-button" :disabled="!canAct(config?.gpt_use_default ? 'routing.gpt_server' : 'routing.gpt_default') || status?.core_running" @click="setGptRouting(!config?.gpt_use_default)">{{ config?.gpt_use_default ? '恢复服务器设置' : '改用默认代理' }}</button>
+          </section>
+          <div class="service-routing-grid">
+            <article v-for="rule in filteredRules" :key="rule.index" class="panel service-routing-card">
+              <div class="service-routing-heading"><h2>{{ rule.title || '分流规则' }}</h2><span class="row-index">优先级 {{ rule.index }}</span></div>
+              <strong class="service-routing-exit">{{ rule.outbound === 'direct' ? '直接连接' : rule.outbound || ruleAction(rule.action) }}</strong>
+              <p>{{ rule.match }}</p>
+            </article>
+          </div>
+          <div v-if="!filteredRules.length" class="panel empty-inline"><p>{{ search ? '没有匹配的服务或域名' : '没有单独分流，所有流量使用默认出口' }}</p></div>
+          <p class="collection-note">按优先级匹配，首次命中后使用对应出口。此处显示{{ catalogSource === 'active' ? '当前运行版本对应' : '已下载版本' }}的有效分流设置，长条件显示前 3 项；客户端另有管理连接直连保护。</p>
+        </template>
       </template>
 
       <template v-else-if="page === 'connections'">
@@ -512,6 +554,7 @@ onBeforeUnmount(() => {
             <div v-if="status?.runtime_error"><dt>运行错误</dt><dd><code>{{ status.runtime_error.code }}</code></dd></div>
           </dl>
           <div v-if="issue" class="diagnostic-error"><span>最近通信结果</span><code>{{ issue.code }}</code><p>{{ issue.message }}</p></div>
+          <section class="help-card"><h3>离线诊断记录</h3><p>此测试版自动保存内核调试日志，记录 DNS、分流出口、连接错误及启动/停止过程，重启后仍保留，最多约 16 MB。</p><p>测试失败时先右键托盘图标，选择“导出诊断包（离线）”，或运行安装目录中的 <strong>Export-Diagnostics.cmd</strong>，再恢复其他代理。诊断包保存在桌面，不需要联网；包含访问域名、IP 和节点名称，凭据已过滤，不包含原始配置。</p></section>
           <details v-if="hello" class="protocol-details"><summary>服务支持的操作</summary><ul><li v-for="method in hello.supported_methods" :key="method"><code>{{ method }}</code></li></ul></details>
         </section>
 </template>

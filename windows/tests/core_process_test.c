@@ -266,6 +266,17 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(sbw_core_poll(core, &status, &error) == 0 && status.last_stop_forced);
     CHECK(DeleteFileW(marker)); free(json); json = NULL;
 
+    /* Real adapter teardown can exceed the old 1.5 second graceful allowance. */
+    sbw_core_free(core); options.stop_timeout_ms = 5000;
+    core = sbw_core_new(&options, &error); CHECK(core);
+    json = fixture_config("slow_graceful", marker, NULL);
+    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && wait_pid(marker));
+    CHECK(sbw_core_stop(core, &error) == 0);
+    CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.last_stop_forced && status.stop_signal_code == 0);
+    CHECK(DeleteFileW(marker)); free(json); json = NULL;
+    sbw_core_free(core); options.stop_timeout_ms = 2000;
+    core = sbw_core_new(&options, &error); CHECK(core);
+
     /* A third peer attached to the core's console must suppress BREAK entirely;
      * only the core's own Job is terminated, leaving the outsider untouched. */
     json = fixture_config("graceful", marker, NULL);
@@ -428,6 +439,11 @@ done:
     if (unsafe) RemoveDirectoryW(unsafe);
     if (sentinel_ready) DeleteFileW(sentinel_ready);
     if (sentinel_signal) DeleteFileW(sentinel_signal);
+    for (int i = 0; i < 4; ++i) {
+        wchar_t name[40]; swprintf_s(name, 40, L"diagnostic-%d.log", i);
+        if (directory) { wchar_t *path = sbw_path_join(directory, name); DeleteFileW(path); free(path); }
+        if (crash_directory) { wchar_t *path = sbw_path_join(crash_directory, name); DeleteFileW(path); free(path); }
+    }
     if (crash_directory) RemoveDirectoryW(crash_directory);
     if (lock) DeleteFileW(lock);
     if (directory) RemoveDirectoryW(directory);

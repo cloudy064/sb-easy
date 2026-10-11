@@ -1,10 +1,12 @@
 #include "core_process.h"
 #include "secure_store.h"
+#include "diagnostics.h"
 
 #include <aclapi.h>
 #include <bcrypt.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -12,6 +14,7 @@
 typedef struct private_config {
     wchar_t *path;
     HANDLE reader;
+    char *redaction_json;
 } private_config;
 
 typedef struct child_process {
@@ -19,6 +22,7 @@ typedef struct child_process {
     HANDLE process;
     DWORD id;
     bool private_console;
+    sbw_log_stream *logs;
 } child_process;
 
 struct sbw_core {
@@ -36,8 +40,10 @@ struct sbw_core {
     bool has_exit_code;
     DWORD exit_code;
     bool last_stop_forced;
+    DWORD stop_signal_code;
     char *checked_json;
     size_t checked_length;
+    sbw_diagnostics *logs;
 };
 
 static int core_fail(sbw_error *error, const char *code) {
@@ -167,6 +173,7 @@ static int remove_stale_configs(sbw_core *core, sbw_error *error) {
 }
 
 static int remove_config(private_config *config, sbw_error *error) {
+    sbw_secret_free(config->redaction_json); config->redaction_json = NULL;
     if (config->reader && config->reader != INVALID_HANDLE_VALUE) CloseHandle(config->reader);
     config->reader = NULL;
     if (!config->path) return 0;
@@ -182,6 +189,7 @@ static int prepare_config(sbw_core *core, const char *json, size_t length, priva
     bool valid = sbj_is_object(parsed);
     sbj_free(parsed);
     if (!valid) return core_fail(error, "CORE_CONFIG_INVALID");
+    config->redaction_json = sb_strndup(json, length);
     BYTE random[16] = {0};
     if (BCryptGenRandom(NULL, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
         return core_fail(error, "CORE_STORAGE_ERROR");
@@ -265,7 +273,8 @@ int sbw_core_signal_helper(int argc, wchar_t **argv) {
     return sent ? 0 : 93;
 }
 
-static bool request_graceful_stop(child_process *child, DWORD timeout) {
+static bool request_graceful_stop(child_process *child, DWORD timeout, DWORD *signal_code) {
+    *signal_code = MAXDWORD;
     wchar_t executable[32768];
     DWORD size = GetModuleFileNameW(NULL, executable, 32768);
     if (!size || size >= 32768 || !timeout) return false;
@@ -302,6 +311,7 @@ static bool request_graceful_stop(child_process *child, DWORD timeout) {
     if (WaitForSingleObject(process.hProcess, timeout) == WAIT_OBJECT_0) {
         DWORD code = MAXDWORD;
         result = GetExitCodeProcess(process.hProcess, &code) && code == 0;
+        *signal_code = code;
     }
 done:
     if (process.hProcess) {
@@ -340,20 +350,25 @@ static int dispose_child(child_process *child, DWORD timeout, sbw_error *error) 
         child->process = NULL;
     }
     child->id = 0;
+    sbw_diagnostics_finish(child->logs); child->logs = NULL;
     return completed ? 0 : core_fail(error, "CORE_STOP_TIMEOUT");
 }
 
 static int stop_child(sbw_core *core, sbw_error *error) {
     ULONGLONG deadline = GetTickCount64() + core->stop_timeout_ms;
     core->last_stop_forced = false;
+    core->stop_signal_code = MAXDWORD;
     if (core->child.process && WaitForSingleObject(core->child.process, 0) == WAIT_TIMEOUT) {
         DWORD grace = core->stop_timeout_ms * 3 / 4;
         ULONGLONG grace_deadline = GetTickCount64() + grace;
-        if (core->child.private_console && request_graceful_stop(&core->child, grace))
+        if (core->child.private_console && request_graceful_stop(&core->child, grace, &core->stop_signal_code))
             (void)WaitForSingleObject(core->child.process, remaining(grace_deadline));
         core->last_stop_forced = WaitForSingleObject(core->child.process, 0) != WAIT_OBJECT_0;
     }
-    return dispose_child(&core->child, remaining(deadline), error);
+    int result = dispose_child(&core->child, remaining(deadline), error);
+    char detail[128]; sprintf_s(detail, sizeof detail, "forced=%u signal_exit=%lu result=%d", core->last_stop_forced ? 1U : 0U, core->stop_signal_code, result);
+    sbw_diagnostics_event(core->logs, "core.stop", detail);
+    return result;
 }
 
 static int launch(sbw_core *core, const wchar_t *verb, const private_config *config,
@@ -362,6 +377,7 @@ static int launch(sbw_core *core, const wchar_t *verb, const private_config *con
     PROCESS_INFORMATION process = {0};
     SECURITY_ATTRIBUTES inheritable = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
     HANDLE input = INVALID_HANDLE_VALUE, output = INVALID_HANDLE_VALUE;
+    HANDLE log_reader = NULL;
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
     wchar_t *command = NULL;
     SIZE_T attribute_bytes = 0;
@@ -373,7 +389,8 @@ static int launch(sbw_core *core, const wchar_t *verb, const private_config *con
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!SetInformationJobObject(child->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) goto done;
     input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable, OPEN_EXISTING, 0, NULL);
-    output = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inheritable, OPEN_EXISTING, 0, NULL);
+    output = NULL;
+    if (!CreatePipe(&log_reader, &output, &inheritable, 0) || !SetHandleInformation(log_reader, HANDLE_FLAG_INHERIT, 0)) goto done;
     if (input == INVALID_HANDLE_VALUE || output == INVALID_HANDLE_VALUE) goto done;
     (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_bytes);
     if (!attribute_bytes) goto done;
@@ -406,6 +423,10 @@ static int launch(sbw_core *core, const wchar_t *verb, const private_config *con
     child->id = process.dwProcessId;
     child->private_console = running;
     process.hProcess = NULL;
+    child->logs = sbw_diagnostics_capture(core->logs, log_reader, config->redaction_json); log_reader = NULL;
+    if (!child->logs) goto done;
+    char launch_detail[80]; sprintf_s(launch_detail, sizeof launch_detail, "%s pid=%lu", running ? "run" : "check", child->id);
+    sbw_diagnostics_event(core->logs, "core.launch", launch_detail);
     if (ResumeThread(process.hThread) == (DWORD)-1) goto done;
     result = 0;
 done:
@@ -415,7 +436,8 @@ done:
     free(attributes);
     free(command);
     if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
-    if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+    if (output && output != INVALID_HANDLE_VALUE) CloseHandle(output);
+    if (log_reader) CloseHandle(log_reader);
     if (result != 0) { dispose_child(child, core->stop_timeout_ms, NULL); return core_fail(error, "CORE_START_FAILED"); }
     return 0;
 }
@@ -468,6 +490,8 @@ sbw_core *sbw_core_new(const sbw_core_options *options, sbw_error *error) {
      * only our exact filenames, only after the private directory is pinned and
      * exclusively locked, and only through validated regular-file handles. */
     if (remove_stale_configs(core, error) != 0) goto failed;
+    core->logs = sbw_diagnostics_new(core->directory);
+    if (!core->logs) { core_fail(error, "CORE_STORAGE_ERROR"); goto failed; }
     return core;
 failed:
     sbw_core_free(core);
@@ -571,6 +595,7 @@ int sbw_core_poll(sbw_core *core, sbw_core_status *status, sbw_error *error) {
     status->has_exit_code = core->has_exit_code;
     status->exit_code = core->exit_code;
     status->last_stop_forced = core->last_stop_forced;
+    status->stop_signal_code = core->stop_signal_code;
     ReleaseSRWLockExclusive(&core->mutex);
     return result;
 }
@@ -580,6 +605,7 @@ void sbw_core_free(sbw_core *core) {
     stop_child(core, NULL);
     clear_checked(core);
     remove_config(&core->config, NULL);
+    sbw_diagnostics_free(core->logs);
     sbw_store_free(core->directory_guard);
     if (core->executable_file && core->executable_file != INVALID_HANDLE_VALUE) CloseHandle(core->executable_file);
     for (size_t i = core->parent_count; i > 0; --i) CloseHandle(core->executable_parents[i - 1]);
@@ -587,4 +613,8 @@ void sbw_core_free(sbw_core *core) {
     free(core->executable);
     free(core->directory);
     free(core);
+}
+
+void sbw_core_event(sbw_core *core, const char *event, const char *result) {
+    if (core) sbw_diagnostics_event(core->logs, event, result);
 }

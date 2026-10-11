@@ -20,10 +20,12 @@ New-Item -ItemType Directory -Path (Join-Path $stage 'licenses'),(Join-Path $sta
 foreach ($name in @('sbj-grisu2-MIT.txt', 'webview2.txt', 'webview2-notice.txt', 'vue.txt')) {
     Copy-Item -LiteralPath (Join-Path $binaryRoot "licenses\$name") -Destination (Join-Path $stage 'licenses')
 }
-foreach ($name in @('README.md', 'THIRD_PARTY_NOTICES.md')) {
+foreach ($name in @('README.md', 'THIRD_PARTY_NOTICES.md', 'TESTING-0.4.4.txt')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "windows\$name") -Destination $stage
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prepare-core.ps1') -Destination (Join-Path $stage 'scripts')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'collect-diagnostics.ps1') -Destination (Join-Path $stage 'scripts')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Export-Diagnostics.cmd') -Destination $stage
 if ($IncludeCore) {
     # Re-verify the pinned upstream archive; do not package arbitrary core files
     # found in a developer's build directory.

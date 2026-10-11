@@ -733,9 +733,13 @@ private fun ProxiesScreen(
                     Text("未命中服务分组且需要代理的流量", color = Muted, fontSize = 12.sp,
                         modifier = Modifier.padding(top = 8.dp))
                 } else {
-                    val appName = LocalRouting.officialAppName(group.id)?.takeIf { group.includeOfficialApp }
-                    Text((appName?.let { "官方 $it App · " } ?: "") + "${group.domains.size} 个域名及其子域名", color = Muted, fontSize = 12.sp,
-                        modifier = Modifier.padding(top = 8.dp))
+                    LocalRouting.officialAppName(group.id)?.let { appName ->
+                        Text("Android $appName App 全流量：${if (group.includeOfficialApp) "已启用" else "已关闭"}",
+                            color = if (group.includeOfficialApp) AccentDark else Muted, fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 8.dp))
+                    }
+                    Text("网页 / 其他应用：${group.domains.size} 个域名及其子域名", color = Muted, fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 5.dp))
                     Text(group.domains.take(3).joinToString(" · ") + if (group.domains.size > 3) " …" else "",
                         color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
                     Row {
@@ -784,9 +788,9 @@ private fun ProxiesScreen(
         item {
             AppCard {
                 Text("直连", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                Text("国内域名、国内 IP、局域网和管理服务器 → direct", color = Muted, fontSize = 12.sp,
+                Text("未命中 App 规则时，国内域名、国内 IP、局域网和管理服务器 → direct", color = Muted, fontSize = 12.sp,
                     modifier = Modifier.padding(top = 7.dp))
-                Text("网页按域名匹配，Claude 和 GPT 组也包含官方 App 的流量。新增服务域名或第三方网关可在对应组补充。",
+                Text("启用 App 全流量后，Claude / ChatGPT 官方 Android App 的所有连接优先跟随各自分组节点。浏览器仍按域名匹配。",
                     color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 7.dp))
             }
         }
@@ -855,9 +859,11 @@ private fun RoutingGroupEditor(
                     color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
                 LocalRouting.officialAppName(original.id)?.let { appName ->
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                        Text("包含官方 $appName App 的流量", color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Text("代理官方 $appName Android App 的全部流量", color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
                         Switch(checked = includeApp, onCheckedChange = { includeApp = it }, enabled = !busy)
                     }
+                    Text("启用后，App 的所有目标地址和 DNS 都优先使用本组规则，不限于上面的域名列表；实际出口跟随本组所选节点。外部浏览器登录仍按浏览器的域名规则处理。",
+                        color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
                 }
                 (error ?: saveError)?.let { ErrorText(it) }
             }

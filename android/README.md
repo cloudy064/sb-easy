@@ -29,6 +29,36 @@ The server executes QuickJS. The phone only receives the generated, validated
 sing-box configuration and never receives administrator credentials or script
 execution privileges.
 
+## Official Android application routing (1.2.8)
+
+The Claude and GPT group cards explicitly show **Android App 全流量** status.
+Their existing, default-enabled **编辑规则** switches match the official Android
+packages `com.anthropic.claude` and `com.openai.chatgpt`. All connections identified
+as belonging to each app follow that group's selected exit, independently of the
+hostname, IP address, network protocol or the other group's domain list. Selecting
+`direct` for the group remains an explicit direct-exit choice. Existing saved
+node selections, domain edits and manually disabled app switches are retained.
+
+Application routing now precedes every destination-based route, including
+private-address, management-host and management-endpoint exceptions; sniffing and
+DNS interception still run first. Non-matching apps retain these exceptions and
+the established domain/default policy. All application DNS rules now precede
+all group-domain and management DNS rules, so a ChatGPT-owned lookup for a Claude
+hostname uses GPT's DNS/FakeIP policy, regardless of group ordering. Bootstrap
+DNS for proxy nodes remains explicitly direct to avoid resolver loops.
+
+Browser traffic continues to match service domains. External browser login
+belongs to the browser, not the originating app; unidentified owners fall back
+to destination rules rather than being guessed. No server or non-Android agent
+policy changes are needed. TCP/UDP matching does not add capabilities missing
+from the selected outbound transport.
+
+Verification covers owner-only route conditions and priority, cross-group and
+unlisted/management DNS requests across A/AAAA/HTTPS/SVCB/TXT, browser fallback,
+reordered groups, disabling/persisting app matching, and the existing pinned-core
+native DNS/routing regression. Actual Android connection-owner detection still
+requires device acceptance: inspect each app's host/exit traffic while testing.
+
 ## Clear traffic statistics (1.2.7)
 
 Use **诊断 → 流量统计 → 清空统计** and confirm to reset all app, domain,
@@ -183,9 +213,10 @@ normalization accepts one domain per line, Unicode names and `*.example.com`;
 URLs, IP literals and overlapping domains between groups are rejected. Deleting
 a group returns its domains to the remaining direct/default policy.
 
-Sniffing, DNS hijacking, control-plane access and management endpoint routes are
-preserved. Private addresses go direct; local group rules then precede the
-private/China domain and China-IP direct rules. Other public traffic uses the
+Sniffing and DNS hijacking are preserved. Since 1.2.8, enabled official-app
+rules take priority over destination exceptions. For other traffic, control-plane
+access, management endpoints and private addresses retain their existing routing;
+local domain groups precede private/China domain and China-IP direct rules. Other public traffic uses the
 default local selector. Centrally pinned proxy route rules are superseded by
 the local groups/default. Provisioned direct and non-routing rules are retained.
 Each group has a separate Google HTTPS DNS server (`dns.google`) through its selector; direct DNS

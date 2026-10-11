@@ -240,6 +240,14 @@ object LocalRouting {
         if (originalRules.none { it.optString("action") == "hijack-dns" }) {
             rules.put(JSONObject().put("protocol", "dns").put("action", "hijack-dns"))
         }
+        // Official app ownership takes precedence over every destination-based
+        // route, including private IPs, control-plane hosts and other groups.
+        policy.groups.forEach { group ->
+            officialPackage(group)?.let { packageName ->
+                rules.put(JSONObject().put("package_name", JSONArray(listOf(packageName)))
+                    .put("outbound", groupTags.getValue(group.id)))
+            }
+        }
         val controlHost = runCatching { URI(controlPlaneServer).host?.removeSurrounding("[", "]") }.getOrNull()
         if (!controlHost.isNullOrBlank()) {
             val key = if (controlHost.contains(':') || controlHost.matches(Regex("[0-9.]+"))) "ip_cidr" else "domain"
@@ -248,12 +256,6 @@ object LocalRouting {
         }
         originalRules.filter { it.optString("outbound") in endpointTags }.forEach(rules::put)
         rules.put(JSONObject().put("ip_is_private", true).put("outbound", "direct"))
-        policy.groups.forEach { group ->
-            officialPackage(group)?.let { packageName ->
-                rules.put(JSONObject().put("package_name", JSONArray(listOf(packageName)))
-                    .put("outbound", groupTags.getValue(group.id)))
-            }
-        }
         policy.groups.forEach { group ->
             rules.put(JSONObject().put("domain_suffix", JSONArray(group.domains)).put("outbound", groupTags.getValue(group.id)))
         }
@@ -313,26 +315,30 @@ object LocalRouting {
             .put("query_type", JSONArray(listOf("A", "AAAA"))).put("action", "route").put("server", fakeDns)
             .also { if (ipv4OnlyTun) it.put("strategy", "ipv4_only") }
         val dnsRules = JSONArray()
+        val groupDnsServers = policy.groups.associate { group ->
+            val tag = groupTags.getValue(group.id)
+            group.id to if (selections[tag] == "direct") directDns else dnsServer(TAG_PREFIX + "dns-" + group.id, tag)
+        }
+        fun addGroupDnsRule(group: LocalRoutingGroup, field: String, values: List<String>) {
+            val tag = groupTags.getValue(group.id)
+            if (useFakeIP(tag)) {
+                // Do not let HTTPS/SVCB address hints bypass the FakeIP mapping.
+                dnsRules.put(JSONObject().put(field, JSONArray(values)).put("query_type", JSONArray(listOf("HTTPS", "SVCB")))
+                    .put("action", "predefined").put("rcode", "NOERROR"))
+                dnsRules.put(fakeAddressRule(JSONObject().put(field, JSONArray(values))))
+            }
+            dnsRules.put(JSONObject().put(field, JSONArray(values)).put("action", "route").put("server", groupDnsServers.getValue(group.id)))
+        }
+        // All app rules precede all domain rules. A ChatGPT request to a Claude
+        // domain must still use ChatGPT's exit and its associated DNS policy.
+        policy.groups.forEach { group ->
+            officialPackage(group)?.let { addGroupDnsRule(group, "package_name", listOf(it)) }
+        }
         if (!controlHost.isNullOrBlank() && !controlHost.contains(':') && !controlHost.matches(Regex("[0-9.]+"))) {
             dnsRules.put(JSONObject().put("domain", JSONArray(listOf(controlHost)))
                 .put("action", "route").put("server", directDns))
         }
-        policy.groups.forEach { group ->
-            val tag = groupTags.getValue(group.id)
-            val groupDns = if (selections[tag] == "direct") directDns
-                else dnsServer(TAG_PREFIX + "dns-" + group.id, tag)
-            fun addRule(field: String, values: List<String>) {
-                if (useFakeIP(tag)) {
-                    // Do not let HTTPS/SVCB address hints bypass the FakeIP mapping.
-                    dnsRules.put(JSONObject().put(field, JSONArray(values)).put("query_type", JSONArray(listOf("HTTPS", "SVCB")))
-                        .put("action", "predefined").put("rcode", "NOERROR"))
-                    dnsRules.put(fakeAddressRule(JSONObject().put(field, JSONArray(values))))
-                }
-                dnsRules.put(JSONObject().put(field, JSONArray(values)).put("action", "route").put("server", groupDns))
-            }
-            officialPackage(group)?.let { addRule("package_name", listOf(it)) }
-            addRule("domain_suffix", group.domains)
-        }
+        policy.groups.forEach { group -> addGroupDnsRule(group, "domain_suffix", group.domains) }
         dnsRules.put(JSONObject().put("rule_set", JSONArray(listOf("geosite-private", "geosite-cn")))
             .put("action", "route").put("server", directDns))
         dnsRules.put(JSONObject().put("domain_suffix", JSONArray(listOf("lan", "local")))

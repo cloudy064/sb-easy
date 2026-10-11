@@ -256,6 +256,71 @@ class LocalRoutingTest {
         assertFalse(objects(JSONObject(disabled.content).getJSONObject("route").getJSONArray("rules")).any { it.has("package_name") })
     }
 
+    @Test fun officialAppsPrecedeEveryDestinationRouteAndDoNotRestrictProtocolOrDomain() {
+        val policy = independentPolicy().let { it.copy(groups = it.groups.reversed()) }
+        val rendered = LocalRouting.render(base, policy, "https://manage.example.com:51821")
+        val rules = objects(JSONObject(rendered.content).getJSONObject("route").getJSONArray("rules"))
+        val terminal = rules.filter { it.has("outbound") }
+        val apps = terminal.take(2)
+        assertEquals(setOf("com.anthropic.claude", "com.openai.chatgpt"), apps.map { it.getJSONArray("package_name").getString(0) }.toSet())
+        apps.forEach { rule ->
+            // Owner-only conditions cover unlisted domains, literal/private IPs, TCP and UDP.
+            assertEquals(setOf("package_name", "outbound"), rule.keys().asSequence().toSet())
+            assertTrue(rules.indexOf(rule) < rules.indexOfFirst { it.optBoolean("ip_is_private") })
+            assertTrue(rules.indexOf(rule) < rules.indexOfFirst { it.has("domain") })
+            assertTrue(rules.indexOf(rule) < rules.indexOfFirst { it.has("domain_suffix") })
+        }
+        assertTrue(rules.indexOfFirst { it.optString("action") == "hijack-dns" } < rules.indexOf(apps.first()))
+    }
+
+    @Test fun appDnsPrecedesEveryDomainRuleIncludingOtherGroupsAndManagement() {
+        val httpBase = JSONObject(base).also { root ->
+            objects(root.getJSONArray("outbounds")).single { it.getString("tag") == "Tokyo" }.put("type", "http")
+        }.toString()
+        for (policy in listOf(independentPolicy(), independentPolicy().let { it.copy(groups = it.groups.reversed()) })) {
+            val rendered = LocalRouting.render(httpBase, policy, "https://manage.example.com:51821")
+            val dns = JSONObject(rendered.content).getJSONObject("dns")
+            val rules = objects(dns.getJSONArray("rules"))
+            val appIndexes = rules.indices.filter { rules[it].has("package_name") }
+            val domainIndexes = rules.indices.filter { rules[it].has("domain") || rules[it].has("domain_suffix") || rules[it].has("rule_set") }
+            assertTrue(appIndexes.max() < domainIndexes.min())
+            fun lookup(owner: String, host: String, queryType: String): JSONObject = rules.first { rule ->
+                !rule.has("rule_set") &&
+                    (!rule.has("package_name") || owner in strings(rule.getJSONArray("package_name"))) &&
+                    (!rule.has("domain") || host in strings(rule.getJSONArray("domain"))) &&
+                    (!rule.has("domain_suffix") || strings(rule.getJSONArray("domain_suffix")).any { host == it || host.endsWith(".$it") }) &&
+                    (!rule.has("query_type") || queryType in strings(rule.getJSONArray("query_type")))
+            }
+            val gptTag = rendered.snapshot.groupTags.getValue("gpt")
+            val gptDns = objects(dns.getJSONArray("servers")).single { it.optString("detour") == gptTag }.getString("tag")
+            for (query in listOf("A", "AAAA", "HTTPS", "SVCB", "TXT")) {
+                for (host in listOf("claude.ai", "manage.example.com", "unlisted.example.net")) {
+                    assertEquals(gptDns, lookup("com.openai.chatgpt", host, query).getString("server"))
+                }
+            }
+            val fakeDns = objects(dns.getJSONArray("servers")).single { it.getString("type") == "fakeip" }.getString("tag")
+            assertEquals(fakeDns, lookup("com.anthropic.claude", "chatgpt.com", "A").getString("server"))
+            assertEquals("predefined", lookup("com.anthropic.claude", "chatgpt.com", "HTTPS").getString("action"))
+            // An external browser still selects DNS by destination domain.
+            assertEquals(gptDns, lookup("com.android.chrome", "chatgpt.com", "A").getString("server"))
+            assertEquals(fakeDns, lookup("com.android.chrome", "claude.ai", "A").getString("server"))
+        }
+    }
+
+    @Test fun disablingOfficialAppRoutingRetainsBrowserDomainRulesAndSavedChoices() {
+        val policy = independentPolicy().let { it.copy(groups = it.groups.map { group -> group.copy(includeOfficialApp = false) }) }
+        val rendered = LocalRouting.render(base, LocalRouting.decode(LocalRouting.encode(policy)))
+        val root = JSONObject(rendered.content)
+        for (section in listOf("route", "dns")) {
+            val rules = objects(root.getJSONObject(section).getJSONArray("rules"))
+            assertFalse(rules.any { it.has("package_name") })
+            assertTrue(rules.any { it.optJSONArray("domain_suffix")?.toString()?.contains("claude.ai") == true })
+            assertTrue(rules.any { it.optJSONArray("domain_suffix")?.toString()?.contains("chatgpt.com") == true })
+        }
+        assertEquals("Tokyo", rendered.snapshot.selections[rendered.snapshot.groupTags["claude"]])
+        assertEquals("US", rendered.snapshot.selections[rendered.snapshot.groupTags["gpt"]])
+    }
+
     @Test fun restartAndServerSyncRetainUserChoicesAndEditedDomains() {
         val policy = independentPolicy().let { p -> p.copy(groups = p.groups.map {
             if (it.id == "claude") it.copy(domains = it.domains + "my-claude-gateway.example.net", outbound = "US") else it

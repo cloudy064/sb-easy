@@ -8,6 +8,8 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of sb-easy is already installed."
                   Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="SbEasyIcon" SourceFile="$(Payload)\sb-easy.ico" />
+    <Property Id="ARPPRODUCTICON" Value="SbEasyIcon" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/cloudy064/sb-easy" />
     <Property Id="WEBVIEW2_MACHINE">
       <RegistrySearch Id="WebViewMachine" Root="HKLM" Bitness="always32"
@@ -27,9 +29,9 @@
         <Component Id="DesktopExecutable" Guid="*">
           <File Id="DesktopExe" Source="$(Payload)\sb-easy.exe" KeyPath="yes">
             <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="sb-easy"
-                      Advertise="yes" WorkingDirectory="INSTALLFOLDER" />
+                      Advertise="yes" Icon="SbEasyIcon" IconIndex="0" WorkingDirectory="INSTALLFOLDER" />
             <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="sb-easy"
-                      Advertise="yes" WorkingDirectory="INSTALLFOLDER" />
+                      Advertise="yes" Icon="SbEasyIcon" IconIndex="0" WorkingDirectory="INSTALLFOLDER" />
           </File>
         </Component>
         <Component Id="ServiceExecutable" Guid="*">

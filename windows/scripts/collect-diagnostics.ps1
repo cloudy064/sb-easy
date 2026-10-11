@@ -61,8 +61,8 @@ try {
             } finally {$source.Dispose()}
         }
     }
-    Save-Json 'manifest.json' @{version='0.4.4';captured_utc=[DateTime]::UtcNow.ToString('o');logs=$copied;contains='Sanitized core logs, domain/IP/node names, local network state. No device state or raw configuration.'}
-    foreach($method in @('status.get','config.inspect','runtime.snapshot')) {
+    Save-Json 'manifest.json' @{version='0.6.1';captured_utc=[DateTime]::UtcNow.ToString('o');logs=$copied;contains='Sanitized core logs, domain/IP/node names, local network state. No device state or raw configuration.'}
+    foreach($method in @('status.get','config.inspect','runtime.snapshot','traffic.snapshot','logs.snapshot')) {
         try {Save-Json ($method+'.json') (Rpc $method)} catch {Save-Json ($method+'.json') @{unavailable=$true;reason=$_.Exception.Message}}
     }
     Save-Json 'adapters.json' @(Get-NetAdapter -ErrorAction SilentlyContinue | Select-Object Name,InterfaceIndex,Status,InterfaceDescription)

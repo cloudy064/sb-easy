@@ -19,6 +19,8 @@ typedef struct sbw_control_plane {
                   sbj **identity, sbw_error *error);
     int (*fetch_config)(void *context, const sbj *identity, const char *etag, HANDLE cancel,
                         sbj **download, sbw_error *error);
+    int (*upload_capture)(void *context, const sbj *identity, const char *digest,
+                          const void *data, size_t length, HANDLE cancel, sbw_error *error);
     void (*destroy)(void *context);
 } sbw_control_plane;
 

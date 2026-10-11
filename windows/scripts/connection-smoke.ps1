@@ -50,6 +50,14 @@ function Invoke-TestRpc([string]$Method, $Params = @{}, [string]$ExpectedError =
         return $decoded.result
     } finally { $stream.Dispose() }
 }
+function Read-CaptureSnapshot {
+    # Read-only status can race the monitor's bounded core API request.
+    for ($attempt=0; $attempt -lt 20; $attempt++) {
+        try { return Invoke-TestRpc 'capture.snapshot' }
+        catch { if ($_.Exception.Message -notlike 'capture.snapshot failed: BUSY:*') { throw }; Start-Sleep -Milliseconds 250 }
+    }
+    throw 'Capture status remained busy for five seconds.'
+}
 try {
     $node = (Get-Command node.exe -ErrorAction Stop).Source
     $fixture = Start-Process -FilePath $node -ArgumentList @(('"' + (Join-Path $PSScriptRoot 'fixture-server.mjs') + '"'), ('"' + $testDir + '"')) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $testDir 'fixture.log') -RedirectStandardError (Join-Path $testDir 'fixture-error.log')
@@ -89,10 +97,26 @@ try {
             Start-Sleep -Milliseconds 100
         } while ([DateTime]::UtcNow -lt $deadline)
         if ($telemetry.connection_count -le 0 -or $telemetry.connections[0].download -le 0) { throw 'The real core did not report the streamed fixture connection.' }
+        $traffic = Invoke-TestRpc 'traffic.snapshot'
+        if ($traffic.download -le 0 -or $traffic.rows.Count -le 0 -or -not $traffic.storage_ok) { throw 'Background traffic ledger did not record real forwarding.' }
+        $logs = Invoke-TestRpc 'logs.snapshot'
+        if (-not $logs.lines.Count -or ($logs.lines -join "`n") -match 'fixture-private-password|fixture-private-token') { throw 'Log projection unavailable or leaked credentials.' }
+        $cleared = Invoke-TestRpc 'traffic.clear'
+        if ($cleared.upload -ne 0 -or $cleared.download -ne 0 -or $cleared.rows.Count -ne 0) { throw 'Traffic clear did not reset cumulative totals.' }
+        # No GUI or runtime.snapshot RPC during this interval: only the service monitor collects.
+        Start-Sleep -Milliseconds 2500
+        $background = Invoke-TestRpc 'traffic.snapshot'
+        if ($background.download -le 0 -or $background.rows.Count -le 0) { throw 'Traffic collection depended on an open GUI.' }
+        Write-Output 'PASS: background collection without GUI, reset of a live connection, attribution and sanitized log RPC.'
         $desktopExe = Join-Path $buildDir 'sb-easy.exe'
         $views = @(
             @{page='overview';theme='light';width='1120';name='overview-light'},
             @{page='overview';theme='dark';width='1120';name='overview-dark'},
+            @{page='statistics';theme='light';width='1120';name='statistics'},
+            @{page='statistics';theme='dark';width='760';name='statistics-narrow'},
+            @{page='logs';theme='dark';width='1120';name='logs'},
+            @{page='capture';theme='light';width='1120';name='capture'},
+            @{page='capture';theme='dark';width='760';name='capture-narrow'},
             @{page='proxies';theme='light';width='1120';name='proxies'},
             @{page='connections';theme='dark';width='1120';name='connections'},
             @{page='profiles';theme='light';width='1120';name='profiles'},
@@ -132,7 +156,7 @@ try {
         inbounds=@(@{type='tun';tag='fixture-tun';interface_name=$adapterName;address=@('198.18.255.1/30');auto_route=$true;route_address=@('198.18.255.0/30');strict_route=$false;stack='system'})
         outbounds=@(@{type='direct';tag='direct'})
         dns=@{servers=@(@{type='local';tag='local'});final='local'}
-        route=@{rules=@(@{protocol='dns';action='hijack-dns'});final='direct'}
+        route=@{rules=@(@{protocol='dns';action='hijack-dns'},@{action='sniff'},@{port=@(([uri]$origin).Port);action='route';outbound='direct';override_address='127.0.0.1'});final='direct'}
     }
     if ($SlowRules) {
         $candidate.route.rule_set = @(@{ type='remote'; tag='slow-fixture'; format='source'; url="$origin/slow-rules"; download_detour='direct' })
@@ -144,11 +168,55 @@ try {
         # Only a benchmark /30 is routed into this unique temporary adapter.
         # There is no default-route capture or strict-route firewall rule.
         if (Get-NetRoute -DestinationPrefix '198.18.255.0/30' -ErrorAction SilentlyContinue) { throw 'The isolated test prefix is already routed; refusing to change it.' }
+        $null = Invoke-TestRpc 'capture.configure' @{config=@{enabled=$true;bpf='tcp port 18443';wifi_only=$false}}
         $status = Invoke-TestRpc 'connection.start'
         $connected = $true
         if (-not $status.tun_active -or $status.phase -ne 'RUNNING') { throw 'TUN activation was not reported.' }
         $adapter = Get-NetAdapter -Name $adapterName -ErrorAction Stop
         if (-not (Get-NetRoute -InterfaceIndex $adapter.ifIndex -DestinationPrefix '198.18.255.0/30' -ErrorAction SilentlyContinue)) { throw 'The test TUN route was not created.' }
+        $deadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            $capture = Read-CaptureSnapshot
+            if ($capture.running -or $capture.error) { break }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not $capture.running) { throw "Capture driver did not start: $($capture.error)" }
+        & curl.exe --silent --max-time 2 --noproxy '*' 'http://198.18.255.2:18443/' 2>$null | Out-Null
+        Start-Sleep -Milliseconds 500
+        $capture = Invoke-TestRpc 'capture.rotate'
+        if ($capture.packets -le 0 -or -not $capture.files.Count) { throw "Real TUN packets were not captured: $($capture | ConvertTo-Json -Depth 5 -Compress)" }
+        $digest = $capture.files[0].digest
+        $chunk = Invoke-TestRpc 'capture.read' @{digest=$digest;offset=0}
+        $bytes = [Convert]::FromBase64String($chunk.data)
+        if ($bytes.Length -lt 60 -or [BitConverter]::ToUInt32($bytes,20) -ne 101) { throw 'Invalid raw-IP PCAP from real TUN.' }
+        $null = Invoke-TestRpc 'capture.upload' @{digest=$digest}
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $capture = Read-CaptureSnapshot
+            if (-not $capture.uploading) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (-not ($capture.files | Where-Object { $_.digest -eq $digest -and $_.uploaded })) { throw "PCAP upload was not acknowledged: $($capture.upload_status)" }
+        $receipt = Get-Content -LiteralPath (Join-Path $testDir 'fixture-receipt.json') -Raw | ConvertFrom-Json
+        if ($receipt.captures -ne 1) { throw 'Fixture did not validate one raw PCAP upload.' }
+        Write-Output 'PASS: signed capture driver, real TUN packets, raw-IP PCAP and authenticated binary upload with digest acknowledgement.'
+        # Real process/domain attribution, while only the isolated /30 is routed.
+        $capturePort = ([uri]$origin).Port
+        foreach ($selection in @(@{apps=@('curl.exe')},@{domains=@('capture.fixture.invalid')})) {
+            $captureSettings = @{enabled=$true;bpf="tcp port $capturePort";wifi_only=$false} + $selection
+            $capture = Invoke-TestRpc 'capture.configure' @{config=$captureSettings}
+            $before = $capture.packets
+            $streamProbe = Start-Process -FilePath (Get-Command curl.exe).Source -ArgumentList @('--silent','--show-error','--max-time','15','--noproxy','*','--resolve',"capture.fixture.invalid:${capturePort}:198.18.255.2",'--output','NUL',"http://capture.fixture.invalid:$capturePort/test/connection-stream") -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $testDir 'capture-stream-error.log')
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                Start-Sleep -Milliseconds 250
+                $capture = Read-CaptureSnapshot
+                if ($capture.packets -gt $before) { break }
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if ($capture.packets -le $before) { throw "Real TUN attribution failed for $($selection.Keys): $($capture.error)" }
+            if (-not $streamProbe.HasExited) { Stop-Process -Id $streamProbe.Id -Force; $streamProbe.WaitForExit() }
+            Write-Output "PASS: actual TUN traffic matched $($selection.Keys) selection."
+        }
         $null = Invoke-TestRpc 'connection.stop'
         $connected = $false
         $deadline = [DateTime]::UtcNow.AddSeconds(5)

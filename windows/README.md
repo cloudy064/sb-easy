@@ -177,7 +177,7 @@ To create a portable development archive after building:
 ./windows/scripts/package.ps1
 ```
 
-This writes `build/sb-easy-windows-x64-development-preview.zip` and prints its
+This writes `build/sb-easy-0.6.0-windows-x64-portable.zip` and prints its
 SHA-256. An explicit file list includes the desktop, service, loader, UI, notices
 and preparation script; an optional core already present in the build directory
 is not included unless `-IncludeCore` is supplied. That switch verifies and
@@ -196,7 +196,7 @@ dotnet tool install wix --version 5.0.2 --tool-path build/wix
 ./windows/scripts/package.ps1 -Msi -IncludeCore -WixPath ./build/wix/wix.exe
 ```
 
-This produces both `build/sb-easy-0.4.4-windows-x64.msi` and the portable ZIP
+This produces both `build/sb-easy-0.6.0-windows-x64.msi` and the portable ZIP
 above, from the same staged payload, with sing-box and its license included.
 Omit `-IncludeCore` for lightweight packages. MSI requires the machine-wide
 [WebView2 Evergreen Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703);
@@ -227,8 +227,8 @@ preferences. Use **忘记设备** before uninstall to clear locally stored regis
 For a quiet installation/removal with logs, from an administrator terminal:
 
 ```powershell
-msiexec /i "build\sb-easy-0.4.4-windows-x64.msi" /qn /norestart /l*v install.log
-msiexec /x "build\sb-easy-0.4.4-windows-x64.msi" /qn /norestart /l*v uninstall.log
+msiexec /i "build\sb-easy-0.6.0-windows-x64.msi" /qn /norestart /l*v install.log
+msiexec /x "build\sb-easy-0.6.0-windows-x64.msi" /qn /norestart /l*v uninstall.log
 ```
 
 `scripts/installer-smoke.ps1 -Msi <new.msi> -PreviousMsi <older.msi>` exercises
@@ -405,3 +405,41 @@ a service label does not imply all traffic from its desktop process is captured.
 DNS and application traffic can use a dedicated service exit independently of
 the default proxy. When only one service fails, compare both its DNS detour and
 route exit with the default path before diagnosing TUN capture as broken.
+
+## Windows application icon
+
+`assets/sb-easy.svg` is the editable desktop icon source, retaining the green/blue
+connection mark on a dark teal tile. `assets/sb-easy.ico` contains 16, 20, 24, 32,
+40, 48, 64, 128 and 256 pixel frames. Both C executables embed it through
+`ui-host/app.rc`; the desktop uses the resource for its window and tray, and
+WiX uses it for shortcuts and the installed-apps entry.
+Regenerate with `npm install --prefix build/icon-tools @resvg/resvg-js@2.6.2`
+then `node windows/scripts/generate-icons.cjs`. Normal builds use the committed
+ICO and do not require the icon renderer.
+
+
+### 0.5.0 statistics and runtime logs
+
+The C service now collects traffic while the desktop is closed, with DPAPI-backed
+cumulative statistics, application/domain → host → outbound drill-down, and a
+sanitized runtime/service log viewer. See [ANDROID-PARITY.md](ANDROID-PARITY.md)
+for the exact Android comparison and [TESTING-0.5.0.txt](TESTING-0.5.0.txt) for
+acceptance steps and sampling/retention limits.
+
+### 0.6.0 filtered packet capture
+
+The Capture page adds opt-in raw-IP PCAP recording for this application's TUN,
+with process-name/domain/exact-host-or-IP OR filters and a libpcap BPF AND filter.
+It offers export/delete, file rotation, a bounded local quota, manual upload and
+opt-in periodic upload to the enrolled control plane. Native code remains C11.
+Build preparation downloads pinned WinDivert and flex/bison tools and builds the
+vendored libpcap with its null backend. Both ZIP and MSI include capture dependencies.
+
+Files are scoped by center and device under the protected core-work directory.
+Diagnostics exports do not contain raw PCAPs. Uploads verify the server's digest
+acknowledgement before marking success or deleting a local file. The center needs
+migration 012 and the capture endpoint. See TESTING-0.6.0.txt for limits and testing.
+
+### 0.6.1：后台启动授权
+
+已安装后台停止且当前账户没有启动权限时，界面提供“授权并启动服务”。点击后由 Windows UAC 授权独立的 C helper，仅启动 SCM 中已安装且路径匹配的 sb-easy 服务，随后自动重新读取状态。不会启动代理内核或修改 DNS；取消 UAC 后可重试，无需重启电脑或以管理员身份运行整个界面。未安装服务时仍需运行 MSI 安装包；便携目录不会被注册为 SYSTEM 服务。

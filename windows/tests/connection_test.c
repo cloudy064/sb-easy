@@ -183,7 +183,9 @@ int wmain(int argc, wchar_t **argv) {
     sbw_controller_free(controller); test_data_free(&data); CloseHandle(health_gate);
     wchar_t *lock = sbw_path_join(directory, L"state.lock");
     test_remove_diagnostics(directory);
-    CHECK(DeleteFileW(lock)); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
+    CHECK(DeleteFileW(lock)); wchar_t *traffic_file = sbw_path_join(directory, L"device-state.dat");
+    DeleteFileW(traffic_file); free(traffic_file);
+    test_remove_capture_dirs(directory); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
     puts("C11 connection controller: local health, activation, stop, persistence, replacement, rollback, crash and redaction passed.");
     return 0;
 }

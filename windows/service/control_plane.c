@@ -279,6 +279,7 @@ typedef struct async_state {
     DWORD status, bytes, error;
     char buffer[16 * 1024];
     char *payload;
+    size_t payload_length;
     wchar_t *headers;
 } async_state;
 
@@ -287,7 +288,7 @@ static void state_release(async_state *state) {
     if (state->connection) WinHttpCloseHandle(state->connection);
     if (state->session) WinHttpCloseHandle(state->session);
     if (state->completion) CloseHandle(state->completion);
-    if (state->payload) { SecureZeroMemory(state->payload, strlen(state->payload)); free(state->payload); }
+    if (state->payload) { SecureZeroMemory(state->payload, state->payload_length); free(state->payload); }
     if (state->headers) { SecureZeroMemory(state->headers, wcslen(state->headers) * sizeof(wchar_t)); free(state->headers); }
     DeleteCriticalSection(&state->mutex);
     free(state);
@@ -502,7 +503,7 @@ static void response_free(http_response *response) {
 }
 
 static int send_request(const server_address *server, const wchar_t *method, const wchar_t *endpoint,
-    const char *payload, const char *token, const char *etag, size_t body_limit, HANDLE cancel,
+    const char *payload, size_t payload_length, bool binary, const char *token, const char *etag, size_t body_limit, HANDLE cancel,
     DWORD timeout, http_response *response, sbw_error *error) {
     memset(response, 0, sizeof(*response));
     if (!token) token = "";
@@ -518,15 +519,17 @@ static int send_request(const server_address *server, const wchar_t *method, con
     int result = -1;
     char *content_length = NULL;
     sb_buf headers = {0};
-    request.state->payload = sb_strdup(payload ? payload : "");
+    request.state->payload = sb_xcalloc(payload_length + 1, 1);
+    request.state->payload_length = payload_length;
+    if (payload_length) memcpy(request.state->payload, payload, payload_length);
     sb_buf_puts(&headers, "Accept: application/json\r\n");
     if (*token) sb_buf_printf(&headers, "Authorization: Bearer %s\r\n", token);
     if (*etag) sb_buf_printf(&headers, "If-None-Match: %s\r\n", etag);
-    if (payload && *payload) sb_buf_puts(&headers, "Content-Type: application/json; charset=utf-8\r\n");
+    if (payload_length) sb_buf_puts(&headers, binary ? "Content-Type: application/vnd.tcpdump.pcap\r\n" : "Content-Type: application/json; charset=utf-8\r\n");
     request.state->headers = sbw_wide(headers.p, error);
     if (!request.state->headers) { failure(error, "invalid_identity"); goto done; }
     if (request_prepare(&request, error) < 0) goto done;
-    DWORD payload_size = (DWORD)strlen(request.state->payload);
+    DWORD payload_size = (DWORD)payload_length;
     if (request_await(&request, WinHttpSendRequest(request.handle, request.state->headers,
         (DWORD)wcslen(request.state->headers), payload_size ? request.state->payload : WINHTTP_NO_REQUEST_DATA,
         payload_size, payload_size, (DWORD_PTR)request.state), WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE, NULL, error) < 0) goto done;
@@ -608,7 +611,7 @@ static int enroll(void *context, const sbw_enrollment_target *target, HANDLE can
     sbj_set_bool(device, "supports_diagnostic_upload", false);
     request = sbj_object(); sbj_set_str(request, "code", code); sbj_set(request, "device", device);
     payload = sbj_dump(request, -1);
-    if (send_request(&server, L"POST", L"/api/devices/enroll", payload, "", "", MAX_ENROLLMENT_BODY,
+    if (send_request(&server, L"POST", L"/api/devices/enroll", payload, strlen(payload), false, "", "", MAX_ENROLLMENT_BODY,
         cancel, client->timeout, &response, error) < 0) goto done;
     if (response.status < 200 || response.status >= 300) { failure(error, "http_error"); goto done; }
     body = response_json(&response.body, error);
@@ -653,7 +656,7 @@ static int fetch_config(void *context, const sbj *identity, const char *etag, HA
     const char *stored_name = required_field(identity, "profile_name", error);
     if (!address || !token || !stored_id || !stored_name) return failure(error, "invalid_identity");
     if (parse_server(address, &server, error) < 0) goto done;
-    if (send_request(&server, L"GET", L"/api/agent/config", "", token, etag, MAX_CONFIG_BODY,
+    if (send_request(&server, L"GET", L"/api/agent/config", "", 0, false, token, etag, MAX_CONFIG_BODY,
         cancel, client->timeout, &response, error) < 0) goto done;
     if (response.status != 200 && response.status != 304) { failure(error, "http_error"); goto done; }
     bool not_modified = response.status == 304;
@@ -675,12 +678,34 @@ done:
     return result;
 }
 
+static int upload_capture(void *context, const sbj *identity, const char *digest,
+                          const void *data, size_t length, HANDLE cancel, sbw_error *error) {
+    if (!digest || strlen(digest) != 64 || !data || length < 24 || length > 768U * 1024U)
+        return failure(error, "invalid_request");
+    for (const char *p = digest; *p; ++p) if (!(*p >= '0' && *p <= '9') && !(*p >= 'a' && *p <= 'f')) return failure(error, "invalid_request");
+    server_address server = {0}; http_response response = {0}; int result = -1;
+    const char *address = required_field(identity, "server", error), *token = required_field(identity, "agent_token", error);
+    if (!address || !token || parse_server(address, &server, error) < 0) goto done;
+    wchar_t endpoint[100] = L"/api/agent/captures/";
+    wchar_t *wide = sbw_wide(digest, error);
+    if (!wide) goto done;
+    swprintf_s(endpoint, 100, L"/api/agent/captures/%ls", wide); free(wide);
+    if (send_request(&server, L"POST", endpoint, data, length, true, token, "", 65536,
+                     cancel, ((winhttp_client *)context)->timeout, &response, error) != 0) goto done;
+    sbj *ack = response_json(&response.body, error);
+    bool accepted = sbj_get_bool(ack, "ok", false) && sb_streq(sbj_get_str(ack, "digest", ""), digest);
+    sbj_free(ack);
+    result = accepted ? 0 : failure(error, "invalid_response");
+ done:
+    server_free(&server); response_free(&response); return result;
+}
+
 sbw_control_plane *sbw_winhttp_new(DWORD timeout, sbw_error *error) {
     if (!timeout || timeout > 60000) { failure(error, "invalid_server"); return NULL; }
     sbw_control_plane *api = sb_xcalloc(1, sizeof(*api));
     winhttp_client *client = sb_xcalloc(1, sizeof(*client));
     client->timeout = timeout;
-    api->context = client; api->enroll = enroll; api->fetch_config = fetch_config; api->destroy = free;
+    api->context = client; api->enroll = enroll; api->fetch_config = fetch_config; api->upload_capture = upload_capture; api->destroy = free;
     return api;
 }
 void sbw_control_plane_free(sbw_control_plane *client) {

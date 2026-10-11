@@ -412,3 +412,32 @@ test('GPT routing RPCs validate empty params and local preference results', () =
     assert.equal(validResult(method, { ...summary, gpt_use_default: 'true' }), false)
   }
 })
+
+test('capture boundary rejects traversal, extra fields and invalid chunks', () => {
+  const digest='a'.repeat(64)
+  assert.equal(validParams('capture.read',{digest,offset:0}),true)
+  assert.equal(validParams('capture.read',{digest:'../state.dat',offset:0}),false)
+  assert.equal(validParams('capture.upload',{digest,path:'C:/secret'}),false)
+  assert.equal(validParams('capture.read',{digest,offset:-1}),false)
+  assert.equal(validResult('capture.read',{data:'AA==',offset:0,next:1,total:1}),true)
+  assert.equal(validResult('capture.read',{data:'AA==',offset:0,next:65537,total:65537}),false)
+  assert.equal(validResult('capture.read',{data:'AA==',offset:0,next:1,total:786433}),false)
+})
+
+
+test('service authorization works without a live backend and preserves UAC cancellation', async () => {
+  const transport = new TestTransport()
+  const bridge = new NativeBridge(transport)
+  assert.equal(validParams('service.start', { binary: 'anything.exe' }), false)
+  assert.equal(validResult('service.start', { ready: false }), false)
+  const cancelled = bridge.request('service.start', {}, { timeoutMs: 300_000 })
+  const rejected = assert.rejects(cancelled, codeIs('UAC_CANCELLED'))
+  transport.respond({ id: transport.messages[0].id, version: 1, ok: false,
+    error: { code: 'UAC_CANCELLED', message: '用户取消授权' } })
+  await rejected
+  const retry = bridge.request('service.start', {}, { timeoutMs: 300_000 })
+  transport.respond({ id: transport.messages[1].id, version: 1, ok: true, result: { ready: true } })
+  assert.deepEqual(await retry, { ready: true })
+  assert.equal(transport.messages.length, 2)
+  bridge.dispose()
+})

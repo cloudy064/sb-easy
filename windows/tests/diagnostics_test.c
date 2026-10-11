@@ -23,7 +23,10 @@ int main(void) {
     const char last[] = "value i/o timeout\n";
     CHECK(WriteFile(writer, first, sizeof first - 1, &written, NULL));
     CHECK(WriteFile(writer, last, sizeof last - 1, &written, NULL));
-    CloseHandle(writer); sbw_diagnostics_finish(capture); sbw_diagnostics_free(log);
+    CloseHandle(writer); sbw_diagnostics_finish(capture);
+    sbj *recent = sbw_diagnostics_snapshot(log); char *encoded = sbj_dump(recent, -1);
+    CHECK(strstr(encoded, "api.openai.com") && !strstr(encoded, "fixture-private"));
+    free(encoded); sbj_free(recent); sbw_diagnostics_free(log);
     wchar_t *path = sbw_path_join(directory, L"diagnostic-0.log");
     FILE *file = NULL; CHECK(!_wfopen_s(&file, path, L"rb") && file);
     char data[4096] = {0}; CHECK(fread(data, 1, sizeof data - 1, file) > 0); fclose(file);
@@ -32,6 +35,8 @@ int main(void) {
     log = sbw_diagnostics_new(directory);
     char bulk[16000]; memset(bulk, 'x', sizeof bulk - 1); bulk[sizeof bulk - 1] = 0;
     for (int i = 0; i < 1200; ++i) sbw_diagnostics_event(log, "rotation", bulk);
+    recent = sbw_diagnostics_snapshot(log);
+    CHECK(sbj_arr_len(sbj_get(recent, "lines")) == 200); sbj_free(recent);
     sbw_diagnostics_free(log);
     for (int i = 0; i < 4; ++i) {
         wchar_t name[40]; swprintf_s(name, 40, L"diagnostic-%d.log", i);

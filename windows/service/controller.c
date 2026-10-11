@@ -2,6 +2,10 @@
 #include "runtime_config.h"
 #include "dashboard.h"
 #include "routing.h"
+#include "traffic.h"
+#include "capture.h"
+#include <wincrypt.h>
+#include <tlhelp32.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -22,8 +26,22 @@ struct sbw_controller {
     sbw_error runtime_error;
     bool last_stop_forced;
     HANDLE monitor_stop, monitor;
+    sbw_traffic *traffic;
+    ULONGLONG traffic_saved;
+    bool traffic_storage_ok, traffic_load_ok;
+    sbw_capture *capture;
+    HANDLE upload_thread, upload_cancel;
+    SRWLOCK upload_lock;
+    char upload_status[256];
+    ULONGLONG upload_attempt;
+
 };
 static DWORD WINAPI monitor_main(void *context);
+static bool collect_traffic(sbw_controller *controller);
+static void persist_traffic(sbw_controller *controller);
+static void capture_upload_join(sbw_controller *controller);
+static void capture_auto_upload(sbw_controller *controller);
+static sbj *capture_dispatch(sbw_controller *controller, const char *method, const sbj *params, sbw_error *error);
 static sbj *config_counts(const sbj *candidate, sbw_error *error) {
     const sbj *content = sbj_get(candidate, "content");
     if (!sbw_json_string(content, 8U * 1024U * 1024U, false)) goto invalid;
@@ -131,9 +149,10 @@ sbw_controller *sbw_controller_new(sbw_control_plane *remote, sbw_store *store, 
         sbw_fail(error, "INITIALIZATION_FAILED", "Service dependencies are unavailable."); return NULL;
     }
     sbw_controller *controller = sb_xcalloc(1, sizeof *controller);
+    controller->traffic = sbw_traffic_new(); controller->traffic_storage_ok = controller->traffic_load_ok = true;
     controller->remote = remote; controller->store = store; controller->cancel = cancel;
     InitializeSRWLock(&controller->state_lock); InitializeSRWLock(&controller->mutation_lock);
-    InitializeSRWLock(&controller->user_operation_lock);
+    InitializeSRWLock(&controller->user_operation_lock); InitializeSRWLock(&controller->upload_lock);
     sb_windows_runtime_init(&controller->runtime);
     sbj *saved = NULL;
     if (store->load(store->context, &saved, &controller->startup_error) != 0) return controller;
@@ -156,11 +175,13 @@ void sbw_controller_free(sbw_controller *controller) {
     if (controller->monitor_stop) SetEvent(controller->monitor_stop);
     if (controller->monitor) { WaitForSingleObject(controller->monitor, INFINITE); CloseHandle(controller->monitor); }
     if (controller->monitor_stop) CloseHandle(controller->monitor_stop);
+    capture_upload_join(controller); sbw_capture_free(controller->capture); controller->capture = NULL;
     /* All IPC workers are joined by the caller before freeing this owner. */
     sbw_core_stop(controller->core, NULL);
     sbw_runtime_config_free(&controller->active_config);
     sbj_free(controller->identity); sbj_free(controller->candidate);
     sbj_free(controller->last_good); sbj_free(controller->active);
+    persist_traffic(controller); sbw_traffic_free(controller->traffic);
     sbw_core_free(controller->core); free(controller->checked_etag);
     sbw_control_plane_free(controller->remote); sbw_store_free(controller->store); free(controller);
 }
@@ -170,6 +191,11 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     if (error && !core) controller->core_error = *error;
     free(controller->checked_etag); controller->checked_etag = NULL; controller->checked_valid = false;
     if (core && !controller->monitor) {
+        sbj *saved_traffic = NULL; sbw_error traffic_error = {0};
+        controller->traffic_storage_ok = sbw_core_traffic_load(core, &saved_traffic, &traffic_error) == 0;
+        if (saved_traffic) controller->traffic_storage_ok = sbw_traffic_restore(controller->traffic, saved_traffic);
+        controller->traffic_load_ok = controller->traffic_storage_ok;
+        sbj_free(saved_traffic);
         controller->monitor_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
         controller->monitor = controller->monitor_stop ? CreateThread(NULL, 0, monitor_main, controller, 0, NULL) : NULL;
         if (!controller->monitor) {
@@ -181,7 +207,7 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     }
 }
 bool sbw_is_mutating_method(const char *method) {
-    return sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
+    return sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
         sb_streq(method, "config.refresh") || sb_streq(method, "config.validate") ||
         sb_streq(method, "connection.start") || sb_streq(method, "connection.stop");
 }
@@ -214,6 +240,7 @@ static sbj *runtime_status(sbw_controller *controller) {
     return result;
 }
 static void clear_active(sbw_controller *controller) {
+    sbw_capture_observe(controller->capture, 0, NULL, NULL);
     sbj_free(controller->active); controller->active = NULL;
     sbw_runtime_config_free(&controller->active_config);
     controller->runtime.core_running = false;
@@ -241,13 +268,15 @@ static int check_config(sbw_controller *controller, sbw_runtime_config *config, 
 }
 static int launch_healthy(sbw_controller *controller, sbw_runtime_config *config, sbw_error *error) {
     if (sbw_core_start(controller->core, config->json, strlen(config->json), controller->cancel, error) != 0) return -1;
+    sbw_traffic_new_core(controller->traffic);
     sbw_core_status status = {0};
     if (sbw_core_poll(controller->core, &status, error) != 0 || !status.process_running)
         return sbw_fail(error, "CORE_EXITED", "The core exited during startup.");
     /* The Clash API starts after remote rule sets initialize. Cold downloads
-     * must not be treated as a failed TUN after the old three-second deadline. */
+     * must not be treated as a failed TUN after the old three-second deadline.
+     * A cold Wintun adapter also takes over three seconds on some machines. */
     if (sbw_runtime_config_health(config, status.process_id, controller->cancel,
-                                 config->remote_rule_sets ? 25000 : 3000, error) != 0) return -1;
+                                 config->remote_rule_sets ? 25000 : config->has_tun ? 10000 : 3000, error) != 0) return -1;
     if (cancelled(controller, error)) return -1;
     return 0;
 }
@@ -281,12 +310,40 @@ static DWORD WINAPI monitor_main(void *context) {
         if (controller->cancel && WaitForSingleObject(controller->cancel, 0) == WAIT_OBJECT_0) break;
         if (TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
             observe_core(controller, true);
+            collect_traffic(controller);
+            capture_auto_upload(controller);
             ReleaseSRWLockExclusive(&controller->mutation_lock);
         }
     }
     return 0;
 }
+static void persist_traffic(sbw_controller *controller) {
+    if (!controller->core || !controller->traffic_load_ok) return;
+    sbj *data = sbw_traffic_snapshot(controller->traffic); sbw_error error = {0};
+    controller->traffic_storage_ok = sbw_core_traffic_save(controller->core, data, &error) == 0;
+    if (!controller->traffic_storage_ok)
+        sbw_core_event(controller->core, "traffic-save", error.code);
+    sbj_free(data); controller->traffic_saved = GetTickCount64();
+}
+static bool collect_traffic(sbw_controller *controller) {
+    if (!controller->active || !controller->runtime.core_running) return true;
+    if (!controller->capture && controller->identity && controller->core)
+        controller->capture = sbw_capture_new(sbw_core_work_directory(controller->core), controller->identity, NULL);
+    sbw_core_status process = {0}; sbj *connections = NULL; sbw_error error = {0}; bool collected = false;
+    if (sbw_core_poll(controller->core, &process, &error) == 0 && process.process_running &&
+        sbw_runtime_config_get(&controller->active_config, process.process_id, controller->monitor_stop,
+                               "/connections", &connections, &error) == 0) {
+        sbw_traffic_record(controller->traffic, connections, process.process_id);
+        sbw_capture_observe(controller->capture, process.process_id, controller->active_config.interface_name, connections);
+        collected = true;
+    }
+    sbj_free(connections);
+    if (GetTickCount64() - controller->traffic_saved >= 30000) persist_traffic(controller);
+    return collected;
+}
 static int connection_stop(sbw_controller *controller, sbw_error *error) {
+    collect_traffic(controller); persist_traffic(controller);
+    sbw_capture_observe(controller->capture, 0, NULL, NULL);
     bool had_tun = controller->active_config.has_tun;
     int stopped = sbw_core_stop(controller->core, error);
     sbw_core_status status = {0};
@@ -412,6 +469,7 @@ static sbj *dashboard_snapshot(sbw_controller *controller, sbw_error *error) {
             sbw_fail(error, "INVALID_RESPONSE", "The core returned an invalid runtime snapshot."); goto done;
         }
     }
+    if (running) sbw_traffic_record(controller->traffic, connections, process.process_id);
     result = sbw_dashboard_snapshot(connections, proxies);
     sbj_set_bool(result, "running", running);
     sbj_set_int(result, "core_pid", process.process_id);
@@ -424,8 +482,35 @@ done:
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params, bool authorized, sbw_error *error) {
     if (!controller || !method) { sbw_fail(error, "INVALID_REQUEST", "Invalid service operation."); return NULL; }
     bool is_apply = strcmp(method, "enrollment.apply") == 0;
-    if (!sbj_is_object(params) || (!is_apply && sbj_obj_len(params) != 0)) {
+    if (!sbj_is_object(params) || (!is_apply && strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
         sbw_fail(error, "INVALID_REQUEST", "This operation expects object params."); return NULL;
+    }
+    if (!strncmp(method, "capture.", 8)) {
+        if (!authorized) { sbw_fail(error, "FORBIDDEN", "Capture requires the active console session or an administrator."); return NULL; }
+        if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) { sbw_fail(error, "BUSY", "A connection operation is in progress."); return NULL; }
+        sbj *result = capture_dispatch(controller, method, params, error);
+        ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
+    }
+    if (sb_streq(method, "traffic.snapshot") || sb_streq(method, "traffic.clear") || sb_streq(method, "logs.snapshot")) {
+        if (!authorized) { sbw_fail(error, "FORBIDDEN", "This operation requires the active console session."); return NULL; }
+        if (sb_streq(method, "logs.snapshot")) return sbw_core_logs(controller->core);
+        if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
+            sbw_fail(error, "BUSY", "A connection operation is in progress."); return NULL;
+        }
+        if (sb_streq(method, "traffic.clear")) {
+            if (!collect_traffic(controller) || !controller->core) {
+                ReleaseSRWLockExclusive(&controller->mutation_lock);
+                sbw_fail(error, "TRAFFIC_UNAVAILABLE", "Cannot clear statistics until collection and storage are available."); return NULL;
+            }
+            sbw_traffic *blank = sbw_traffic_new(); sbj *saved = sbw_traffic_snapshot(blank); sbw_traffic_free(blank);
+            int stored = sbw_core_traffic_save(controller->core, saved, error); sbj_free(saved);
+            if (stored != 0) { ReleaseSRWLockExclusive(&controller->mutation_lock); return NULL; }
+            controller->traffic_storage_ok = controller->traffic_load_ok = true;
+            sbw_traffic_clear(controller->traffic);
+        }
+        sbj *result = sbw_traffic_snapshot(controller->traffic);
+        sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
+        ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
     }
     if (sb_streq(method, "runtime.snapshot") || sb_streq(method, "config.inspect")) {
         if (!authorized) { sbw_fail(error, "FORBIDDEN", "This operation requires an administrator or the active console session."); return NULL; }
@@ -534,6 +619,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             sbw_fail(error, "INVALID_STATE", "Only a stopped enrolled device can be forgotten."); goto done;
         }
         if (controller->store->clear(controller->store->context, error) != 0) goto done;
+        capture_upload_join(controller); sbw_capture_free(controller->capture); controller->capture = NULL;
         AcquireSRWLockExclusive(&controller->state_lock);
         sbj_free(controller->identity); controller->identity = NULL;
         sbj_free(controller->candidate); controller->candidate = NULL;
@@ -599,4 +685,130 @@ done:
     sbw_core_event(controller->core, method, result ? "ok" : error && error->code[0] ? error->code : "failed");
     ReleaseSRWLockExclusive(&controller->mutation_lock);
     ReleaseSRWLockExclusive(&controller->user_operation_lock); return result;
+}
+
+typedef struct capture_upload_job {
+    sbw_controller *controller;
+    sbj *identity;
+    unsigned char *bytes;
+    size_t length;
+    char digest[65];
+    bool remove_after;
+} capture_upload_job;
+static DWORD WINAPI capture_upload_main(void *context) {
+    capture_upload_job *job = context; sbw_controller *c = job->controller; sbw_error error = {0};
+    int result = c->remote->upload_capture(c->remote->context, job->identity, job->digest,
+                                         job->bytes, job->length, c->upload_cancel, &error);
+    if (!result) result = sbw_capture_mark_uploaded(c->capture, job->digest, &error);
+    if (!result && job->remove_after) result = sbw_capture_delete(c->capture, job->digest, &error);
+    AcquireSRWLockExclusive(&c->upload_lock);
+    strcpy_s(c->upload_status, sizeof c->upload_status, result ? error.message : "Upload confirmed by server.");
+    ReleaseSRWLockExclusive(&c->upload_lock);
+    SecureZeroMemory(job->bytes, job->length); free(job->bytes); sbj_free(job->identity); free(job); return 0;
+}
+static void capture_upload_join(sbw_controller *c) {
+    if (c->upload_cancel) SetEvent(c->upload_cancel);
+    if (c->upload_thread) { WaitForSingleObject(c->upload_thread, INFINITE); CloseHandle(c->upload_thread); c->upload_thread = NULL; }
+    if (c->upload_cancel) { CloseHandle(c->upload_cancel); c->upload_cancel = NULL; }
+}
+static bool capture_uploading(sbw_controller *c) {
+    return c->upload_thread && WaitForSingleObject(c->upload_thread, 0) == WAIT_TIMEOUT;
+}
+static int capture_upload_begin(sbw_controller *c, const char *digest, sbw_error *error) {
+    if (capture_uploading(c)) return sbw_fail(error, "BUSY", "A capture upload is already running.");
+    if (!c->remote->upload_capture) return sbw_fail(error, "NOT_IMPLEMENTED", "Capture upload is unavailable.");
+    sbj *snapshot = sbw_capture_snapshot(c->capture); const sbj *config = sbj_get(snapshot, "config");
+    bool wifi_only = sbj_get_bool(config, "wifi_only", true), remove_after = sbj_get_bool(config, "delete_after_upload", false);
+    sbj_free(snapshot);
+    if (wifi_only && !sbw_capture_wifi()) return sbw_fail(error, "WIFI_REQUIRED", "Capture upload is restricted to Wi-Fi. Change capture settings to use Ethernet.");
+    capture_upload_join(c);
+    capture_upload_job *job = sb_xcalloc(1, sizeof *job); job->controller = c; job->remove_after = remove_after;
+    if (sbw_capture_read(c->capture, digest, &job->bytes, &job->length, error) != 0) { free(job); return -1; }
+    strcpy_s(job->digest, sizeof job->digest, digest); job->identity = sbj_clone(c->identity);
+    c->upload_cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c->upload_attempt = GetTickCount64();
+    AcquireSRWLockExclusive(&c->upload_lock); strcpy_s(c->upload_status, sizeof c->upload_status, "Uploading capture..."); ReleaseSRWLockExclusive(&c->upload_lock);
+    c->upload_thread = c->upload_cancel ? CreateThread(NULL, 0, capture_upload_main, job, 0, NULL) : NULL;
+    if (!c->upload_thread) { free(job->bytes); sbj_free(job->identity); free(job); capture_upload_join(c); return sbw_fail(error, "CAPTURE_FAILED", "Upload worker could not start."); }
+    return 0;
+}
+static void capture_auto_upload(sbw_controller *c) {
+    if (!c->capture || !c->identity || capture_uploading(c) || !c->runtime.core_running) return;
+    sbj *snapshot = sbw_capture_snapshot(c->capture); const sbj *config = sbj_get(snapshot, "config");
+    bool allowed = sbj_get_bool(config, "auto_upload", false) &&
+        GetTickCount64() - c->upload_attempt >= (ULONGLONG)sbj_get_int(config, "upload_seconds", 60) * 1000;
+    sbj_free(snapshot); if (!allowed) return;
+    c->upload_attempt = GetTickCount64(); sbw_capture_rotate(c->capture, NULL);
+    snapshot = sbw_capture_snapshot(c->capture); const sbj *files = sbj_get(snapshot, "files");
+    for (size_t i = 0; i < sbj_arr_len(files); ++i) {
+        const sbj *file = sbj_arr_at(files, i);
+        if (!sbj_get_bool(file, "uploaded", false)) {
+            sbw_error error = {0};
+            if (capture_upload_begin(c, sbj_get_str(file, "digest", ""), &error) != 0) {
+                AcquireSRWLockExclusive(&c->upload_lock); strcpy_s(c->upload_status, sizeof c->upload_status, error.message); ReleaseSRWLockExclusive(&c->upload_lock);
+            }
+            break;
+        }
+    }
+    sbj_free(snapshot);
+}
+static sbj *capture_snapshot(sbw_controller *c) {
+    sbj *result = sbw_capture_snapshot(c->capture);
+    AcquireSRWLockShared(&c->upload_lock); sbj_set_str(result, "upload_status", c->upload_status); ReleaseSRWLockShared(&c->upload_lock);
+    sbj_set_bool(result, "uploading", capture_uploading(c));
+    sbj *apps = sbj_array(); HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W entry = {0}; entry.dwSize = sizeof entry;
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        if (Process32FirstW(snapshot, &entry)) do {
+            char *name = sbw_utf8(entry.szExeFile, NULL);
+            if (name && strlen(name) <= 96 && sbj_arr_len(apps) < 512) sbj_arr_push(apps, sbj_str(name));
+            free(name);
+        } while (Process32NextW(snapshot, &entry));
+        CloseHandle(snapshot);
+    }
+    sbj_set(result, "apps", apps); return result;
+}
+static sbj *capture_dispatch(sbw_controller *c, const char *method, const sbj *params, sbw_error *error) {
+    if (sb_streq(method, "capture.validate")) {
+        if (sbj_obj_len(params) != 1 || !sbj_is_object(sbj_get(params, "config"))) goto invalid;
+        sbj *config = sbw_capture_validate(sbj_get(params, "config"), error); if (!config) return NULL;
+        sbj *result = sbj_object(); sbj_set(result, "config", config); return result;
+    }
+    if (!c->identity || !c->core) { sbw_fail(error, "NOT_ENROLLED", "Register the device and prepare the core first."); return NULL; }
+    if (!c->capture) c->capture = sbw_capture_new(sbw_core_work_directory(c->core), c->identity, error);
+    if (!c->capture) return NULL;
+    if (sb_streq(method, "capture.configure")) {
+        if (sbj_obj_len(params) != 1 || !sbj_is_object(sbj_get(params, "config"))) goto invalid;
+        capture_upload_join(c);
+        if (sbw_capture_configure(c->capture, sbj_get(params, "config"), error) != 0) return NULL;
+        collect_traffic(c);
+    } else if (sb_streq(method, "capture.snapshot") || sb_streq(method, "capture.rotate")) {
+        if (sbj_obj_len(params)) goto invalid;
+        if (sb_streq(method, "capture.rotate") && sbw_capture_rotate(c->capture, error) != 0) return NULL;
+    } else if (sb_streq(method, "capture.delete") || sb_streq(method, "capture.upload") || sb_streq(method, "capture.read")) {
+        const char *digest = sbj_get_str(params, "digest", "");
+        bool read = sb_streq(method, "capture.read");
+        if (sbj_obj_len(params) != (read ? 2U : 1U) || !sbw_capture_digest_valid(digest)) goto invalid;
+        if (sb_streq(method, "capture.delete")) {
+            if (capture_uploading(c)) { sbw_fail(error, "BUSY", "Wait for the capture upload before deleting files."); return NULL; }
+            if (sbw_capture_delete(c->capture, digest, error) != 0) return NULL;
+        } else if (read) {
+            if (!sbj_is_integer(sbj_get(params, "offset"))) goto invalid;
+            int64_t offset = sbj_get_int(params, "offset", -1); unsigned char *bytes = NULL; size_t length = 0;
+            if (offset < 0 || offset > 768 * 1024) goto invalid;
+            if (sbw_capture_read(c->capture, digest, &bytes, &length, error) != 0) return NULL;
+            if ((size_t)offset > length) { free(bytes); goto invalid; }
+            size_t count = length - (size_t)offset; if (count > 65536) count = 65536;
+            DWORD chars = 0; CryptBinaryToStringA(bytes + offset, (DWORD)count, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &chars);
+            char *encoded = sb_xcalloc((size_t)chars + 1, 1);
+            bool ok = CryptBinaryToStringA(bytes + offset, (DWORD)count, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, encoded, &chars) != FALSE;
+            SecureZeroMemory(bytes, length); free(bytes);
+            if (!ok) { free(encoded); sbw_fail(error, "CAPTURE_FAILED", "Capture export failed."); return NULL; }
+            sbj *result = sbj_object(); sbj_set_str(result, "data", encoded); free(encoded);
+            sbj_set_int(result, "total", (int64_t)length); sbj_set_int(result, "offset", offset); sbj_set_int(result, "next", offset + (int64_t)count); return result;
+        } else if (capture_upload_begin(c, digest, error) != 0) return NULL;
+    } else { sbw_fail(error, "NOT_IMPLEMENTED", "Unknown capture operation."); return NULL; }
+    return capture_snapshot(c);
+ invalid:
+    sbw_fail(error, "INVALID_REQUEST", "Invalid capture operation parameters."); return NULL;
 }

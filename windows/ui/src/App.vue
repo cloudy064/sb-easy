@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
+import StatisticsView from './components/StatisticsView.vue'
+import LogsView from './components/LogsView.vue'
+import CaptureView from './components/CaptureView.vue'
 import { bytes, rates, shortVersion, nodeKind, graphPoints, ruleAction } from './lib/dashboard'
 import brandMark from '../../../assets/branding/sb-easy-mark-v2.svg'
 import { BridgeError, findNativeTransport, NativeBridge } from './lib/bridge'
@@ -11,12 +14,15 @@ import type { ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult
 
 type ConnectionState = 'checking' | 'online' | 'offline' | 'host_missing'
 const bridge = new NativeBridge(findNativeTransport())
-type Page = 'overview' | 'proxies' | 'connections' | 'profiles' | 'rules' | 'activity' | 'settings' | 'diagnostics'
+type Page = 'capture' | 'statistics' | 'logs' | 'overview' | 'proxies' | 'connections' | 'profiles' | 'rules' | 'activity' | 'settings' | 'diagnostics'
 const page = ref<Page>('overview')
 const navigation: { id: Page; label: string; description: string }[] = [
   { id: 'overview', label: '总览', description: '连接状态与网络活动，尽在掌握。' },
   { id: 'proxies', label: '代理节点', description: '查看代理组、配置出口和内核测速记录。' },
   { id: 'connections', label: '活动连接', description: '了解应用访问的目标、匹配规则与流量。' },
+  { id: 'statistics', label: '流量统计', description: '按应用、域名与 host 查看累计流量和出站记录。' },
+  { id: 'capture', label: '流量采集', description: '按应用、域名与 BPF 筛选，保存和管理 PCAP 文件。' },
+  { id: 'logs', label: '运行日志', description: '查看内核运行日志与后台服务诊断。' },
   { id: 'profiles', label: '配置管理', description: '同步、校验并管理此设备的服务端配置。' },
   { id: 'rules', label: '服务分流', description: '查看各项服务使用的节点与直连范围。' },
   { id: 'activity', label: '活动记录', description: '查看本次打开界面后的连接与操作记录。' },
@@ -100,7 +106,7 @@ const issue = ref<BridgeError | null>(null)
 const checkedAt = ref<Date | null>(null)
 const config = ref<ConfigSummary | null>(null)
 const configIssue = ref('')
-const operation = ref<'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
+const operation = ref<'service' | 'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
 const enrollmentUri = ref('')
 const confirmForget = ref(false)
 const actionNotice = ref('')
@@ -170,6 +176,21 @@ watch(() => status.value?.phase, (value, old) => {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '操作未完成，请刷新状态后检查'
+}
+
+async function startService(): Promise<void> {
+  if (locked.value || !bridge.available) return
+  operation.value = 'service'
+  try {
+    await bridge.request('service.start', {}, { timeoutMs: 300_000 })
+    record('后台服务已启动', '管理员授权完成，正在重新连接后台。')
+    issue.value = null
+  } catch (error) {
+    issue.value = error instanceof BridgeError ? error : new BridgeError('SERVICE_START_FAILED', errorMessage(error))
+    record('后台服务未启动', issue.value.message, true)
+    return
+  } finally { operation.value = null }
+  if (!destroyed) await refresh()
 }
 
 async function refresh(): Promise<void> {
@@ -419,7 +440,11 @@ onBeforeUnmount(() => {
     </aside>
     <main id="main-content">
       <header class="page-header"><div><p class="eyebrow">WORKSPACE / {{ page.toUpperCase() }}</p><h1>{{ currentPage.label }}</h1><p class="page-description">{{ currentPage.description }}</p></div><div class="header-actions"><span class="status-tag" :class="{ pending: !status?.core_running }"><span class="state-dot" :class="{ ready: status?.core_running }"></span>{{ status?.core_running ? '内核运行中' : '未连接' }}</span><button class="refresh-button" data-testid="status-refresh" :disabled="locked" @click="refresh"><AppIcon name="refresh" :class="{ spinning: busy }" />{{ busy ? '检查中' : '刷新' }}</button></div></header>
-      <div v-if="issue && connection !== 'host_missing'" class="error-notice" role="alert"><strong>服务通信未完成</strong><span>{{ issue.message }}</span></div>
+      <div v-if="issue && connection !== 'host_missing'" class="error-notice" role="alert"><strong>服务通信未完成</strong><span>{{ issue.message }}</span>
+        <template v-if="bridge.available && connection === 'offline'">
+          <button class="connect-button" data-testid="service-authorize" :disabled="locked" @click="startService">{{ operation === 'service' ? '等待管理员授权与服务启动…' : '授权并启动服务' }}</button>
+          <small>仅启动已安装的后台；不会自动连接代理，无需重启电脑。尚未安装服务时请使用 MSI 安装包。</small>
+        </template></div>
       <div v-if="deviceStateError" class="error-notice" role="alert"><strong>设备存储需要修复</strong><span>{{ deviceStateError.message }}</span><code>{{ deviceStateError.code }}</code></div>
       <div v-if="status?.runtime_error" class="error-notice" role="alert"><strong>{{ status.runtime_error.code === 'ROLLED_BACK' ? '已恢复先前配置' : '连接操作需要检查' }}</strong><span>{{ status.runtime_error.message }}</span><code>{{ status.runtime_error.code }}</code></div>
       <div v-if="actionNotice && !(actionFailed && status?.runtime_error && actionNotice.includes(status.runtime_error.message))" class="action-notice" :class="{ failed: actionFailed }" :role="actionFailed ? 'alert' : 'status'">{{ actionNotice }}</div>
@@ -529,8 +554,11 @@ onBeforeUnmount(() => {
         <section class="panel help-card"><h2>配置生效流程</h2><p>同步只下载新的候选版本，校验通过后在总览点击“启动连接”或“应用新配置”。正在运行的版本会保留到切换成功；新版本启动失败时服务会尝试恢复上次可用版本。</p><button class="text-button" @click="selectPage('overview')">前往连接控制 →</button></section>
       </template>
 
+      <CaptureView v-else-if="page === 'capture'" :bridge="bridge" :server="deviceMetadata?.server_origin ?? ''" />
+      <StatisticsView v-else-if="page === 'statistics'" :bridge="bridge" />
+      <LogsView v-else-if="page === 'logs'" :bridge="bridge" />
       <template v-else-if="page === 'activity'">
-        <div class="content-toolbar"><span class="data-source-line">本次界面会话 · {{ activities.length }} 条记录</span><button class="secondary-button" :disabled="!activities.length" @click="activities = []">清空记录</button></div><section class="panel activity-panel"><div v-for="item in activities" :key="item.id" class="activity-row" :class="{ failed: item.failed }"><time>{{ item.time }}</time><span class="activity-marker"><AppIcon :name="item.failed ? 'activity' : 'check'" /></span><div><h3>{{ item.title }}</h3><p>{{ item.detail }}</p></div></div><div v-if="!activities.length" class="empty-state"><AppIcon name="activity" /><h2>还没有活动记录</h2><p>配置同步、连接启停与状态变化会记录在这里。</p></div></section><p class="collection-note">记录只保留在当前界面内存中，最多 100 条；关闭窗口后清空。当前尚未接入内核日志。</p>
+        <div class="content-toolbar"><span class="data-source-line">本次界面会话 · {{ activities.length }} 条记录</span><button class="secondary-button" :disabled="!activities.length" @click="activities = []">清空记录</button></div><section class="panel activity-panel"><div v-for="item in activities" :key="item.id" class="activity-row" :class="{ failed: item.failed }"><time>{{ item.time }}</time><span class="activity-marker"><AppIcon :name="item.failed ? 'activity' : 'check'" /></span><div><h3>{{ item.title }}</h3><p>{{ item.detail }}</p></div></div><div v-if="!activities.length" class="empty-state"><AppIcon name="activity" /><h2>还没有活动记录</h2><p>配置同步、连接启停与状态变化会记录在这里。</p></div></section><p class="collection-note">记录只保留在当前界面内存中，最多 100 条；关闭窗口后清空。内核运行记录请查看“运行日志”。</p>
       </template>
 
       <template v-else-if="page === 'settings'">

@@ -60,3 +60,5 @@ main { max-width:1450px; padding:30px 34px 20px; }
 .sidebar { scrollbar-width:thin; } nav { gap:4px; } nav button { padding-top:10px; padding-bottom:10px; }
 
 .service-routing-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }.service-routing-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; }.service-routing-heading h2 { font-size:16px; }.service-routing-exit { display:block; color:var(--accent); margin-top:18px; overflow-wrap:anywhere; }.service-routing-card p { color:var(--secondary); line-height:1.8; margin-top:12px; overflow-wrap:anywhere; font-size:12px; }@media(max-width:900px) { .service-routing-grid { grid-template-columns:minmax(0,1fr); } }
+
+.sidebar nav button { padding-top:7px; padding-bottom:7px; }

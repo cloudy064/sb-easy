@@ -72,7 +72,29 @@ export interface RuntimeSnapshot {
   connections: RuntimeConnection[]; nodes: ProxyNode[]
 }
 
+export interface TrafficRow { app: string; host: string; outbound: string; rule: string; upload: number; download: number; last_seen: number }
+export interface TrafficSnapshot { version: 1; upload: number; download: number; sampled_at: number; cleared_at: number; limited: boolean; storage_ok: boolean; rows: TrafficRow[] }
+export interface CaptureConfig {
+  enabled: boolean; apps: string[]; domains: string[]; hosts: string[]; bpf: string
+  file_kb: number; quota_mb: number; rotate_seconds: number; auto_upload: boolean
+  wifi_only: boolean; upload_seconds: number; delete_after_upload: boolean
+}
+export interface CaptureFile { digest: string; size: number; created_at: number; uploaded: boolean }
+export interface CaptureSnapshot { config: CaptureConfig; files: CaptureFile[]; running: boolean; packets: number; dropped: number; stored_bytes: number; error: string; upload_status: string; uploading: boolean; apps: string[] }
 export interface ResultMap {
+  'service.start': { ready: true }
+  'capture.snapshot': CaptureSnapshot
+  'capture.configure': CaptureSnapshot
+  'capture.validate': { config: CaptureConfig }
+  'capture.rotate': CaptureSnapshot
+  'capture.upload': CaptureSnapshot
+  'capture.delete': CaptureSnapshot
+  'capture.read': { data: string; offset: number; next: number; total: number }
+
+  'traffic.snapshot': TrafficSnapshot
+  'traffic.clear': TrafficSnapshot
+  'logs.snapshot': { lines: string[] }
+
   'protocol.hello': HelloResult
   'enrollment.status': EnrollmentResult
   'status.get': StatusResult
@@ -91,7 +113,7 @@ export interface ResultMap {
 
 export type Method = keyof ResultMap
 export type EmptyParams = Record<string, never>
-export type ParamsMap = { [M in Method]: M extends 'enrollment.apply' ? { uri: string } : EmptyParams }
+export type ParamsMap = { [M in Method]: M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -133,14 +155,39 @@ function validDeviceMetadata(value: Record<string, unknown>): boolean {
 
 export function validParams<M extends Method>(method: M, value: unknown): value is ParamsMap[M] {
   if (!isRecord(value)) return false
+  if (method === 'capture.configure' || method === 'capture.validate') return Object.keys(value).length === 1 && validCaptureConfig(value.config)
+  if (method === 'capture.upload' || method === 'capture.delete' || method === 'capture.read') return typeof value.digest === 'string' && /^[a-f0-9]{64}$/.test(value.digest) && (method === 'capture.read' ? Object.keys(value).length === 2 && safeCount(value.offset) && value.offset <= 786432 : Object.keys(value).length === 1)
   if (method === 'enrollment.apply') return Object.keys(value).length === 1 && boundedString(value.uri, 16_384)
-  if (!['protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot'].includes(method)) return false
+  if (!['service.start', 'protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot', 'traffic.snapshot', 'traffic.clear', 'logs.snapshot', 'capture.snapshot', 'capture.rotate'].includes(method)) return false
   return Object.keys(value).length === 0
 }
 
 export function validResult<M extends Method>(method: M, value: unknown): value is ResultMap[M] {
   if (!isRecord(value)) return false
   switch (method) {
+    case 'service.start': return value.ready === true
+    case 'capture.read':
+      return typeof value.data === 'string' && value.data.length <= 87384 && /^[A-Za-z0-9+/]*={0,2}$/.test(value.data) &&
+        safeCount(value.offset) && safeCount(value.next) && safeCount(value.total) && value.total <= 786432 && value.offset <= value.next && value.next <= value.total && value.next - value.offset <= 65536
+    case 'capture.validate': return validCaptureConfig(value.config)
+    case 'capture.snapshot':
+    case 'capture.configure':
+    case 'capture.rotate':
+    case 'capture.upload':
+    case 'capture.delete':
+      return validCaptureConfig(value.config) && typeof value.running === 'boolean' && typeof value.uploading === 'boolean' &&
+        ['packets','dropped','stored_bytes'].every(key => safeCount(value[key])) &&
+        typeof value.error === 'string' && value.error.length <= 256 && typeof value.upload_status === 'string' && value.upload_status.length <= 256 &&
+        Array.isArray(value.apps) && value.apps.length <= 512 && value.apps.every(item => typeof item === 'string' && item.length <= 96) &&
+        Array.isArray(value.files) && value.files.length <= 1000 && value.files.every(file => isRecord(file) && typeof file.digest === 'string' && /^[a-f0-9]{64}$/.test(file.digest) && safeCount(file.size) && safeCount(file.created_at) && typeof file.uploaded === 'boolean')
+    case 'logs.snapshot':
+      return Array.isArray(value.lines) && value.lines.length <= 200 && value.lines.every(line => typeof line === 'string' && line.length <= 1024)
+    case 'traffic.snapshot':
+    case 'traffic.clear':
+      return value.version === 1 && ['upload', 'download', 'sampled_at', 'cleared_at'].every(key => safeCount(value[key])) &&
+        typeof value.limited === 'boolean' && typeof value.storage_ok === 'boolean' && Array.isArray(value.rows) && value.rows.length <= 512 &&
+        value.rows.every(row => isRecord(row) && ['app', 'host', 'outbound', 'rule'].every(key => typeof row[key] === 'string' && (row[key] as string).length <= 253) &&
+          ['upload', 'download', 'last_seen'].every(key => safeCount(row[key])))
     case 'config.inspect':
       return validCatalog(value.candidate) && validCatalog(value.active)
     case 'runtime.snapshot':
@@ -199,4 +246,12 @@ function validCatalog(value: unknown): boolean {
 function validConnection(value: unknown): boolean {
   return isRecord(value) && ['id', 'host', 'destination', 'port', 'network', 'type', 'process', 'rule'].every(key => displayString(value[key])) &&
     displayStrings(value.chains, 8) && safeCount(value.upload) && safeCount(value.download)
+}
+
+export function validCaptureConfig(value: unknown): value is CaptureConfig {
+  if (!isRecord(value)) return false
+  if (!['enabled','auto_upload','wifi_only','delete_after_upload'].every(key => typeof value[key] === 'boolean')) return false
+  if (!['apps','domains','hosts'].every(key => Array.isArray(value[key]) && (value[key] as unknown[]).length <= 100 && (value[key] as unknown[]).every(item => typeof item === 'string' && item.length > 0 && item.length <= (key === 'apps' ? 96 : 253) && !/[\x00-\x1f]/.test(item)))) return false
+  return typeof value.bpf === 'string' && value.bpf.length <= 4096 && !value.bpf.includes('\0') &&
+    [['file_kb',128,768],['quota_mb',8,256],['rotate_seconds',10,600],['upload_seconds',30,3600]].every(([key,low,high]) => safeCount(value[key as string]) && (value[key as string] as number) >= Number(low) && (value[key as string] as number) <= Number(high))
 }

@@ -79,4 +79,21 @@ static inline void test_redacted(const sbj *value) {
     CHECK(!strstr(text, "private-agent-token") && !strstr(text, "secret-proxy-value") && !strstr(text, "agent_token") && !strstr(text, "aaaaaaaaaaaaaaaa"));
     free(text);
 }
+static inline void test_remove_capture_dirs(const wchar_t *root) {
+    wchar_t *pattern=sbw_path_join(root,L"captures-*"); WIN32_FIND_DATAW folder;
+    HANDLE search=FindFirstFileW(pattern,&folder); free(pattern);
+    if(search==INVALID_HANDLE_VALUE)return;
+    do {
+        CHECK(!(folder.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));
+        wchar_t *directory=sbw_path_join(root,folder.cFileName),*items=sbw_path_join(directory,L"*");
+        WIN32_FIND_DATAW item; HANDLE scan=FindFirstFileW(items,&item);free(items);
+        if(scan!=INVALID_HANDLE_VALUE) {
+            do { if(item.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)continue;
+                CHECK(!(item.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));
+                wchar_t *file=sbw_path_join(directory,item.cFileName);CHECK(DeleteFileW(file));free(file);
+            }while(FindNextFileW(scan,&item)); FindClose(scan);
+        }
+        CHECK(RemoveDirectoryW(directory));free(directory);
+    }while(FindNextFileW(search,&folder));FindClose(search);
+}
 #endif

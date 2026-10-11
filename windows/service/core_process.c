@@ -618,3 +618,15 @@ void sbw_core_free(sbw_core *core) {
 void sbw_core_event(sbw_core *core, const char *event, const char *result) {
     if (core) sbw_diagnostics_event(core->logs, event, result);
 }
+
+sbj *sbw_core_logs(sbw_core *core) { return sbw_diagnostics_snapshot(core ? core->logs : NULL); }
+/* The work directory's existing DPAPI store is separate from enrollment state. */
+int sbw_core_traffic_load(sbw_core *core, sbj **out, sbw_error *error) {
+    *out = NULL;
+    return core ? core->directory_guard->load(core->directory_guard->context, out, error) : -1;
+}
+int sbw_core_traffic_save(sbw_core *core, const sbj *data, sbw_error *error) {
+    return core ? core->directory_guard->save(core->directory_guard->context, data, error) : -1;
+}
+
+const wchar_t *sbw_core_work_directory(sbw_core *core) { return core ? core->directory : NULL; }

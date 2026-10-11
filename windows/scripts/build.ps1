@@ -28,6 +28,7 @@ if (-not $SkipUi) {
         if ($LASTEXITCODE -ne 0) { throw 'UI build failed' }
     } finally { Pop-Location }
 }
+& (Join-Path $PSScriptRoot 'prepare-capture.ps1')
 & $cmake -S (Join-Path $repoRoot 'windows') -B $buildDir -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_BUILD_TYPE=$Configuration"
 if ($LASTEXITCODE -ne 0) { throw 'Windows configuration failed' }
 $buildArguments = @('--build', $buildDir, '--parallel', '4')

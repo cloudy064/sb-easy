@@ -15,4 +15,7 @@ typedef struct sbw_service_start_options {
  * backend outlives the UI; *started_pid is zero when reusing an existing one. */
 int sbw_service_ensure(const sbw_service_start_options *options, HANDLE cancel,
                        DWORD timeout_ms, DWORD *started_pid, sbw_error *error);
+/* Fixed, explicit UAC operation; never starts the proxy core. */
+int sbw_service_elevate(HWND owner, HANDLE cancel, sbw_error *error);
+int sbw_service_start_helper(void);
 #endif

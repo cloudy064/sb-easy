@@ -49,6 +49,11 @@ int sbw_core_poll(sbw_core *core, sbw_core_status *status, sbw_error *error);
 /* Fixed operation names and error codes only; never pass request/config data. */
 void sbw_core_event(sbw_core *core, const char *event, const char *result);
 
+const wchar_t *sbw_core_work_directory(sbw_core *core);
+sbj *sbw_core_logs(sbw_core *core);
+int sbw_core_traffic_load(sbw_core *core, sbj **out, sbw_error *error);
+int sbw_core_traffic_save(sbw_core *core, const sbj *data, sbw_error *error);
+
 /* Concurrent operations fail with CORE_BUSY instead of waiting without a bound.
  * Remote health checks, configuration activation, rollback, and routing cleanup
  * belong to the controller; this adapter provides none of those guarantees. */

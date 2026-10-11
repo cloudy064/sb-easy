@@ -39,6 +39,7 @@ typedef struct loopback_server {
     CRITICAL_SECTION mutex;
     http_reply reply;
     char *origin, *request;
+    size_t request_length;
     LONG requests, failed;
 } loopback_server;
 
@@ -82,7 +83,8 @@ static void serve(loopback_server *server, SOCKET connection) {
     if (stopped(server)) goto done;
     if (required == SIZE_MAX || request.len < required) { InterlockedExchange(&server->failed, 1); goto done; }
     EnterCriticalSection(&server->mutex);
-    free(server->request); server->request = sb_strdup(request.p);
+    free(server->request); server->request = sb_xmalloc(request.len + 1);
+    memcpy(server->request, request.p, request.len + 1); server->request_length = request.len;
     InterlockedIncrement(&server->requests);
     LeaveCriticalSection(&server->mutex);
     if (pause_server(server, server->reply.delay_headers)) goto done;
@@ -394,6 +396,31 @@ static void cancellation_tests(void) {
     server_free(&fast); sbj_free(device);
 }
 
+static void capture_upload_tests(void) {
+    unsigned char packet[24] = {0xd4,0xc3,0xb2,0xa1,2,0,4,0,0,0,0,0,0,0,0,0,255,255,0,0,101,0,0,0};
+    const char *digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char *acks[] = {
+        "{\"ok\":true,\"digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+        "{\"ok\":true,\"digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "{\"ok\":false,\"digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    };
+    for (size_t i=0;i<3;++i) {
+        loopback_server server; server_init(&server);
+        server_start(&server,(http_reply){"200 OK","Content-Type: application/json\r\n",acks[i],0,0,false});
+        sbw_error error={0};sbw_control_plane *client=sbw_winhttp_new(25000,&error);sbj *device=identity(server.origin);
+        int result=client->upload_capture(client->context,device,digest,packet,sizeof packet,NULL,&error);
+        if(i==0)REQUIRE(result==0,"Matching capture acknowledgement failed");
+        else expect_error(result,&error,"invalid_response");
+        EnterCriticalSection(&server.mutex);
+        const char *body=strstr(server.request,"\r\n\r\n");
+        REQUIRE(body&&server.request_length-(size_t)(body+4-server.request)==sizeof packet,"Binary upload length changed");
+        REQUIRE(!memcmp(body+4,packet,sizeof packet),"Binary upload lost embedded zeros");
+        REQUIRE(strstr(server.request,"Content-Type: application/vnd.tcpdump.pcap"),"Capture content type missing");
+        LeaveCriticalSection(&server.mutex);
+        sbw_control_plane_free(client);sbj_free(device);server_free(&server);
+    }
+}
+
 int main(void) {
     WSADATA winsock;
     REQUIRE(WSAStartup(MAKEWORD(2, 2), &winsock) == 0, "WSAStartup failed");
@@ -402,6 +429,7 @@ int main(void) {
     puts("Config tests"); config_tests();
     puts("Rejected response tests"); rejected_response_tests();
     puts("Cancellation tests"); cancellation_tests();
+    puts("Capture binary upload and acknowledgement tests"); capture_upload_tests();
     WSACleanup();
     puts("C11 control-plane parser and loopback transport tests passed.");
     return 0;

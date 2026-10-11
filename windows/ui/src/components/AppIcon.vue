@@ -1,6 +1,9 @@
 <script setup lang="ts">
 defineProps<{ name: string }>()
 const paths: Record<string, string> = {
+  capture: 'M3 7V3h4M17 3h4v4M21 17v4h-4M7 21H3v-4M3 12h4l3-5 4 10 3-5h4',
+  statistics: 'M4 20V10h4v10M10 20V4h4v16M16 20v-8h4v8',
+  logs: 'M5 3h14v18H5zM8 7h8M8 11h8M8 15h5',
   overview: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
   proxies: 'M4 6h16M4 12h16M4 18h16M8 4v4M16 10v4M10 16v4',
   connections: 'M4 7h13l-3-3M20 17H7l3 3M17 7l-3 3M7 17l3-3',

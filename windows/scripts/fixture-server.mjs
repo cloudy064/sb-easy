@@ -4,7 +4,7 @@ import http from 'node:http'
 import net from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 
 const directory = process.argv[2]
 if (!directory || !path.isAbsolute(directory)) throw new Error('Expected absolute fixture output directory')
@@ -18,7 +18,7 @@ await new Promise((resolve, reject) => {
 })
 const proxyPort = proxyReservation.address().port
 fs.writeFileSync(path.join(directory, 'fixture-proxy-port.txt'), String(proxyPort))
-const receipt = { enrollments: 0, configRequests: 0, notModified: 0, rejected: 0, ruleRequests: 0 }
+const receipt = { enrollments: 0, configRequests: 0, notModified: 0, rejected: 0, ruleRequests: 0, captures: 0 }
 let origin
 function record() { fs.writeFileSync(path.join(directory, 'fixture-receipt.json'), JSON.stringify(receipt)) }
 const server = http.createServer(async (request, response) => {
@@ -63,6 +63,18 @@ const server = http.createServer(async (request, response) => {
     reply(200, { server: origin, host_id: 'windows-smoke', host_name: 'Windows 开发测试设备', agent_token: token,
       profile: { id: 'fixture-profile', name: '桌面测试配置' } })
     return
+  }
+  if (/^\/test\/api\/agent\/captures\/[a-f0-9]{64}$/.test(request.url) && request.method === 'POST') {
+    if (request.headers.authorization !== `Bearer ${token}`) { receipt.rejected++; reply(401, {}); return }
+    const chunks = []; let size = 0
+    for await (const chunk of request) { size += chunk.length; if (size > 768 * 1024) { request.destroy(); return }; chunks.push(chunk) }
+    const data = Buffer.concat(chunks), digest = request.url.split('/').at(-1)
+    if (data.length < 24 || data.readUInt32LE(0) !== 0xa1b2c3d4 || data.readUInt32LE(20) !== 101 || createHash('sha256').update(data).digest('hex') !== digest || request.headers['content-type'] !== 'application/vnd.tcpdump.pcap') { reply(400, {}); return }
+    let offset = 24
+    while (offset + 16 <= data.length) { const length = data.readUInt32LE(offset + 8); if (!length || length > 65535 || length !== data.readUInt32LE(offset + 12) || offset + 16 + length > data.length) { reply(400, {}); return }; offset += 16 + length }
+    if (offset !== data.length) { reply(400, {}); return }
+    receipt.captures++; fs.writeFileSync(path.join(directory, `${digest}.pcap`), data)
+    reply(200, { ok: true, digest }); return
   }
   if (request.url === '/test/api/agent/config' && request.method === 'GET') {
     if (request.headers.authorization !== `Bearer ${token}`) { receipt.rejected++; reply(401, {}); return }

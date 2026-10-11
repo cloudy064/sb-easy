@@ -1,3 +1,4 @@
+#include "resource.h"
 #define CINTERFACE
 #define COBJMACROS
 #define CONST_VTABLE
@@ -108,9 +109,9 @@ static void receive(desktop *app, ICoreWebView2WebMessageReceivedEventArgs *args
     sbj *request = NULL;
     const sbj *id = NULL, *version, *method;
     bool allowed = false, queued = false;
-    static const char *methods[] = {"protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
+    static const char *methods[] = {"service.start", "protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
                                    "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server",
-                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot"};
+                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source))) return;
     allowed = source && wcscmp(source, app_uri) == 0; CoTaskMemFree(source);
     if (!allowed) return;
@@ -161,6 +162,18 @@ static unsigned __stdcall work(void *context) {
         parsed_request = sbw_json_parse(request, strlen(request), 32, &error);
         id = sbj_get(parsed_request, "id");
         int ready = 0;
+        bool local = sbj_string_is(sbj_get(parsed_request, "method"), "service.start");
+        if (local) {
+            if (wcscmp(app->pipe, default_pipe) || app->service_data || sbj_size(sbj_get(parsed_request, "params")))
+                sbw_fail(&error, "INVALID_REQUEST", "仅默认安装支持管理员启动服务。");
+            else if (!sbw_service_elevate(app->window, app->cancel, &error)) {
+                sbj *reply = sbj_object(), *body = sbj_object();
+                sbj_set(reply, "id", sbj_clone(id)); sbj_set_int(reply, "version", 1);
+                sbj_set_bool(reply, "ok", true); sbj_set_bool(body, "ready", true);
+                sbj_set(reply, "result", body); response = sbj_dump(reply, -1); sbj_free(reply);
+                valid = true;
+            }
+        }
         if (parsed_request && app->auto_service && sbj_string_is(sbj_get(parsed_request, "method"), "protocol.hello")) {
             wchar_t *binary = sbw_expected_service_binary();
             sbw_service_start_options options = {app->pipe, binary, app->service_data, wcscmp(app->pipe, default_pipe) == 0};
@@ -168,7 +181,7 @@ static unsigned __stdcall work(void *context) {
             free(binary);
         }
         DWORD request_timeout = sbj_string_is(sbj_get(parsed_request, "method"), "connection.start") ? 90000 : 35000;
-        if (parsed_request && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, request_timeout, &response, &error)) {
+        if (parsed_request && !local && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, request_timeout, &response, &error)) {
             parsed_response = sbw_json_parse(response, strlen(response), 32, &error);
             valid = sbj_is_object(parsed_response) && sbj_equal(sbj_get(parsed_response, "id"), id) &&
                 sbj_is_integer(sbj_get(parsed_response, "version")) && sbj_get_int(parsed_response, "version", 0) == 1 &&
@@ -459,7 +472,8 @@ static void smoke_tick(desktop *app) {
 static void add_tray(desktop *app) {
     NOTIFYICONDATAW icon = {0}; icon.cbSize = sizeof(icon); icon.hWnd = app->window; icon.uID = 1;
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; icon.uCallbackMessage = TRAY_MESSAGE;
-    icon.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    icon.hIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_SB_EASY), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
     wcscpy_s(icon.szTip, sizeof(icon.szTip) / sizeof(icon.szTip[0]), L"sb-easy · Windows 开发预览");
     app->tray_added = Shell_NotifyIconW(NIM_ADD, &icon) != FALSE;
     icon.uVersion = NOTIFYICON_VERSION_4; if (app->tray_added) Shell_NotifyIconW(NIM_SETVERSION, &icon);
@@ -564,7 +578,7 @@ static bool parse_arguments(desktop *app) {
         else if (!wcscmp(arg, L"--expect-running")) app->expect_running = true;
         else if (!wcscmp(arg, L"--smoke-page") && i + 1 < count) {
             const wchar_t *page = args[++i];
-            if (wcscmp(page, L"overview") && wcscmp(page, L"proxies") && wcscmp(page, L"connections") && wcscmp(page, L"profiles") && wcscmp(page, L"rules") && wcscmp(page, L"activity") && wcscmp(page, L"settings") && wcscmp(page, L"diagnostics")) goto done;
+            if (wcscmp(page, L"capture") && wcscmp(page, L"statistics") && wcscmp(page, L"logs") && wcscmp(page, L"overview") && wcscmp(page, L"proxies") && wcscmp(page, L"connections") && wcscmp(page, L"profiles") && wcscmp(page, L"rules") && wcscmp(page, L"activity") && wcscmp(page, L"settings") && wcscmp(page, L"diagnostics")) goto done;
             free(app->smoke_page); app->smoke_page = wide_copy(page);
         }
         else if (!wcscmp(arg, L"--smoke-theme") && i + 1 < count) {
@@ -613,17 +627,23 @@ done:
     LocalFree(args); return ok;
 }
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, int show_command) {
-    desktop *app; WNDCLASSW window_class = {0}; MSG message_value; int result = 1; BOOL next;
+    desktop *app; WNDCLASSEXW window_class = {0}; MSG message_value; int result = 1; BOOL next;
     (void)previous; (void)command_line;
+    int helper = sbw_service_start_helper();
+    if (helper >= 0) return helper;
     if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED))) return 1;
     app = sb_xcalloc(1, sizeof(*app)); app->refs = 1; app->alive = 1; app->width = 1120;
     InitializeCriticalSection(&app->mutex); InitializeConditionVariable(&app->ready);
     app->cancel = CreateEventW(NULL, TRUE, FALSE, NULL); app->pipe = wide_copy(default_pipe);
     if (!app->cancel || !parse_arguments(app)) goto cleanup;
     current_desktop = app; taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    window_class.cbSize = sizeof(window_class);
     window_class.lpfnWndProc = window_proc; window_class.hInstance = instance; window_class.lpszClassName = L"SbEasyDesktopWindow";
-    window_class.hCursor = LoadCursorW(NULL, IDC_ARROW); window_class.hIcon = LoadIconW(NULL, IDI_APPLICATION);
-    window_class.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&window_class);
+    window_class.hCursor = LoadCursorW(NULL, IDC_ARROW); window_class.hIcon = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(IDI_SB_EASY), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED);
+    window_class.hIconSm = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(IDI_SB_EASY), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
+    window_class.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassExW(&window_class);
     app->window = CreateWindowExW(0, window_class.lpszClassName, L"sb-easy · Windows 开发预览", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, app->width, 780, NULL, NULL, instance, NULL);
     if (!app->window) goto cleanup;

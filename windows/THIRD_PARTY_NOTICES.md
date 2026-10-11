@@ -35,3 +35,24 @@ with `core/LICENSE`. Local preview packages are unsigned.
 MSI packages are authored using WiX Toolset 5.0.2 with its UI extension. WiX is a
 build-time tool, not a C++ implementation of the sb-easy service or desktop. End
 users do not need WiX, .NET SDK or Visual Studio installed.
+
+
+## tldts / tldts-core (7.0.25)
+
+MIT-licensed public suffix parsing by Remusao and contributors, used for domain
+traffic grouping including private suffixes. Distributed license texts are
+`licenses/tldts.txt` and `licenses/tldts-core.txt`.
+
+## WinDivert 2.2.2 and libpcap 1.10.6
+
+Optional TUN capture dynamically loads the unmodified official x64 WinDivert DLL
+and signed driver in sniff-only mode. WinDivert is used under LGPLv3; its full
+license is distributed as `licenses/WinDivert.txt`. Users may replace the
+compatible library/driver. Upstream source and build instructions:
+https://github.com/basil00/WinDivert/tree/v2.2.2 and https://reqrypt.org/windivert-doc.html.
+
+libpcap's BPF compiler/interpreter is statically built from the repository's
+`android/third_party/libpcap-1.10.6.tar.xz`, using the null capture backend. No
+Npcap runtime is required. Its BSD license is included as `licenses/libpcap.txt`.
+Source: https://www.tcpdump.org/release/libpcap-1.10.6.tar.xz.
+The pinned win_flex_bison tools are build dependencies, not shipped runtimes.

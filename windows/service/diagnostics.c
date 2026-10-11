@@ -5,7 +5,7 @@
 
 #define LOG_LIMIT (4U * 1024U * 1024U)
 #define LINE_LIMIT 16384
-struct sbw_diagnostics { SRWLOCK lock; wchar_t *paths[4]; HANDLE file; DWORD size; };
+struct sbw_diagnostics { SRWLOCK lock; wchar_t *paths[4]; HANDLE file; DWORD size; char *recent[200]; size_t next, count; };
 struct sbw_log_stream { sbw_diagnostics *log; HANDLE reader, thread, stop; sbj *config; };
 
 static bool private_key(const char *key) {
@@ -70,6 +70,10 @@ static void write_line(sbw_diagnostics *log, const char *kind, const char *line)
         now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
         GetCurrentProcessId(), kind, line);
     AcquireSRWLockExclusive(&log->lock);
+    free(log->recent[log->next]);
+    log->recent[log->next] = sb_strdup(buffer.len <= 1024 ? buffer.p : "[long log line: see exported diagnostics]");
+    log->next = (log->next + 1) % 200;
+    if (log->count < 200) ++log->count;
     if (log->file != INVALID_HANDLE_VALUE && log->size + buffer.len > LOG_LIMIT) {
         CloseHandle(log->file); log->file = INVALID_HANDLE_VALUE;
         DeleteFileW(log->paths[3]);
@@ -94,7 +98,8 @@ sbw_diagnostics *sbw_diagnostics_new(const wchar_t *directory) {
 void sbw_diagnostics_free(sbw_diagnostics *log) {
     if (!log) return;
     if (log->file != INVALID_HANDLE_VALUE) CloseHandle(log->file);
-    for (int i = 0; i < 4; ++i) free(log->paths[i]); free(log);
+    for (int i = 0; i < 4; ++i) free(log->paths[i]);
+    for (size_t i = 0; i < 200; ++i) free(log->recent[i]); free(log);
 }
 void sbw_diagnostics_event(sbw_diagnostics *log, const char *event, const char *result) {
     sb_buf message = {0}; sb_buf_printf(&message, "%s %s", event, result ? result : "");
@@ -138,4 +143,15 @@ void sbw_diagnostics_finish(sbw_log_stream *stream) {
     if (stream->thread) { SetEvent(stream->stop); WaitForSingleObject(stream->thread, INFINITE); CloseHandle(stream->thread); }
     if (stream->stop) CloseHandle(stream->stop);
     CloseHandle(stream->reader); sbj_free(stream->config); free(stream);
+}
+
+sbj *sbw_diagnostics_snapshot(sbw_diagnostics *log) {
+    sbj *result = sbj_object(), *lines = sbj_array();
+    if (log) {
+        AcquireSRWLockShared(&log->lock);
+        for (size_t i = 0; i < log->count; ++i)
+            sbj_arr_push(lines, sbj_str(log->recent[(log->next + 200 - log->count + i) % 200]));
+        ReleaseSRWLockShared(&log->lock);
+    }
+    sbj_set(result, "lines", lines); return result;
 }

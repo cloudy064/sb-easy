@@ -11,4 +11,5 @@ void sbw_diagnostics_event(sbw_diagnostics *log, const char *event, const char *
 sbw_log_stream *sbw_diagnostics_capture(sbw_diagnostics *log, HANDLE reader, const char *config);
 void sbw_diagnostics_finish(sbw_log_stream *stream);
 char *sbw_diagnostics_redact(const char *line, const sbj *config);
+sbj *sbw_diagnostics_snapshot(sbw_diagnostics *log);
 #endif

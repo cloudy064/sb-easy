@@ -1,0 +1,7 @@
+0.6.1 service authorization
+
+Host-only service.start requires empty parameters and the default installed pipe.
+The C helper has a fixed service name and verifies the registered executable.
+Tests cover cancellation before elevation, bridge UAC cancellation/retry, malformed parameters and readiness responses.
+Manual UAC consent and an installed-service end-to-end check remain required.
+Existing 0.6.0 capture validation is documented in TESTING-0.6.0.txt.

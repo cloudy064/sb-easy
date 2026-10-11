@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#173E43"/><stop offset="1" stop-color="#081D2B"/></linearGradient>
+    <linearGradient id="up" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#67F0BA"/><stop offset="1" stop-color="#30CBA5"/></linearGradient>
+    <linearGradient id="down" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#70D8F5"/><stop offset="1" stop-color="#48A9F0"/></linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="55.25" fill="none" stroke="#A4F4DF" stroke-opacity=".18" stroke-width="1.5"/>
+  <g transform="translate(-9 -7) scale(.22)">
+    <path fill="url(#up)" d="M856 217H505c-128 0-224 98-224 228s97 236 222 236h14c14 0 26 6 36 17l51 61v-74c0-11 4-20 11-28l45-43-49-49c-9-10-21-16-34-16h-72c-57 0-98-44-98-104 0-58 42-101 98-101h351c39 0 67-27 67-63 0-37-28-64-67-64Z"/>
+    <path fill="url(#down)" d="M640 549h128c131 0 218 96 218 231 0 134-87 233-214 233H376c-37 0-64-28-64-65 0-36 27-65 64-65h396c54 0 87-42 87-103 0-63-33-99-91-99h-48c-13 0-24 5-33 16l-48 62v-75c0-11 4-21 12-29l42-41-43-45c-8-8-11-14-10-20Z"/>
+  </g>
+</svg>

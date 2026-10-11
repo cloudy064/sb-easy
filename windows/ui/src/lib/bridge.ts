@@ -59,7 +59,7 @@ export class NativeBridge {
     if (!this.transport) return Promise.reject(new BridgeError('host_unavailable', '原生宿主不可用'))
     if (!validParams(method, params)) return Promise.reject(new BridgeError('invalid_params', '请求参数格式无效'))
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > (method === 'connection.start' ? 95_000 : 45_000)) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > (method === 'service.start' ? 300_000 : method === 'connection.start' ? 95_000 : 45_000)) {
       return Promise.reject(new BridgeError('invalid_timeout', '请求等待时间无效'))
     }
     if (this.pending.size >= 32) return Promise.reject(new BridgeError('too_many_requests', '待处理请求过多'))

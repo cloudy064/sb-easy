@@ -48,6 +48,13 @@ static void hello(const wchar_t *pipe, HANDLE cancel) {
 }
 
 int wmain(int argc, wchar_t **argv) {
+    CHECK(sbw_service_start_helper() == -1);
+    HANDLE cancelled = CreateEventW(NULL, TRUE, TRUE, NULL);
+    sbw_error elevation_error = {0};
+    CHECK(cancelled);
+    CHECK(sbw_service_elevate(NULL, cancelled, &elevation_error) == -1);
+    CHECK(!strcmp(elevation_error.code, "CANCELLED"));
+    CloseHandle(cancelled);
     /* The test binary also provides an immediately failing launch fixture. */
     if (argc > 1 && !wcscmp(argv[1], L"--console")) return 3;
     CHECK(argc == 2);

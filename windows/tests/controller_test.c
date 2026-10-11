@@ -55,6 +55,11 @@ static void test_validation(const wchar_t *fixture) {
     sbj *empty = sbj_object(), *enrollment = test_enrollment();
     sbw_controller *controller = test_controller(&data, NULL);
     sbw_core *core = attach_fixture(controller, fixture, directory);
+    expect_error(controller, "traffic.snapshot", empty, false, "FORBIDDEN");
+    expect_error(controller, "traffic.clear", empty, false, "FORBIDDEN");
+    expect_error(controller, "logs.snapshot", empty, false, "FORBIDDEN");
+    sbj *traffic = call(controller, "traffic.snapshot", empty, true);
+    CHECK(sbj_get_int(traffic, "version", 0) == 1); sbj_free(traffic);
     expect_error(controller, "config.validate", empty, true, "NO_CANDIDATE");
     sbj *result = call(controller, "enrollment.apply", enrollment, true); sbj_free(result);
     result = call(controller, "config.refresh", empty, true);
@@ -110,7 +115,9 @@ static void test_validation(const wchar_t *fixture) {
     /* Remove only the owned fixture directory and its known lock file. */
     wchar_t *lock = sbw_path_join(directory, L"state.lock");
     test_remove_diagnostics(directory);
-    CHECK(DeleteFileW(lock)); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
+    CHECK(DeleteFileW(lock)); wchar_t *traffic_file = sbw_path_join(directory, L"device-state.dat");
+    DeleteFileW(traffic_file); free(traffic_file);
+    CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
 }
 static const char *routing_fixture =
  "{\"outbounds\":[{\"tag\":\"default\",\"type\":\"socks\",\"server\":\"127.0.0.1\",\"server_port\":1080}],"
@@ -153,7 +160,9 @@ static void test_routing(const wchar_t *fixture) {
     CHECK(sb_streq(sbj_get_str(sbj_arr_at(sbj_get(sbj_get(result, "candidate"), "rules"), 0), "outbound", ""), "broken")); sbj_free(result);
     sbw_controller_free(controller); test_data_free(&data); sbj_free(empty); sbj_free(enrollment);
     wchar_t *lock = sbw_path_join(directory, L"state.lock"); test_remove_diagnostics(directory);
-    CHECK(DeleteFileW(lock)); CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
+    CHECK(DeleteFileW(lock)); wchar_t *traffic_file = sbw_path_join(directory, L"device-state.dat");
+    DeleteFileW(traffic_file); free(traffic_file);
+    CHECK(RemoveDirectoryW(directory)); free(lock); free(directory);
 }
 
 typedef struct refresh_task { sbw_controller *controller; sbj *params; sbj *result; } refresh_task;

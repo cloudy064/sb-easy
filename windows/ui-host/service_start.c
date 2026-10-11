@@ -2,6 +2,7 @@
 #include "server_identity.h"
 #include <sddl.h>
 #include <shellapi.h>
+#include <objbase.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -77,7 +78,7 @@ static int start_installed(const sbw_service_start_options *options, sbw_error *
         CloseServiceHandle(service);
         service = OpenServiceW(manager, L"sb-easy", SERVICE_START);
         if (!service) {
-            sbw_fail(error, "SERVICE_ELEVATION_REQUIRED", "已安装的后台已停止，当前账户没有启动权限。请以管理员身份运行 sb-easy 一次。");
+            sbw_fail(error, "SERVICE_ELEVATION_REQUIRED", "已安装的后台已停止，当前账户没有启动权限。请点击“授权并启动服务”，在 UAC 提示中允许启动。");
             goto done;
         }
         if (!StartServiceW(service, 0, NULL) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
@@ -186,5 +187,73 @@ done:
     if (pinned != INVALID_HANDLE_VALUE) CloseHandle(pinned);
     if (locked) ReleaseMutex(mutex);
     if (mutex) CloseHandle(mutex);
+    return result;
+}
+
+/* The helper accepts no paths or service names from the caller. SCM's existing
+ * registration must point to the same packaged binary as this desktop host. */
+int sbw_service_start_helper(void) {
+    int argc = 0;
+    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    bool helper = argv && argc == 2 && !wcscmp(argv[1], L"--start-installed-service");
+    if (argv) LocalFree(argv);
+    if (!helper) return -1;
+    sbw_error error = {0};
+    wchar_t *binary = sbw_expected_service_binary();
+    if (!binary) return ERROR_FILE_NOT_FOUND;
+    sbw_service_start_options options = {L"\\\\.\\pipe\\sb-easy-control-v1", binary, NULL, true};
+    int installed = start_installed(&options, &error);
+    free(binary);
+    return installed == 1 ? 0 : installed == 0 ? ERROR_SERVICE_DOES_NOT_EXIST : ERROR_SERVICE_NOT_ACTIVE;
+}
+
+int sbw_service_elevate(HWND owner, HANDLE cancel, sbw_error *error) {
+    static LONG pending = 0;
+    if (InterlockedCompareExchange(&pending, 1, 0))
+        return sbw_fail(error, "BUSY", "正在等待管理员授权，请勿重复点击。");
+    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    int result = -1;
+    wchar_t executable[32768];
+    DWORD length = GetModuleFileNameW(NULL, executable, 32768);
+    SHELLEXECUTEINFOW execute = {0};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    execute.hwnd = owner;
+    execute.lpVerb = L"runas";
+    execute.lpFile = executable;
+    execute.lpParameters = L"--start-installed-service";
+    execute.nShow = SW_HIDE;
+    if (!length || length >= 32768 || WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) {
+        sbw_fail(error, "CANCELLED", "后台启动已取消。"); goto done;
+    }
+    if (!ShellExecuteExW(&execute)) {
+        DWORD code = GetLastError();
+        sbw_fail(error, code == ERROR_CANCELLED ? "UAC_CANCELLED" : "SERVICE_START_FAILED",
+            code == ERROR_CANCELLED ? "已取消管理员授权，可以再次点击启动服务。" : "无法打开管理员授权窗口，请检查安装文件。");
+        goto done;
+    }
+    if (!execute.hProcess) { sbw_fail(error, "SERVICE_START_FAILED", "无法确认授权操作结果，请刷新状态。"); goto done; }
+    HANDLE waits[] = {cancel, execute.hProcess};
+    DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 30000), exit_code = 1;
+    if (wait == WAIT_OBJECT_0 + 1) GetExitCodeProcess(execute.hProcess, &exit_code);
+    CloseHandle(execute.hProcess);
+    if (wait != WAIT_OBJECT_0 + 1 || exit_code) {
+        sbw_fail(error, "SERVICE_START_FAILED", exit_code == ERROR_SERVICE_DOES_NOT_EXIST ?
+            "未安装 Windows 后台服务，请运行 MSI 安装包后重试。" : "后台未能启动，请刷新状态或使用 MSI 修复安装。");
+        goto done;
+    }
+    wchar_t *binary = sbw_expected_service_binary();
+    sbw_service_start_options options = {L"\\\\.\\pipe\\sb-easy-control-v1", binary, NULL, true};
+    /* Identity is checked again after the elevated helper exits. */
+    ULONGLONG deadline = GetTickCount64() + 12000;
+    while (binary && GetTickCount64() < deadline && WaitForSingleObject(cancel, 50) == WAIT_TIMEOUT) {
+        int available = probe(&options, error);
+        if (available) { result = available > 0 ? 0 : -1; break; }
+    }
+    free(binary);
+    if (result && !*error->code) sbw_fail(error, "SERVICE_START_TIMEOUT", "后台仍未就绪，请刷新状态查看结果。");
+done:
+    if (SUCCEEDED(com)) CoUninitialize();
+    InterlockedExchange(&pending, 0);
     return result;
 }

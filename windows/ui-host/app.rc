@@ -1,0 +1,28 @@
+#include "resource.h"
+IDI_SB_EASY ICON "../assets/sb-easy.ico"
+
+#include <winver.h>
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION SB_EASY_VERSION_MAJOR,SB_EASY_VERSION_MINOR,SB_EASY_VERSION_PATCH,0
+ PRODUCTVERSION SB_EASY_VERSION_MAJOR,SB_EASY_VERSION_MINOR,SB_EASY_VERSION_PATCH,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "sb-easy"
+            VALUE "FileDescription", "sb-easy Windows"
+            VALUE "FileVersion", SB_EASY_VERSION
+            VALUE "ProductName", "sb-easy"
+            VALUE "ProductVersion", SB_EASY_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

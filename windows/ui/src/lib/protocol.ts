@@ -94,12 +94,22 @@ export interface CaptureConfig {
 }
 export interface CaptureFile { digest: string; size: number; created_at: number; uploaded: boolean }
 export interface CaptureSnapshot { config: CaptureConfig; files: CaptureFile[]; running: boolean; packets: number; dropped: number; stored_bytes: number; error: string; upload_status: string; uploading: boolean; apps: string[] }
-export type ExtensionId = 'capture' | 'statistics' | 'network-tools'
-export function isExtensionId(value: unknown): value is ExtensionId { return ['capture','statistics','network-tools'].includes(value as string) }
+export type ExtensionId = 'capture' | 'statistics' | 'network-tools' | 'http-debug'
+export function isExtensionId(value: unknown): value is ExtensionId { return ['capture','statistics','network-tools','http-debug'].includes(value as string) }
 export interface ExtensionInfo { id: ExtensionId; name: string; version: string; installed: boolean; enabled: boolean; running: boolean; failed: boolean }
 export interface StoreItem { id: ExtensionId; name: string; version: string; size: number; publisher: string; description: string; permissions: string }
 export interface StoreProgress { id: ExtensionId | '';  phase: 'idle' | 'downloading' | 'verifying' | 'installing' | 'complete' | 'failed'; received: number; total: number; error: string }
+export interface HttpDebugState { phase: string; error: string; url: string; attached: boolean; domains?: string[] }
 export interface ResultMap {
+  'httpdebug.start': HttpDebugState
+  'httpdebug.stop': HttpDebugState
+  'httpdebug.snapshot': HttpDebugState
+  'httpdebug.attach': HttpDebugState
+  'httpdebug.certificate': { der: string }
+  'httpdebug.export': { ready: true }
+  'httpdebug.open': { ready: true }
+  'httpdebug.trust': { ready: true }
+  'httpdebug.untrust': { ready: true }
   'extensions.catalog': { items: StoreItem[] }
   'extensions.install': StoreProgress
   'extensions.progress': StoreProgress
@@ -141,7 +151,7 @@ export interface ResultMap {
 
 export type Method = keyof ResultMap
 export type EmptyParams = Record<string, never>
-export type ParamsMap = { [M in Method]: M extends 'extensions.install' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
+export type ParamsMap = { [M in Method]: M extends 'httpdebug.attach' ? { domains: string[] } : M extends 'extensions.install' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -186,6 +196,8 @@ export function validParams<M extends Method>(method: M, value: unknown): value 
   if (method === 'subscriptions.fetch') return Object.keys(value).length === 1 && (boundedString(value.url, 8192) || boundedString(value.id, 36))
   if (method === 'subscriptions.remove') return Object.keys(value).length === 1 && boundedString(value.id, 36)
   if (method === 'subscriptions.save') return Object.keys(value).every(key => ['id','name','url','nodes'].includes(key)) && boundedString(value.name, 100) && (value.id === undefined || boundedString(value.id, 36)) && (value.url === undefined ? boundedString(value.id,36) : boundedString(value.url,8192)) && Array.isArray(value.nodes) && value.nodes.length > 0 && value.nodes.length <= 256 && value.nodes.every(isRecord)
+  if (method === 'httpdebug.attach') return Object.keys(value).length === 1 && Array.isArray(value.domains) && value.domains.length > 0 && value.domains.length <= 64 && value.domains.every(d => typeof d === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}$/.test(d))
+  if (['httpdebug.start','httpdebug.stop','httpdebug.snapshot','httpdebug.certificate','httpdebug.open','httpdebug.export','httpdebug.trust','httpdebug.untrust'].includes(method)) return Object.keys(value).length === 0
   if (method === 'extensions.install') return Object.keys(value).length === 1 && isExtensionId(value.id)
   if (method === 'extensions.change') return Object.keys(value).length === 2 && isExtensionId(value.id) && ['enable','disable','remove'].includes(value.action as string)
   if (method === 'routing.set') return typeof value.group === 'string' && /^[a-z0-9-]{1,64}$/.test(value.group) &&
@@ -202,7 +214,10 @@ export function validParams<M extends Method>(method: M, value: unknown): value 
 export function validResult<M extends Method>(method: M, value: unknown): value is ResultMap[M] {
   if (!isRecord(value)) return false
   switch (method) {
-    case 'extensions.catalog': return Array.isArray(value.items) && value.items.length <= 16 && value.items.every(e => isRecord(e) && isExtensionId(e.id) && boundedString(e.name,128) && boundedString(e.version,32) && boundedString(e.publisher,128) && boundedString(e.description,512) && boundedString(e.permissions,512) && Number.isSafeInteger(e.size) && (e.size as number) > 0 && (e.size as number) <= 16777216)
+    case 'httpdebug.start': case 'httpdebug.stop': case 'httpdebug.snapshot': case 'httpdebug.attach': return ['starting','running','stopped','failed'].includes(value.phase as string) && typeof value.error === 'string' && typeof value.url === 'string' && typeof value.attached === 'boolean'
+    case 'httpdebug.certificate': return typeof value.der === 'string' && value.der.length < 32768 && /^[0-9a-f]+$/.test(value.der)
+    case 'httpdebug.export': case 'httpdebug.open': case 'httpdebug.trust': case 'httpdebug.untrust': return value.ready === true
+    case 'extensions.catalog': return Array.isArray(value.items) && value.items.length <= 16 && value.items.every(e => isRecord(e) && isExtensionId(e.id) && boundedString(e.name,128) && boundedString(e.version,32) && boundedString(e.publisher,128) && boundedString(e.description,512) && boundedString(e.permissions,512) && Number.isSafeInteger(e.size) && (e.size as number) > 0 && (e.size as number) <= 134217728)
     case 'extensions.install':
     case 'extensions.progress': return (isExtensionId(value.id) || (value.phase === 'idle' && value.id === '')) && ['idle','downloading','verifying','installing','complete','failed'].includes(value.phase as string) && Number.isSafeInteger(value.received) && (value.received as number) >= 0 && Number.isSafeInteger(value.total) && (value.total as number) >= (value.phase === 'idle' ? 0 : 1) && (value.received as number) <= (value.total as number) + 1 && typeof value.error === 'string' && value.error.length <= 64
     case 'extensions.list':

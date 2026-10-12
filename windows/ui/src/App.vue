@@ -19,7 +19,7 @@ import type { ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult
 
 type ConnectionState = 'checking' | 'online' | 'offline' | 'host_missing'
 const bridge = new NativeBridge(findNativeTransport())
-type Page = 'connections' | 'logs' | 'rules' | 'extensions' | 'capture' | 'statistics' | 'network-tools' | 'overview' | 'proxies' | 'profiles' | 'activity' | 'settings' | 'diagnostics'
+type Page = 'connections' | 'logs' | 'rules' | 'extensions' | 'http-debug' | 'capture' | 'statistics' | 'network-tools' | 'overview' | 'proxies' | 'profiles' | 'activity' | 'settings' | 'diagnostics'
 const page = ref<Page>('overview')
 const toolsOpen = ref(false)
 const extensions = ref<ExtensionInfo[]>([])
@@ -27,7 +27,7 @@ const enabledExtensions = computed(() => extensions.value.filter(e => e.installe
 const extensionPage = computed(() => enabledExtensions.value.find(e => e.id === page.value))
 const captureEnabled = computed(() => enabledExtensions.value.some(e => e.id === 'capture'))
 function openExtension(id: ExtensionId){selectPage(id === 'network-tools' ? 'connections' : id)}
-watch(extensions, () => { if (['capture','statistics','network-tools'].includes(page.value) && !extensionPage.value) page.value = 'extensions' })
+watch(extensions, () => { if (['capture','statistics','network-tools','http-debug'].includes(page.value) && !extensionPage.value) page.value = 'extensions' })
 const navigation: { id: Page; label: string; description: string }[] = [
   { id: 'extensions', label: '扩展商店', description: '按需安装高级功能，让基础代理保持简单。' },
   { id: 'overview', label: '连接', description: '连接网络，为每项服务选择出口。' },
@@ -36,7 +36,8 @@ const navigation: { id: Page; label: string; description: string }[] = [
   { id: 'logs', label: '运行日志', description: '查看内核运行日志，排查连接问题。' },
   { id: 'rules', label: '规则详情', description: '查看当前生效和已下载的分流规则。' },
   { id: 'statistics', label: '流量统计', description: '按应用、域名与 host 查看累计流量和出站记录。' },
-  { id: 'capture', label: '流量采集', description: '按应用、域名与 BPF 筛选，保存和管理 PCAP 文件。' },
+  { id: 'http-debug', label: 'HTTP(S) 抓包', description: '查看明文请求与响应，修改、重放并导出会话。' },
+  { id: 'capture', label: '网络包采集', description: '原始 PCAP 用于网络层诊断；查看 HTTPS 明文请使用 HTTP(S) 抓包插件。' },
   { id: 'profiles', label: '配置管理', description: '同步、校验并管理此设备的服务端配置。' },
   { id: 'activity', label: '活动记录', description: '查看本次打开界面后的连接与操作记录。' },
 ]

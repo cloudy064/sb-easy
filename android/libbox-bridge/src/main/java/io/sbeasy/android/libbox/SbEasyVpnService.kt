@@ -56,6 +56,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private val lifecycleMutex = Mutex()
     private lateinit var platform: AndroidPlatformBridge
     @Volatile private var commandServer: CommandServer? = null
+    private var appliedRuntimeContent: String? = null
     private var commandMonitor: LibboxCommandMonitor? = null
     private val restoredSelectionGroups = mutableSetOf<String>()
     private var controlLoopJob: Job? = null
@@ -235,6 +236,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeResources() {
+        io.sbeasy.android.core.HttpDebug.release()
+        appliedRuntimeContent = null
         runtimeWanted = false
         handover.close()
         networkHealthJob?.cancel()
@@ -262,6 +265,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeCore() {
+        appliedRuntimeContent = null
         commandMonitor?.close()
         commandMonitor = null
         commandServer?.let { server ->
@@ -276,6 +280,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun startCore(config: ManagedConfig) {
+        val runtimeContent = io.sbeasy.android.core.HttpDebug.overlay(config.content)
         io.sbeasy.android.core.PacketCapture.nativeStatus = { io.nekohasekai.libbox.Libbox.captureStatus() }
         io.sbeasy.android.core.PacketCapture.rotate = { io.nekohasekai.libbox.Libbox.rotateCapture() }
         io.sbeasy.android.core.PacketCapture.runtimeError = ""
@@ -287,7 +292,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
             io.sbeasy.android.core.PacketCapture.runtimeError = "采集未启动：${it.message}"
             ClientDiagnostics.error(TAG, "capture initialization failed", it)
         }
-        io.nekohasekai.libbox.Libbox.checkConfig(config.content)
+        io.nekohasekai.libbox.Libbox.checkConfig(runtimeContent)
         val inbounds = org.json.JSONObject(config.content).optJSONArray("inbounds")
         val stacks = (0 until (inbounds?.length() ?: 0)).mapNotNull { index ->
             inbounds?.optJSONObject(index)?.takeIf { it.optString("type") == "tun" }?.optString("stack", "default")
@@ -296,7 +301,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         val server = CommandServer(this, platform)
         server.start()
         try {
-            server.startOrReloadService(config.content, OverrideOptions())
+            server.startOrReloadService(runtimeContent, OverrideOptions())
             restoreLocalDefaults(config)
         } catch (error: Throwable) {
             runCatching { server.closeService() }
@@ -304,6 +309,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
             throw error
         }
         commandServer = server
+        appliedRuntimeContent = runtimeContent
         commandMonitor = LibboxCommandMonitor(::restoreRememberedSelections).also { it.connect() }
     }
 
@@ -457,17 +463,20 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override suspend fun applyConfiguration(config: ManagedConfig) {
         lifecycleMutex.withLock {
-            io.nekohasekai.libbox.Libbox.checkConfig(config.content)
+            val runtimeContent = io.sbeasy.android.core.HttpDebug.overlay(config.content)
+            io.nekohasekai.libbox.Libbox.checkConfig(runtimeContent)
             val server = requireNotNull(commandServer) { "VPN 未运行" }
             val previous = CoreGraph.repository.activeConfig()
+            val previousRuntime = appliedRuntimeContent
             try {
-                server.startOrReloadService(config.content, OverrideOptions())
+                server.startOrReloadService(runtimeContent, OverrideOptions())
                 restoreLocalDefaults(config)
                 restoredSelectionGroups.clear()
+                appliedRuntimeContent = runtimeContent
             } catch (error: Throwable) {
-                if (previous != null) {
+                if (previous != null && previousRuntime != null) {
                     runCatching {
-                        server.startOrReloadService(previous.content, OverrideOptions())
+                        server.startOrReloadService(previousRuntime, OverrideOptions())
                         restoreLocalDefaults(previous)
                     }
                 }

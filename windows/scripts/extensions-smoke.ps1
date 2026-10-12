@@ -1,5 +1,6 @@
 param(
-    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release'
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
+    [switch]$HttpDebug
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -18,11 +19,11 @@ Copy-Item -LiteralPath (Join-Path $buildDir 'core') -Destination $installRoot -R
 $serviceExe=Join-Path $installRoot 'sb-easy-service.exe'
 function Install-FromStore([string]$ExtensionId='capture') {
     $null=Invoke-TestRpc 'extensions.install' @{id=$ExtensionId}
-    $deadline=[DateTime]::UtcNow.AddSeconds(90)
+    $deadline=[DateTime]::UtcNow.AddSeconds(330)
     do {
         $job=Invoke-TestRpc 'extensions.progress'
         if($job.id -ne $ExtensionId){throw 'Wrong installation identity'}
-        if($job.phase -eq 'failed'){throw ('Store installation failed: '+$job.error)}
+        if($job.phase -eq 'failed'){throw ('Store installation failed: '+$job.id+' '+$job.error+' at '+$job.received+'/'+$job.total)}
         if([DateTime]::UtcNow -gt $deadline){throw 'Store installation timeout'}
         if((Invoke-TestRpc 'runtime.snapshot').core_pid -ne $before.core_pid){throw 'Store installation interrupted core'}
         Start-Sleep -Milliseconds 100
@@ -163,7 +164,35 @@ try {
     if(-not ((Invoke-TestRpc 'extensions.list').extensions | Where-Object id -eq 'statistics').running){throw 'Reading built-in tools disturbed statistics'}
     $null=Invoke-TestRpc 'extensions.change' @{id='statistics';action='disable'}
     if((Invoke-TestRpc 'runtime.snapshot').core_pid -ne $before.core_pid){throw 'Plugin lifecycle restarted proxy'}
-    Write-Output 'PASS: capture and statistics store downloads; capture and statistics worker crash isolation; statistics collection, disable, persistence, reinstall and no recount of disabled traffic; built-in logs without network-tools installation; unchanged proxy PID.'
+    if($HttpDebug) {
+        Install-FromStore 'http-debug'
+        $null=Invoke-TestRpc 'extensions.change' @{id='http-debug';action='enable'}
+        $null=Invoke-TestRpc 'httpdebug.start'
+        $deadline=[DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $debug=Invoke-TestRpc 'httpdebug.snapshot'
+            if($debug.phase -eq 'failed' -or [DateTime]::UtcNow -gt $deadline){throw ('HTTP engine failed: '+$debug.error)}
+            if($debug.phase -ne 'running'){Start-Sleep -Milliseconds 100}
+        }while($debug.phase -ne 'running')
+        if($debug.PSObject.Properties.Name -contains 'password'){throw 'Proxy password leaked to UI'}
+        $cert=Invoke-TestRpc 'httpdebug.certificate'
+        if($cert.der.Length -lt 1000){throw 'Public CA missing'}
+        $null=Invoke-TestRpc 'httpdebug.attach' @{domains=@('openai.com')}
+        $probe=& curl.exe --silent --show-error --max-time 10 --noproxy never-bypass.invalid --proxy "socks5h://127.0.0.1:$proxyPort" 'http://api.openai.com/test/connection-probe'
+        if($LASTEXITCODE -ne 0 -or ($probe|ConvertFrom-Json).fixture -ne 'sb-easy-connection-probe'){throw 'Capture chain lost the normal upstream'}
+        $debug=Invoke-TestRpc 'httpdebug.snapshot'
+        if(-not $debug.attached -or $debug.domains[0] -ne 'openai.com'){throw 'Capture scope was not retained'}
+        $token=([uri]$debug.url).Query.Substring(7)
+        $flows=Invoke-RestMethod 'http://127.0.0.1:17991/flows.json' -Headers @{Authorization="Bearer $token"} -NoProxy
+        if(-not ($flows | Where-Object { $_.request.host -eq 'api.openai.com' })){throw 'No parsed HTTP session'}
+        $null=Invoke-TestRpc 'extensions.change' @{id='http-debug';action='disable'}
+        if((Invoke-TestRpc 'httpdebug.snapshot').phase -ne 'stopped'){throw 'Disable did not stop the engine'}
+        $probe=& curl.exe --silent --show-error --max-time 5 --noproxy never-bypass.invalid --proxy "socks5h://127.0.0.1:$proxyPort" 'http://api.openai.com/test/connection-probe'
+        if($LASTEXITCODE -ne 0 -or ($probe|ConvertFrom-Json).fixture -ne 'sb-easy-connection-probe'){throw 'Stopping capture failed to restore normal routing'}
+        $null=Invoke-TestRpc 'extensions.change' @{id='http-debug';action='remove'}
+        Write-Output 'PASS: HTTP debug store install, independent engine, public CA, parsed HTTP through original upstream, scope retention and disable/restore/uninstall.'
+    }
+    Write-Output 'PASS: capture/statistics store lifecycle, crash isolation and persistence; built-in logs.'
 } finally {
     if($connected -and $service -and -not $service.HasExited){try{$null=Invoke-TestRpc 'connection.stop'}catch{}}
     foreach($process in @($service,$fixture)){if($process -and -not $process.HasExited){Stop-Process -Id $process.Id}}

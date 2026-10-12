@@ -14,7 +14,7 @@ const visible = computed(() => catalog.value.filter(c => c.id === 'network-tools
 const percent = computed(() => Math.min(100, Math.round(100 * (progress.value?.received ?? 0) / (progress.value?.total || 1))))
 const phaseLabel = computed(() => progress.value?.phase === 'verifying' ? '正在校验安装包' : progress.value?.phase === 'installing' ? '正在安装' : '正在下载')
 function state(id: string) { return items.value.find(i => i.id === id) }
-function features(id: ExtensionId) { return id === 'capture' ? ['应用与域名筛选','PCAP 导出','独立进程'] : id === 'statistics' ? ['按应用与域名汇总','本地历史','独立进程'] : ['活动连接','规则详情','脱敏日志'] }
+function features(id: ExtensionId) { return id === 'http-debug' ? ['HTTPS 明文会话','修改与重放','mitmproxy 引擎'] : id === 'capture' ? ['应用与域名筛选','PCAP 导出','独立进程'] : id === 'statistics' ? ['按应用与域名汇总','本地历史','独立进程'] : ['活动连接','规则详情','脱敏日志'] }
 function message(code: string) {
   return ({ STORE_DOWNLOAD: '下载失败，请检查网络后重试。', STORE_INTEGRITY: '安装包未通过完整性校验，已停止安装。请重试。', STORE_STORAGE: '无法写入扩展文件，请检查磁盘空间和目录权限后重试。', STORE_EXISTS: '此扩展已安装，或安装目录已被占用。', BUSY: '操作正在进行，请稍后重试。' } as Record<string,string>)[code] || '安装未完成，请重试。'
 }

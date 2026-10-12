@@ -18,7 +18,7 @@ root = Path(__file__).resolve().parents[2]
 capture_files = ['extension.json', 'sb-easy-capture.exe', 'capture/WinDivert.dll', 'capture/WinDivert64.sys',
                  'licenses/WinDivert.txt', 'licenses/libpcap.txt', 'licenses/vue.txt', 'licenses/sbj-grisu2-MIT.txt']
 specs = [
-    ('capture', '流量采集', '按应用、域名筛选网络数据，保存 PCAP，按需上传用于排查问题。',
+    ('capture', '网络包采集（PCAP）', '采集原始网络包用于底层诊断，HTTPS 仍为密文。需要明文请求与响应，请安装 HTTP(S) 抓包。',
      '包含采集驱动。启用后可采集数据包，上传需单独开启。', capture_files),
     ('statistics', '流量统计', '按应用、域名和出口查看历史流量，定位流量消耗。',
      '启用后在本机记录应用、访问域名、出口和字节数。不读取数据包正文，不上传历史记录。',
@@ -26,6 +26,9 @@ specs = [
     ('network-tools', '网络排查', '集中查看活动连接、规则匹配和脱敏日志，排查代理问题。',
      '打开时读取当前连接元数据、规则和脱敏日志。不采集数据包，不保存访问历史。',
      ['extension.json', 'licenses/vue.txt']),
+    ('http-debug', 'HTTP(S) 抓包', '由 mitmproxy 驱动，查看明文请求与响应，支持修改、重放和 HAR 导出。',
+     '仅在本机运行。安装 CA 证书需单独操作；会话含敏感正文，默认只保存在内存。仅接管选定域名。',
+     ['extension.json', 'sb-easy-http-debug.exe', 'licenses/http-debug.txt', 'licenses/vue.txt']),
 ]
 def quote(s):
     return json.dumps(s, ensure_ascii=False)
@@ -59,7 +62,7 @@ with zipfile.ZipFile(root/'build/sb-easy-capture-1.0.0-windows-x64.zip') as capt
                 data += struct.pack('<I', len(content)) + content
         digest = hashlib.sha256(data).hexdigest()
         filename = f'{id}-1.0.0-{digest[:16]}.sbe'
-        if len(data) > 16*1024*1024:
+        if len(data) > 128*1024*1024:
             raise ValueError('Bundle too large')
         if data:
             (root/'build'/filename).write_bytes(data)

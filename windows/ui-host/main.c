@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <wincrypt.h>
 #include "../common.h"
 #include "pipe_client.h"
 #include "server_identity.h"
@@ -102,6 +103,30 @@ static void send_json(desktop *app, const sbj *value) {
 static void send_failure(desktop *app, const sbj *id, const char *code, const char *text) {
     sbj *value = failure(id, code, text); send_json(app, value); sbj_free(value);
 }
+static bool httpdebug_local(desktop *app,sbj *request,char **response,sbw_error *error) {
+    const char *method=sbj_get_str(request,"method","");bool export_har=sb_streq(method,"httpdebug.export"),open=sb_streq(method,"httpdebug.open")||export_har,remove=sb_streq(method,"httpdebug.untrust");
+    sbj *query=sbj_clone(request);sbj_set_str(query,"method",open?"httpdebug.snapshot":"httpdebug.certificate");char *raw=sbj_dump(query,-1),*answer=NULL;sbj_free(query);
+    int failed=sbw_pipe_request(app->pipe,raw,app->cancel,10000,&answer,error);free(raw);if(failed)return false;
+    sbj *reply=sbw_json_parse(answer,strlen(answer),32,error);free(answer);bool ok=sbj_get_bool(reply,"ok",false);const sbj *result=sbj_get(reply,"result");
+    if(!ok){sbw_fail(error,"HTTP_DEBUG_ERROR",sbj_get_str(sbj_get(reply,"error"),"message","Start HTTP debugging first."));sbj_free(reply);return false;}
+    if(open) {
+        const char *url=sbj_get_str(result,"url","");const char *prefix="http://127.0.0.1:17991/?token=";size_t n=strlen(prefix);
+        ok=strlen(url)==n+64&&!strncmp(url,prefix,n)&&strspn(url+n,"0123456789abcdef")==64;
+        if(ok){char destination[160];sprintf_s(destination,sizeof destination,"http://127.0.0.1:17991/%s?token=%s",export_har?"sbeasy.har":"",url+n);wchar_t *wide=sbw_wide(destination,error);ok=wide&&(INT_PTR)ShellExecuteW(NULL,L"open",wide,NULL,NULL,SW_SHOWNORMAL)>32;free(wide);}
+    }else {
+        const char *hex=sbj_get_str(result,"der","");DWORD size=0;ok=*hex&&strlen(hex)<32768&&CryptStringToBinaryA(hex,0,CRYPT_STRING_HEXRAW,NULL,&size,NULL,NULL);
+        BYTE *bytes=ok?sb_xmalloc(size):NULL;PCCERT_CONTEXT cert=NULL;HCERTSTORE store=NULL;
+        if(ok)ok=CryptStringToBinaryA(hex,0,CRYPT_STRING_HEXRAW,bytes,&size,NULL,NULL);
+        if(ok){cert=CertCreateCertificateContext(X509_ASN_ENCODING,bytes,size);ok=cert!=NULL;}
+        if(ok){store=CertOpenStore(CERT_STORE_PROV_SYSTEM_W,0,0,CERT_SYSTEM_STORE_CURRENT_USER,L"ROOT");ok=store!=NULL;}
+        if(ok&&remove){PCCERT_CONTEXT found=CertFindCertificateInStore(store,X509_ASN_ENCODING,0,CERT_FIND_EXISTING,cert,NULL);ok=!found||CertDeleteCertificateFromStore(found);}
+        else if(ok)ok=CertAddCertificateContextToStore(store,cert,CERT_STORE_ADD_USE_EXISTING,NULL);
+        if(store)CertCloseStore(store,0);if(cert)CertFreeCertificateContext(cert);free(bytes);
+    }
+    if(ok){sbj *body=sbj_object();sbj_set_bool(body,"ready",true);sbj_set(reply,"result",body);*response=sbj_dump(reply,-1);}
+    else sbw_fail(error,"HTTP_DEBUG_ERROR",open?"Could not open the local capture window.":"Could not update this user's capture certificate.");
+    sbj_free(reply);return ok;
+}
 static void receive(desktop *app, ICoreWebView2WebMessageReceivedEventArgs *args) {
     LPWSTR source = NULL, raw = NULL;
     sbw_error error = {0};
@@ -111,7 +136,7 @@ static void receive(desktop *app, ICoreWebView2WebMessageReceivedEventArgs *args
     bool allowed = false, queued = false;
     static const char *methods[] = {"service.start", "protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
                                    "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server", "routing.gpt_node", "routing.set", "subscriptions.fetch", "subscriptions.save", "subscriptions.remove",
-                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "extensions.list", "extensions.change", "extensions.catalog", "extensions.install", "extensions.progress", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
+                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "extensions.list", "extensions.change", "extensions.catalog", "extensions.install", "extensions.progress", "httpdebug.open", "httpdebug.export", "httpdebug.trust", "httpdebug.untrust", "httpdebug.start", "httpdebug.stop", "httpdebug.snapshot", "httpdebug.attach", "httpdebug.certificate", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source))) return;
     allowed = source && wcscmp(source, app_uri) == 0; CoTaskMemFree(source);
     if (!allowed) return;
@@ -163,6 +188,9 @@ static unsigned __stdcall work(void *context) {
         id = sbj_get(parsed_request, "id");
         int ready = 0;
         bool local = sbj_string_is(sbj_get(parsed_request, "method"), "service.start");
+        const char *operation=sbj_get_str(parsed_request,"method","");
+        bool debug_local=sb_streq(operation,"httpdebug.export")||sb_streq(operation,"httpdebug.open")||sb_streq(operation,"httpdebug.trust")||sb_streq(operation,"httpdebug.untrust");
+        if(debug_local){if(sbj_obj_len(sbj_get(parsed_request,"params")))sbw_fail(&error,"INVALID_REQUEST","Expected empty params.");else valid=httpdebug_local(app,parsed_request,&response,&error);}
         if (local) {
             if (wcscmp(app->pipe, default_pipe) || app->service_data || sbj_size(sbj_get(parsed_request, "params")))
                 sbw_fail(&error, "INVALID_REQUEST", "仅默认安装支持管理员启动服务。");
@@ -181,7 +209,7 @@ static unsigned __stdcall work(void *context) {
             free(binary);
         }
         DWORD request_timeout = sbj_string_is(sbj_get(parsed_request, "method"), "connection.start") ? 90000 : 35000;
-        if (parsed_request && !local && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, request_timeout, &response, &error)) {
+        if (parsed_request && !local && !debug_local && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, request_timeout, &response, &error)) {
             parsed_response = sbw_json_parse(response, strlen(response), 32, &error);
             valid = sbj_is_object(parsed_response) && sbj_equal(sbj_get(parsed_response, "id"), id) &&
                 sbj_is_integer(sbj_get(parsed_response, "version")) && sbj_get_int(parsed_response, "version", 0) == 1 &&

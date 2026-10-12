@@ -64,7 +64,7 @@ int sbw_store_publish(const char *id,const wchar_t *root,const void *bytes,size_
     const sbw_extension_release *release=sbw_extension_release_find(id);
     if(!release)return sbw_fail(error,"INVALID_REQUEST","Unknown extension.");
     unsigned char hash[32]={0};BCRYPT_ALG_HANDLE algorithm=NULL;char hex[65];
-    if(length!=release->bytes||length>16U*1024U*1024U||memcmp(bytes,"SBECP001",8))
+    if(length!=release->bytes||length>128U*1024U*1024U||memcmp(bytes,"SBECP001",8))
         return sbw_fail(error,"STORE_INTEGRITY","The extension package is incomplete or invalid.");
     if(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0)<0)
         return sbw_fail(error,"STORE_INTEGRITY","Package verification is unavailable.");
@@ -118,7 +118,7 @@ static DWORD WINAPI install_worker(void *context) {
     wchar_t host[256],path[1024];URL_COMPONENTS url={0};url.dwStructSize=sizeof url;url.lpszHostName=host;url.dwHostNameLength=256;url.lpszUrlPath=path;url.dwUrlPathLength=1024;
     if(!WinHttpCrackUrl(release->url,0,0,&url))goto done;
     session=WinHttpOpen(L"sb-easy extension store/1",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session)goto done;
-    WinHttpSetTimeouts(session,5000,5000,5000,5000);
+    WinHttpSetTimeouts(session,5000,5000,5000,20000);
     connection=WinHttpConnect(session,host,url.nPort,0);if(!connection)goto done;
     request=WinHttpOpenRequest(connection,L"GET",path,NULL,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,url.nScheme==INTERNET_SCHEME_HTTPS?WINHTTP_FLAG_SECURE:0);if(!request)goto done;
     DWORD disabled=WINHTTP_DISABLE_AUTHENTICATION|WINHTTP_DISABLE_COOKIES|WINHTTP_DISABLE_REDIRECTS;
@@ -127,7 +127,7 @@ static DWORD WINAPI install_worker(void *context) {
     if(!WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)||!WinHttpReceiveResponse(request,NULL))goto done;
     DWORD code=0,size=sizeof code;
     if(!WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&code,&size,WINHTTP_NO_HEADER_INDEX)||code!=200)goto done;
-    bytes=sb_xcalloc(release->bytes+1,1);ULONGLONG deadline=GetTickCount64()+60000;
+    bytes=sb_xcalloc(release->bytes+1,1);ULONGLONG deadline=GetTickCount64()+(release->bytes>16U*1024U*1024U?300000:60000);
     for(;;) {
         DWORD count=0;
         if(InterlockedCompareExchange(&stopping,0,0)||GetTickCount64()>deadline)goto done;

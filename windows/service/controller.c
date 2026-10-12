@@ -7,6 +7,8 @@
 #include "capture.h"
 #include "extensions.h"
 #include "extension_store.h"
+#include "extension_process.h"
+#include "http_debug.h"
 #include <wincrypt.h>
 #include <tlhelp32.h>
 #include <stdlib.h>
@@ -33,6 +35,9 @@ struct sbw_controller {
     ULONGLONG traffic_saved;
     bool traffic_storage_ok, traffic_load_ok;
     sbw_capture *capture;
+    sbw_extension_process *httpdebug;
+    char *httpdebug_base;
+    sbj *httpdebug_domains;
     HANDLE upload_thread, upload_cancel;
     SRWLOCK upload_lock;
     char upload_status[256];
@@ -184,6 +189,7 @@ void sbw_controller_free(sbw_controller *controller) {
     if (controller->monitor) { WaitForSingleObject(controller->monitor, INFINITE); CloseHandle(controller->monitor); }
     if (controller->monitor_stop) CloseHandle(controller->monitor_stop);
     capture_upload_join(controller); sbw_capture_free(controller->capture); controller->capture = NULL;
+    sbw_extension_process_free(controller->httpdebug);sbw_secret_free(controller->httpdebug_base);sbj_free(controller->httpdebug_domains);
     /* All IPC workers are joined by the caller before freeing this owner. */
     sbw_core_stop(controller->core, NULL);
     sbw_runtime_config_free(&controller->active_config);
@@ -210,6 +216,7 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     }
 }
 bool sbw_is_mutating_method(const char *method) {
+    if(sb_streq(method,"httpdebug.start")||sb_streq(method,"httpdebug.attach")||sb_streq(method,"httpdebug.stop"))return true;
     return sb_streq(method,"extensions.install") || sb_streq(method,"extensions.change") || !strncmp(method,"subscriptions.",14) || sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "routing.gpt_node") || sb_streq(method, "routing.set") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
         sb_streq(method, "config.refresh") || sb_streq(method, "config.validate") ||
         sb_streq(method, "connection.start") || sb_streq(method, "connection.stop");
@@ -244,6 +251,9 @@ static sbj *runtime_status(sbw_controller *controller) {
     return result;
 }
 static void clear_active(sbw_controller *controller) {
+    sbw_extension_process_free(controller->httpdebug);controller->httpdebug=NULL;
+    sbw_secret_free(controller->httpdebug_base);controller->httpdebug_base=NULL;
+    sbj_free(controller->httpdebug_domains);controller->httpdebug_domains=NULL;
     sbw_capture_observe(controller->capture, 0, NULL, NULL);
     sbj_free(controller->active); controller->active = NULL;
     sbw_runtime_config_free(&controller->active_config);
@@ -509,8 +519,66 @@ done:
     sbj_free(connections); sbj_free(proxies);
     ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
 }
+static sbj *httpdebug_dispatch(sbw_controller *c,const char *method,const sbj *params,sbw_error *error) {
+    if(sb_streq(method,"httpdebug.start")) {
+        if(!sbw_extension_is_enabled("http-debug")){sbw_fail(error,"EXTENSION_MISSING","Install and enable HTTP(S) debugging first.");return NULL;}
+        if(!c->active||!c->runtime.core_running){sbw_fail(error,"NOT_CONNECTED","Connect the proxy first.");return NULL;}
+        if(c->httpdebug){sbw_fail(error,"BUSY","Stop the existing capture session first.");return NULL;}
+        c->httpdebug=sbw_extension_process_new(L"extensions\\http-debug\\sb-easy-http-debug.exe",error);
+        sbj *p=sbj_object();wchar_t *dir=sbw_path_join(sbw_core_work_directory(c->core),L"http-debug");char *utf=sbw_utf8(dir,error);free(dir);
+        sbj_set_str(p,"directory",utf?utf:"");free(utf);
+        sbj *r=sbw_extension_process_call(c->httpdebug,"start",p,error);sbj_free(p);
+        if(!r){sbw_extension_process_free(c->httpdebug);c->httpdebug=NULL;}return r;
+    }
+    if(sb_streq(method,"httpdebug.stop")) {
+        if(c->httpdebug_base) {
+            sbw_runtime_config restored={0};
+            if(prepare_candidate(c,c->active,&restored,error))return NULL;
+            if(check_config(c,&restored,error)){sbw_runtime_config_free(&restored);return NULL;}
+            sbw_core_stop(c->core,NULL);
+            if(launch_healthy(c,&restored,error)) {
+                sbw_runtime_config_free(&restored);
+                sbw_error ignored={0};sbw_core_stop(c->core,NULL);launch_healthy(c,&c->active_config,&ignored);
+                return NULL;
+            }
+            sbw_runtime_config_free(&c->active_config);c->active_config=restored;
+            sbw_secret_free(c->httpdebug_base);c->httpdebug_base=NULL;
+            sbj_free(c->httpdebug_domains);c->httpdebug_domains=NULL;
+        }
+        sbw_extension_process_free(c->httpdebug);c->httpdebug=NULL;
+    }
+    if(!c->httpdebug){sbj *r=sbj_object();sbj_set_str(r,"phase","stopped");sbj_set_str(r,"url","");sbj_set_str(r,"error","");sbj_set_bool(r,"attached",false);return r;}
+    if(sb_streq(method,"httpdebug.certificate"))return sbw_extension_process_call(c->httpdebug,"certificate",NULL,error);
+    sbj *r=sbw_extension_process_call(c->httpdebug,"snapshot",NULL,error);
+    if(!r)return NULL;
+    if(sb_streq(method,"httpdebug.attach")) {
+        if(c->httpdebug_base||!sbj_string_is(sbj_get(r,"phase"),"running")){sbj_free(r);sbw_fail(error,"BUSY","Wait for the engine, or stop the existing capture first.");return NULL;}
+        char *adapted=sbw_http_debug_overlay(c->active_config.json,sbj_get(params,"domains"),sbj_get_str(r,"password",""),error);
+        if(!adapted){sbj_free(r);return NULL;}
+        char *original=c->active_config.json;c->active_config.json=adapted;
+        if(check_config(c,&c->active_config,error)){c->active_config.json=original;sbw_secret_free(adapted);sbj_free(r);return NULL;}
+        sbw_core_stop(c->core,NULL);
+        if(launch_healthy(c,&c->active_config,error)) {
+            c->active_config.json=original;sbw_secret_free(adapted);
+            sbw_error ignored={0};sbw_core_stop(c->core,NULL);launch_healthy(c,&c->active_config,&ignored);sbj_free(r);return NULL;
+        }
+        c->httpdebug_base=original;
+        c->httpdebug_domains=sbj_clone(sbj_get(params,"domains"));
+    }
+    sbj_del(r,"password");sbj_del(r,"username");sbj_set_bool(r,"attached",c->httpdebug_base!=NULL);return r;
+}
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params, bool authorized, sbw_error *error) {
     if (!controller || !method) { sbw_fail(error, "INVALID_REQUEST", "Invalid service operation."); return NULL; }
+    if(!strncmp(method,"httpdebug.",10)) {
+        if(!authorized){sbw_fail(error,"FORBIDDEN","HTTP debugging requires the active console session.");return NULL;}
+        if(!sbj_is_object(params)||(!sb_streq(method,"httpdebug.attach")&&sbj_obj_len(params))||
+           (sb_streq(method,"httpdebug.attach")&&sbj_obj_len(params)!=1)||
+           !(sb_streq(method,"httpdebug.start")||sb_streq(method,"httpdebug.stop")||sb_streq(method,"httpdebug.snapshot")||sb_streq(method,"httpdebug.attach")||sb_streq(method,"httpdebug.certificate"))){sbw_fail(error,"INVALID_REQUEST","Invalid HTTP debug request.");return NULL;}
+        if(!TryAcquireSRWLockExclusive(&controller->mutation_lock)){sbw_fail(error,"BUSY","A connection operation is in progress.");return NULL;}
+        sbj *result=httpdebug_dispatch(controller,method,params,error);
+        if(result){sbj_del(result,"password");sbj_del(result,"username");if(!sbj_has(result,"der")){sbj_set_bool(result,"attached",controller->httpdebug_base!=NULL);sbj_set(result,"domains",controller->httpdebug_domains?sbj_clone(controller->httpdebug_domains):sbj_array());}}
+        ReleaseSRWLockExclusive(&controller->mutation_lock);return result;
+    }
     bool is_apply = strcmp(method, "enrollment.apply") == 0;
     if (!sbj_is_object(params) || (!is_apply && strncmp(method,"subscriptions.",14) && strncmp(method,"extensions.",11) && !sb_streq(method, "routing.gpt_node") && !sb_streq(method, "routing.set") && strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
         sbw_fail(error, "INVALID_REQUEST", "This operation expects object params."); return NULL;
@@ -532,6 +600,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             const char *action=sbj_get_str(params,"action",""),*id=sbj_get_str(params,"id","");
             if (sbw_store_busy()) sbw_fail(error,"BUSY","An extension installation is in progress.");
             else if (sb_streq(action,"enable") || sb_streq(action,"disable") || sb_streq(action,"remove")) {
+                if(sb_streq(id,"http-debug")&&controller->httpdebug){sbj *stopped=httpdebug_dispatch(controller,"httpdebug.stop",NULL,error);if(!stopped){ReleaseSRWLockExclusive(&controller->mutation_lock);return NULL;}sbj_free(stopped);}
                 if(sb_streq(id,"capture")){capture_upload_join(controller);sbw_capture_free(controller->capture);controller->capture=NULL;}
                 if(sb_streq(id,"statistics")){persist_traffic(controller);sbw_traffic_free(controller->traffic);controller->traffic=NULL;}
                 if (!sbw_extension_change(id,action,error)) result=sbw_extensions_snapshot(controller->capture,sbw_traffic_running(controller->traffic),false);

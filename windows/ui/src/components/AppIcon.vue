@@ -1,6 +1,7 @@
 <script setup lang="ts">
 defineProps<{ name: string }>()
 const paths: Record<string, string> = {
+  'http-debug': 'M8 3H5v18h14V3h-3M9 3h6v4H9zM8 12h8M8 16h5',
   capture: 'M3 7V3h4M17 3h4v4M21 17v4h-4M7 21H3v-4M3 12h4l3-5 4 10 3-5h4',
   statistics: 'M4 20V10h4v10M10 20V4h4v16M16 20v-8h4v8',
   logs: 'M5 3h14v18H5zM8 7h8M8 11h8M8 15h5',

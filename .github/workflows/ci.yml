@@ -7,6 +7,25 @@ on:
     branches: [master]
 
 jobs:
+  http-debug-engine:
+    name: Local HTTPS decryption, replay and packaged engine
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: extensions/http-debug/requirements-windows.lock
+      - name: Install pinned engine dependencies
+        run: python -m pip install -r extensions/http-debug/requirements-windows.lock
+      - name: Verify TLS, plaintext, edits, replay, HAR and restricted controls
+        run: python extensions/http-debug/tests/test_engine.py
+      - name: Build standalone optional worker
+        run: python -m PyInstaller --noconfirm --onefile --name sb-easy-http-debug --distpath build/http-debug --workpath build/http-debug-freeze --specpath build --paths extensions/http-debug --collect-all mitmproxy --collect-all mitmproxy_rs --copy-metadata mitmproxy --collect-all mitmproxy_windows extensions/http-debug/worker.py
+      - name: Verify packaged worker
+        run: python extensions/http-debug/tests/worker_smoke.py build/http-debug/sb-easy-http-debug.exe
+
   windows:
     name: Windows C11 desktop preview (x64)
     runs-on: windows-2022
@@ -49,13 +68,13 @@ jobs:
             $setup = Start-Process ./build/WebView2Setup.exe -ArgumentList '/silent /install' -Wait -PassThru
             if ($setup.ExitCode -ne 0) { throw 'WebView2 Runtime installation failed' }
           }
-          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.6.8-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
+          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.6.9-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
       - uses: actions/upload-artifact@v4
         with:
           name: sb-easy-windows-x64-packages
           path: |
-            build/sb-easy-0.6.8-windows-x64-portable.zip
-            build/sb-easy-0.6.8-windows-x64.msi
+            build/sb-easy-0.6.9-windows-x64-portable.zip
+            build/sb-easy-0.6.9-windows-x64.msi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

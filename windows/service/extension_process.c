@@ -19,7 +19,7 @@ sbj *sbw_extension_process_call(sbw_extension_process *c,const char *method,cons
     if(!sbw_extension_process_running(c)){sbw_fail(error,"EXTENSION_FAILED","Extension stopped. Re-enable it in Extensions.");goto done;}
     exchange x={c,sbj_object(),NULL};sbj_set_str(x.request,"method",method);sbj_set(x.request,"params",params?sbj_clone(params):sbj_object());
     HANDLE thread=CreateThread(NULL,0,exchange_main,&x,0,NULL);
-    if(!thread||WaitForSingleObject(thread,3000)!=WAIT_OBJECT_0) {
+    if(!thread||WaitForSingleObject(thread,sb_streq(method,"start")?20000:3000)!=WAIT_OBJECT_0) {
         c->failed=true;
         /* Terminating the optional child releases both pipe ends and unblocks
          * any pending synchronous read/write. The proxy core is independent. */

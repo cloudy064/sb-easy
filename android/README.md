@@ -1,5 +1,16 @@
 # sb-easy Android
 
+## 1.3.3 HTTP(S) debugging preview
+
+Version code 27 adds an optional, separately installed local mitmproxy engine.
+Tools → HTTP(S) debugging includes the plugin store entry, explicit CA export,
+domain selection, local session window and HAR download. The Android plugin
+runs independently of a computer. Its engine supports ARM64 and x86_64;
+the base app retains its existing ABI coverage. Host and plugin must share a
+signing identity; these builds retain the existing debug/test signing identity.
+See [setup, routing behavior and limitations](../extensions/http-debug/README.md).
+User CA trust is application-dependent; certificate-pinned apps are not bypassed.
+
 ## 1.3.2 maintenance release
 
 Version code 26 rebuilds the existing 1.3.1 feature set from the current source

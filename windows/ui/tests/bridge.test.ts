@@ -5,6 +5,18 @@ import { validParams, validResult } from '../src/lib/protocol.js'
 import { configStage } from '../src/lib/config.js'
 import { connectionActions, runtimeDetail } from '../src/lib/connection.js'
 
+test('HTTP debug certificates and browser launch cannot accept arbitrary files or URLs', () => {
+  for (const method of ['httpdebug.open','httpdebug.trust','httpdebug.untrust','httpdebug.export'] as const) {
+    assert.equal(validParams(method, {}), true)
+    assert.equal(validParams(method, { url: 'file:///private', der: '00' }), false)
+  }
+  assert.equal(validParams('httpdebug.attach', { domains: ['example.com'] }), true)
+  assert.equal(validParams('httpdebug.attach', { domains: [] }), false)
+  assert.equal(validParams('httpdebug.attach', { domains: ['https://example.com'] }), false)
+  assert.equal(validParams('extensions.install', { id: 'http-debug' }), true)
+  assert.equal(validResult('httpdebug.snapshot', { phase: 'failed', attached: true, url: '', error: 'Engine stopped' }), true)
+})
+
 test('extension commands require known identities and explicit lifecycle actions', () => {
   assert.equal(validResult('extensions.progress', { id: '', phase: 'idle', received: 0, total: 846176, error: '' }), true)
   assert.equal(validResult('extensions.progress', { id: 'statistics', phase: 'complete', received: 846176, total: 846176, error: '' }), true)

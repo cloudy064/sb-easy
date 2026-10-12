@@ -37,7 +37,7 @@ if ($IncludeCore) {
         Copy-Item -LiteralPath (Join-Path $binaryRoot "core\$name") -Destination (Join-Path $stage 'core')
     }
 }
-$archive = Join-Path $buildRoot 'sb-easy-0.6.8-windows-x64-portable.zip'
+$archive = Join-Path $buildRoot 'sb-easy-0.6.9-windows-x64-portable.zip'
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
 Write-Output "Windows preview packaged at $archive"
 Get-FileHash -LiteralPath $archive -Algorithm SHA256

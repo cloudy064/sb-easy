@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(sb_easy_windows VERSION 0.6.8 LANGUAGES C RC)
+project(sb_easy_windows VERSION 0.6.9 LANGUAGES C RC)
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The Windows preview requires MSVC targeting x64")
@@ -101,7 +101,7 @@ if(SB_EASY_BUILD_STATISTICS_EXTENSION)
     set_target_properties(sb-easy-statistics PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extensions/statistics")
 endif()
 
-add_library(sb_windows_controller STATIC service/controller.c service/secure_store.c service/core_process.c service/runtime_config.c service/dashboard.c service/traffic_proxy.c service/extension_process.c service/capture_proxy.c service/extensions.c service/extension_store.c service/extension_store.c service/diagnostics.c service/routing.c service/routing_groups.c service/subscriptions.c)
+add_library(sb_windows_controller STATIC service/controller.c service/http_debug.c service/secure_store.c service/core_process.c service/runtime_config.c service/dashboard.c service/traffic_proxy.c service/extension_process.c service/capture_proxy.c service/extensions.c service/extension_store.c service/extension_store.c service/diagnostics.c service/routing.c service/routing_groups.c service/subscriptions.c)
 target_include_directories(sb_windows_controller PUBLIC service)
 target_link_libraries(sb_windows_controller PUBLIC sb_windows_runtime sb_windows_control_plane
     sb_windows_common crypt32 bcrypt advapi32 shell32 ole32 iphlpapi)
@@ -139,7 +139,7 @@ if(SB_EASY_BUILD_DESKTOP)
 
     add_executable(sb-easy WIN32 ui-host/app.rc ui-host/main.c ui-host/pipe_client.c ui-host/server_identity.c ui-host/service_start.c ui-host/webview_guids.c ui-host/app.manifest)
     target_link_libraries(sb-easy PRIVATE sb_webview2 sb_windows_common
-        user32 shell32 ole32 shlwapi version advapi32 uuid)
+        user32 shell32 ole32 shlwapi version advapi32 uuid crypt32)
     sb_windows_target(sb-easy)
     # Refresh packaged assets on every build, including UI-only changes.
     add_custom_target(sb_windows_ui_assets ALL
@@ -171,6 +171,10 @@ if(BUILD_TESTING)
     add_test(NAME windows_traffic COMMAND windows_traffic_test)
     add_executable(windows_subscriptions_test tests/subscriptions_test.c)
     add_executable(windows_extension_store_test tests/extension_store_test.c)
+    add_executable(windows_http_debug_test tests/http_debug_test.c)
+    target_link_libraries(windows_http_debug_test PRIVATE sb_windows_controller)
+    sb_windows_target(windows_http_debug_test)
+    add_test(NAME windows_http_debug COMMAND windows_http_debug_test)
     target_link_libraries(windows_extension_store_test PRIVATE sb_windows_controller)
     sb_windows_target(windows_extension_store_test)
     add_test(NAME windows_extension_store COMMAND windows_extension_store_test)

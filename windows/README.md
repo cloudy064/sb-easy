@@ -1,5 +1,15 @@
 # sb-easy Windows development preview
 
+## 0.6.9 HTTP(S) debugging preview
+
+The extension store now offers a local mitmproxy-based HTTP(S) debugging plugin:
+read decrypted request/response bodies, edit/replay requests, use breakpoints,
+and export HAR. Install the optional engine, explicitly trust its per-device CA,
+then choose domain suffixes to capture. Stopping/disabling restores normal
+routing. Raw PCAP capture remains a separate network-diagnostics tool.
+See [setup, build instructions and limits](../extensions/http-debug/README.md).
+The base installer does not contain the Python engine or automatically install a CA.
+
 This is an executable Windows development preview with real core connection control.
 It connects a packaged Vue UI in an unelevated Win32/WebView2 window to a real
 local service over an ACL-protected named pipe. Starting a TUN configuration can

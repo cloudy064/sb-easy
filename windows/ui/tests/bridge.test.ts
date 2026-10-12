@@ -5,6 +5,29 @@ import { validParams, validResult } from '../src/lib/protocol.js'
 import { configStage } from '../src/lib/config.js'
 import { connectionActions, runtimeDetail } from '../src/lib/connection.js'
 
+test('extension commands require known identities and explicit lifecycle actions', () => {
+  assert.equal(validResult('extensions.progress', { id: '', phase: 'idle', received: 0, total: 846176, error: '' }), true)
+  assert.equal(validResult('extensions.progress', { id: 'statistics', phase: 'complete', received: 846176, total: 846176, error: '' }), true)
+  for (const id of ['capture','statistics','network-tools']) {
+    assert.equal(validParams('extensions.install', { id }), true)
+    assert.equal(validParams('extensions.change', { id, action: 'disable' }), true)
+  }
+  assert.equal(validResult('extensions.progress', { id: '../unknown', phase: 'downloading', received: 0, total: 100, error: '' }), false)
+  assert.equal(validParams('extensions.install', { id: '../capture' }), false)
+  assert.equal(validParams('extensions.install', { id: 'capture', url: 'https://evil.invalid/package' }), false)
+  assert.equal(validParams('extensions.install', { id: 'capture', hash: 'attacker-controlled' }), false)
+  assert.equal(validResult('extensions.progress', { id: 'network-tools', phase: 'failed', received: 3, total: 10, error: 'STORE_INTEGRITY' }), true)
+  assert.equal(validResult('extensions.progress', { id: 'statistics', phase: 'complete', received: -1, total: 10, error: '' }), false)
+  assert.equal(validParams('extensions.change', { id: 'capture', action: 'enable' }), true)
+  assert.equal(validParams('extensions.change', { id: '../unknown', action: 'enable' }), false)
+  assert.equal(validParams('extensions.change', { id: 'capture', action: 'install', url: 'https://example.invalid' }), false)
+  assert.equal(validParams('extensions.list', {}), true)
+  const item = { id: 'capture', name: 'Capture', version: '1.0.0', installed: true, enabled: false, running: false, failed: false }
+  assert.equal(validResult('extensions.list', { extensions: [item] }), true)
+  assert.equal(validResult('extensions.list', { extensions: [{ ...item, version: '', installed: false }] }), true)
+  assert.equal(validResult('extensions.list', { extensions: [{ ...item, enabled: 'yes' }] }), false)
+})
+
 class TestTransport implements WebViewTransport {
   messages: Array<{ id: string; version: number; method: string; params: object }> = []
   listeners = new Set<(event: HostMessage) => void>()
@@ -30,6 +53,24 @@ class TestTransport implements WebViewTransport {
 
 const hello = { protocol_version: 1, service_version: '0.1.0', supported_methods: ['protocol.hello', 'status.get', 'enrollment.status'] }
 const status = { phase: 'UNENROLLED', enrolled: false, core_running: false, connection_available: false }
+test('unified service switching constrains group identity and mode', () => {
+  for (const group of ['default', 'claude', 'gpt', 'service-0123abcd']) {
+    assert.equal(validParams('routing.set', { group, mode: 'node', node: 'Tokyo 1' }), true)
+    assert.equal(validParams('routing.set', { group, mode: 'server' }), true)
+  }
+  assert.equal(validParams('routing.set', { group: 'claude', mode: 'default' }), true)
+  assert.equal(validParams('routing.set', { group: 'default', mode: 'default' }), false)
+  assert.equal(validParams('routing.set', { group: '../configs', mode: 'server' }), false)
+  assert.equal(validParams('routing.set', { group: 'claude', mode: 'node', node: 'bad\nnode' }), false)
+  assert.equal(validParams('routing.set', { group: 'claude', mode: 'server', node: 'extra' }), false)
+})
+test('IPv6 evidence remains optional for older services and rejects misleading values', () => {
+  assert.equal(validResult('status.get', status), true)
+  const ipv6 = { checked: true, global_address: false, native_route: false, tun_route: true, node_support: 'untested' }
+  assert.equal(validResult('status.get', { ...status, ipv6 }), true)
+  assert.equal(validResult('status.get', { ...status, ipv6: { ...ipv6, tun_route: 'yes' } }), false)
+  assert.equal(validResult('status.get', { ...status, ipv6: { ...ipv6, node_support: 'supported' } }), false)
+})
 const codeIs = (code: string) => (error: unknown) => error instanceof BridgeError && error.code === code
 
 test('browser preview has no native fallback or fabricated service response', async () => {
@@ -440,4 +481,52 @@ test('service authorization works without a live backend and preserves UAC cance
   assert.deepEqual(await retry, { ready: true })
   assert.equal(transport.messages.length, 2)
   bridge.dispose()
+})
+
+
+test('local GPT node parameters require one nonempty bounded tag', () => {
+  assert.equal(validParams('routing.gpt_node', { outbound: '🇯🇵 Tokyo 1' }), true)
+  assert.equal(validParams('routing.gpt_node', {}), false)
+  assert.equal(validParams('routing.gpt_node', { outbound: '' }), false)
+  assert.equal(validParams('routing.gpt_node', { outbound: 'x', extra: true }), false)
+  assert.equal(validParams('routing.gpt_node', { outbound: 'x\u0000y' }), false)
+  assert.equal(validParams('routing.gpt_node', { outbound: '界'.repeat(200) }), false)
+})
+
+test('busy reads retry and preserve the original deadline', async () => {
+  const transport = new TestTransport()
+  const bridge = new NativeBridge(transport, 2000)
+  const request = bridge.request('extensions.list')
+  const id = transport.messages[0].id
+  transport.respond({ id, ok: false, error: { code: 'BUSY', message: 'busy' } })
+  await new Promise(resolve => setTimeout(resolve, 220))
+  assert.equal(transport.messages.length, 2)
+  transport.respond({ id, ok: true, result: { extensions: [] } })
+  assert.deepEqual(await request, { extensions: [] })
+  bridge.dispose()
+})
+
+test('busy mutation is never replayed', async () => {
+  const transport = new TestTransport()
+  const bridge = new NativeBridge(transport)
+  const request = bridge.request('connection.stop')
+  transport.respond({ id: transport.messages[0].id, ok: false, error: { code: 'BUSY', message: 'busy' } })
+  await assert.rejects(request, codeIs('BUSY'))
+  await new Promise(resolve => setTimeout(resolve, 220))
+  assert.equal(transport.messages.length, 1)
+  bridge.dispose()
+})
+
+test('busy retry timers stop on timeout and disposal', async () => {
+  for (const dispose of [false, true]) {
+    const transport = new TestTransport()
+    const bridge = new NativeBridge(transport, 40)
+    const request = bridge.request('extensions.list')
+    transport.respond({ id: transport.messages[0].id, ok: false, error: { code: 'BUSY', message: 'busy' } })
+    if (dispose) bridge.dispose()
+    await assert.rejects(request, codeIs(dispose ? 'bridge_closed' : 'timeout'))
+    await new Promise(resolve => setTimeout(resolve, 220))
+    assert.equal(transport.messages.length, 1)
+    bridge.dispose()
+  }
 })

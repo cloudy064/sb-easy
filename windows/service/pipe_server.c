@@ -80,7 +80,7 @@ static void serve_client(pipe_worker *worker) {
         const sbj *method = sbj_get(parsed, "method");
         bool mutation = sbw_json_string(method, 128, false) && sbw_is_mutating_method(method->v.str.ptr);
         bool private_read = sbw_json_string(method, 128, false) &&
-            (!strncmp(method->v.str.ptr, "capture.", 8) || sb_streq(method->v.str.ptr, "traffic.snapshot") || sb_streq(method->v.str.ptr, "logs.snapshot") || sb_streq(method->v.str.ptr, "runtime.snapshot") || sb_streq(method->v.str.ptr, "config.inspect"));
+            (!strncmp(method->v.str.ptr, "extensions.", 11) || !strncmp(method->v.str.ptr, "capture.", 8) || sb_streq(method->v.str.ptr, "traffic.snapshot") || sb_streq(method->v.str.ptr, "logs.snapshot") || sb_streq(method->v.str.ptr, "runtime.snapshot") || sb_streq(method->v.str.ptr, "config.inspect"));
         bool permitted = (mutation || private_read) && authorized(worker->pipe, worker->stop);
         sbj_free(parsed);
         if (WaitForSingleObject(worker->stop, 0) == WAIT_OBJECT_0) { sbw_secret_free(request); return; }

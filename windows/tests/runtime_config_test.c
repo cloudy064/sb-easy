@@ -133,6 +133,15 @@ int wmain(int argc, wchar_t **argv) {
     bool sockets = WSAStartup(MAKEWORD(2, 2), &startup) == 0;
     int result = 1;
     CHECK(sockets);
+    value = sbw_runtime_ipv6_status(&other, false);
+    CHECK(sbj_is_bool(sbj_get(value, "checked")) && !sbj_get_bool(value, "tun_route", true));
+    CHECK(sbj_string_is(sbj_get(value, "node_support"), "untested"));
+    sbj_free(value); value = NULL;
+    const char dual[] = "{\"inbounds\":[{\"type\":\"tun\",\"address\":[\"172.19.0.1/30\",\"fd71:5be:a5e::1/126\"],\"auto_route\":true,\"strict_route\":true}],\"dns\":{\"strategy\":\"prefer_ipv4\"}}";
+    CHECK(sbw_runtime_config_prepare(dual, strlen(dual), "https://control.example", &other, &error) == 0);
+    CHECK(other.has_tun && other.auto_route && strstr(other.json, "fd71:5be:a5e::1/126"));
+    CHECK(strstr(other.json, "prefer_ipv4") && strstr(dual, "fd71:5be:a5e::1/126"));
+    sbw_runtime_config_free(&other);
     const char wg[] = "{\"endpoints\":[{\"type\":\"wireguard\",\"tag\":\"network\",\"system\":true,\"name\":\"wg0\",\"address\":[\"10.59.32.3/32\"],\"private_key\":\"fixture-key\",\"peers\":[{\"address\":\"vpn.example.test\",\"allowed_ips\":[\"10.59.32.0/24\"],\"public_key\":\"fixture-public\"}]}],\"route\":{\"rules\":[{\"ip_cidr\":[\"10.59.32.0/24\"],\"outbound\":\"network\"}]}}";
     CHECK(sbw_runtime_config_prepare(wg, strlen(wg), "https://panel.example.test", &other, &error) == 0);
     value = sbj_parse_cstr(other.json);

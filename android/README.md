@@ -1,5 +1,14 @@
 # sb-easy Android
 
+## 1.3.2 maintenance release
+
+Version code 26 rebuilds the existing 1.3.1 feature set from the current source
+revision. Android plugin extraction is not included. The published APKs retain
+the previous debug signing identity for upgrade compatibility; these are test
+builds, not production-key-signed builds. All five APK variants, 89 JVM tests,
+and lint pass. No new physical-device VPN acceptance is claimed for this release.
+The pinned native libraries are unchanged from the published 1.3.1 ARM64 APK.
+
 This directory contains the managed sb-easy Android client. It embeds sing-box
 1.13.12 through `libbox.aar`; no root access, external executable, local HTTP
 server, or administrator account is required on the phone.

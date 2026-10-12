@@ -45,7 +45,8 @@ traffic grouping including private suffixes. Distributed license texts are
 
 ## WinDivert 2.2.2 and libpcap 1.10.6
 
-Optional TUN capture dynamically loads the unmodified official x64 WinDivert DLL
+These dependencies ship only in the separate capture extension package, not the
+base client. The capture worker dynamically loads the unmodified official x64 WinDivert DLL
 and signed driver in sniff-only mode. WinDivert is used under LGPLv3; its full
 license is distributed as `licenses/WinDivert.txt`. Users may replace the
 compatible library/driver. Upstream source and build instructions:
@@ -56,3 +57,5 @@ libpcap's BPF compiler/interpreter is statically built from the repository's
 Npcap runtime is required. Its BSD license is included as `licenses/libpcap.txt`.
 Source: https://www.tcpdump.org/release/libpcap-1.10.6.tar.xz.
 The pinned win_flex_bison tools are build dependencies, not shipped runtimes.
+
+- yaml 2.x (ISC), Copyright Eemeli Aro. Used for local subscription parsing. License shipped as `licenses/yaml.txt`.

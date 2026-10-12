@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
-import StatisticsView from './components/StatisticsView.vue'
+import SubscriptionsPanel from './components/SubscriptionsPanel.vue'
+import { parseSubscription } from './lib/subscriptions'
+import ServiceRouting from './components/ServiceRouting.vue'
+import ExtensionView from './components/ExtensionView.vue'
+import ExtensionsPanel from './components/ExtensionsPanel.vue'
+import NetworkToolsView from './components/NetworkToolsView.vue'
 import LogsView from './components/LogsView.vue'
-import CaptureView from './components/CaptureView.vue'
-import { bytes, rates, shortVersion, nodeKind, graphPoints, ruleAction } from './lib/dashboard'
+import type { ExtensionId, ExtensionInfo } from './lib/protocol'
+import { bytes, rates, shortVersion, nodeKind } from './lib/dashboard'
 import brandMark from '../../../assets/branding/sb-easy-mark-v2.svg'
 import { BridgeError, findNativeTransport, NativeBridge } from './lib/bridge'
 import { previewEnrollment } from './lib/enrollment'
@@ -14,17 +19,25 @@ import type { ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult
 
 type ConnectionState = 'checking' | 'online' | 'offline' | 'host_missing'
 const bridge = new NativeBridge(findNativeTransport())
-type Page = 'capture' | 'statistics' | 'logs' | 'overview' | 'proxies' | 'connections' | 'profiles' | 'rules' | 'activity' | 'settings' | 'diagnostics'
+type Page = 'connections' | 'logs' | 'rules' | 'extensions' | 'capture' | 'statistics' | 'network-tools' | 'overview' | 'proxies' | 'profiles' | 'activity' | 'settings' | 'diagnostics'
 const page = ref<Page>('overview')
+const toolsOpen = ref(false)
+const extensions = ref<ExtensionInfo[]>([])
+const enabledExtensions = computed(() => extensions.value.filter(e => e.installed && e.enabled && e.id !== 'network-tools'))
+const extensionPage = computed(() => enabledExtensions.value.find(e => e.id === page.value))
+const captureEnabled = computed(() => enabledExtensions.value.some(e => e.id === 'capture'))
+function openExtension(id: ExtensionId){selectPage(id === 'network-tools' ? 'connections' : id)}
+watch(extensions, () => { if (['capture','statistics','network-tools'].includes(page.value) && !extensionPage.value) page.value = 'extensions' })
 const navigation: { id: Page; label: string; description: string }[] = [
-  { id: 'overview', label: '总览', description: '连接状态与网络活动，尽在掌握。' },
-  { id: 'proxies', label: '代理节点', description: '查看代理组、配置出口和内核测速记录。' },
-  { id: 'connections', label: '活动连接', description: '了解应用访问的目标、匹配规则与流量。' },
+  { id: 'extensions', label: '扩展商店', description: '按需安装高级功能，让基础代理保持简单。' },
+  { id: 'overview', label: '连接', description: '连接网络，为每项服务选择出口。' },
+  { id: 'proxies', label: '节点与订阅', description: '按来源管理节点，添加只在本机使用的订阅。' },
+  { id: 'connections', label: '活动连接', description: '查看当前连接、应用和实际出口。' },
+  { id: 'logs', label: '运行日志', description: '查看内核运行日志，排查连接问题。' },
+  { id: 'rules', label: '规则详情', description: '查看当前生效和已下载的分流规则。' },
   { id: 'statistics', label: '流量统计', description: '按应用、域名与 host 查看累计流量和出站记录。' },
   { id: 'capture', label: '流量采集', description: '按应用、域名与 BPF 筛选，保存和管理 PCAP 文件。' },
-  { id: 'logs', label: '运行日志', description: '查看内核运行日志与后台服务诊断。' },
   { id: 'profiles', label: '配置管理', description: '同步、校验并管理此设备的服务端配置。' },
-  { id: 'rules', label: '服务分流', description: '查看各项服务使用的节点与直连范围。' },
   { id: 'activity', label: '活动记录', description: '查看本次打开界面后的连接与操作记录。' },
 ]
 const currentPage = computed(() => navigation.find(item => item.id === page.value) ??
@@ -36,36 +49,54 @@ const runtimeIssue = ref('')
 const telemetryBusy = ref(false)
 const catalogSource = ref<'active' | 'candidate'>('active')
 const search = ref('')
+const pendingRouting = ref('')
+const routingNodes = computed(() => ((config.value?.routing_live ? inspection.value?.active : inspection.value?.candidate)?.nodes ?? []).filter(node => node.type !== 'block' && !node.tag.startsWith('sb-easy-local-')).map(node => ({ ...node, label: nodeLabel(node.tag), source: sourceMap.value.get(node.tag)?.name })))
+const routingGroups = computed(() => config.value?.routing_groups ?? [])
+const sourceFilter = ref('')
+const subscriptionSummary = computed(() => config.value?.subscriptions)
+const sourceMap = computed(() => {
+  const map = new Map<string, { key: string; name: string }>()
+  for (const scope of ['managed', 'local'] as const) for (const sub of subscriptionSummary.value?.[scope] ?? [])
+    for (const tag of sub.tags) map.set(tag, { key: `${scope}:${sub.id}`, name: sub.name })
+  return map
+})
+function nodeLabel(tag: string): string { return tag.replace(/^local-[a-f0-9-]{36}\//, '') }
 const nodeFilter = ref('all')
-const connectionFilter = ref('all')
 const theme = ref<'system' | 'light' | 'dark'>('system')
 const autoRefresh = ref(true)
-const chart = ref<{ up: number; down: number }[]>([])
+const ipv6Network = computed(() => {
+  const v = status.value?.ipv6
+  if (!v?.checked) return '尚未检测'
+  if (v.native_route) return '具备联网条件，未实测'
+  return v.global_address ? '有公网地址，缺少默认路由' : '未发现公网 IPv6'
+})
+const ipv6Tunnel = computed(() => {
+  if (!status.value?.ipv6?.checked) return '尚未检测'
+  if (!status.value.core_running) return '连接未启动'
+  return status.value.ipv6.tun_route ? '已检测到 IPv6 接管路由' : '未检测到 IPv6 接管路由'
+})
 const speed = ref<{ up: number; down: number } | null>(null)
 const activities = ref<{ id: number; time: string; title: string; detail: string; failed: boolean }[]>([])
 let activityId = 0
 let telemetryTimer: ReturnType<typeof setTimeout> | undefined
 let previousSample: RuntimeSnapshot | null = null
 const catalog = computed(() => catalogSource.value === 'active' ? inspection.value?.active : inspection.value?.candidate)
-const displayNodes = computed(() => catalogSource.value === 'active' && runtime.value ? runtime.value.nodes : catalog.value?.nodes ?? [])
+const displayNodes = computed(() => (catalogSource.value === 'active' && runtime.value ? runtime.value.nodes : catalog.value?.nodes ?? []).filter(node => !node.tag.startsWith('sb-easy-local-')))
 const groups = computed(() => displayNodes.value.filter(item => item.member_count > 0))
 const filteredNodes = computed(() => displayNodes.value.filter(item =>
+  (!sourceFilter.value || (sourceMap.value.get(item.tag)?.key ?? 'unknown') === sourceFilter.value) &&
   (nodeFilter.value === 'all' || (nodeFilter.value === 'groups' ? item.member_count > 0 : item.member_count === 0)) &&
   `${item.tag} ${item.type} ${item.selected}`.toLowerCase().includes(search.value.toLowerCase())))
-const filteredRules = computed(() => (catalog.value?.rules ?? []).filter(item =>
-  `${item.title ?? ""} ${item.match} ${item.outbound} ${ruleAction(item.action)}`.toLowerCase().includes(search.value.toLowerCase())))
-const filteredConnections = computed(() => (runtime.value?.connections ?? []).filter(item =>
-  (connectionFilter.value === 'all' || item.network.toLowerCase() === connectionFilter.value) &&
-  `${item.host} ${item.destination} ${item.process} ${item.rule} ${item.chains.join(' ')}`.toLowerCase().includes(search.value.toLowerCase())))
-const chartMaximum = computed(() => Math.max(1024, ...chart.value.flatMap(item => [item.up, item.down])))
-const upPoints = computed(() => graphPoints(chart.value.map(item => item.up), chartMaximum.value))
-const downPoints = computed(() => graphPoints(chart.value.map(item => item.down), chartMaximum.value))
 const runningCatalog = computed(() => inspection.value?.active ?? inspection.value?.candidate)
 const proxyEndpoint = computed(() => runningCatalog.value?.inbounds.find(item => ['mixed', 'socks', 'http'].includes(item.type)))
 const trafficReady = computed(() => status.value?.core_running && runtime.value?.running && !runtimeIssue.value)
-const activeVersion = computed(() => shortVersion(configMetadata.value?.active_etag))
 const sourceLabel = computed(() => catalogSource.value === 'active' ? '当前运行配置' : '已下载候选配置')
-function selectPage(value: Page): void { page.value = value; search.value = '' }
+function selectPage(value: Page): void {
+  page.value = value
+  if (['profiles', 'rules', 'activity'].includes(value)) toolsOpen.value = true
+  search.value = ''
+  window.scrollTo({ top: 0 })
+}
 function record(title: string, detail: string, failed = false): void {
   activities.value.unshift({ id: ++activityId, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), title, detail, failed })
   activities.value = activities.value.slice(0, 100)
@@ -82,13 +113,11 @@ async function readTelemetry(): Promise<void> {
     const sample = await bridge.request('runtime.snapshot', {}, { timeoutMs: 6_000 })
     if (destroyed || locked.value || !status.value?.core_running || status.value.config?.active_etag !== etag || sample.etag !== etag) return
     speed.value = rates(previousSample, sample)
-    if (previousSample && previousSample.core_pid !== sample.core_pid) chart.value = []
     previousSample = sample
-    if (speed.value) chart.value = [...chart.value.slice(-29), speed.value]
     runtime.value = sample
     runtimeIssue.value = ''
   } catch (error) {
-    if (!destroyed) { runtime.value = null; speed.value = null; previousSample = null; chart.value = []; runtimeIssue.value = errorMessage(error) }
+    if (!destroyed) { runtime.value = null; speed.value = null; previousSample = null; runtimeIssue.value = errorMessage(error) }
   } finally { telemetryBusy.value = false }
 }
 async function pollTelemetry(): Promise<void> {
@@ -106,7 +135,7 @@ const issue = ref<BridgeError | null>(null)
 const checkedAt = ref<Date | null>(null)
 const config = ref<ConfigSummary | null>(null)
 const configIssue = ref('')
-const operation = ref<'service' | 'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
+const operation = ref<'subscription' | 'service' | 'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
 const enrollmentUri = ref('')
 const confirmForget = ref(false)
 const actionNotice = ref('')
@@ -134,7 +163,7 @@ const stateLabel = computed(() => {
   if (connection.value === 'checking') return '正在检查服务'
   if (connection.value === 'offline') return '服务不可用'
   if (deviceStateError.value) return '本地设备状态不可用'
-  if (status.value?.phase === 'RUNNING' && status.value.tun_active) return '内核运行中 · TUN 已启用'
+  if (status.value?.phase === 'RUNNING') return '代理已连接'
   return phaseLabels[status.value?.phase ?? ''] ?? '未知运行状态'
 })
 const serviceLabel = computed(() => ({
@@ -146,6 +175,7 @@ const stateDetail = computed(() => {
   if (connection.value === 'offline') return '本地后台暂未就绪。刷新状态会尝试自动恢复，具体原因见下方提示。'
   if (deviceStateError.value) return '本地设备资料无法读取，已有文件保持原样。请先修复存储问题；此时不能重新注册或覆盖设备状态。'
   if (!enrollment.value?.enrolled) return '本机服务已就绪。请在下方粘贴管理面板生成的一次性注册链接，完成此设备的授权。'
+  if (status.value?.phase === 'RUNNING') return '代理已就绪。你可以在下方直接切换出口，无需断开连接。'
   return status.value ? runtimeDetail(status.value) : '正在读取本机内核状态。'
 })
 const checkedTime = computed(() => checkedAt.value?.toLocaleTimeString('zh-CN', { hour12: false }) ?? '尚未检查')
@@ -169,12 +199,16 @@ watch(actionNotice, value => { if (value) record(actionFailed.value ? '操作需
 watch(() => status.value?.phase, (value, old) => {
   if (value && value !== old) record(phaseLabels[value] ?? value, status.value ? runtimeDetail(status.value) : '')
   if (value !== 'RUNNING') {
-    runtime.value = null; previousSample = null; speed.value = null; chart.value = []; runtimeIssue.value = ''
+    runtime.value = null; previousSample = null; speed.value = null; runtimeIssue.value = ''
     if (inspection.value) inspection.value = { ...inspection.value, active: null }
   }
 })
 
 function errorMessage(error: unknown): string {
+  if (error instanceof BridgeError) {
+    const messages: Record<string, string> = { ROUTING_NODE_UNAVAILABLE: '所选节点已从配置移除，请选择其他节点或恢复服务器设置。', ROUTING_UNSUPPORTED: '此分组或 DNS 结构无法安全覆盖，请恢复服务器设置。', LIVE_ROUTING_UNAVAILABLE: '当前内核尚未包含此分组，请先应用新版配置。', LIVE_ROUTING_UNCERTAIN: '切换回滚未能确认，请刷新并检查当前出口。' }
+    if (messages[error.code]) return messages[error.code]!
+  }
   return error instanceof Error ? error.message : '操作未完成，请刷新状态后检查'
 }
 
@@ -223,11 +257,14 @@ async function refresh(): Promise<void> {
       enrollmentUri.value = ''
       confirmForget.value = false
     }
+    if (greeting.supported_methods.includes('extensions.list')) {
+      try { extensions.value = (await bridge.request('extensions.list')).extensions } catch { extensions.value = [] }
+    }
     config.value = summary.result
     configIssue.value = summary.error
     connection.value = 'online'
     if (greeting.supported_methods.includes('config.inspect') && !device.error && !runtime.error) {
-      try { const result = await bridge.request('config.inspect', {}); if (!destroyed) { inspection.value = result; catalogIssue.value = '' } }
+      try { const result = await bridge.request('config.inspect', {}); if (!destroyed) { inspection.value = result; catalogIssue.value = result.routing_warning ? '部分本地覆盖已失效，相关规则暂显示服务器配置。请重新选择节点或恢复服务器设置。' : '' } }
       catch (error) { inspection.value = null; catalogIssue.value = errorMessage(error) }
     } else { inspection.value = null; catalogIssue.value = '' }
   } catch (error) {
@@ -310,22 +347,43 @@ async function downloadConfig(): Promise<void> {
   }
 }
 
-async function setGptRouting(local: boolean): Promise<void> {
-  const method = local ? 'routing.gpt_default' : 'routing.gpt_server'
-  if (!canAct(method) || status.value?.core_running) return
+async function setServiceRouting(group: string, mode: 'node' | 'default' | 'server', node?: string): Promise<void> {
+  if (!canAct('routing.set')) return
+  if (mode === 'node' && !node) return
+  pendingRouting.value = group
   operation.value = 'routing'
   actionNotice.value = ''
   actionFailed.value = false
   try {
-    config.value = await bridge.request(method, {}, { timeoutMs: 45_000 })
-    actionNotice.value = local ? 'GPT / Codex 的流量和 DNS 已改用默认代理；设置保存在本机。' : '已恢复服务器指定的 GPT / Codex 出口。'
+    const params = mode === 'node' ? { group, mode, node: node! } : { group, mode }
+    config.value = await bridge.request('routing.set', params, { timeoutMs: 45_000 })
+    actionNotice.value = config.value.routing_live ? '出口已切换，新连接立即生效。已有连接继续使用原出口。' : '出口已保存，下次连接生效。'
+
   } catch (error) {
     actionFailed.value = true
-    actionNotice.value = errorMessage(error)
+    actionNotice.value = '切换未确认，请以刷新后的出口为准。' + errorMessage(error)
   } finally {
+    pendingRouting.value = ''
     operation.value = null
     if (!destroyed) await refresh()
   }
+}
+
+async function changeSubscription(action: 'add' | 'refresh' | 'remove', id: string, name = '', url = ''): Promise<void> {
+  if (!canAct('subscriptions.save')) return
+  operation.value = 'subscription'; actionNotice.value = ''; actionFailed.value = false
+  try {
+    if (action === 'remove') config.value = await bridge.request('subscriptions.remove', { id }, { timeoutMs: 45_000 })
+    else {
+      const downloaded = await bridge.request('subscriptions.fetch', action === 'add' ? { url } : { id }, { timeoutMs: 45_000 })
+      const nodes = parseSubscription(downloaded.body)
+      downloaded.body = ''
+      config.value = await bridge.request('subscriptions.save', { name, nodes, ...(action === 'add' ? { url } : { id }) }, { timeoutMs: 45_000 })
+    }
+    actionNotice.value = action === 'remove' ? '本机订阅已删除。' : config.value.routing_live ? '订阅已保存，节点已加入当前配置，可在首页选择。' : '订阅已保存，下次连接生效。'
+    sourceFilter.value = ''
+  } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { url = ''; operation.value = null; if (!destroyed) await refresh() }
 }
 
 async function validateConfig(): Promise<void> {
@@ -426,20 +484,27 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell" data-testid="desktop-app" :data-page="page" :data-service-state="connection === 'online' ? 'connected' : connection === 'checking' ? 'loading' : 'disconnected'" :data-enrolled="enrollment?.enrolled === true ? 'true' : 'false'" :data-candidate="config?.candidate_available === true ? 'true' : 'false'" :data-busy="locked ? 'true' : 'false'" :data-validation="stage.state" :data-phase="status?.phase ?? 'UNKNOWN'" :data-core-running="status?.core_running ? 'true' : 'false'" :data-active-etag="configMetadata?.active_etag ?? ''" :data-telemetry="runtime?.running ? 'ready' : 'waiting'" :data-samples="chart.length">
+  <div class="app-shell" data-testid="desktop-app" :data-page="page" :data-service-state="connection === 'online' ? 'connected' : connection === 'checking' ? 'loading' : 'disconnected'" :data-enrolled="enrollment?.enrolled === true ? 'true' : 'false'" :data-candidate="config?.candidate_available === true ? 'true' : 'false'" :data-busy="locked ? 'true' : 'false'" :data-validation="stage.state" :data-phase="status?.phase ?? 'UNKNOWN'" :data-core-running="status?.core_running ? 'true' : 'false'" :data-active-etag="configMetadata?.active_etag ?? ''" :data-telemetry="runtime?.running ? 'ready' : 'waiting'">
     <aside class="sidebar">
-      <div class="brand"><img :src="brandMark" alt="" /><div><strong>sb-easy<span class="brand-dot">.</span></strong><span>Windows 网络控制台</span></div></div>
+      <div class="brand"><img :src="brandMark" alt="" /><div><strong>sb-easy<span class="brand-dot">.</span></strong><span>你的网络，由你选择</span></div></div>
       <div class="sidebar-label">工作空间</div>
       <nav aria-label="主导航">
-        <button v-for="item in navigation" :key="item.id" :data-testid="`nav-${item.id}`" :class="{ selected: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)"><AppIcon :name="item.id" /><span>{{ item.label }}</span><span v-if="item.id === 'connections' && trafficReady" class="nav-count">{{ runtime?.connection_count }}</span></button>
+        <button v-for="item in navigation.filter(item => ['overview', 'proxies', 'connections', 'logs'].includes(item.id))" :key="item.id" :data-testid="`nav-${item.id}`" :class="{ selected: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)"><AppIcon :name="item.id" /><span>{{ item.label }}</span></button>
+        <div class="advanced-navigation">
+          <button class="tools-toggle" data-testid="tools-toggle" :aria-expanded="toolsOpen" aria-controls="advanced-tools" @click="toolsOpen = !toolsOpen"><span>更多工具</span><svg class="tools-chevron" :class="{ expanded: toolsOpen }" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>
+          <div id="advanced-tools" v-show="toolsOpen">
+          <button v-for="item in navigation.filter(item => ['profiles','rules','activity'].includes(item.id))" :key="item.id" :data-testid="`nav-${item.id}`" :class="{ selected: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)"><AppIcon :name="item.id" /><span>{{ item.label }}</span></button>
+          </div>
+        </div>
+        <button v-for="item in enabledExtensions" :key="item.id" :data-testid="`nav-${item.id}`" :class="{selected:page===item.id}" :aria-current="page===item.id ? 'page' : undefined" @click="openExtension(item.id)"><AppIcon :name="item.id"/><span>{{ item.name }}</span></button>
       </nav>
       <div class="sidebar-bottom">
         <button data-testid="nav-diagnostics" class="sidebar-service" @click="selectPage('diagnostics')"><span class="state-dot" :class="{ ready: connection === 'online' }"></span><div><strong>服务 {{ serviceLabel }}</strong><span>{{ hello ? `v${hello.service_version}` : '等待服务响应' }}</span></div><AppIcon name="arrow" /></button>
-        <button class="settings-nav" data-testid="nav-settings" :class="{ selected: page === 'settings' }" @click="selectPage('settings')"><AppIcon name="settings" /><span>设置</span><span class="preview-badge">预览</span></button>
+        <button class="settings-nav" data-testid="nav-settings" :class="{ selected: page === 'settings' }" @click="selectPage('settings')"><AppIcon name="settings" /><span>设置</span></button>
       </div>
     </aside>
     <main id="main-content">
-      <header class="page-header"><div><p class="eyebrow">WORKSPACE / {{ page.toUpperCase() }}</p><h1>{{ currentPage.label }}</h1><p class="page-description">{{ currentPage.description }}</p></div><div class="header-actions"><span class="status-tag" :class="{ pending: !status?.core_running }"><span class="state-dot" :class="{ ready: status?.core_running }"></span>{{ status?.core_running ? '内核运行中' : '未连接' }}</span><button class="refresh-button" data-testid="status-refresh" :disabled="locked" @click="refresh"><AppIcon name="refresh" :class="{ spinning: busy }" />{{ busy ? '检查中' : '刷新' }}</button></div></header>
+      <header class="page-header"><div><h1>{{ currentPage.label }}</h1><p class="page-description">{{ currentPage.description }}</p></div><div class="header-actions"><span class="status-tag" :class="{ pending: !status?.core_running }"><span class="state-dot" :class="{ ready: status?.core_running }"></span>{{ status?.core_running ? '代理已启动' : '未连接' }}</span><button class="refresh-button" data-testid="status-refresh" :disabled="locked" @click="refresh"><AppIcon name="refresh" :class="{ spinning: busy }" />{{ busy ? '检查中' : '刷新' }}</button></div></header>
       <div v-if="issue && connection !== 'host_missing'" class="error-notice" role="alert"><strong>服务通信未完成</strong><span>{{ issue.message }}</span>
         <template v-if="bridge.available && connection === 'offline'">
           <button class="connect-button" data-testid="service-authorize" :disabled="locked" @click="startService">{{ operation === 'service' ? '等待管理员授权与服务启动…' : '授权并启动服务' }}</button>
@@ -451,17 +516,18 @@ onBeforeUnmount(() => {
 
       <template v-if="page === 'overview'">
         <section class="connection-card" :class="{ 'is-running': status?.core_running }" aria-labelledby="connection-title" aria-live="polite" :aria-busy="locked" data-testid="connection-summary">
-          <div class="connection-top"><div><div class="state-kicker"><AppIcon name="shield" />{{ status?.tun_active ? 'TUN 网络接管已启用' : status?.core_running ? '本地代理已就绪' : '准备连接你的网络' }}</div><h2 id="connection-title">{{ stateLabel }}</h2><p>{{ stateDetail }}</p></div><div class="connection-symbol" :class="{ ready: status?.core_running }"><AppIcon name="power" /></div></div>
-          <div class="connection-bottom"><div class="connection-facts"><div><span>运行配置</span><strong>{{ configMetadata?.active_etag ? profileName : '尚未激活' }}</strong></div><div><span>接入方式</span><strong>{{ status?.core_running ? status.tun_active ? 'TUN 虚拟网卡' : '本地代理' : '等待启动' }}</strong></div></div><div class="connection-action"><button v-if="!status?.core_running || controls.canStart || operation === 'start'" class="connect-button" data-testid="connection-start" :disabled="!canAct('connection.start') || !controls.canStart" @click="changeConnection('start')"><AppIcon name="power" />{{ operation === 'start' ? '正在启动…' : controls.startLabel }}</button><button v-if="controls.canStop || operation === 'stop'" class="secondary-button" data-testid="connection-stop" :disabled="!canAct('connection.stop') || !controls.canStop" @click="changeConnection('stop')">{{ operation === 'stop' ? '正在断开…' : '断开连接' }}</button></div></div>
+          <div class="connection-top"><div><div class="state-kicker"><span class="state-dot" :class="{ ready: status?.core_running }"></span>{{ status?.core_running ? '本机代理已就绪' : '连接状态' }}</div><h2 id="connection-title">{{ stateLabel }}</h2><p>{{ stateDetail }}</p></div><div class="connection-action"><button v-if="!status?.core_running || controls.canStart || operation === 'start'" class="connect-button" data-testid="connection-start" :disabled="!canAct('connection.start') || !controls.canStart" @click="changeConnection('start')"><AppIcon name="power" />{{ operation === 'start' ? '正在启动…' : controls.startLabel }}</button><button v-if="controls.canStop || operation === 'stop'" class="secondary-button" data-testid="connection-stop" :disabled="!canAct('connection.stop') || !controls.canStop" @click="changeConnection('stop')">{{ operation === 'stop' ? '正在断开…' : '断开连接' }}</button></div></div>
         </section>
+        <ServiceRouting v-if="routingGroups.length" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.set')" :pending="pendingRouting" :live="config?.routing_live === true" @select="setServiceRouting" />
+        <div v-if="catalogIssue" class="error-notice" role="alert">{{ catalogIssue }}</div>
+        <section v-if="enrollment?.enrolled && !routingGroups.length" class="panel empty-inline"><p>{{ configIssue || '尚未读取到可用出口，请同步配置或检查服务版本。' }}</p><button class="text-button" @click="selectPage('profiles')">前往配置管理 →</button></section>
         <section class="traffic-metrics" aria-label="实时流量">
-          <article><span><AppIcon name="up" />上传速率</span><strong>{{ trafficReady ? bytes(speed?.up) : '—' }}<small v-if="trafficReady && speed">/s</small></strong><p>{{ trafficReady ? `累计 ${bytes(runtime?.upload_total)}` : '连接后开始统计' }}</p></article>
-          <article><span><AppIcon name="down" />下载速率</span><strong>{{ trafficReady ? bytes(speed?.down) : '—' }}<small v-if="trafficReady && speed">/s</small></strong><p>{{ trafficReady ? `累计 ${bytes(runtime?.download_total)}` : '连接后开始统计' }}</p></article>
+          <article><span><AppIcon name="up" />上传速率</span><strong>{{ trafficReady ? bytes(speed?.up) : '—' }}<small v-if="trafficReady && speed">/s</small></strong><p>{{ trafficReady ? `累计 ${bytes(runtime?.upload_total)}` : status?.core_running ? '等待流量数据' : '连接后开始统计' }}</p></article>
+          <article><span><AppIcon name="down" />下载速率</span><strong>{{ trafficReady ? bytes(speed?.down) : '—' }}<small v-if="trafficReady && speed">/s</small></strong><p>{{ trafficReady ? `累计 ${bytes(runtime?.download_total)}` : status?.core_running ? '等待流量数据' : '连接后开始统计' }}</p></article>
           <article><span><AppIcon name="connections" />活动连接</span><strong>{{ trafficReady ? runtime?.connection_count : '—' }}</strong><button class="text-button" @click="selectPage('connections')">查看连接 <span>↗</span></button></article>
           <article><span><AppIcon name="proxies" />配置节点</span><strong>{{ runningCatalog?.node_count ?? '—' }}</strong><button class="text-button" @click="selectPage('proxies')">查看代理 <span>↗</span></button></article>
         </section>
-        <div class="overview-columns"><section class="panel traffic-panel"><div class="section-heading"><h2>网络活动</h2><span><i class="legend-dot download"></i> 下载 <i class="legend-dot upload"></i> 上传</span></div><div class="chart-area"><div class="chart-scale"><span>{{ bytes(chartMaximum) }}/s</span><span>0 B/s</span></div><svg class="traffic-chart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="最近 30 次实际流量采样"><path class="chart-grid" d="M0 20H600M0 65H600M0 110H600" /><polyline v-if="chart.length > 1" class="chart-download" :points="downPoints" /><polyline v-if="chart.length > 1" class="chart-upload" :points="upPoints" /></svg><div v-if="chart.length < 2" class="chart-empty">{{ runtimeIssue ? '流量数据暂不可用' : status?.core_running ? '等待流量采样' : '连接后显示流量趋势' }}<span>{{ runtimeIssue || '来自 sing-box 内核的实际统计' }}</span></div></div><div class="chart-footer"><span>最近 30 次采样 · 约 1 分钟</span><span>{{ autoRefresh ? '每 2 秒刷新' : '自动刷新已暂停' }}</span></div></section>
-          <section class="panel quick-panel" data-testid="candidate-summary"><div class="section-heading"><h2>运行配置</h2><span class="source-badge">{{ configMetadata?.rule_source === 'quickjs' ? 'QuickJS' : 'Profile' }}</span></div><h3>{{ profileName }}</h3><p>{{ stage.label }}</p><div class="version-line"><span>运行版本</span><code>{{ activeVersion }}</code></div><div class="version-line"><span>下载版本</span><code>{{ shortVersion(configMetadata?.downloaded_etag) }}</code></div><div class="quick-buttons"><button class="secondary-button" data-testid="config-refresh" :disabled="!canAct('config.refresh') || !enrollment?.enrolled" @click="downloadConfig">{{ operation === 'sync' ? '同步中…' : '同步配置' }}</button><button class="secondary-button" data-testid="config-validate" :disabled="!canAct('config.validate') || !stage.canValidate" @click="validateConfig">{{ operation === 'validate' ? '校验中…' : '校验配置' }}</button></div><button class="text-button" @click="selectPage('profiles')">管理配置与设备 <span>→</span></button></section></div>
+        <div v-if="enrollment?.enrolled" class="home-config-link"><span>共享配置 · {{ profileName }}</span><button class="text-button" @click="selectPage('profiles')">管理配置 →</button><button class="text-button" @click="selectPage('rules')">查看规则 →</button></div>
                 <section v-if="!enrollment?.enrolled" class="device-card" aria-labelledby="enrollment-title">
           <div class="section-heading"><h2 id="enrollment-title">注册这台设备</h2><span>一次性设备授权</span></div>
           <p class="section-description">在管理面板的“设备”页面生成注册链接，然后粘贴到这里。</p>
@@ -476,44 +542,21 @@ onBeforeUnmount(() => {
           </form>
         </section>
 
-        <div class="overview-columns"><section class="panel"><div class="section-heading"><h2>最近连接</h2><button class="text-button" @click="selectPage('connections')">查看全部 →</button></div><div v-if="trafficReady && runtime?.connections.length" class="recent-connections"><div v-for="item in runtime.connections.slice(0, 4)" :key="item.id"><span class="connection-app"><AppIcon name="connections" /></span><div><strong>{{ item.host || item.destination || '未知目标' }}</strong><span>{{ item.process || item.type || item.network }}</span></div><code>{{ item.chains[0] || item.rule || '—' }}</code></div></div><div v-else class="empty-inline"><AppIcon name="connections" /><p>{{ status?.core_running ? '当前没有活动连接' : '连接后查看应用与访问目标' }}</p><span>连接关闭后会从列表中移除</span></div></section><section class="panel environment-panel"><div class="section-heading"><h2>连接环境</h2><button class="text-button" @click="selectPage('diagnostics')">诊断 →</button></div><div class="environment-row"><span>设备授权</span><strong>{{ deviceLabel }}</strong></div><div class="environment-row"><span>本地代理端口</span><code>{{ proxyEndpoint ? `${proxyEndpoint.listen}:${proxyEndpoint.port}` : '未配置' }}</code></div><div class="environment-row"><span>TUN 接管</span><strong>{{ status?.tun_active ? '已启用' : '未启用' }}</strong></div><div class="environment-row"><span>内核版本</span><strong>{{ config?.validation?.core_version ?? '尚未读取' }}</strong></div><p class="input-hint">本地内核就绪与 TUN 状态来自服务；互联网连通性尚未检测。</p></section></div>
       </template>
 
-      <template v-else-if="page === 'proxies' || page === 'rules'">
+      <template v-else-if="page === 'proxies'">
         <div class="content-toolbar"><div class="segments" aria-label="配置来源"><button :class="{ active: catalogSource === 'active' }" @click="catalogSource = 'active'">当前运行</button><button :class="{ active: catalogSource === 'candidate' }" @click="catalogSource = 'candidate'">已下载配置</button></div><label class="search-box"><AppIcon name="search" /><input v-model="search" :placeholder="page === 'proxies' ? '搜索节点或协议' : '搜索域名、规则或出口'" :aria-label="page === 'proxies' ? '搜索节点' : '搜索路由规则'" /></label></div>
         <div class="data-source-line"><span>{{ sourceLabel }} · <code>{{ shortVersion(catalog?.etag) }}</code></span><span v-if="catalog">{{ page === 'proxies' ? `${catalog.node_count} 个出站` : `${catalog.rule_count} 条规则` }}</span></div>
         <div v-if="catalogIssue" class="error-notice" role="alert">{{ catalogIssue }}</div>
         <div v-if="!catalog" class="panel empty-state"><AppIcon :name="page" /><h2>{{ catalogSource === 'active' ? '尚无运行配置' : '还没有下载配置' }}</h2><p>{{ catalogSource === 'active' ? '启动连接后可查看实际生效的节点与规则，也可以先查看已下载配置。' : '完成设备注册并同步配置后，节点与路由规则会显示在这里。' }}</p><button class="secondary-button" @click="catalogSource === 'active' && inspection?.candidate ? catalogSource = 'candidate' : selectPage('profiles')">{{ catalogSource === 'active' && inspection?.candidate ? '查看已下载配置' : '前往配置管理' }}</button></div>
-        <template v-else-if="page === 'proxies'">
+        <template v-else>
+          <SubscriptionsPanel :summary="subscriptionSummary" :disabled="!canAct('subscriptions.save')" :busy="operation === 'subscription'" :filter="sourceFilter" @filter="sourceFilter = $event" @add="(name, url) => changeSubscription('add', '', name, url)" @refresh="(id, name) => changeSubscription('refresh', id, name)" @remove="id => changeSubscription('remove', id)" />
           <section v-if="groups.length" class="proxy-groups"><article v-for="group in groups" :key="group.tag" class="panel group-card"><div class="section-heading"><span class="group-icon"><AppIcon name="proxies" /></span><span class="status-tag">{{ nodeKind(group.type) }}</span></div><h2>{{ group.tag }}</h2><p>当前出口</p><strong>{{ group.selected || '由内核自动选择' }}</strong><span class="group-count">{{ group.member_count }} 个成员 · {{ catalogSource === 'active' && runtime ? '内核实时状态' : '配置初始值' }}</span></article></section>
           <div class="section-heading node-heading"><h2>节点列表 <span>{{ filteredNodes.length }}</span></h2><div class="segments"><button :class="{ active: nodeFilter === 'all' }" @click="nodeFilter = 'all'">全部</button><button :class="{ active: nodeFilter === 'nodes' }" @click="nodeFilter = 'nodes'">节点</button><button :class="{ active: nodeFilter === 'groups' }" @click="nodeFilter = 'groups'">代理组</button></div></div>
-          <div class="node-grid"><article v-for="(node, index) in filteredNodes" :key="`${node.tag}-${index}`" class="node-card" :class="{ 'default-node': node.tag === catalog.final }"><div class="node-avatar">{{ node.member_count ? '组' : node.type.toLowerCase() === 'direct' ? '直' : node.tag.slice(0, 1).toUpperCase() || 'N' }}</div><div class="node-copy"><h3>{{ node.tag || '未命名出站' }}</h3><span>{{ nodeKind(node.type) }}<b v-if="node.tag === catalog.final">默认出口</b></span></div><span class="node-delay" :class="{ measured: node.delay }">{{ node.delay ? `${node.delay} ms` : '未测速' }}</span><details v-if="node.members.length"><summary>查看组成员</summary><ul><li v-for="member in node.members" :key="member">{{ member }}</li></ul><p v-if="node.member_count > node.members.length">另有 {{ node.member_count - node.members.length }} 个成员</p></details></article></div>
-          <div v-if="!filteredNodes.length" class="panel empty-inline"><p>没有匹配的节点</p><button class="text-button" @click="search = ''; nodeFilter = 'all'">清除筛选</button></div><p class="collection-note">当前展示配置与内核中的代理信息；节点切换和主动测速将在后续接入。延迟仅显示内核已有的测速记录。</p><p v-if="catalog.node_count > catalog.nodes.length" class="collection-note">配置包含 {{ catalog.node_count }} 个出站，当前最多展示 128 个。</p>
+          <div class="node-grid"><article v-for="(node, index) in filteredNodes" :key="`${node.tag}-${index}`" class="node-card" :class="{ 'default-node': node.tag === catalog.final }"><div class="node-avatar">{{ node.member_count ? '组' : node.type.toLowerCase() === 'direct' ? '直' : Array.from(nodeLabel(node.tag))[0]?.toUpperCase() || 'N' }}</div><div class="node-copy"><h3>{{ nodeLabel(node.tag) || '未命名出站' }}</h3><span>{{ nodeKind(node.type) }} · {{ sourceMap.get(node.tag)?.name ?? '其他 / 未知来源' }}<b v-if="node.tag === catalog.final">默认出口</b></span></div><span class="node-delay" :class="{ measured: node.delay }">{{ node.delay ? `${node.delay} ms` : '未测速' }}</span><details v-if="node.members.length"><summary>查看组成员</summary><ul><li v-for="member in node.members" :key="member">{{ member }}</li></ul><p v-if="node.member_count > node.members.length">另有 {{ node.member_count - node.members.length }} 个成员</p></details></article></div>
+          <div v-if="!filteredNodes.length" class="panel empty-inline"><p>没有匹配的节点</p><button class="text-button" @click="search = ''; nodeFilter = 'all'; sourceFilter = ''">清除筛选</button></div><p class="collection-note">服务出口可在“连接”页面选择。此处延迟仅显示内核已有的测速记录，尚未提供主动测速。</p><p v-if="catalog.node_count > catalog.nodes.length" class="collection-note">配置包含 {{ catalog.node_count }} 个出站，当前最多展示 1024 个。</p>
         </template>
-        <template v-else>
-          <section class="panel route-summary"><div><AppIcon name="rules" /><span>默认代理</span><strong>{{ catalog.final === 'direct' ? '直接连接' : catalog.final || '由内核确定' }}</strong></div><p>没有命中下方分流条件的流量使用此出口。服务分组展示域名覆盖范围，应用内其他域名仍按各自规则处理。</p></section>
-          <section class="panel service-routing-card">
-            <h2>GPT / Codex 出口</h2>
-            <p>{{ config?.gpt_use_default ? '使用默认代理（本机设置）' : '使用服务器指定节点' }}。此设置同步调整 DNS 出口，刷新配置后仍会保留。请先断开连接再切换。</p>
-            <button class="secondary-button" :disabled="!canAct(config?.gpt_use_default ? 'routing.gpt_server' : 'routing.gpt_default') || status?.core_running" @click="setGptRouting(!config?.gpt_use_default)">{{ config?.gpt_use_default ? '恢复服务器设置' : '改用默认代理' }}</button>
-          </section>
-          <div class="service-routing-grid">
-            <article v-for="rule in filteredRules" :key="rule.index" class="panel service-routing-card">
-              <div class="service-routing-heading"><h2>{{ rule.title || '分流规则' }}</h2><span class="row-index">优先级 {{ rule.index }}</span></div>
-              <strong class="service-routing-exit">{{ rule.outbound === 'direct' ? '直接连接' : rule.outbound || ruleAction(rule.action) }}</strong>
-              <p>{{ rule.match }}</p>
-            </article>
-          </div>
-          <div v-if="!filteredRules.length" class="panel empty-inline"><p>{{ search ? '没有匹配的服务或域名' : '没有单独分流，所有流量使用默认出口' }}</p></div>
-          <p class="collection-note">按优先级匹配，首次命中后使用对应出口。此处显示{{ catalogSource === 'active' ? '当前运行版本对应' : '已下载版本' }}的有效分流设置，长条件显示前 3 项；客户端另有管理连接直连保护。</p>
-        </template>
-      </template>
 
-      <template v-else-if="page === 'connections'">
-        <section class="connection-stats"><div><span>活动连接</span><strong>{{ trafficReady ? runtime?.connection_count : '—' }}</strong></div><div><span>累计上传</span><strong>{{ trafficReady ? bytes(runtime?.upload_total) : '—' }}</strong></div><div><span>累计下载</span><strong>{{ trafficReady ? bytes(runtime?.download_total) : '—' }}</strong></div><button class="secondary-button" :disabled="!status?.core_running || telemetryBusy || locked" @click="readTelemetry">{{ telemetryBusy ? '读取中…' : '刷新连接' }}</button></section>
-        <div class="content-toolbar"><div class="segments" aria-label="连接协议"><button v-for="item in ['all', 'tcp', 'udp']" :key="item" :class="{ active: connectionFilter === item }" @click="connectionFilter = item">{{ item === 'all' ? '全部' : item.toUpperCase() }}</button></div><label class="search-box"><AppIcon name="search" /><input v-model="search" aria-label="搜索活动连接" placeholder="搜索目标、应用或出口" /></label></div>
-        <div v-if="runtimeIssue" class="error-notice" role="alert">实时数据暂不可用：{{ runtimeIssue }}</div>
-        <div class="panel table-panel"><table v-if="trafficReady && filteredConnections.length" class="connections-table"><thead><tr><th>目标 / 应用</th><th>出口 / 规则</th><th>流量</th></tr></thead><tbody><tr v-for="item in filteredConnections" :key="item.id"><td><strong>{{ item.host || item.destination || '未知目标' }}<span class="port">:{{ item.port }}</span></strong><span class="table-sub">{{ item.process || item.type }} · {{ item.network.toUpperCase() }}</span><span v-if="item.host && item.destination" class="table-sub">{{ item.destination }}</span></td><td><span class="rule-chip">{{ item.chains.join(' → ') || '未提供出口' }}</span><span class="table-sub">{{ item.rule || '未提供规则' }}</span></td><td class="traffic-cell"><span>↑ {{ bytes(item.upload) }}</span><span>↓ {{ bytes(item.download) }}</span></td></tr></tbody></table><div v-else class="empty-state"><AppIcon name="connections" /><h2>{{ !status?.core_running ? '连接尚未启动' : search ? '没有匹配的连接' : '当前没有活动连接' }}</h2><p>{{ !status?.core_running ? '启动 sing-box 后，经过内核的应用连接会显示在这里。' : '正在监听内核活动；已结束的连接不会保留在列表中。' }}</p><button v-if="!status?.core_running" class="secondary-button" @click="selectPage('overview')">返回总览启动连接</button></div></div><p class="collection-note">累计流量属于当前内核进程；重启后重新统计。最多展示 128 条活动连接。</p>
       </template>
 
       <template v-else-if="page === 'profiles'">
@@ -554,14 +597,24 @@ onBeforeUnmount(() => {
         <section class="panel help-card"><h2>配置生效流程</h2><p>同步只下载新的候选版本，校验通过后在总览点击“启动连接”或“应用新配置”。正在运行的版本会保留到切换成功；新版本启动失败时服务会尝试恢复上次可用版本。</p><button class="text-button" @click="selectPage('overview')">前往连接控制 →</button></section>
       </template>
 
-      <CaptureView v-else-if="page === 'capture'" :bridge="bridge" :server="deviceMetadata?.server_origin ?? ''" />
-      <StatisticsView v-else-if="page === 'statistics'" :bridge="bridge" />
+      <NetworkToolsView v-else-if="page === 'connections' || page === 'rules'" :key="page" :bridge="bridge" :initial-tab="page" standalone />
       <LogsView v-else-if="page === 'logs'" :bridge="bridge" />
+      <ExtensionsPanel v-else-if="page === 'extensions'" :bridge="bridge" @changed="extensions = $event" @open="openExtension" />
+      <ExtensionView v-else-if="extensionPage" :key="extensionPage.id" :id="extensionPage.id" :bridge="bridge" :server="deviceMetadata?.server_origin ?? ''" @back="selectPage('extensions')" />
       <template v-else-if="page === 'activity'">
         <div class="content-toolbar"><span class="data-source-line">本次界面会话 · {{ activities.length }} 条记录</span><button class="secondary-button" :disabled="!activities.length" @click="activities = []">清空记录</button></div><section class="panel activity-panel"><div v-for="item in activities" :key="item.id" class="activity-row" :class="{ failed: item.failed }"><time>{{ item.time }}</time><span class="activity-marker"><AppIcon :name="item.failed ? 'activity' : 'check'" /></span><div><h3>{{ item.title }}</h3><p>{{ item.detail }}</p></div></div><div v-if="!activities.length" class="empty-state"><AppIcon name="activity" /><h2>还没有活动记录</h2><p>配置同步、连接启停与状态变化会记录在这里。</p></div></section><p class="collection-note">记录只保留在当前界面内存中，最多 100 条；关闭窗口后清空。内核运行记录请查看“运行日志”。</p>
       </template>
 
       <template v-else-if="page === 'settings'">
+        <section class="panel settings-panel"><div class="section-heading"><h2>扩展商店</h2><button class="secondary-button" @click="selectPage('extensions')">浏览扩展 →</button></div><p class="input-hint">流量采集等高级能力按需安装，基础代理不依赖扩展。</p><button v-if="captureEnabled" class="text-button" @click="selectPage('capture')">打开流量采集 →</button></section>
+        <section class="panel settings-panel" aria-labelledby="ipv6-title">
+          <div class="section-heading"><h2 id="ipv6-title">IPv6 支持</h2><span class="status-tag">最近检查 {{ checkedTime }}</span></div>
+          <div class="setting-row"><div><h3>本机 IPv6 网络</h3><p>检查可用网卡上的公网地址与默认路由，不代表已通过互联网连通测试。</p></div><strong>{{ ipv6Network }}</strong></div>
+          <div class="setting-row"><div><h3>IPv6 代理接管</h3><p>检查运行中的 TUN 网卡路由；具体流量仍按分流规则决定直连或代理。</p></div><strong>{{ ipv6Tunnel }}</strong></div>
+          <div class="setting-row"><div><h3>节点 IPv6 出口</h3><p>本机没有公网 IPv6 也可以由代理节点连接 IPv6 网站，但需节点本身支持。</p></div><strong>尚未实测</strong></div>
+          <p class="input-hint">启用双栈需要配置 IPv6 TUN 地址和路由，并验证节点出口。当前检测不会修改网络设置，也不等同于完整的防泄露测试。</p>
+          <button class="text-button" @click="selectPage('diagnostics')">查看连接诊断 →</button>
+        </section>
         <section class="panel settings-panel"><div class="section-heading"><h2>外观与显示</h2><AppIcon name="settings" /></div><div class="setting-row"><div><h3>主题</h3><p>选择喜欢的外观，或跟随 Windows。</p></div><div class="segments" aria-label="主题选择"><button v-for="item in [{ id: 'system', label: '跟随系统' }, { id: 'light', label: '浅色' }, { id: 'dark', label: '深色' }] as const" :key="item.id" :data-testid="`theme-${item.id}`" :class="{ active: theme === item.id }" @click="theme = item.id">{{ item.label }}</button></div></div><div class="setting-row"><div><h3>自动刷新</h3><p>流量每 2 秒、服务状态每 15 秒更新；窗口隐藏时暂停。</p></div><button class="toggle" role="switch" :aria-checked="autoRefresh" :class="{ enabled: autoRefresh }" aria-label="自动刷新" @click="autoRefresh = !autoRefresh"><span></span></button></div><p class="input-hint">显示偏好保存在此电脑；活动记录和设备凭据不会存入界面设置。</p></section>
         <section class="panel settings-panel"><div class="section-heading"><h2>网络接入</h2><span class="status-tag" :class="{ pending: !status?.tun_active }">{{ status?.tun_active ? 'TUN 已启用' : '按下发配置启动' }}</span></div><div class="setting-row"><div><h3>TUN 虚拟网卡</h3><p>由服务器配置决定是否启用，需要具有管理员权限的服务。</p></div><strong>{{ status?.tun_active ? '运行中' : '未启用' }}</strong></div><div class="setting-row"><div><h3>本地代理</h3><p>将支持代理的应用设置为此端口，流量才会经过内核。</p></div><code>{{ proxyEndpoint ? `${proxyEndpoint.listen}:${proxyEndpoint.port}` : '未配置' }}</code></div><div class="setting-row"><div><h3>Windows 系统代理</h3><p>当前使用 TUN 或应用内代理设置；系统代理开关尚未接入。</p></div><span class="muted">未接管</span></div></section>
         <section class="panel settings-panel"><div class="section-heading"><h2>关于 sb-easy</h2><span class="preview-badge">Windows 开发预览</span></div><div class="environment-row"><span>本机服务</span><code>{{ hello?.service_version ?? '尚未读取' }}</code></div><div class="environment-row"><span>sing-box</span><code>{{ config?.validation?.core_version ?? '尚未读取' }}</code></div><div class="environment-row"><span>设备名称</span><strong>{{ deviceMetadata?.host_name ?? '尚未注册' }}</strong></div><div class="environment-row"><span>管理服务</span><code>{{ deviceMetadata?.server_origin ?? '尚未注册' }}</code></div><button class="text-button" @click="selectPage('diagnostics')">查看连接诊断 →</button><button class="text-button manage-device" @click="selectPage('profiles')">管理设备授权 →</button></section>
@@ -578,6 +631,9 @@ onBeforeUnmount(() => {
             <div v-if="deviceStateError"><dt>设备存储错误</dt><dd><code>{{ deviceStateError.code }}</code></dd></div>
             <div><dt>本机启动条件</dt><dd>{{ status ? status.connection_available ? '内核和候选配置可用' : '尚未就绪' : '尚未读取' }}</dd></div>
             <div><dt>TUN 状态</dt><dd>{{ status?.tun_active === true ? '已启用' : status?.tun_active === false ? '未启用' : '服务尚未提供' }}</dd></div>
+            <div><dt>本机 IPv6</dt><dd>{{ ipv6Network }}</dd></div>
+            <div><dt>IPv6 接管</dt><dd>{{ ipv6Tunnel }}</dd></div>
+            <div><dt>节点 IPv6 出口</dt><dd>尚未实测</dd></div>
             <div><dt>互联网连通性</dt><dd>尚未检测</dd></div>
             <div v-if="status?.runtime_error"><dt>运行错误</dt><dd><code>{{ status.runtime_error.code }}</code></dd></div>
           </dl>

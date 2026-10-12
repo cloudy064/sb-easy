@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(sb_easy_windows VERSION 0.6.1 LANGUAGES C RC)
+project(sb_easy_windows VERSION 0.6.8 LANGUAGES C RC)
 
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The Windows preview requires MSVC targeting x64")
@@ -28,6 +28,8 @@ set(CMAKE_C_EXTENSIONS OFF)
 # Ship the C runtime with our binaries: a clean machine must not need a
 # separately installed Visual C++ Redistributable to start the MSI service.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+option(SB_EASY_BUILD_STATISTICS_EXTENSION "Build the optional statistics worker" OFF)
+option(SB_EASY_BUILD_CAPTURE_EXTENSION "Build the optional capture extension" OFF)
 option(SB_EASY_BUILD_DESKTOP "Build the WebView2 desktop shell" ON)
 option(SB_EASY_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
 include(CTest)
@@ -55,6 +57,7 @@ target_include_directories(sb_windows_control_plane PUBLIC service)
 target_link_libraries(sb_windows_control_plane PUBLIC sb_windows_common winhttp ws2_32)
 sb_windows_target(sb_windows_control_plane)
 
+if(SB_EASY_BUILD_CAPTURE_EXTENSION)
 # libpcap is built without a capture backend: only its C BPF compiler/interpreter
 # and file readers are used. No Npcap installation or driver is needed.
 set(capture_deps "${CMAKE_CURRENT_SOURCE_DIR}/../build/capture-deps")
@@ -72,10 +75,36 @@ target_include_directories(sb_windows_capture_deps SYSTEM INTERFACE
     "${capture_deps}/WinDivert-2.2.2-A/include")
 target_link_libraries(sb_windows_capture_deps INTERFACE pcap_static ws2_32)
 
-add_library(sb_windows_controller STATIC service/controller.c service/secure_store.c service/core_process.c service/runtime_config.c service/dashboard.c service/traffic.c service/capture.c service/diagnostics.c service/routing.c)
+add_library(sb_windows_capture_impl STATIC service/capture.c service/secure_store.c)
+ target_include_directories(sb_windows_capture_impl PUBLIC service)
+ target_link_libraries(sb_windows_capture_impl PUBLIC sb_windows_common sb_windows_capture_deps bcrypt crypt32 advapi32 iphlpapi)
+ sb_windows_target(sb_windows_capture_impl)
+ add_executable(sb-easy-capture service/capture_worker.c ui-host/app.manifest)
+ target_link_libraries(sb-easy-capture PRIVATE sb_windows_capture_impl)
+ sb_windows_target(sb-easy-capture)
+ set_target_properties(sb-easy-capture PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extensions/capture")
+ add_custom_command(TARGET sb-easy-capture POST_BUILD
+ COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:sb-easy-capture>/capture"
+ COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${capture_deps}/WinDivert-2.2.2-A/x64/WinDivert.dll" "${capture_deps}/WinDivert-2.2.2-A/x64/WinDivert64.sys" "$<TARGET_FILE_DIR:sb-easy-capture>/capture"
+ COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/extensions/capture/extension.json" "$<TARGET_FILE_DIR:sb-easy-capture>/extension.json")
+endif()
+
+if(SB_EASY_BUILD_STATISTICS_EXTENSION OR BUILD_TESTING)
+    add_library(sb_windows_statistics_impl STATIC service/traffic.c)
+    target_link_libraries(sb_windows_statistics_impl PUBLIC sb_windows_common)
+    sb_windows_target(sb_windows_statistics_impl)
+endif()
+if(SB_EASY_BUILD_STATISTICS_EXTENSION)
+    add_executable(sb-easy-statistics service/statistics_worker.c ui-host/app.manifest)
+    target_link_libraries(sb-easy-statistics PRIVATE sb_windows_statistics_impl)
+    sb_windows_target(sb-easy-statistics)
+    set_target_properties(sb-easy-statistics PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/extensions/statistics")
+endif()
+
+add_library(sb_windows_controller STATIC service/controller.c service/secure_store.c service/core_process.c service/runtime_config.c service/dashboard.c service/traffic_proxy.c service/extension_process.c service/capture_proxy.c service/extensions.c service/extension_store.c service/extension_store.c service/diagnostics.c service/routing.c service/routing_groups.c service/subscriptions.c)
 target_include_directories(sb_windows_controller PUBLIC service)
 target_link_libraries(sb_windows_controller PUBLIC sb_windows_runtime sb_windows_control_plane
-    sb_windows_common sb_windows_capture_deps crypt32 bcrypt advapi32 shell32 ole32 iphlpapi)
+    sb_windows_common crypt32 bcrypt advapi32 shell32 ole32 iphlpapi)
 sb_windows_target(sb_windows_controller)
 
 add_library(sb_windows_protocol STATIC service/protocol.c)
@@ -114,9 +143,6 @@ if(SB_EASY_BUILD_DESKTOP)
     sb_windows_target(sb-easy)
     # Refresh packaged assets on every build, including UI-only changes.
     add_custom_target(sb_windows_ui_assets ALL
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:sb-easy>/capture"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${capture_deps}/WinDivert-2.2.2-A/x64/WinDivert.dll" "${capture_deps}/WinDivert-2.2.2-A/x64/WinDivert64.sys" "$<TARGET_FILE_DIR:sb-easy>/capture"
-
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/dist" "$<TARGET_FILE_DIR:sb-easy>/ui"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:sb-easy>/licenses"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/licenses/sbj-grisu2-MIT.txt" "$<TARGET_FILE_DIR:sb-easy>/licenses/sbj-grisu2-MIT.txt"
@@ -127,19 +153,34 @@ if(SB_EASY_BUILD_DESKTOP)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md" "$<TARGET_FILE_DIR:sb-easy>"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/tldts/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/tldts.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/tldts-core/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/tldts-core.txt"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/yaml/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/yaml.txt"
         COMMENT "Copying packaged desktop UI (run npm ci && npm run build in windows/ui first)")
     add_dependencies(sb-easy sb_windows_ui_assets)
 endif()
 
 if(BUILD_TESTING)
+    if(SB_EASY_BUILD_CAPTURE_EXTENSION)
     add_executable(windows_capture_test tests/capture_test.c)
-    target_link_libraries(windows_capture_test PRIVATE sb_windows_controller)
+    target_link_libraries(windows_capture_test PRIVATE sb_windows_capture_impl)
     sb_windows_target(windows_capture_test)
     add_test(NAME windows_capture COMMAND windows_capture_test)
+    endif()
     add_executable(windows_traffic_test tests/traffic_test.c)
-    target_link_libraries(windows_traffic_test PRIVATE sb_windows_controller)
+    target_link_libraries(windows_traffic_test PRIVATE sb_windows_statistics_impl)
     sb_windows_target(windows_traffic_test)
     add_test(NAME windows_traffic COMMAND windows_traffic_test)
+    add_executable(windows_subscriptions_test tests/subscriptions_test.c)
+    add_executable(windows_extension_store_test tests/extension_store_test.c)
+    target_link_libraries(windows_extension_store_test PRIVATE sb_windows_controller)
+    sb_windows_target(windows_extension_store_test)
+    add_test(NAME windows_extension_store COMMAND windows_extension_store_test)
+    target_link_libraries(windows_subscriptions_test PRIVATE sb_windows_controller)
+    sb_windows_target(windows_subscriptions_test)
+    add_test(NAME windows_subscriptions COMMAND windows_subscriptions_test)
+    add_executable(windows_routing_groups_test tests/routing_groups_test.c)
+    target_link_libraries(windows_routing_groups_test PRIVATE sb_windows_controller)
+    sb_windows_target(windows_routing_groups_test)
+    add_test(NAME windows_routing_groups COMMAND windows_routing_groups_test)
     add_executable(windows_routing_test tests/routing_test.c)
     target_link_libraries(windows_routing_test PRIVATE sb_windows_controller)
     sb_windows_target(windows_routing_test)

@@ -17,6 +17,8 @@ typedef struct sbw_runtime_config {
 int sbw_runtime_config_prepare(const char *json, size_t length, const char *server,
                                sbw_runtime_config *out, sbw_error *error);
 void sbw_runtime_config_free(sbw_runtime_config *config);
+/* Local interface/route evidence only, not an Internet or node reachability test. */
+sbj *sbw_runtime_ipv6_status(const sbw_runtime_config *config, bool running);
 /* Readiness of this exact process' authenticated loopback API, not proof of
  * internet reachability. Retries startup until the overall deadline. */
 int sbw_runtime_config_health(const sbw_runtime_config *config, DWORD expected_pid,
@@ -25,5 +27,10 @@ int sbw_runtime_config_health(const sbw_runtime_config *config, DWORD expected_p
  * The caller owns *out. Never return the API secret or private config. */
 int sbw_runtime_config_get(const sbw_runtime_config *config, DWORD expected_pid,
                            HANDLE cancel, const char *path, sbj **out, sbw_error *error);
+
+int sbw_runtime_select_gpt(const sbw_runtime_config *config, DWORD pid, HANDLE cancel,
+                           const char *target, sbw_error *error);
+int sbw_runtime_select_group(const sbw_runtime_config *config, DWORD pid, HANDLE cancel,
+                           const char *selector, const char *target, sbw_error *error);
 
 #endif

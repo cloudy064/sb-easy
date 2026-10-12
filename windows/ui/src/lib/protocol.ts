@@ -36,14 +36,27 @@ export interface StatusResult extends DeviceMetadata {
   core_running: boolean
   connection_available: boolean
   tun_active?: boolean
+  ipv6?: { checked: boolean; global_address: boolean; native_route: boolean; tun_route: boolean; node_support: 'untested' }
   runtime_error?: { code: string; message: string }
 }
 
+export interface SubscriptionSource { id: string; name: string; tags: string[] }
+export interface SubscriptionsSummary { managed: SubscriptionSource[]; local: SubscriptionSource[]; sources_available: boolean }
+
 export interface ConfigSummary extends ConfigMetadata {
+  subscriptions?: SubscriptionsSummary
+  routing_groups?: RoutingGroup[]
+  routing_live?: boolean
   gpt_use_default?: boolean
+  gpt_outbound?: string | null
   profile: ProfileSummary | null
   counts: { inbounds: number; outbounds: number; rules: number }
   validation?: ConfigValidation
+}
+
+export interface RoutingGroup {
+  id: string; label: string; server_outbound: string; outbound: string
+  mode: 'server' | 'default' | 'node'; editable: boolean; reason: string
 }
 
 export interface ConfigValidation {
@@ -61,7 +74,7 @@ export interface ConfigCatalog {
   rules: { index: number; title?: string; match: string; action: string; outbound: string }[]
   inbounds: { type: string; listen: string; port: number; auto_route: boolean }[]
 }
-export interface ConfigInspection { candidate: ConfigCatalog | null; active: ConfigCatalog | null }
+export interface ConfigInspection { routing_warning?: boolean; candidate: ConfigCatalog | null; active: ConfigCatalog | null }
 export interface RuntimeConnection {
   id: string; host: string; destination: string; port: string; network: string; type: string
   process: string; rule: string; chains: string[]; upload: number; download: number
@@ -81,7 +94,17 @@ export interface CaptureConfig {
 }
 export interface CaptureFile { digest: string; size: number; created_at: number; uploaded: boolean }
 export interface CaptureSnapshot { config: CaptureConfig; files: CaptureFile[]; running: boolean; packets: number; dropped: number; stored_bytes: number; error: string; upload_status: string; uploading: boolean; apps: string[] }
+export type ExtensionId = 'capture' | 'statistics' | 'network-tools'
+export function isExtensionId(value: unknown): value is ExtensionId { return ['capture','statistics','network-tools'].includes(value as string) }
+export interface ExtensionInfo { id: ExtensionId; name: string; version: string; installed: boolean; enabled: boolean; running: boolean; failed: boolean }
+export interface StoreItem { id: ExtensionId; name: string; version: string; size: number; publisher: string; description: string; permissions: string }
+export interface StoreProgress { id: ExtensionId | '';  phase: 'idle' | 'downloading' | 'verifying' | 'installing' | 'complete' | 'failed'; received: number; total: number; error: string }
 export interface ResultMap {
+  'extensions.catalog': { items: StoreItem[] }
+  'extensions.install': StoreProgress
+  'extensions.progress': StoreProgress
+  'extensions.list': { extensions: ExtensionInfo[] }
+  'extensions.change': { extensions: ExtensionInfo[] }
   'service.start': { ready: true }
   'capture.snapshot': CaptureSnapshot
   'capture.configure': CaptureSnapshot
@@ -105,6 +128,11 @@ export interface ResultMap {
   'config.validate': ConfigSummary
   'routing.gpt_default': ConfigSummary
   'routing.gpt_server': ConfigSummary
+  'routing.gpt_node': ConfigSummary
+  'routing.set': ConfigSummary
+  'subscriptions.fetch': { body: string }
+  'subscriptions.save': ConfigSummary
+  'subscriptions.remove': ConfigSummary
   'connection.start': StatusResult
   'connection.stop': StatusResult
   'config.inspect': ConfigInspection
@@ -113,7 +141,7 @@ export interface ResultMap {
 
 export type Method = keyof ResultMap
 export type EmptyParams = Record<string, never>
-export type ParamsMap = { [M in Method]: M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
+export type ParamsMap = { [M in Method]: M extends 'extensions.install' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -155,16 +183,31 @@ function validDeviceMetadata(value: Record<string, unknown>): boolean {
 
 export function validParams<M extends Method>(method: M, value: unknown): value is ParamsMap[M] {
   if (!isRecord(value)) return false
+  if (method === 'subscriptions.fetch') return Object.keys(value).length === 1 && (boundedString(value.url, 8192) || boundedString(value.id, 36))
+  if (method === 'subscriptions.remove') return Object.keys(value).length === 1 && boundedString(value.id, 36)
+  if (method === 'subscriptions.save') return Object.keys(value).every(key => ['id','name','url','nodes'].includes(key)) && boundedString(value.name, 100) && (value.id === undefined || boundedString(value.id, 36)) && (value.url === undefined ? boundedString(value.id,36) : boundedString(value.url,8192)) && Array.isArray(value.nodes) && value.nodes.length > 0 && value.nodes.length <= 256 && value.nodes.every(isRecord)
+  if (method === 'extensions.install') return Object.keys(value).length === 1 && isExtensionId(value.id)
+  if (method === 'extensions.change') return Object.keys(value).length === 2 && isExtensionId(value.id) && ['enable','disable','remove'].includes(value.action as string)
+  if (method === 'routing.set') return typeof value.group === 'string' && /^[a-z0-9-]{1,64}$/.test(value.group) &&
+    (value.mode === 'node' ? Object.keys(value).length === 3 && boundedString(value.node, 512) && !/[\u0000-\u001f\u007f]/.test(value.node) && new TextEncoder().encode(value.node).length <= 512 :
+      Object.keys(value).length === 2 && (value.mode === 'server' || (value.mode === 'default' && value.group !== 'default')))
   if (method === 'capture.configure' || method === 'capture.validate') return Object.keys(value).length === 1 && validCaptureConfig(value.config)
   if (method === 'capture.upload' || method === 'capture.delete' || method === 'capture.read') return typeof value.digest === 'string' && /^[a-f0-9]{64}$/.test(value.digest) && (method === 'capture.read' ? Object.keys(value).length === 2 && safeCount(value.offset) && value.offset <= 786432 : Object.keys(value).length === 1)
+  if (method === 'routing.gpt_node') return Object.keys(value).length === 1 && boundedString(value.outbound, 512) && !/[\u0000-\u001f\u007f]/.test(value.outbound) && new TextEncoder().encode(value.outbound).length <= 512
   if (method === 'enrollment.apply') return Object.keys(value).length === 1 && boundedString(value.uri, 16_384)
-  if (!['service.start', 'protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot', 'traffic.snapshot', 'traffic.clear', 'logs.snapshot', 'capture.snapshot', 'capture.rotate'].includes(method)) return false
+  if (!['extensions.catalog', 'extensions.progress', 'extensions.list', 'service.start', 'protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot', 'traffic.snapshot', 'traffic.clear', 'logs.snapshot', 'capture.snapshot', 'capture.rotate'].includes(method)) return false
   return Object.keys(value).length === 0
 }
 
 export function validResult<M extends Method>(method: M, value: unknown): value is ResultMap[M] {
   if (!isRecord(value)) return false
   switch (method) {
+    case 'extensions.catalog': return Array.isArray(value.items) && value.items.length <= 16 && value.items.every(e => isRecord(e) && isExtensionId(e.id) && boundedString(e.name,128) && boundedString(e.version,32) && boundedString(e.publisher,128) && boundedString(e.description,512) && boundedString(e.permissions,512) && Number.isSafeInteger(e.size) && (e.size as number) > 0 && (e.size as number) <= 16777216)
+    case 'extensions.install':
+    case 'extensions.progress': return (isExtensionId(value.id) || (value.phase === 'idle' && value.id === '')) && ['idle','downloading','verifying','installing','complete','failed'].includes(value.phase as string) && Number.isSafeInteger(value.received) && (value.received as number) >= 0 && Number.isSafeInteger(value.total) && (value.total as number) >= (value.phase === 'idle' ? 0 : 1) && (value.received as number) <= (value.total as number) + 1 && typeof value.error === 'string' && value.error.length <= 64
+    case 'extensions.list':
+    case 'extensions.change': return Array.isArray(value.extensions) && value.extensions.length <= 16 && value.extensions.every(e => isRecord(e) && isExtensionId(e.id) && boundedString(e.name,128) && typeof e.version === 'string' && e.version.length <= 32 && ['installed','enabled','running','failed'].every(k => typeof e[k] === 'boolean'))
+    case 'subscriptions.fetch': return typeof value.body === 'string' && value.body.length <= 262144
     case 'service.start': return value.ready === true
     case 'capture.read':
       return typeof value.data === 'string' && value.data.length <= 87384 && /^[A-Za-z0-9+/]*={0,2}$/.test(value.data) &&
@@ -189,12 +232,12 @@ export function validResult<M extends Method>(method: M, value: unknown): value 
         value.rows.every(row => isRecord(row) && ['app', 'host', 'outbound', 'rule'].every(key => typeof row[key] === 'string' && (row[key] as string).length <= 253) &&
           ['upload', 'download', 'last_seen'].every(key => safeCount(row[key])))
     case 'config.inspect':
-      return validCatalog(value.candidate) && validCatalog(value.active)
+      return (value.routing_warning === undefined || typeof value.routing_warning === 'boolean') && validCatalog(value.candidate) && validCatalog(value.active)
     case 'runtime.snapshot':
       return typeof value.running === 'boolean' && safeCount(value.core_pid) && safeCount(value.sample_ms) &&
         nullableString(value.etag, 4096) && safeCount(value.upload_total) && safeCount(value.download_total) && safeCount(value.connection_count) &&
         Array.isArray(value.connections) && value.connections.length <= 128 && value.connections.every(validConnection) &&
-        Array.isArray(value.nodes) && value.nodes.length <= 128 && value.nodes.every(validNode)
+        Array.isArray(value.nodes) && value.nodes.length <= 1024 && value.nodes.every(validNode)
     case 'protocol.hello':
       return value.protocol_version === 1 && boundedString(value.service_version, 128) &&
         Array.isArray(value.supported_methods) && value.supported_methods.length <= 128 &&
@@ -209,13 +252,24 @@ export function validResult<M extends Method>(method: M, value: unknown): value 
       return boundedString(value.phase, 64) && typeof value.enrolled === 'boolean' &&
         typeof value.core_running === 'boolean' && typeof value.connection_available === 'boolean' && validDeviceMetadata(value) &&
         (value.tun_active === undefined || typeof value.tun_active === 'boolean') &&
+        (value.ipv6 === undefined || (isRecord(value.ipv6) &&
+          ['checked', 'global_address', 'native_route', 'tun_route'].every(key => typeof (value.ipv6 as Record<string, unknown>)[key] === 'boolean') &&
+          value.ipv6.node_support === 'untested')) &&
         (value.runtime_error === undefined || (isRecord(value.runtime_error) && boundedString(value.runtime_error.code, 128) && boundedString(value.runtime_error.message, 2048)))
     case 'config.summary':
     case 'config.refresh':
     case 'routing.gpt_default':
     case 'routing.gpt_server':
+    case 'routing.gpt_node':
+    case 'subscriptions.save':
+    case 'subscriptions.remove':
+    case 'routing.set':
     case 'config.validate':
-      return (value.gpt_use_default === undefined || typeof value.gpt_use_default === 'boolean') && validConfigMetadata(value) && validProfile(value.profile) && isRecord(value.counts) &&
+      return (value.subscriptions === undefined || (isRecord(value.subscriptions) && typeof value.subscriptions.sources_available === 'boolean' && ['managed','local'].every(key => { const list = (value.subscriptions as Record<string, unknown>)[key]; return Array.isArray(list) && list.length <= 1024 && list.every(sub => isRecord(sub) && boundedString(sub.id,128) && boundedString(sub.name,1024) && Array.isArray(sub.tags) && sub.tags.length <= 1024 && sub.tags.every(tag => boundedString(tag,512))) }))) && (value.routing_live === undefined || typeof value.routing_live === 'boolean') &&
+        (value.routing_groups === undefined || (Array.isArray(value.routing_groups) && value.routing_groups.length <= 64 && value.routing_groups.every(g => isRecord(g) &&
+          boundedString(g.id,64) && boundedString(g.label,512) && nullableString(g.server_outbound,512) && nullableString(g.outbound,512) &&
+          ['server','default','node'].includes(g.mode as string) && typeof g.editable === 'boolean' && typeof g.reason === 'string'))) &&
+        (value.gpt_outbound === undefined || nullableString(value.gpt_outbound, 512)) && (value.gpt_use_default === undefined || typeof value.gpt_use_default === 'boolean') && validConfigMetadata(value) && validProfile(value.profile) && isRecord(value.counts) &&
         (value.validation === undefined || validValidation(value.validation)) &&
         ['inbounds', 'outbounds', 'rules'].every(key => {
           const count = (value.counts as Record<string, unknown>)[key]
@@ -239,7 +293,7 @@ function validNode(value: unknown): boolean {
 }
 function validCatalog(value: unknown): boolean {
   return value === null || (isRecord(value) && nullableString(value.etag, 4096) && typeof value.etag === 'string' && displayString(value.final) &&
-    safeCount(value.node_count) && safeCount(value.rule_count) && Array.isArray(value.nodes) && value.nodes.length <= 128 && value.nodes.every(validNode) &&
+    safeCount(value.node_count) && safeCount(value.rule_count) && Array.isArray(value.nodes) && value.nodes.length <= 1024 && value.nodes.every(validNode) &&
     Array.isArray(value.inbounds) && value.inbounds.length <= 16 && value.inbounds.every(item => isRecord(item) && displayString(item.type) && displayString(item.listen) && safeCount(item.port) && typeof item.auto_route === 'boolean') &&
     Array.isArray(value.rules) && value.rules.length <= 128 && value.rules.every(item => isRecord(item) && safeCount(item.index) && (item.title === undefined || displayString(item.title)) && typeof item.match === 'string' && item.match.length <= 600 && displayString(item.action) && displayString(item.outbound)))
 }

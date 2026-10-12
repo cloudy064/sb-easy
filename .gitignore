@@ -50,3 +50,7 @@ cutover-backup-*/
 # Downloadable release artifacts
 /downloads/*.apk
 /downloads/*.sha256
+/windows/ui/dist-capture/
+
+/windows/ui/dist-statistics/
+/windows/ui/dist-network-tools/

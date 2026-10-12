@@ -656,7 +656,7 @@ static int fetch_config(void *context, const sbj *identity, const char *etag, HA
     const char *stored_name = required_field(identity, "profile_name", error);
     if (!address || !token || !stored_id || !stored_name) return failure(error, "invalid_identity");
     if (parse_server(address, &server, error) < 0) goto done;
-    if (send_request(&server, L"GET", L"/api/agent/config", "", 0, false, token, etag, MAX_CONFIG_BODY,
+    if (send_request(&server, L"GET", L"/api/agent/config?sources=1", "", 0, false, token, etag, MAX_CONFIG_BODY,
         cancel, client->timeout, &response, error) < 0) goto done;
     if (response.status != 200 && response.status != 304) { failure(error, "http_error"); goto done; }
     bool not_modified = response.status == 304;
@@ -672,6 +672,10 @@ static int fetch_config(void *context, const sbj *identity, const char *etag, HA
     sbj_set_str(output, "etag", response_etag);
     sbj_set_str(output, "rule_source", *response.rule_source ? response.rule_source : "profile");
     sbj_set_str(output, "profile_id", profile_id); sbj_set_str(output, "profile_name", profile_name);
+    if(!not_modified && sbj_is_object(sbj_get(parsed,"config")) && sbj_is_array(sbj_get(parsed,"subscription_sources"))){
+        char *config_body=sbj_dump(sbj_get(parsed,"config"),-1);sbj_set_str(output,"content",config_body);sbw_secret_free(config_body);
+        sbj_set(output,"subscription_sources",sbj_clone(sbj_get(parsed,"subscription_sources")));
+    }
     *download = output; result = 0;
 done:
     server_free(&server); response_free(&response); sbj_free(parsed);

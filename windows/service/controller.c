@@ -1,9 +1,12 @@
+#include "subscriptions.h"
 #include "controller.h"
 #include "runtime_config.h"
 #include "dashboard.h"
 #include "routing.h"
 #include "traffic.h"
 #include "capture.h"
+#include "extensions.h"
+#include "extension_store.h"
 #include <wincrypt.h>
 #include <tlhelp32.h>
 #include <stdlib.h>
@@ -97,6 +100,10 @@ static sbj *enrollment_status(sbw_controller *controller) {
 static sbj *config_summary(sbw_controller *controller) {
     sbj *result = sbj_object(), *counts;
     sbj_set_bool(result, "gpt_use_default", sbj_get_bool(controller->identity, "windows_gpt_use_default", false));
+    sbj_set_str(result, "gpt_outbound", sbj_get_str(controller->identity, "windows_gpt_outbound", NULL));
+    sbj_set(result, "subscriptions", sbw_subscriptions_summary(controller->active ? controller->active : controller->candidate, controller->identity));
+    sbj_set(result, "routing_groups", sbw_routing_groups(controller->active ? controller->active : controller->candidate, controller->identity));
+    sbj_set_bool(result, "routing_live", controller->active && controller->runtime.core_running);
     sbj_set_bool(result, "candidate_available", controller->candidate != NULL);
     sbj_set_str(result, "downloaded_etag", sbj_get_str(controller->candidate, "etag", NULL));
     sbj_set_str(result, "active_etag", sbj_get_str(controller->active, "etag", NULL));
@@ -149,7 +156,7 @@ sbw_controller *sbw_controller_new(sbw_control_plane *remote, sbw_store *store, 
         sbw_fail(error, "INITIALIZATION_FAILED", "Service dependencies are unavailable."); return NULL;
     }
     sbw_controller *controller = sb_xcalloc(1, sizeof *controller);
-    controller->traffic = sbw_traffic_new(); controller->traffic_storage_ok = controller->traffic_load_ok = true;
+    controller->traffic_storage_ok = controller->traffic_load_ok = true;
     controller->remote = remote; controller->store = store; controller->cancel = cancel;
     InitializeSRWLock(&controller->state_lock); InitializeSRWLock(&controller->mutation_lock);
     InitializeSRWLock(&controller->user_operation_lock); InitializeSRWLock(&controller->upload_lock);
@@ -172,6 +179,7 @@ sbw_controller *sbw_controller_new(sbw_control_plane *remote, sbw_store *store, 
 }
 void sbw_controller_free(sbw_controller *controller) {
     if (!controller) return;
+    sbw_store_join();
     if (controller->monitor_stop) SetEvent(controller->monitor_stop);
     if (controller->monitor) { WaitForSingleObject(controller->monitor, INFINITE); CloseHandle(controller->monitor); }
     if (controller->monitor_stop) CloseHandle(controller->monitor_stop);
@@ -191,11 +199,6 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     if (error && !core) controller->core_error = *error;
     free(controller->checked_etag); controller->checked_etag = NULL; controller->checked_valid = false;
     if (core && !controller->monitor) {
-        sbj *saved_traffic = NULL; sbw_error traffic_error = {0};
-        controller->traffic_storage_ok = sbw_core_traffic_load(core, &saved_traffic, &traffic_error) == 0;
-        if (saved_traffic) controller->traffic_storage_ok = sbw_traffic_restore(controller->traffic, saved_traffic);
-        controller->traffic_load_ok = controller->traffic_storage_ok;
-        sbj_free(saved_traffic);
         controller->monitor_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
         controller->monitor = controller->monitor_stop ? CreateThread(NULL, 0, monitor_main, controller, 0, NULL) : NULL;
         if (!controller->monitor) {
@@ -207,7 +210,7 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     }
 }
 bool sbw_is_mutating_method(const char *method) {
-    return sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
+    return sb_streq(method,"extensions.install") || sb_streq(method,"extensions.change") || !strncmp(method,"subscriptions.",14) || sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "routing.gpt_node") || sb_streq(method, "routing.set") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
         sb_streq(method, "config.refresh") || sb_streq(method, "config.validate") ||
         sb_streq(method, "connection.start") || sb_streq(method, "connection.stop");
 }
@@ -231,6 +234,7 @@ static sbj *runtime_status(sbw_controller *controller) {
     sbj_set_str(result, "connection_mode", controller->active ?
         (controller->active_config.has_tun ? "tun" : "local") : NULL);
     sbj_set(result, "config", config_summary(controller));
+    sbj_set(result, "ipv6", sbw_runtime_ipv6_status(&controller->active_config, controller->runtime.core_running));
     if (controller->runtime_error.code[0]) {
         sbj *failure = sbj_object();
         sbj_set_str(failure, "code", controller->runtime_error.code);
@@ -253,15 +257,18 @@ static void record_check(sbw_controller *controller, bool valid, const sbw_error
     if (!valid && error) controller->core_error = *error;
     ReleaseSRWLockExclusive(&controller->state_lock);
 }
-static int prepare_candidate(sbw_controller *controller, const sbj *source, sbw_runtime_config *config, sbw_error *error) {
+static int prepare_with_identity(const sbj *identity, const sbj *source, sbw_runtime_config *config, sbw_error *error) {
     const sbj *content = sbj_get(source, "content");
     if (!content) return sbw_fail(error, "NO_CANDIDATE", "Download a candidate configuration before starting.");
-    sbj *effective = sbw_routing_snapshot(source, sbj_get_bool(controller->identity, "windows_gpt_use_default", false), error);
+    sbj *effective = sbw_routing_apply(source, identity, true, error);
     if (!effective) return -1;
     content = sbj_get(effective, "content");
     int result = sbw_runtime_config_prepare(content->v.str.ptr, content->v.str.len,
-        sbj_get_str(controller->identity, "server", ""), config, error);
+        sbj_get_str(identity, "server", ""), config, error);
     sbj_free(effective); return result;
+}
+static int prepare_candidate(sbw_controller *controller,const sbj *source,sbw_runtime_config *config,sbw_error *error) {
+    return prepare_with_identity(controller->identity,source,config,error);
 }
 static int check_config(sbw_controller *controller, sbw_runtime_config *config, sbw_error *error) {
     return sbw_core_config_check(controller->core, config->json, strlen(config->json), controller->cancel, NULL, error);
@@ -277,7 +284,19 @@ static int launch_healthy(sbw_controller *controller, sbw_runtime_config *config
      * A cold Wintun adapter also takes over three seconds on some machines. */
     if (sbw_runtime_config_health(config, status.process_id, controller->cancel,
                                  config->remote_rule_sets ? 25000 : config->has_tun ? 10000 : 3000, error) != 0) return -1;
-    if (cancelled(controller, error)) return -1;
+    sbj *runtime = sbj_parse_cstr(config->json);
+    const sbj *nodes = sbj_get(runtime, "outbounds");
+    int selected = 0;
+    for (size_t i = 0; i < sbj_arr_len(nodes); ++i) {
+        const sbj *node = sbj_arr_at(nodes, i);
+        if (!strncmp(sbj_get_str(node, "tag", ""), "sb-easy-local-", 14)) {
+            selected = sbw_runtime_select_group(config, status.process_id, controller->cancel,
+                sbj_get_str(node, "tag", ""), sbj_get_str(node, "default", ""), error);
+            if (selected != 0) break;
+        }
+    }
+    sbj_free(runtime);
+    if (selected != 0 || cancelled(controller, error)) return -1;
     return 0;
 }
 /* mutation_lock serializes this with start/stop; only short state commits take
@@ -318,16 +337,26 @@ static DWORD WINAPI monitor_main(void *context) {
     return 0;
 }
 static void persist_traffic(sbw_controller *controller) {
-    if (!controller->core || !controller->traffic_load_ok) return;
+    if (!controller->core || !controller->traffic || !controller->traffic_load_ok) return;
     sbj *data = sbw_traffic_snapshot(controller->traffic); sbw_error error = {0};
+    if(!data){controller->traffic_storage_ok=false;return;}
     controller->traffic_storage_ok = sbw_core_traffic_save(controller->core, data, &error) == 0;
     if (!controller->traffic_storage_ok)
         sbw_core_event(controller->core, "traffic-save", error.code);
     sbj_free(data); controller->traffic_saved = GetTickCount64();
 }
+static void ensure_statistics(sbw_controller *controller) {
+    if(controller->traffic||!controller->core||!sbw_extension_is_enabled("statistics"))return;
+    controller->traffic=sbw_traffic_new();sbj *saved=NULL;sbw_error error={0};
+    controller->traffic_storage_ok=sbw_core_traffic_load(controller->core,&saved,&error)==0;
+    if(saved&&controller->traffic_storage_ok)controller->traffic_storage_ok=sbw_traffic_restore(controller->traffic,saved);
+    controller->traffic_load_ok=controller->traffic_storage_ok;sbj_free(saved);controller->traffic_saved=GetTickCount64();
+}
 static bool collect_traffic(sbw_controller *controller) {
+    ensure_statistics(controller);
+    if(!controller->traffic&&!sbw_extension_enabled())return true;
     if (!controller->active || !controller->runtime.core_running) return true;
-    if (!controller->capture && controller->identity && controller->core)
+    if (!controller->capture && controller->identity && controller->core && sbw_extension_enabled())
         controller->capture = sbw_capture_new(sbw_core_work_directory(controller->core), controller->identity, NULL);
     sbw_core_status process = {0}; sbj *connections = NULL; sbw_error error = {0}; bool collected = false;
     if (sbw_core_poll(controller->core, &process, &error) == 0 && process.process_running &&
@@ -365,14 +394,14 @@ static int connection_stop(sbw_controller *controller, sbw_error *error) {
     ReleaseSRWLockExclusive(&controller->state_lock);
     return stopped;
 }
-static int connection_start(sbw_controller *controller, sbw_error *error) {
+static int connection_activate(sbw_controller *controller, const sbj *source, const sbj *identity, bool force, sbw_error *error) {
     if (!controller->identity) return sbw_fail(error, "NOT_ENROLLED", "Enroll this device before starting a connection.");
-    if (!controller->candidate) return sbw_fail(error, "NO_CANDIDATE", "Download a candidate configuration before starting.");
+    if (!source) return sbw_fail(error, "NO_CANDIDATE", "Download a candidate configuration before starting.");
     if (!controller->core) return sbw_fail(error, "CORE_UNAVAILABLE", "Prepare the pinned core and restart the service first.");
-    if (controller->active && sbj_equal(controller->active, controller->candidate)) return 0;
+    if (!force && controller->active && sbj_equal(controller->active, source)) return 0;
     sbw_runtime_config next = {0}; sbw_error failure = {0};
     /* A rejected candidate must never interrupt a healthy old instance. */
-    if (prepare_candidate(controller, controller->candidate, &next, &failure) != 0 ||
+    if (prepare_with_identity(identity, source, &next, &failure) != 0 ||
         check_config(controller, &next, &failure) != 0) {
         record_check(controller, false, &failure);
         sbw_runtime_config_free(&next); return sbw_fail(error, failure.code, failure.message);
@@ -392,10 +421,11 @@ static int connection_start(sbw_controller *controller, sbw_error *error) {
     bool started = launch_healthy(controller, &next, &failure) == 0;
     /* Commit last-good only after exact-config check, process start and health.
      * If durable commit fails, restore the previous known-good process. */
-    if (started && save_state(controller, controller->identity, controller->candidate, controller->candidate, &failure) == 0) {
+    if (started && save_state(controller, identity, controller->candidate, source, &failure) == 0) {
         AcquireSRWLockExclusive(&controller->state_lock);
-        sbj_free(controller->last_good); controller->last_good = sbj_clone(controller->candidate);
-        controller->active = sbj_clone(controller->candidate);
+        sbj *saved_identity=sbj_clone(identity);sbj_free(controller->identity);controller->identity=saved_identity;
+        sbj_free(controller->last_good); controller->last_good = sbj_clone(source);
+        controller->active = sbj_clone(source);
         controller->active_config = next; memset(&next, 0, sizeof next);
         sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_CORE_HEALTHY);
         memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
@@ -482,8 +512,32 @@ done:
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params, bool authorized, sbw_error *error) {
     if (!controller || !method) { sbw_fail(error, "INVALID_REQUEST", "Invalid service operation."); return NULL; }
     bool is_apply = strcmp(method, "enrollment.apply") == 0;
-    if (!sbj_is_object(params) || (!is_apply && strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
+    if (!sbj_is_object(params) || (!is_apply && strncmp(method,"subscriptions.",14) && strncmp(method,"extensions.",11) && !sb_streq(method, "routing.gpt_node") && !sb_streq(method, "routing.set") && strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
         sbw_fail(error, "INVALID_REQUEST", "This operation expects object params."); return NULL;
+    }
+    if (!strncmp(method, "extensions.", 11)) {
+        if (!authorized) { sbw_fail(error,"FORBIDDEN","Extension management requires the active console session."); return NULL; }
+        if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) { sbw_fail(error,"BUSY","A connection operation is in progress."); return NULL; }
+        sbj *result=NULL;
+        if (sb_streq(method,"extensions.list") && !sbj_obj_len(params)) result=sbw_extensions_snapshot(controller->capture,sbw_traffic_running(controller->traffic),controller->traffic&&!sbw_traffic_running(controller->traffic));
+        else if (sb_streq(method,"extensions.catalog") && !sbj_obj_len(params)) result=sbw_store_catalog();
+        else if (sb_streq(method,"extensions.progress") && !sbj_obj_len(params)) result=sbw_store_progress();
+        else if (sb_streq(method,"extensions.install") && sbj_obj_len(params)==1 && sbw_extension_release_find(sbj_get_str(params,"id",""))) {
+            const char *id=sbj_get_str(params,"id","");
+            if (sb_streq(id,"network-tools")) sbw_fail(error,"BUILTIN_FEATURE","Connections, rules and logs are included in the app.");
+            else if (sbw_extension_installed(id)) sbw_fail(error,"STORE_EXISTS","The extension is already installed.");
+            else if (!sbw_store_install(id,error)) result=sbw_store_progress();
+        }
+        else if (sb_streq(method,"extensions.change") && sbj_obj_len(params)==2 && sbw_extension_release_find(sbj_get_str(params,"id",""))) {
+            const char *action=sbj_get_str(params,"action",""),*id=sbj_get_str(params,"id","");
+            if (sbw_store_busy()) sbw_fail(error,"BUSY","An extension installation is in progress.");
+            else if (sb_streq(action,"enable") || sb_streq(action,"disable") || sb_streq(action,"remove")) {
+                if(sb_streq(id,"capture")){capture_upload_join(controller);sbw_capture_free(controller->capture);controller->capture=NULL;}
+                if(sb_streq(id,"statistics")){persist_traffic(controller);sbw_traffic_free(controller->traffic);controller->traffic=NULL;}
+                if (!sbw_extension_change(id,action,error)) result=sbw_extensions_snapshot(controller->capture,sbw_traffic_running(controller->traffic),false);
+            } else sbw_fail(error,"INVALID_REQUEST","Unknown extension action.");
+        } else sbw_fail(error,"INVALID_REQUEST","Invalid extension request.");
+        ReleaseSRWLockExclusive(&controller->mutation_lock);return result;
     }
     if (!strncmp(method, "capture.", 8)) {
         if (!authorized) { sbw_fail(error, "FORBIDDEN", "Capture requires the active console session or an administrator."); return NULL; }
@@ -493,22 +547,26 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     }
     if (sb_streq(method, "traffic.snapshot") || sb_streq(method, "traffic.clear") || sb_streq(method, "logs.snapshot")) {
         if (!authorized) { sbw_fail(error, "FORBIDDEN", "This operation requires the active console session."); return NULL; }
+        if (!sb_streq(method,"logs.snapshot") && !sbw_extension_is_enabled("statistics")) {sbw_fail(error,"EXTENSION_MISSING","Install and enable this extension in the store.");return NULL;}
         if (sb_streq(method, "logs.snapshot")) return sbw_core_logs(controller->core);
         if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
             sbw_fail(error, "BUSY", "A connection operation is in progress."); return NULL;
         }
+        ensure_statistics(controller);
+        if(!sbw_traffic_running(controller->traffic)){ReleaseSRWLockExclusive(&controller->mutation_lock);sbw_fail(error,"EXTENSION_FAILED","Statistics worker stopped. Re-enable it in the store.");return NULL;}
         if (sb_streq(method, "traffic.clear")) {
             if (!collect_traffic(controller) || !controller->core) {
                 ReleaseSRWLockExclusive(&controller->mutation_lock);
                 sbw_fail(error, "TRAFFIC_UNAVAILABLE", "Cannot clear statistics until collection and storage are available."); return NULL;
             }
             sbw_traffic *blank = sbw_traffic_new(); sbj *saved = sbw_traffic_snapshot(blank); sbw_traffic_free(blank);
-            int stored = sbw_core_traffic_save(controller->core, saved, error); sbj_free(saved);
+            int stored = saved?sbw_core_traffic_save(controller->core, saved, error):sbw_fail(error,"EXTENSION_FAILED","Statistics worker did not respond."); sbj_free(saved);
             if (stored != 0) { ReleaseSRWLockExclusive(&controller->mutation_lock); return NULL; }
             controller->traffic_storage_ok = controller->traffic_load_ok = true;
             sbw_traffic_clear(controller->traffic);
         }
         sbj *result = sbw_traffic_snapshot(controller->traffic);
+        if(!result){ReleaseSRWLockExclusive(&controller->mutation_lock);sbw_fail(error,"EXTENSION_FAILED","Statistics worker did not respond.");return NULL;}
         sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
         ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
     }
@@ -519,15 +577,14 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         AcquireSRWLockShared(&controller->state_lock);
         if (ready(controller, error)) {
             result = sbj_object();
-            bool local = sbj_get_bool(controller->identity, "windows_gpt_use_default", false);
-            sbj *candidate = sbw_routing_snapshot(controller->candidate, local, error);
-            sbj *active = sbw_routing_snapshot(controller->active, local, error);
+            sbw_error routing_error = {0};
+            sbj *candidate = sbw_routing_apply(controller->candidate, controller->identity, false, &routing_error);
+            sbj *active = sbw_routing_apply(controller->active, controller->identity, false, &routing_error);
             if ((controller->candidate && !candidate) || (controller->active && !active)) {
-                sbj_free(result); result = NULL;
-            } else {
-                sbj_set(result, "candidate", sbw_config_catalog(candidate));
-                sbj_set(result, "active", sbw_config_catalog(active));
+                sbj_set_bool(result, "routing_warning", true);
             }
+            sbj_set(result, "candidate", sbw_config_catalog(candidate ? candidate : controller->candidate));
+            sbj_set(result, "active", sbw_config_catalog(active ? active : controller->active));
             sbj_free(candidate); sbj_free(active);
         }
         ReleaseSRWLockShared(&controller->state_lock); return result;
@@ -560,18 +617,113 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     if (cancelled(controller, error) || !ready(controller, error)) goto done;
     observe_core(controller, false);
     if (sb_streq(method, "connection.start") || sb_streq(method, "connection.stop")) {
-        int changed = sb_streq(method, "connection.start") ? connection_start(controller, error) : connection_stop(controller, error);
+        int changed = sb_streq(method, "connection.start") ? connection_activate(controller, controller->candidate, controller->identity, false, error) : connection_stop(controller, error);
         if (changed == 0) {
             AcquireSRWLockShared(&controller->state_lock); result = runtime_status(controller);
             ReleaseSRWLockShared(&controller->state_lock);
         }
-    } else if (sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server")) {
+    } else if (sb_streq(method,"subscriptions.fetch")) {
+        const char *url=sbj_get_str(params,"url",NULL),*id=sbj_get_str(params,"id",NULL);
+        if(sbj_obj_len(params)!=1 || (!url && !id)){sbw_fail(error,"INVALID_REQUEST","Choose a subscription address or ID.");goto done;}
+        if(id){const sbj *subs=sbj_get(controller->identity,"local_subscriptions");for(size_t i=0;i<sbj_arr_len(subs);++i)if(sbj_string_is(sbj_get(sbj_arr_at(subs,i),"id"),id))url=sbj_get_str(sbj_arr_at(subs,i),"url",NULL);}
+        result=sbw_subscription_fetch(url,controller->cancel,error);
+    } else if (sb_streq(method,"subscriptions.save") || sb_streq(method,"subscriptions.remove")) {
+        bool live=controller->active && controller->runtime.core_running;
+        const sbj *source=live?controller->active:controller->candidate;
+        if(!source){sbw_fail(error,"NO_CANDIDATE","Download the shared configuration first.");goto done;}
+        new_identity=sbw_subscriptions_change(controller->identity,params,sb_streq(method,"subscriptions.remove"),error);
+        if(!new_identity)goto done;
+        if(live){
+            sbj *snapshot=sbj_clone(source);
+            int changed=connection_activate(controller,snapshot,new_identity,true,error);sbj_free(snapshot);
+            if(!changed)result=config_summary(controller);
+        }else{
+            sbw_runtime_config next={0};
+            int changed=prepare_with_identity(new_identity,source,&next,error);
+            if(!changed)changed=check_config(controller,&next,error);
+            if(!changed)changed=save_state(controller,new_identity,controller->candidate,controller->last_good,error);
+            if(!changed){AcquireSRWLockExclusive(&controller->state_lock);sbj_free(controller->identity);controller->identity=new_identity;new_identity=NULL;result=config_summary(controller);ReleaseSRWLockExclusive(&controller->state_lock);}
+            sbw_runtime_config_free(&next);
+        }
+    } else if (sb_streq(method, "routing.set")) {
+        if (!controller->identity) { sbw_fail(error,"NOT_ENROLLED","Enroll this device first."); goto done; }
+        const char *id=sbj_get_str(params,"group",""), *mode=sbj_get_str(params,"mode","");
+        const char *node=sbj_get_str(params,"node","");
+        bool custom=sb_streq(mode,"node"), live=controller->active && controller->runtime.core_running;
+        if (!sbw_json_string(sbj_get(params,"group"),64,false) ||
+            (!custom && !sb_streq(mode,"server") && !sb_streq(mode,"default")) ||
+            sbj_obj_len(params)!=(custom?3U:2U) ||
+            (custom && !sbw_json_string(sbj_get(params,"node"),512,false)) ||
+            (sb_streq(id,"default") && sb_streq(mode,"default"))) {
+            sbw_fail(error,"INVALID_REQUEST","Choose a service group and routing mode."); goto done;
+        }
+        const sbj *source=live?controller->active:controller->candidate;
+        if (!source) { sbw_fail(error,"NO_CANDIDATE","Download configuration first."); goto done; }
+        sbj *groups=sbw_routing_groups(source,controller->identity); bool found=false;
+        for(size_t i=0;i<sbj_arr_len(groups);++i)
+            if(sbj_string_is(sbj_get(sbj_arr_at(groups,i),"id"),id)) found=true;
+        sbj_free(groups);
+        if(!found) { sbw_fail(error,"ROUTING_UNSUPPORTED","The service group is no longer present."); goto done; }
+        new_identity=sbj_clone(controller->identity);
+        sbj *overrides=sbj_get(new_identity,"windows_routing");
+        if(!overrides){overrides=sbj_object();sbj_set(new_identity,"windows_routing",overrides);}
+        sbj *pref=sbj_object();sbj_set_str(pref,"mode",mode);if(custom)sbj_set_str(pref,"node",node);
+        sbj_set(overrides,id,pref);
+        if(sb_streq(id,"gpt")) {
+            sbj_set_bool(new_identity,"windows_gpt_use_default",sb_streq(mode,"default"));
+            sbj_del(new_identity,"windows_gpt_outbound");if(custom)sbj_set_str(new_identity,"windows_gpt_outbound",node);
+        }
+        sbj *next=sbw_routing_apply(source,new_identity,true,error);
+        if(!next)goto done;
+        sbj *cfg=sbj_parse_cstr(sbj_get_str(next,"content",""));sbj_free(next);
+        char selector[96];sprintf_s(selector,sizeof(selector),"sb-easy-local-%s",id);
+        char *selected=NULL,*previous=NULL;
+        const sbj *nodes=sbj_get(cfg,"outbounds");
+        for(size_t i=0;i<sbj_arr_len(nodes);++i)
+            if(sbj_string_is(sbj_get(sbj_arr_at(nodes,i),"tag"),selector)) selected=sb_strdup(sbj_get_str(sbj_arr_at(nodes,i),"default",""));
+        sbj_free(cfg);
+        if(!selected && !sb_streq(mode,"server")){sbw_fail(error,"ROUTING_UNSUPPORTED","This service cannot be safely changed locally.");goto done;}
+        bool switch_live=live && selected;
+        sbw_core_status process={0};sbj *proxies=NULL;
+        if(switch_live) {
+            if(sbw_core_poll(controller->core,&process,error)!=0 ||
+                sbw_runtime_config_get(&controller->active_config,process.process_id,controller->cancel,"/proxies",&proxies,error)!=0) {
+                free(selected);sbj_free(proxies);goto done;
+            }
+            previous=sb_strdup(sbj_get_str(sbj_get(sbj_get(proxies,"proxies"),selector),"now",""));sbj_free(proxies);
+            if(!*previous){free(previous);free(selected);sbw_fail(error,"LIVE_ROUTING_UNAVAILABLE","Apply the updated configuration once to enable live service switching.");goto done;}
+        }
+        int applied=switch_live?sbw_runtime_select_group(&controller->active_config,process.process_id,controller->cancel,selector,selected,error):0;
+        if(applied==0)applied=save_state(controller,new_identity,controller->candidate,controller->last_good,error);
+        if(applied!=0) {
+            sbw_error rollback={0};
+            if(switch_live && sbw_runtime_select_group(&controller->active_config,process.process_id,NULL,selector,previous,&rollback)!=0) {
+                sbw_fail(error,"LIVE_ROUTING_UNCERTAIN","The switch could not be rolled back. Check the running node.");
+                AcquireSRWLockExclusive(&controller->state_lock);if(error)controller->runtime_error=*error;ReleaseSRWLockExclusive(&controller->state_lock);
+            }
+            free(previous);free(selected);goto done;
+        }
+        free(previous);free(selected);
+        AcquireSRWLockExclusive(&controller->state_lock);
+        sbj_free(controller->identity);controller->identity=new_identity;new_identity=NULL;
+        free(controller->checked_etag);controller->checked_etag=NULL;controller->checked_valid=false;
+        if(live)memset(&controller->runtime_error,0,sizeof(controller->runtime_error));
+        result=config_summary(controller);ReleaseSRWLockExclusive(&controller->state_lock);
+    } else if (sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "routing.gpt_node")) {
         if (!controller->identity) { sbw_fail(error, "NOT_ENROLLED", "Enroll this device first."); goto done; }
-        if (controller->active || controller->runtime.core_running) { sbw_fail(error, "CONNECTION_RUNNING", "Stop the connection before changing routing."); goto done; }
         bool local = sb_streq(method, "routing.gpt_default");
-        if (local) {
-            if (!controller->candidate) { sbw_fail(error, "NO_CANDIDATE", "Download configuration first."); goto done; }
-            sbj *effective = sbw_routing_snapshot(controller->candidate, true, error);
+        const char *outbound = NULL;
+        if (sb_streq(method, "routing.gpt_node")) {
+            if (sbj_obj_len(params) != 1 || !sbw_json_string(sbj_get(params, "outbound"), 512, false)) {
+                sbw_fail(error, "INVALID_REQUEST", "Choose one valid outbound tag."); goto done;
+            }
+            outbound = sbj_get_str(params, "outbound", "");
+        }
+        bool live = controller->active && controller->runtime.core_running;
+        const sbj *routing_source = live ? controller->active : controller->candidate;
+        if (local || outbound || live) {
+            if (!routing_source) { sbw_fail(error, "NO_CANDIDATE", "Download configuration first."); goto done; }
+            sbj *effective = sbw_routing_snapshot_node(routing_source, local, outbound, error);
             if (!effective) goto done;
             const char *content = sbj_get_str(effective, "content", "");
             sbw_runtime_config adapted = {0};
@@ -582,9 +734,47 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             if (checked != 0) goto done;
         }
         new_identity = sbj_clone(controller->identity);
+        if (sbj_get(new_identity, "windows_routing")) sbj_del(sbj_get(new_identity, "windows_routing"), "gpt");
         sbj_set_bool(new_identity, "windows_gpt_use_default", local);
-        if (save_state(controller, new_identity, controller->candidate, controller->last_good, error) != 0) goto done;
+        sbj_del(new_identity, "windows_gpt_outbound");
+        if (outbound) sbj_set_str(new_identity, "windows_gpt_outbound", outbound);
+        char *previous = NULL, *selected = NULL;
+        sbw_core_status process = {0};
+        if (live) {
+            sbj *next = sbw_routing_snapshot_node(controller->active, local, outbound, error);
+            if (!next) goto done;
+            selected = sbw_routing_target(next); sbj_free(next);
+            sbj *proxies = NULL;
+            if (!selected || !*selected) {
+                free(selected); sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE", "This running configuration has no GPT route."); goto done;
+            }
+            if (sbw_core_poll(controller->core, &process, error) != 0 ||
+                sbw_runtime_config_get(&controller->active_config, process.process_id, controller->cancel, "/proxies", &proxies, error) != 0) {
+                free(selected); sbj_free(proxies); goto done;
+            }
+            previous = sb_strdup(sbj_get_str(sbj_get(sbj_get(proxies, "proxies"), SBW_GPT_SELECTOR), "now", ""));
+            sbj_free(proxies);
+            if (!*previous) {
+                free(previous); free(selected);
+                sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE", "This running configuration has no live GPT group."); goto done;
+            }
+        }
+        int applied = live ? sbw_runtime_select_gpt(&controller->active_config, process.process_id,
+            controller->cancel, selected, error) : 0;
+        if (applied == 0) applied = save_state(controller, new_identity, controller->candidate, controller->last_good, error);
+        if (applied != 0) {
+            sbw_error rollback_error = {0};
+            if (live && sbw_runtime_select_gpt(&controller->active_config, process.process_id, NULL, previous, &rollback_error) != 0) {
+                sbw_fail(error, "LIVE_ROUTING_UNCERTAIN", "The live switch could not be rolled back. Check the current node before retrying.");
+                AcquireSRWLockExclusive(&controller->state_lock);
+                if (error) controller->runtime_error = *error;
+                ReleaseSRWLockExclusive(&controller->state_lock);
+            }
+            free(previous); free(selected); goto done;
+        }
+        free(previous); free(selected);
         AcquireSRWLockExclusive(&controller->state_lock);
+        if (live) memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
         sbj_free(controller->identity); controller->identity = new_identity; new_identity = NULL;
         free(controller->checked_etag); controller->checked_etag = NULL; controller->checked_valid = false;
         result = config_summary(controller);
@@ -601,6 +791,9 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             controller->remote->enroll(controller->remote->context, &target, controller->cancel, &new_identity, error) != 0) goto done;
         if (!identity_valid(new_identity)) { sbw_fail(error, "INVALID_RESPONSE", "The server returned invalid device information."); goto done; }
         sbj_del(new_identity, "windows_gpt_use_default");
+        sbj_del(new_identity, "windows_gpt_outbound");
+        sbj_del(new_identity, "windows_routing");
+        sbj_del(new_identity, "local_subscriptions");
         /* A redeemed single-use identity must be saved even during shutdown. */
         if (save_state(controller, new_identity, NULL, NULL, error) != 0) goto done;
         AcquireSRWLockExclusive(&controller->state_lock);
@@ -665,7 +858,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
                     sbj_set_str(download, key, sbj_get_str(controller->identity, key, ""));
             }
             sbj_del(download, "not_modified");
-            sbj *effective = sbw_routing_snapshot(download, sbj_get_bool(controller->identity, "windows_gpt_use_default", false), error);
+            sbj *effective = sbw_routing_apply(download, controller->identity, false, error);
             if (!effective) goto done;
             sbj_free(effective);
             if (save_state(controller, controller->identity, download, controller->last_good, error) != 0) goto done;
@@ -754,6 +947,7 @@ static void capture_auto_upload(sbw_controller *c) {
 }
 static sbj *capture_snapshot(sbw_controller *c) {
     sbj *result = sbw_capture_snapshot(c->capture);
+    if (!result) return NULL;
     AcquireSRWLockShared(&c->upload_lock); sbj_set_str(result, "upload_status", c->upload_status); ReleaseSRWLockShared(&c->upload_lock);
     sbj_set_bool(result, "uploading", capture_uploading(c));
     sbj *apps = sbj_array(); HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -769,9 +963,14 @@ static sbj *capture_snapshot(sbw_controller *c) {
     sbj_set(result, "apps", apps); return result;
 }
 static sbj *capture_dispatch(sbw_controller *c, const char *method, const sbj *params, sbw_error *error) {
+    if (!sbw_extension_enabled()) { sbw_fail(error,"EXTENSION_MISSING","Install and enable the capture extension first."); return NULL; }
+    if (!c->identity || !c->core) { sbw_fail(error,"NOT_ENROLLED","Register this device first."); return NULL; }
+    if (!c->capture) c->capture=sbw_capture_new(sbw_core_work_directory(c->core),c->identity,error);
+    if (!c->capture) return NULL;
+    if (!sbw_capture_worker_running(c->capture)) { sbw_fail(error,"EXTENSION_FAILED","Re-enable the capture extension in Extensions. Proxy remains connected."); return NULL; }
     if (sb_streq(method, "capture.validate")) {
         if (sbj_obj_len(params) != 1 || !sbj_is_object(sbj_get(params, "config"))) goto invalid;
-        sbj *config = sbw_capture_validate(sbj_get(params, "config"), error); if (!config) return NULL;
+        sbj *config = sbw_capture_worker_validate(c->capture, sbj_get(params, "config"), error); if (!config) return NULL;
         sbj *result = sbj_object(); sbj_set(result, "config", config); return result;
     }
     if (!c->identity || !c->core) { sbw_fail(error, "NOT_ENROLLED", "Register the device and prepare the core first."); return NULL; }
@@ -808,7 +1007,9 @@ static sbj *capture_dispatch(sbw_controller *c, const char *method, const sbj *p
             sbj_set_int(result, "total", (int64_t)length); sbj_set_int(result, "offset", offset); sbj_set_int(result, "next", offset + (int64_t)count); return result;
         } else if (capture_upload_begin(c, digest, error) != 0) return NULL;
     } else { sbw_fail(error, "NOT_IMPLEMENTED", "Unknown capture operation."); return NULL; }
-    return capture_snapshot(c);
+    sbj *snapshot=capture_snapshot(c);
+    if(!snapshot)sbw_fail(error,"EXTENSION_FAILED","Capture extension stopped. Re-enable it in Extensions. Proxy remains connected.");
+    return snapshot;
  invalid:
     sbw_fail(error, "INVALID_REQUEST", "Invalid capture operation parameters."); return NULL;
 }

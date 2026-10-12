@@ -16,7 +16,17 @@ This is not a completed or signed VPN release.
   causes the next config fetch to provision its own peer. No separate Windows
   WireGuard service is needed. Unknown endpoint types remain unsupported.
 
-- GPT/Codex can use the default proxy via a persisted local routing preference.
+- GPT/Codex can follow the server, use the default proxy, or use a chosen node via a persisted local routing preference.
+  The service keeps the downloaded server snapshot unchanged and overlays the local
+  choice on both the GPT route and its DNS detour during validation and startup.
+  Sync and service restarts preserve the choice. Open Service Routing, select a
+  node, then save the local choice. A runtime-only selector switches GPT traffic
+  and DNS through the authenticated Clash API without restarting the core or TUN.
+  Existing user connections retain their exit; new connections use the selection.
+  A failed durable save restores the previous live selection. Restore server settings removes
+  the override. No separate server profile is needed. If the chosen node disappears,
+  refresh fails explicitly and retains the previous candidate instead of silently
+  changing exits. Arbitrary rule editing and other service groups remain future work.
   Both its domain route and a dedicated clone of its DNS server use that exit;
   other services sharing the original DNS server stay unchanged. The server
   snapshot/ETag remain intact. Switching requires a stopped core and validates
@@ -433,7 +443,7 @@ with process-name/domain/exact-host-or-IP OR filters and a libpcap BPF AND filte
 It offers export/delete, file rotation, a bounded local quota, manual upload and
 opt-in periodic upload to the enrolled control plane. Native code remains C11.
 Build preparation downloads pinned WinDivert and flex/bison tools and builds the
-vendored libpcap with its null backend. Both ZIP and MSI include capture dependencies.
+vendored libpcap with its null backend. The old 0.6.0 ZIP/MSI included capture dependencies; current base packages exclude them (see Optional capture extension below).
 
 Files are scoped by center and device under the protected core-work directory.
 Diagnostics exports do not contain raw PCAPs. Uploads verify the server's digest
@@ -443,3 +453,207 @@ migration 012 and the capture endpoint. See TESTING-0.6.0.txt for limits and tes
 ### 0.6.1：后台启动授权
 
 已安装后台停止且当前账户没有启动权限时，界面提供“授权并启动服务”。点击后由 Windows UAC 授权独立的 C helper，仅启动 SCM 中已安装且路径匹配的 sb-easy 服务，随后自动重新读取状态。不会启动代理内核或修改 DNS；取消 UAC 后可重试，无需重启电脑或以管理员身份运行整个界面。未安装服务时仍需运行 MSI 安装包；便携目录不会被注册为 SYSTEM 服务。
+
+Live GPT switching acceptance: `windows/scripts/live-routing-smoke.ps1` uses
+loopback-only proxy fixtures and a real sing-box core, verifies unchanged PID,
+an uninterrupted existing GPT stream, new requests after each switch, and rollback
+on a failed preference write. It does not create a TUN or contact OpenAI.
+
+### IPv6 状态与双栈接入
+
+Windows 的设置与连接诊断显示本机 IPv6 和 TUN 接管证据。服务使用 Windows
+网卡/路由 API：只统计启用网卡上处于 Preferred 状态的全球单播地址，联网条件
+要求同一接口存在 IPv6 默认路由；TUN 接管要求正在运行的确切网卡存在默认路由
+或两条覆盖全空间的 /1 路由。检测失败显示“尚未检测”，旧服务保持兼容。
+此检测不会发送联网请求，不证明节点出口可用，也不证明不存在路由例外或泄露。
+
+内核配置适配已支持保留双栈地址。例如在共享模板 tun inbound 的 address 中同时
+配置 `172.19.0.1/30` 与 `fd71:5be:a5e::1/126`（部署前检查地址冲突），配合
+`auto_route: true`、`strict_route: true`，并检查自定义 route_address/exclude_address。
+DNS 应允许 AAAA（例如 prefer_ipv4，而非 ipv4_only）；AI 分组 DNS detour 和流量
+出站继续一致。客户端到代理可用 IPv4，因此本地没有公网 IPv6 不妨碍节点代连
+IPv6 目标。启用接管不代表节点具备 IPv6 出口。
+
+双栈上线验收必须包含真实 TUN 路由、仅 AAAA 的 HTTPS 目标经所选节点访问、
+原有 IPv4 回归、断开后的路由恢复和直连例外检查。当前新增回归验证双栈模板在
+Windows 适配中保留、检测字段与旧版协议兼容；尚未完成真实 IPv6 出口验收，
+界面明确显示节点“尚未实测”，本次更新不自动修改共享模板启用双栈。
+
+### 统一的 Windows 本地服务分流
+
+服务分流支持默认代理、Claude、GPT/Codex，以及可安全识别的其他域名后缀分组。
+Windows 首页集中显示连接状态和服务出口。点击出口可搜索节点，也可选择跟随服务器
+或默认代理；选中即提交，不再单独点击应用。切换中禁止重复提交，结果由服务回读
+确认；断开时提示下次连接生效。配置版本和校验保留在配置管理，规则与日志收进更多工具。
+每组可选择本机节点或恢复服务器设置，服务组还可跟随本机默认代理。界面明确
+区分服务器、本机覆盖和跟随默认；运行期间编辑当前运行版本，停止时编辑下载版本。
+原有 GPT 本地选择自动兼容。覆盖通过受保护的设备状态持久化，不修改服务器原配置。
+
+运行配置为每个可编辑组添加独立 selector 和 DNS 副本；默认代理同时覆盖最终路由
+及最终 DNS，bootstrap 和其他分组不会被一起改写。跟随默认使用 selector 引用，
+因此后续默认出口切换无需重启。选择写入失败会恢复原 selector；恢复失败明确报错。
+启动时重新确认所有本地 selector 的选项，防止内核缓存覆盖持久化设置。
+
+复杂条件、缺少对应 DNS、重名服务或保留标签冲突显示为不可编辑，继续遵循服务端。
+其他分组以排序后的域名集合生成稳定 ID，规则调整顺序不影响覆盖。节点/分组消失
+时拒绝悄悄回退；用户需重新选择或恢复服务器设置。已有连接保持原出口，新连接
+使用新选择。升级到此版本需重建一次内核以添加分组；之后切换无需断开。
+
+`windows/scripts/service-routing-smoke.ps1` 使用本机回环代理与真实内核，验证三组
+实时切换、长连接保持、默认跟随、保存失败回滚和服务重启后的持久化。不会创建
+TUN 或访问真实 AI 服务。`windows_routing_groups_test` 验证 DNS 副本隔离及规则拒绝。
+
+
+### Subscription sources and local subscriptions
+
+The Nodes & Subscriptions page groups nodes by the provenance delivered with
+`GET /api/agent/config?sources=1`. The C server returns an opt-in envelope with
+`config` and `subscription_sources`; legacy clients still receive plain sing-box
+JSON. Provenance includes only the names and tags of subscriptions whose nodes
+are actually rendered for this device, never subscription URLs or credentials.
+Older servers continue working and are explicitly labelled as missing provenance.
+Update the Docker server with `scripts/update-docker-subscriptions.sh` using the
+existing deployment's Compose file, then sync/apply the Windows configuration.
+
+Local subscriptions support bounded HTTP(S) downloads (256 KiB), Clash YAML,
+sing-box JSON, and plain/base64 URI lists. Supported nodes are Shadowsocks,
+VMess, VLESS, Trojan, Hysteria2, TUIC, HTTP and SOCKS. Unsupported protocols,
+plugins, external-file TLS settings, duplicate names and invalid nodes reject the
+whole import. No public conversion service is used. Each subscription has a stable
+ID and isolated node tags; URLs and credentials are persisted with the protected
+device identity, never in localStorage or public subscription summaries.
+
+Adding/updating/removing a subscription validates the merged configuration before
+changing the running core. sing-box 1.13's PUT /configs is a no-op, so topology
+changes automatically restart the core and may briefly interrupt connections;
+ordinary selection among existing nodes remains live. Failed activation or save
+restores the previous configuration. Deleting a currently selected node is rejected:
+first select another exit. Local changes survive shared configuration sync and
+service restarts, and never modify the shared profile. Up to 16 local subscriptions,
+256 nodes each, and 1024 combined nodes are supported. Refresh is manual in this
+release. The isolated service-routing smoke test covers real traffic through an
+imported node, persistence, used-node deletion rejection and failed-save rollback.
+
+
+## Optional capture extension (API 1)
+
+The default Windows build and portable/MSI payload exclude capture implementation,
+libpcap, WinDivert, and the capture UI. The first official extension is `capture`
+version 1.0.0. Settings > Extension Store manages its lifecycle. This is the first
+migration. Windows 0.6.4 also extracts historical statistics and the network troubleshooting UI as described below.
+
+Build the optional package with `-DSB_EASY_BUILD_CAPTURE_EXTENSION=ON`, run
+`npm --prefix windows/ui run build:capture`, then
+`windows/scripts/package-capture-extension.ps1`. Default builds set the option OFF
+and do not require capture dependencies. The `build.ps1 -CaptureExtension` switch
+prepares those dependencies when requested.
+
+In Windows 0.6.3, open Settings > Extension Store and click Install. The service
+downloads the official package in the background, reports progress, verifies the
+release SHA-256, and publishes staged files. Installation leaves the extension
+disabled and does not restart sing-box. The Installed tab provides enable,
+disable and uninstall. Re-enabling permits saved capture preferences to resume;
+new installations have capture disabled. Failed downloads/installations can be
+retried. The separate ZIP/Install.cmd remains an offline fallback.
+
+This first store is an official curated catalog shipped with the client, with three
+available extensions. It does not accept third-party repositories or silently
+trust new code advertised by a remote catalog. Adding a release requires reviewing
+and updating the client catalog pin. Build a store release with
+`python windows/scripts/package-plugins.py`; it writes all `.sbe` artifacts,
+`build/store-release-index.json` and `service/store_catalog.h`. Rebuild the host
+after pinning. The old package-store.py creates a capture artifact only.
+The fixed-layout bundle contains only the predefined files for each release, no executable
+installer, archive paths, or links. Size is pinned and capped at 16 MiB. The
+compiled digest authenticates package contents even over the current HTTP
+hosting endpoint. Downloads send no device credentials and reject redirects.
+
+`scripts/deploy-extension-store.py <bundle> <sha256>` runs on the Docker host.
+It publishes the package under `/assets/store/` using a persistent read-only
+Compose mount, preserves other Compose settings, and rolls back on failed
+download verification. It does not change device profiles or subscriptions.
+
+The protected `extensions/capture/extension.json` declares `id`, `version` and
+`api_version`. The first host only accepts the official capture ID/API/version.
+It launches `sb-easy-capture.exe` in a kill-on-close job, with an explicit inherited
+handle list and private framed pipes. Calls have a three-second deadline and a
+2 MiB frame ceiling. Failure stops the child, not sing-box. This is process crash
+isolation, not a security sandbox: capture runs with the service's privileges.
+Only the device storage scope and requested connection metadata are sent; device
+authentication credentials and server upload authentication remain in the host.
+
+The extension UI is a separately built module at `ui/extensions/capture/view.js`.
+It is loaded only when opened. Disable/uninstall stops its worker without stopping
+the proxy. Uninstall retires extension binaries/UI into timestamped `*-removed-*`
+directories, preserving existing device-scoped capture settings and PCAP files.
+Reinstalling and enabling restores those settings. Saved data is not deleted by
+uninstallation. Compatible updates use uninstall, then install the newly approved
+release from an updated client catalog.
+
+`extensions.list` and `extensions.change` (`id: capture`, `action: enable|disable|remove`)
+require the same authorized local session as other private operations. Capture
+calls return `EXTENSION_MISSING` while absent/disabled and `EXTENSION_FAILED` if
+the worker exits. Re-enable to restart a failed worker.
+
+`extensions.catalog` lists trusted releases, `extensions.install` accepts only
+`{id: "capture"|"statistics"}`, and `extensions.progress` reports the asynchronous install job.
+The legacy `network-tools` installation request returns `BUILTIN_FEATURE` in 0.6.6.
+All three require the authorized local session. URLs, digests and destination
+paths cannot be supplied by RPC. Downloading does not hold the connection mutation
+lock. Extension lifecycle changes are rejected while installation is active.
+
+Verification: `windows/scripts/extensions-smoke.ps1` exercises absent/disabled
+states, real store download/installation, worker crash recovery, disable, uninstall, reinstall,
+saved preferences, unchanged sing-box PID and real proxy requests on an isolated
+loopback fixture. `capture_test` continues testing packet filtering and files
+against the optional implementation.
+`windows_extension_store_test <bundle>` additionally verifies corruption rejection,
+occupied-destination rollback, disabled installation and overwrite rejection.
+
+
+## Additional optional plugins (Windows 0.6.4)
+
+The store offers `statistics` in addition to capture, each API 1/version 1.0.0.
+Both install disabled. Sidebar entries appear only for enabled plugins, and
+their Vue modules load only when opened. Neither optional module is part of the
+base UI bundle. Installed settings/history survive uninstall.
+
+Statistics aggregation (`traffic.c`) is linked only into the optional
+`sb-easy-statistics.exe` worker and its tests. The host links `traffic_proxy.c`,
+a small broker using the shared, bounded `extension_process` transport. With
+statistics disabled, the host does not launch that worker, load its history,
+accumulate per-application/domain history, or poll connections for statistics.
+Capture can still request its own samples independently. Basic live speed and
+connection counts remain available through sing-box's runtime API.
+
+Existing encrypted history is loaded lazily when statistics is enabled and saved
+through the protected host store. The first sample after a worker start only
+establishes a baseline, so reinstall/re-enable cannot recount earlier traffic.
+A crashed or unresponsive worker never overwrites saved history with empty data.
+Disable saves a final checkpoint, then terminates the worker without restarting
+sing-box. The history was already bounded to 512 aggregate rows; that limit stays.
+
+As of Windows 0.6.6, active connections and runtime logs are default sidebar
+pages. Effective rule inspection is also built in under advanced navigation.
+These pages require no installed or enabled extension. `logs.snapshot` retains
+local-session authorization and redaction, but no longer requires Network Tools.
+The store no longer advertises Network Tools to new users. Existing legacy
+packages remain manageable under Installed, with an explanation that removal
+only deletes the old extension files and does not remove the built-in pages.
+Legacy package identities and integrity pins are retained for that migration.
+
+Release build order:
+1. Build the base and optional worker with
+   `-DSB_EASY_BUILD_STATISTICS_EXTENSION=ON` (or `build.ps1 -StatisticsExtension`).
+2. Run `npm --prefix windows/ui run build:plugins`. Keep the approved capture ZIP
+   in `build/sb-easy-capture-1.0.0-windows-x64.zip`.
+3. Run `python windows/scripts/package-plugins.py`, upload every indexed artifact
+   to the existing server's read-only store mount, then rebuild the base service.
+4. Build the base UI and package the MSI. Base packaging excludes all plugin
+   workers and modules. A bootstrap catalog cannot be packaged.
+
+`extensions-smoke.ps1` now covers all three real store downloads, concurrent
+plugin lifecycle independence, statistics persistence, first-sample baselines,
+disabled-period exclusion, worker crash recovery and unchanged proxy PID/traffic.
+Run `windows_extension_store_test <bundle> <id>` for each indexed release to verify
+integrity and atomic disabled installation for each layout.

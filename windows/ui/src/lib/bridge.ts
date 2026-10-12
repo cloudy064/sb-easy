@@ -21,11 +21,20 @@ export class BridgeError extends Error {
 }
 
 interface PendingRequest {
+  params: unknown
+  attempts: number
+  retryTimer?: ReturnType<typeof setTimeout>
   method: Method
   resolve(value: unknown): void
   reject(error: BridgeError): void
   timer: ReturnType<typeof setTimeout>
 }
+
+const retryableReads = new Set<Method>([
+  'runtime.snapshot', 'traffic.snapshot', 'capture.snapshot', 'capture.read',
+  'extensions.list', 'extensions.catalog', 'extensions.progress',
+  'status.get', 'config.summary', 'config.inspect', 'logs.snapshot',
+])
 
 // No HTTP fallback: a browser preview must never impersonate the Windows service.
 export function findNativeTransport(scope: unknown = globalThis): WebViewTransport | undefined {
@@ -66,10 +75,11 @@ export class NativeBridge {
     const id = `${this.prefix}-${++this.sequence}`
     return new Promise<ResultMap[M]>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id)
-        reject(new BridgeError('timeout', '服务响应超时；操作结果尚未确认，请先刷新状态'))
+        this.finish(id, new BridgeError('timeout', retryableReads.has(method)
+          ? '服务持续忙碌或响应超时，请稍后刷新'
+          : '服务响应超时；操作结果尚未确认，请先刷新状态'))
       }, timeoutMs)
-      this.pending.set(id, { method, resolve: value => resolve(value as ResultMap[M]), reject, timer })
+      this.pending.set(id, { method, params, attempts: 0, resolve: value => resolve(value as ResultMap[M]), reject, timer })
       try {
         this.transport!.postMessage({ id, version: 1, method, params })
       } catch {
@@ -96,11 +106,27 @@ export class NativeBridge {
     }
     if (data.ok === true && validResult(pending.method, data.result)) {
       clearTimeout(pending.timer)
+      clearTimeout(pending.retryTimer)
       this.pending.delete(data.id)
       pending.resolve(data.result)
     } else if (data.ok === false && isRecord(data.error) && typeof data.error.code === 'string' &&
         data.error.code.length > 0 && data.error.code.length <= 128 &&
         typeof data.error.message === 'string' && data.error.message.length > 0 && data.error.message.length <= 2048) {
+      if (data.error.code === 'BUSY' && retryableReads.has(pending.method)) {
+        // Only retry reads, without extending the original deadline or replaying mutations.
+        if (pending.retryTimer !== undefined) return
+        const id = data.id
+        pending.retryTimer = setTimeout(() => {
+          pending.retryTimer = undefined
+          if (!this.pending.has(id)) return
+          try {
+            this.transport!.postMessage({ id, version: 1, method: pending.method, params: pending.params })
+          } catch {
+            this.finish(id, new BridgeError('send_failed', '无法向原生宿主发送请求'))
+          }
+        }, Math.min(100 * 2 ** pending.attempts++, 800) + Math.floor(Math.random() * 75))
+        return
+      }
       this.finish(data.id, new BridgeError(data.error.code, data.error.message))
     } else {
       this.finish(data.id, new BridgeError('invalid_response', '服务返回的数据格式无效'))
@@ -111,6 +137,7 @@ export class NativeBridge {
     const pending = this.pending.get(id)
     if (!pending) return
     clearTimeout(pending.timer)
+    clearTimeout(pending.retryTimer)
     this.pending.delete(id)
     pending.reject(error)
   }

@@ -949,6 +949,25 @@ done:
     return rc == 0 ? 0 : fail_json_aware(err);
 }
 
+/* Metadata is restricted to nodes actually rendered for this device. Never
+ * return subscription URLs, credentials, or other devices' proxy inventories. */
+static sbj *agent_subscription_sources(sb_http_server *srv,const sbj *config,sb_err *err) {
+    sb_proxy_record_vec nodes={0};sb_subscription_vec subscriptions={0};sbj *result=NULL;
+    if(sb_store_list_proxy_nodes(srv->store,&nodes,err)!=0 || sb_store_list_subscriptions(srv->store,&subscriptions,err)!=0)goto done;
+    result=sbj_array();const sbj *outbounds=sbj_get(config,"outbounds");
+    for(size_t i=0;i<subscriptions.len;++i){
+        const sb_subscription *sub=&subscriptions.items[i];sbj *tags=sbj_array();
+        for(size_t j=0;j<nodes.len;++j){const sb_proxy_record *node=&nodes.items[j];
+            if(!node->subscription_id || strcmp(node->subscription_id,sub->id))continue;
+            for(size_t k=0;k<sbj_arr_len(outbounds);++k){const sbj *out=sbj_arr_at(outbounds,k);
+                if(sbj_string_is(sbj_get(out,"tag"),node->tag) && sbj_string_is(sbj_get(out,"server"),node->server) && sbj_get_int(out,"server_port",0)==node->server_port && sbj_string_is(sbj_get(out,"type"),node->node_type)){sbj_arr_push(tags,sbj_str(node->tag));break;}
+            }
+        }
+        if(sbj_arr_len(tags)){sbj *entry=sbj_object();sbj_set_str(entry,"id",sub->id);sbj_set(entry,"name",sbj_strn(S(sub->name),sub->name_len));sbj_set(entry,"tags",tags);sbj_arr_push(result,entry);}else sbj_free(tags);
+    }
+ done:sb_proxy_record_vec_free(&nodes);sb_subscription_vec_free(&subscriptions);return result;
+}
+
 /* GET /api/agent/config: the rendered config as pretty JSON with the config
  * ETag; If-None-Match equal to it yields an empty 304. */
 static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
@@ -971,7 +990,13 @@ static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err
     const char *rule_source = request.rule_script ? "quickjs" : "profile";
     config = render_config(&request, err);
     if (!config) goto done;
-    body = sbj_dump(config, 2);
+    char *sources_requested=sb_req_query_param(req,"sources");
+    bool include_sources=sb_streq(sources_requested,"1");free(sources_requested);
+    if(include_sources){
+        sbj *sources=agent_subscription_sources(srv,config,err);if(!sources)goto done;
+        sbj *envelope=sbj_object();sbj_set(envelope,"config",sbj_clone(config));sbj_set(envelope,"subscription_sources",sources);
+        body=sbj_dump(envelope,2);sbj_free(envelope);
+    }else body = sbj_dump(config, 2);
     etag = sb_config_etag(host.id, body, srv->opts.config_hash_seed);
     if (!etag) {
         sb_fail(err, SB_ERR_GENERIC, "SHA-256 ETag finalization failed");

@@ -76,7 +76,11 @@ const server = http.createServer(async (request, response) => {
     receipt.captures++; fs.writeFileSync(path.join(directory, `${digest}.pcap`), data)
     reply(200, { ok: true, digest }); return
   }
-  if (request.url === '/test/api/agent/config' && request.method === 'GET') {
+  if (request.url === '/test/subscription' && request.method === 'GET') {
+    if (request.headers.authorization || request.headers.cookie) { reply(400, {}); return }
+    reply(200, [{ type: 'http', tag: 'local-test', server: '127.0.0.1', server_port: 8080 }]); return
+  }
+  if (['/test/api/agent/config','/test/api/agent/config?sources=1'].includes(request.url) && request.method === 'GET') {
     if (request.headers.authorization !== `Bearer ${token}`) { receipt.rejected++; reply(401, {}); return }
     receipt.configRequests++
     const override = path.join(directory, 'fixture-candidate.json')
@@ -93,11 +97,23 @@ const server = http.createServer(async (request, response) => {
       outbounds: [{ type: 'direct', tag: 'direct' }, { type: 'trojan', tag: 'fixture-node', server: 'example.invalid', server_port: 443, password: 'fixture-password-must-never-reach-ui' }],
       route: { rules: [{ domain: ['example.invalid'], outbound: 'direct' }], final: 'direct' },
     }
-    reply(200, candidate, { ETag: etag, 'X-SB-Easy-Rule-Source': 'profile', 'X-SB-Easy-Profile-Id': 'fixture-profile' })
+    reply(200, request.url.includes('sources=1') ? { config: candidate, subscription_sources: [{ id: 'fixture-source', name: 'Fixture subscription', tags: candidate.outbounds.filter(n => n.type !== 'direct').map(n => n.tag) }] } : candidate, { ETag: etag, 'X-SB-Easy-Rule-Source': 'profile', 'X-SB-Easy-Profile-Id': 'fixture-profile' })
     return
   }
   receipt.rejected++
   reply(404, {})
+})
+// Loopback-only proxy for live-routing acceptance; never forwards to the Internet.
+server.on('connect', (request, socket, head) => {
+  if (!['api.openai.com:80', 'api.anthropic.com:80'].includes(request.url)) { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return }
+  const upstream = net.connect(server.address().port, '127.0.0.1', () => {
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    if (head.length) upstream.write(head)
+    socket.pipe(upstream); upstream.pipe(socket)
+  })
+  upstream.on('error', () => socket.destroy())
+  socket.on('error', () => upstream.destroy())
+  socket.on('close', () => upstream.destroy())
 })
 server.listen(0, '127.0.0.1', () => {
   origin = `http://127.0.0.1:${server.address().port}/test`

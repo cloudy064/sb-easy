@@ -125,8 +125,8 @@ int wmain(int argc, wchar_t **argv) {
     sbw_core_status process = core_status(core); CHECK(process.process_running && process.process_id);
     DWORD original_pid = process.process_id;
     result = call(controller, "connection.start", true); expect_state(result, "RUNNING", "good-1", "good-1"); sbj_free(result);
-    error_call(controller, "routing.gpt_default", true, "CONNECTION_RUNNING");
-    error_call(controller, "routing.gpt_server", true, "CONNECTION_RUNNING");
+    error_call(controller, "routing.gpt_default", true, "GPT_OUTBOUND_UNAVAILABLE");
+    error_call(controller, "routing.gpt_server", true, "LIVE_ROUTING_UNAVAILABLE");
     CHECK(core_status(core).process_id == original_pid); /* Identical config is idempotent. */
     result = call(controller, "connection.stop", true); expect_state(result, "STOPPED", NULL, "good-1"); sbj_free(result);
     process = core_status(core); CHECK(!process.process_running && !process.last_stop_forced);

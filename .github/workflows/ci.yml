@@ -49,13 +49,13 @@ jobs:
             $setup = Start-Process ./build/WebView2Setup.exe -ArgumentList '/silent /install' -Wait -PassThru
             if ($setup.ExitCode -ne 0) { throw 'WebView2 Runtime installation failed' }
           }
-          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.6.1-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
+          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.6.8-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
       - uses: actions/upload-artifact@v4
         with:
           name: sb-easy-windows-x64-packages
           path: |
-            build/sb-easy-0.6.1-windows-x64-portable.zip
-            build/sb-easy-0.6.1-windows-x64.msi
+            build/sb-easy-0.6.8-windows-x64-portable.zip
+            build/sb-easy-0.6.8-windows-x64.msi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

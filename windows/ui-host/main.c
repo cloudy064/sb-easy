@@ -110,8 +110,8 @@ static void receive(desktop *app, ICoreWebView2WebMessageReceivedEventArgs *args
     const sbj *id = NULL, *version, *method;
     bool allowed = false, queued = false;
     static const char *methods[] = {"service.start", "protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
-                                   "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server",
-                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
+                                   "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server", "routing.gpt_node", "routing.set", "subscriptions.fetch", "subscriptions.save", "subscriptions.remove",
+                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "extensions.list", "extensions.change", "extensions.catalog", "extensions.install", "extensions.progress", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source))) return;
     allowed = source && wcscmp(source, app_uri) == 0; CoTaskMemFree(source);
     if (!allowed) return;

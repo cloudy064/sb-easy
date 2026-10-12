@@ -1,6 +1,6 @@
 {
   "name": "sb-easy-windows-ui",
-  "version": "0.6.1",
+  "version": "0.6.8",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,12 +10,15 @@
     "dev": "vite --host 127.0.0.1",
     "check": "vue-tsc --noEmit",
     "build": "npm run check && vite build",
-    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/bridge.test.js .test-build/tests/enrollment.test.js .test-build/tests/dashboard.test.js .test-build/tests/traffic.test.js",
-    "preview": "vite preview --host 127.0.0.1"
+    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/bridge.test.js .test-build/tests/enrollment.test.js .test-build/tests/dashboard.test.js .test-build/tests/traffic.test.js .test-build/tests/subscriptions.test.js",
+    "preview": "vite preview --host 127.0.0.1",
+    "build:capture": "vite build --config vite.capture.config.ts",
+    "build:plugins": "vite build --config vite.plugins.config.ts --mode statistics && vite build --config vite.plugins.config.ts --mode network-tools"
   },
   "dependencies": {
     "tldts": "7.0.25",
-    "vue": "3.5.38"
+    "vue": "3.5.38",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

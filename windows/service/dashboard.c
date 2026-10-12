@@ -103,7 +103,7 @@ sbj *sbw_config_catalog(const sbj *snapshot) {
     const sbj *source_rules = sbj_get(route, "rules"), *source_inbounds = sbj_get(config, "inbounds");
     sbj_set_str(result, "etag", sbj_get_str(snapshot, "etag", ""));
     sbj_set_str(result, "final", text(route, "final"));
-    for (size_t i = 0; i < sbj_arr_len(outbounds) && i < 128; ++i) {
+    for (size_t i = 0; i < sbj_arr_len(outbounds) && i < 1024; ++i) {
         const sbj *source = sbj_arr_at(outbounds, i); sbj *node = sbj_object();
         sbj_set_str(node, "tag", text(source, "tag")); sbj_set_str(node, "type", text(source, "type"));
         sbj_set_str(node, "selected", text(source, "default"));
@@ -112,7 +112,7 @@ sbj *sbw_config_catalog(const sbj *snapshot) {
         sbj_arr_push(nodes, node);
     }
     const sbj *endpoints = sbj_get(config, "endpoints");
-    for (size_t i = 0; i < sbj_arr_len(endpoints) && sbj_arr_len(nodes) < 128; ++i) {
+    for (size_t i = 0; i < sbj_arr_len(endpoints) && sbj_arr_len(nodes) < 1024; ++i) {
         const sbj *endpoint = sbj_arr_at(endpoints, i);
         sbj *node = sbj_object();
         sbj_set_str(node, "tag", text(endpoint, "tag")); sbj_set_str(node, "type", text(endpoint, "type"));
@@ -161,7 +161,7 @@ sbj *sbw_dashboard_snapshot(const sbj *connections, const sbj *proxies) {
         sbj_set_int(row, "upload", counter(source, "upload")); sbj_set_int(row, "download", counter(source, "download"));
         sbj_arr_push(rows, row);
     }
-    for (size_t i = 0; i < sbj_obj_len(source_nodes) && sbj_arr_len(nodes) < 128; ++i) {
+    for (size_t i = 0; i < sbj_obj_len(source_nodes) && sbj_arr_len(nodes) < 1024; ++i) {
         const sbj *source = sbj_obj_val(source_nodes, i);
         const char *tag = text(source, "name");
         if (!strcmp(tag, "GLOBAL") || !strcmp(tag, "sb-easy-control-direct")) continue;

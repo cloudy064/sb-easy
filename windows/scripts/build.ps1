@@ -1,14 +1,16 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$SkipUi,
+    [switch]$CaptureExtension,
+    [switch]$StatisticsExtension,
     [switch]$Clean
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $vswherePath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-if (-not (Test-Path -LiteralPath $vswherePath)) { throw 'Install Visual Studio 2022 Build Tools with C++ tools, Windows SDK and CMake.' }
-$vsInstall = (& $vswherePath -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath)
-if (-not $vsInstall) { throw 'Visual Studio 2022 C++/CMake components were not found.' }
+if (-not (Test-Path -LiteralPath $vswherePath)) { throw 'Install Visual Studio 2022 or newer Build Tools with C++ tools, Windows SDK and CMake.' }
+$vsInstall = (& $vswherePath -latest -version '[17.0,19.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath)
+if (-not $vsInstall) { throw 'Visual Studio 2022 or newer C++/CMake components were not found.' }
 $vsInstall = $vsInstall.Trim()
 & (Join-Path $vsInstall 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
 # Keep /showIncludes stable so Ninja tracks headers on localized Windows installs.
@@ -26,10 +28,18 @@ if (-not $SkipUi) {
         if ($LASTEXITCODE -ne 0) { throw 'UI tests failed' }
         & npm.cmd run build
         if ($LASTEXITCODE -ne 0) { throw 'UI build failed' }
+        if ($StatisticsExtension) {
+            & npm.cmd run build:plugins
+            if ($LASTEXITCODE -ne 0) { throw 'Extension UI build failed' }
+        }
+        if ($CaptureExtension) {
+            & npm.cmd run build:capture
+            if ($LASTEXITCODE -ne 0) { throw 'Capture extension UI build failed' }
+        }
     } finally { Pop-Location }
 }
-& (Join-Path $PSScriptRoot 'prepare-capture.ps1')
-& $cmake -S (Join-Path $repoRoot 'windows') -B $buildDir -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_BUILD_TYPE=$Configuration"
+if ($CaptureExtension) { & (Join-Path $PSScriptRoot 'prepare-capture.ps1') }
+& $cmake -S (Join-Path $repoRoot 'windows') -B $buildDir -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DCMAKE_BUILD_TYPE=$Configuration" "-DSB_EASY_BUILD_CAPTURE_EXTENSION=$($CaptureExtension.IsPresent.ToString().ToUpperInvariant())" "-DSB_EASY_BUILD_STATISTICS_EXTENSION=$($StatisticsExtension.IsPresent.ToString().ToUpperInvariant())"
 if ($LASTEXITCODE -ne 0) { throw 'Windows configuration failed' }
 $buildArguments = @('--build', $buildDir, '--parallel', '4')
 if ($Clean) { $buildArguments += '--clean-first' }

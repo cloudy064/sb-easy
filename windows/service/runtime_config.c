@@ -1,13 +1,71 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "runtime_config.h"
+#include "routing.h"
 
 #include <bcrypt.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 #include <winhttp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+sbj *sbw_runtime_ipv6_status(const sbw_runtime_config *config, bool running) {
+    sbj *result = sbj_object();
+    bool address = false, native_route = false, tunnel_route = false;
+    bool lower = false, upper = false, ready = false;
+    NET_LUID tunnel = {0};
+    bool identified = running && config->interface_name &&
+        ConvertInterfaceAliasToLuid(config->interface_name, &tunnel) == NO_ERROR;
+    ULONG size = 16384, code = ERROR_BUFFER_OVERFLOW;
+    IP_ADAPTER_ADDRESSES *adapters = NULL;
+    for (int attempt = 0; attempt < 3 && code == ERROR_BUFFER_OVERFLOW; ++attempt) {
+        free(adapters); adapters = sb_xcalloc(size, 1);
+        code = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+            GAA_FLAG_SKIP_DNS_SERVER, NULL, adapters, &size);
+    }
+    PMIB_IPFORWARD_TABLE2 routes = NULL;
+    if (code == NO_ERROR && GetIpForwardTable2(AF_INET6, &routes) == NO_ERROR) {
+        ready = true;
+        for (IP_ADAPTER_ADDRESSES *a = adapters; a; a = a->Next) {
+            if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+                (identified && a->Luid.Value == tunnel.Value)) continue;
+            bool adapter_address = false, adapter_route = false;
+            for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u; u = u->Next) {
+                if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET6 ||
+                    u->DadState != IpDadStatePreferred || !u->ValidLifetime) continue;
+                const IN6_ADDR *ip = &((SOCKADDR_IN6 *)u->Address.lpSockaddr)->sin6_addr;
+                /* Global unicast only; ULA/link-local do not prove a native public path. */
+                if ((ip->u.Byte[0] & 0xe0) == 0x20) adapter_address = true;
+            }
+            for (ULONG i = 0; i < routes->NumEntries; ++i) {
+                const MIB_IPFORWARD_ROW2 *r = &routes->Table[i];
+                if (r->InterfaceLuid.Value == a->Luid.Value && r->ValidLifetime &&
+                    r->DestinationPrefix.PrefixLength == 0) adapter_route = true;
+            }
+            address |= adapter_address;
+            native_route |= adapter_address && adapter_route;
+        }
+        if (identified && config->auto_route) for (ULONG i = 0; i < routes->NumEntries; ++i) {
+            const MIB_IPFORWARD_ROW2 *r = &routes->Table[i];
+            if (r->InterfaceLuid.Value != tunnel.Value || !r->ValidLifetime) continue;
+            if (r->DestinationPrefix.PrefixLength == 0) tunnel_route = true;
+            if (r->DestinationPrefix.PrefixLength == 1) {
+                if (r->DestinationPrefix.Prefix.Ipv6.sin6_addr.u.Byte[0] == 0) lower = true;
+                if (r->DestinationPrefix.Prefix.Ipv6.sin6_addr.u.Byte[0] == 0x80) upper = true;
+            }
+        }
+    }
+    if (routes) FreeMibTable(routes);
+    free(adapters);
+    sbj_set_bool(result, "checked", ready);
+    sbj_set_bool(result, "global_address", address);
+    sbj_set_bool(result, "native_route", native_route);
+    sbj_set_bool(result, "tun_route", tunnel_route || (lower && upper));
+    sbj_set_str(result, "node_support", "untested");
+    return result;
+}
 
 static int fail(sbw_error *error, const char *code) {
     const char *message = "The local core health check failed.";
@@ -312,7 +370,7 @@ static int wait_socket(SOCKET socket_handle, bool writing, HANDLE cancel, HANDLE
 }
 
 static int probe(const sbw_runtime_config *config, DWORD pid, HANDLE cancel, HANDLE process,
-                  ULONGLONG deadline, const char *path, size_t capacity, sbj **out, sbw_error *error) {
+                  ULONGLONG deadline, const char *path, const char *payload, size_t capacity, sbj **out, sbw_error *error) {
     char *response = sb_xcalloc(capacity + 1, 1);
     SOCKET connection = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (connection == INVALID_SOCKET) { free(response); return fail(error, "CORE_HEALTH_FAILED"); }
@@ -330,10 +388,13 @@ static int probe(const sbw_runtime_config *config, DWORD pid, HANDLE cancel, HAN
         }
     }
     if (listener_owner(config->port, pid) != 1) { fail(error, "CORE_HEALTH_IDENTITY"); goto done; }
-    char request[384];
-    int request_size = sprintf_s(request, sizeof(request),
+    char request[8192];
+    int request_size = payload ? sprintf_s(request, sizeof(request),
+        "PUT %s HTTP/1.0\r\nHost: 127.0.0.1:%u\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+        path, config->port, config->secret, strlen(payload), payload) : sprintf_s(request, sizeof(request),
         "GET %s HTTP/1.0\r\nHost: 127.0.0.1:%u\r\nAuthorization: Bearer %s\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
         path, config->port, config->secret);
+    if (request_size <= 0) { fail(error, "CORE_HEALTH_FAILED"); goto done; }
     int sent = 0;
     while (sent < request_size) {
         if (wait_socket(connection, true, cancel, process, deadline, error) != 0) { SecureZeroMemory(request, sizeof(request)); goto done; }
@@ -355,6 +416,9 @@ static int probe(const sbw_runtime_config *config, DWORD pid, HANDLE cancel, HAN
     }
     response[used] = '\0';
     char *body = strstr(response, "\r\n\r\n");
+    if (payload && body && (!strncmp(response, "HTTP/1.0 204 ", 13) || !strncmp(response, "HTTP/1.1 204 ", 13))) {
+        result = interrupted(cancel, process, deadline, error); goto done;
+    }
     if (!body || strlen(response) != used || body - response > 8192 ||
         (strncmp(response, "HTTP/1.0 200 ", 13) && strncmp(response, "HTTP/1.1 200 ", 13))) {
         fail(error, "CORE_HEALTH_FAILED"); goto done;
@@ -392,7 +456,7 @@ int sbw_runtime_config_health(const sbw_runtime_config *config, DWORD expected_p
         if (interrupted(cancel, process, deadline, error) != 0) break;
         int owner = listener_owner(config->port, expected_pid);
         if (owner < 0) { fail(error, "CORE_HEALTH_IDENTITY"); break; }
-        if (owner > 0) { result = probe(config, expected_pid, cancel, process, deadline, "/version", 16384, NULL, error); break; }
+        if (owner > 0) { result = probe(config, expected_pid, cancel, process, deadline, "/version", NULL, 16384, NULL, error); break; }
         ULONGLONG now = GetTickCount64();
         DWORD left = now < deadline ? (DWORD)(deadline - now) : 0;
         DWORD pause = left < 20 ? left : 20;
@@ -415,8 +479,45 @@ int sbw_runtime_config_get(const sbw_runtime_config *config, DWORD expected_pid,
     WSADATA startup;
     if (WSAStartup(MAKEWORD(2, 2), &startup)) { CloseHandle(process); return fail(error, "CORE_HEALTH_FAILED"); }
     int result = listener_owner(config->port, expected_pid) == 1
-        ? probe(config, expected_pid, cancel, process, GetTickCount64() + 1500, path, 256U * 1024U, out, error)
+        ? probe(config, expected_pid, cancel, process, GetTickCount64() + 1500, path, NULL, 256U * 1024U, out, error)
         : fail(error, "CORE_HEALTH_IDENTITY");
     if (result != 0) { sbj_free(*out); *out = NULL; }
     WSACleanup(); CloseHandle(process); return result;
+}
+
+int sbw_runtime_select_group(const sbw_runtime_config *config, DWORD pid, HANDLE cancel,
+                           const char *selector, const char *target, sbw_error *error) {
+    if (!selector || strncmp(selector, "sb-easy-local-", 14) || strlen(selector) > 95) return fail(error, "RUNTIME_CONFIG_INVALID");
+    for (const char *p = selector; *p; ++p) if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-')) return fail(error, "RUNTIME_CONFIG_INVALID");
+    char path[128]; sprintf_s(path, sizeof(path), "/proxies/%s", selector);
+    if (!target || !*target || strlen(target) > 512) return fail(error, "RUNTIME_CONFIG_INVALID");
+    sbj *proxies = NULL;
+    if (sbw_runtime_config_get(config, pid, cancel, "/proxies", &proxies, error) != 0) return -1;
+    const sbj *group = sbj_get(sbj_get(proxies, "proxies"), selector);
+    const sbj *members = sbj_get(group, "all"); bool found = false;
+    for (size_t i = 0; i < sbj_arr_len(members); ++i)
+        if (sbj_string_is(sbj_arr_at(members, i), target)) found = true;
+    bool selected = sbj_string_is(sbj_get(group, "now"), target);
+    sbj_free(proxies);
+    if (!found) return sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE", "The node is not available in the running service group. Apply the downloaded configuration first.");
+    if (selected) return 0;
+    sbj *body = sbj_object(); sbj_set_str(body, "name", target); char *payload = sbj_dump(body, -1); sbj_free(body);
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (!process) { free(payload); return fail(error, "CORE_HEALTH_EXITED"); }
+    WSADATA startup;
+    if (WSAStartup(MAKEWORD(2, 2), &startup)) { free(payload); CloseHandle(process); return fail(error, "CORE_HEALTH_FAILED"); }
+    int result = listener_owner(config->port, pid) == 1 ?
+        probe(config, pid, cancel, process, GetTickCount64() + 2500,
+              path, payload, 16384, NULL, error) : fail(error, "CORE_HEALTH_IDENTITY");
+    free(payload); WSACleanup(); CloseHandle(process);
+    if (result != 0) return result;
+    proxies = NULL;
+    if (sbw_runtime_config_get(config, pid, cancel, "/proxies", &proxies, error) != 0) return -1;
+    selected = sbj_string_is(sbj_get(sbj_get(sbj_get(proxies, "proxies"), selector), "now"), target);
+    sbj_free(proxies);
+    return selected ? 0 : sbw_fail(error, "LIVE_ROUTING_FAILED", "The core did not confirm the selected node.");
+}
+
+int sbw_runtime_select_gpt(const sbw_runtime_config *config, DWORD pid, HANDLE cancel, const char *target, sbw_error *error) {
+    return sbw_runtime_select_group(config, pid, cancel, SBW_GPT_SELECTOR, target, error);
 }

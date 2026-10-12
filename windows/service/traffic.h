@@ -3,6 +3,7 @@
 #include "../common.h"
 /* Serialized by controller mutation_lock. Bounded detail, stable checkpoints. */
 typedef struct sbw_traffic sbw_traffic;
+bool sbw_traffic_running(sbw_traffic *traffic);
 sbw_traffic *sbw_traffic_new(void);
 void sbw_traffic_free(sbw_traffic *traffic);
 void sbw_traffic_record(sbw_traffic *traffic, const sbj *snapshot, DWORD pid);

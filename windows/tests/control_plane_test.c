@@ -260,7 +260,7 @@ static void config_tests(void) {
     REQUIRE(!sbj_get_bool(output, "not_modified", true) && field_is(output, "content", "{\"route\":{}}") && field_is(output, "etag", "\"next\"") &&
         field_is(output, "rule_source", "managed") && field_is(output, "profile_id", "profile-2") && field_is(output, "profile_name", "更新配置"), "Config response mismatch");
     char *request = server_request(&server), *authorization = sb_asprintf("Authorization: Bearer %s", test_token);
-    REQUIRE(strstr(request, "GET /prefix/api/agent/config HTTP/1.1\r\n") == request && strstr(request, authorization) &&
+    REQUIRE(strstr(request, "GET /prefix/api/agent/config?sources=1 HTTP/1.1\r\n") == request && strstr(request, authorization) &&
         strstr(request, "If-None-Match: \"previous\""), "Missing base path/authentication/ETag");
     server_free(&server); free(server_url); free(request); free(authorization); sbj_free(device); sbj_free(output);
     const char *headers[] = {"", "ETag: \"updated\"\r\n"};

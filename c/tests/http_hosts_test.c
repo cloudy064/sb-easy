@@ -307,6 +307,15 @@ TEST(hosts_contract) {
     CHECK_EQ_INT(r.status, 200); /* released Android apps keep their enrollment alias */
     sb_test_response_free(&r);
 
+    /* Windows opts into provenance without changing legacy config responses. */
+    r = call_as(&t, original_token, "GET", "/api/agent/config?sources=1", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK(sbj_is_object(sbj_get(r.json,"config")));
+    CHECK(sbj_is_array(sbj_get(r.json,"subscription_sources")));
+    char *metadata_json=sbj_dump(sbj_get(r.json,"subscription_sources"),-1);
+    CHECK(!strstr(metadata_json,"url") && !strstr(metadata_json,"password"));free(metadata_json);
+    sb_test_response_free(&r);
+
     /* Android agents receive their intranet endpoint through the same
      * authenticated config API with a direct control-plane route. */
     r = call_as(&t, original_token, "GET", "/api/agent/config", NULL);
@@ -372,6 +381,16 @@ TEST(hosts_contract) {
     CHECK_JSON(r.json, "node_ids", "[\"http-node\"]"); /* and round-trips */
     sb_test_response_free(&r);
     free(outbounds_path);
+
+    REQUIRE(execute_sql(&t,"INSERT INTO subscriptions (id,name,url) VALUES ('visible-sub','Visible subscription','https://example.invalid/PRIVATE_SUB_URL'),('unused-sub','Other device subscription','https://example.invalid/PRIVATE_OTHER_URL')") == 0);
+    REQUIRE(execute_sql(&t,"UPDATE proxy_nodes SET subscription_id='visible-sub' WHERE id='http-node'") == 0);
+    r=call_as(&t,original_token,"GET","/api/agent/config?sources=1",NULL);
+    CHECK_EQ_INT(r.status,200);
+    CHECK_EQ_INT(sbj_arr_len(sbj_get(r.json,"subscription_sources")),1);
+    CHECK_STR(jstr(r.json,"subscription_sources.0.name"),"Visible subscription");
+    CHECK_JSON(r.json,"subscription_sources.0.tags","[\"http-node\"]");
+    CHECK(!strstr(r.body,"PRIVATE_SUB_URL") && !strstr(r.body,"PRIVATE_OTHER_URL") && !strstr(r.body,"Other device subscription"));
+    sb_test_response_free(&r);
 
     char *config_path = sb_asprintf("/api/hosts/%s/config", host_id);
     r = call(&t, "GET", config_path, NULL);

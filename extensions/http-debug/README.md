@@ -1,31 +1,24 @@
 # HTTP(S) debugging plugin
 
-This optional plugin runs **mitmproxy 12.2.3** locally on both Windows and Android.
-It is distinct from the original raw-PCAP capture plugin. No computer or server
-is required for the Android engine. Android uses Chaquopy 17 and the pinned native
-wheels from `emanuele-f/chaquopy-wheels` at
-`1c9d6dc79065c1fbf2e9f239b99577b1219e05a8` (the same dependency route used by
-[PCAPdroid-mitm](https://github.com/emanuele-f/PCAPdroid-mitm)).
+This optional plugin runs **mitmproxy 12.2.3** locally on Windows.
+It is distinct from the original raw-PCAP capture plugin. Android HTTP(S)
+debugging is temporarily withdrawn; its host integration and APK build are removed.
 
 ## Usage
 
-1. Install HTTP(S) debugging from the Windows extension store, or the Android
-   tools → HTTP(S) debugging store card. Android requires a separate APK with the
-   same signing identity as the host. The base Android APK has no Python engine.
+1. Install HTTP(S) debugging from the Windows extension store.
 2. Connect the normal proxy and start the capture engine.
 3. Windows: explicitly install the generated CA into **Current User → Root**.
-   Android: save the public CA, then install it in system security settings.
 4. Enter exact domain suffixes, then start capturing. Only ports 80/443 of those
    domains are intercepted. Windows supports TUN and local HTTP/SOCKS listeners;
-   Android uses the existing VPN. Switching starts/stops a local config reload;
+   Switching starts/stops a local config reload;
    existing connections may reconnect. Managed/shared configuration is untouched.
 5. Open the authenticated local mitmweb window to inspect headers, bodies, JSON,
    errors, filters, breakpoints, edits and client replay. Use **Export HAR** for
    a browser download of the currently visible sessions.
 6. Stop to restore normal routing. Windows disabling/uninstalling also restores
    routing before stopping the engine. Disconnecting the VPN ends the session.
-   CA removal is explicit; Windows offers a remove button while the engine runs,
-   Android uses system security settings.
+   CA removal is explicit; Windows offers a remove button while the engine runs.
 
 ## Routing and limits
 
@@ -44,16 +37,12 @@ Bodies over 2 MiB are streamed without retention. Single-message limit: 32 MiB.
 Approximately 500 completed sessions are retained; active/intercepted sessions
 are not evicted. Stopping clears in-memory sessions. No automatic body upload.
 The CA key stays in protected service/application storage; only its public
-certificate is exported. The two control surfaces are private Windows framed
-IPC and Android signature-protected Binder. Web UI and proxy bind loopback only;
+certificate is exported. Control uses private Windows framed IPC.
+Web UI and proxy bind loopback only;
 both use fresh random credentials. No arbitrary scripts, filesystem commands,
 web option persistence, process enumeration or listener reconfiguration are
 exposed through the service-owned mitmweb interface. This deliberately is not
 every feature of standalone mitmproxy.
-
-Android engine ABIs: **arm64-v8a and x86_64**. Base-app support for older ABIs is
-unchanged. Current artifacts use the project's debug signing identity, not a
-production release key. A matching production signing setup must sign both APKs.
 
 ## Build and verification
 
@@ -61,21 +50,14 @@ production release key. A matching production signing setup must sign both APKs.
   plugin builds, `windows/scripts/package-plugins.py`, base-service rebuild and
   MSI packaging. The pinned store entry is generated from actual bytes
   (SHA-256 pinning; this is not an Authenticode signature).
-- Android (Linux): `SB_PYTHON=python3.13 extensions/http-debug/build-android.sh`.
-  Set JAVA_HOME to JDK 17 and ANDROID_HOME to the existing SDK. Then run
-  `package.py` in the Windows plugin's Python environment to collect notices and
-  generate Android store pins, and build the Android host normally.
 - `tests/test_engine.py`: real TLS fixture, decryption, response body, editing,
   replay, HAR, unauthenticated rejection and restricted web settings.
 - `tests/worker_smoke.py <exe>`: frozen worker IPC, Web UI, certificate and stop.
 - `windows_http_debug_test`: route overlay and recursion protection.
 - `windows/scripts/extensions-smoke.ps1 -HttpDebug`: real store installation,
   parsed HTTP through the existing core/upstream, disable, restore and uninstall.
-- `HttpDebugRoutingTest`: Android routing isolation and invalid scope rejection.
-- `HttpDebugEngineTest`: device-side HTTPS decryption and HAR through the native
-  Android plugin; synthetic request to www.example.com, no system trust changes.
 
-The Android APK includes Python dependency metadata/licenses. Windows collects
+Windows collects
 installed dependency notices into `licenses/http-debug.txt`. The mitmproxy
 engine and corresponding upstream sources are available at
 <https://github.com/mitmproxy/mitmproxy/tree/v12.2.3>.

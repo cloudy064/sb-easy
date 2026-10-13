@@ -85,7 +85,6 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }) { network, isCurrent ->
         recoverNetwork(network, isCurrent)
     }
-    private var captureUploadJob: Job? = null
     private var tunDescriptor: ParcelFileDescriptor? = null
 
     override fun onCreate() {
@@ -213,7 +212,6 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 VpnRuntimeState.connected(config)
                 startForegroundNotification("${config.profileName} · 代理运行中")
                 startControlLoop()
-                startCaptureUploadLoop()
                 startNetworkWatchdog()
                 ClientDiagnostics.info(TAG, "libbox runtime connected profile=${config.profileName}")
             }
@@ -236,14 +234,11 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeResources() {
-        io.sbeasy.android.core.HttpDebug.release()
         appliedRuntimeContent = null
         runtimeWanted = false
         handover.close()
         networkHealthJob?.cancel()
         networkHealthJob = null
-        captureUploadJob?.cancel()
-        captureUploadJob = null
         controlLoopJob?.cancel()
         controlLoopJob = null
         if (RuntimeBridge.control === this) RuntimeBridge.control = null
@@ -280,18 +275,9 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun startCore(config: ManagedConfig) {
-        val runtimeContent = io.sbeasy.android.core.HttpDebug.overlay(config.content)
-        io.sbeasy.android.core.PacketCapture.nativeStatus = { io.nekohasekai.libbox.Libbox.captureStatus() }
-        io.sbeasy.android.core.PacketCapture.rotate = { io.nekohasekai.libbox.Libbox.rotateCapture() }
-        io.sbeasy.android.core.PacketCapture.runtimeError = ""
-        runCatching {
-            io.nekohasekai.libbox.Libbox.configureCapture(io.sbeasy.android.core.PacketCapture.nativeConfig(
-                requireNotNull(CoreGraph.repository.state.value.enrollment)))
-        }.onFailure {
-            io.nekohasekai.libbox.Libbox.configureCapture("{}")
-            io.sbeasy.android.core.PacketCapture.runtimeError = "采集未启动：${it.message}"
-            ClientDiagnostics.error(TAG, "capture initialization failed", it)
-        }
+        val runtimeContent = config.content
+        // Packet capture is unavailable on Android, including previously saved preferences.
+        io.nekohasekai.libbox.Libbox.configureCapture("{}")
         io.nekohasekai.libbox.Libbox.checkConfig(runtimeContent)
         val inbounds = org.json.JSONObject(config.content).optJSONArray("inbounds")
         val stacks = (0 until (inbounds?.length() ?: 0)).mapNotNull { index ->
@@ -414,18 +400,6 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         }
     }
 
-    private fun startCaptureUploadLoop() {
-        if (captureUploadJob?.isActive == true) return
-        captureUploadJob = serviceScope.launch {
-            while (currentCoroutineContext().isActive) {
-                try { CoreGraph.repository.uploadCaptures(manual = false) }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (error: Exception) { ClientDiagnostics.error(TAG, "capture upload failed", error) }
-                delay(5_000)
-            }
-        }
-    }
-
     private fun startControlLoop() {
         if (controlLoopJob?.isActive == true) return
         controlLoopJob = serviceScope.launch {
@@ -463,7 +437,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override suspend fun applyConfiguration(config: ManagedConfig) {
         lifecycleMutex.withLock {
-            val runtimeContent = io.sbeasy.android.core.HttpDebug.overlay(config.content)
+            val runtimeContent = config.content
             io.nekohasekai.libbox.Libbox.checkConfig(runtimeContent)
             val server = requireNotNull(commandServer) { "VPN 未运行" }
             val previous = CoreGraph.repository.activeConfig()

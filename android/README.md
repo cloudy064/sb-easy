@@ -1,15 +1,17 @@
 # sb-easy Android
 
-## 1.3.3 HTTP(S) debugging preview
+## 1.3.4 — packet capture temporarily withdrawn
 
-Version code 27 adds an optional, separately installed local mitmproxy engine.
-Tools → HTTP(S) debugging includes the plugin store entry, explicit CA export,
-domain selection, local session window and HAR download. The Android plugin
-runs independently of a computer. Its engine supports ARM64 and x86_64;
-the base app retains its existing ABI coverage. Host and plugin must share a
-signing identity; these builds retain the existing debug/test signing identity.
-See [setup, routing behavior and limitations](../extensions/http-debug/README.md).
-User CA trust is application-dependent; certificate-pinned apps are not bypassed.
+Version code 28 removes mobile capture features while preserving ordinary VPN,
+local routing, traffic statistics and logs.
+
+Android packet capture (PCAP and HTTP(S) debugging) is temporarily withdrawn.
+The PCAP entry and background capture/upload are disabled, including saved capture
+preferences. Existing capture files are preserved. Ordinary traffic statistics remain available.
+The client no longer offers
+the plugin store entry, CA export, session window, or VPN interception overlay.
+Previously installed plugin APKs and user CA certificates can be removed through
+Android system settings.
 
 ## 1.3.2 maintenance release
 
@@ -446,82 +448,11 @@ missing cores and reset exceptions also rebuild. Stale generations and service
 cancellation cannot report recovery or start an obsolete fallback. No permanent
 wake lock is added. Device acceptance remains necessary.
 
-## 原始流量采集（1.3.0 起）
+## 原始流量采集（暂时停用）
 
-进入 **诊断 → 流量采集**，选择已安装的应用，或填写域名、精确 host/IP，
-开启采集后点击“保存并应用”。采集和自动上传默认关闭；默认只允许 Wi-Fi 上传。
-启用或修改配置会重启正在运行的 VPN，未运行时在下次连接生效。
+移动端暂不提供 PCAP 或 HTTP(S) 抓包。网络包采集入口、后台采集初始化及自动上传循环已移除；
+VPN 启动时显式关闭内核采集，因此旧版本保存的启用设置也不会恢复采集。
+已有私有目录中的 PCAP 文件保留，不会自动上传。普通流量统计、路由测试和日志仍可使用。
 
-- **App**：点击应用选择按钮，按名称搜索并勾选，首页显示已选应用名称，可直接移除。
-  默认显示非系统应用，也可显示系统应用；搜索会覆盖系统应用。清单已有
-  `QUERY_ALL_PACKAGES` 权限，无需手动输入包名或额外运行时授权。按 Android 提供的
-  UID/包名归属筛选；共享 UID 的组件无法区分。
-- **域名**：匹配自身及子域名，例如 `example.com` 包含 `api.example.com`。
-- **host/IP**：精确匹配，例如 `api.example.com` 不包含 `sub.api.example.com`。
-- App、域名、host 多项条件之间为“或”；域名/host 每行一项，也可用逗号分隔，最多 100 项。
-- **BPF（1.3.1 起）**：可选标准 libpcap 抓包表达式，例如 `tcp port 443`、
-  `udp port 53`、`src net 10.0.0.0/8 and not udp port 443`、
-  `tcp[tcpflags] & tcp-syn != 0`。与 App/域名/host 组合条件之间为“且”，每个包单独判断。
-  只填 BPF 时筛选全部 VPN TCP/UDP 流量。至少选择应用/域名/host 或填写 BPF。
-  保存前原生编译校验，错误不会覆盖已保存配置；可先点击“检查 BPF 语法”。
-  使用 libpcap 1.10.6 原生编译器及用户态 cBPF 执行器，无需 root、内核 BPF 或 QuickJS 模拟。
-  不支持 Wireshark 显示过滤语法（如 `tcp.port == 443`）。原始 IP 链路不含以太网头，
-  不能按 MAC 地址筛选；仅 TCP/UDP 包进入现有采集链，`icmp` 等表达式不会扩大采集协议范围。
-  BPF IP 按原始 TUN 包匹配（可能是 FakeIP），网站名建议填入域名栏。
-  表达式最多 4096 UTF-8 字节，过滤在异步采集线程执行，不阻断网络转发。
-- 单文件 128–768 KiB（默认 512）、轮转 10–600 秒（默认 60）、本地总量
-  8–256 MiB（默认 64），另有 1000 文件上限。达到上限暂停写入，保留已有文件；
-  删除文件释放空间后自动继续。可选“上传成功后删除本地文件”。
-- 自动上传间隔 30–3600 秒（默认 60），随前台 VPN 服务运行；VPN 停止后可以
-  手动上传。Wi-Fi 限制也适用于手动上传。没有可用物理网络或上传失败时保留文件，
-  下一轮重试。上传连接绑定物理网络，避免抓到自身上传的数据而循环生成文件。
-- 本地文件可通过 Android 文件选择器导出。上传只针对当前注册服务器及设备身份，
-  不会把旧注册身份的文件发送到新服务器。解除注册会关闭采集和自动上传。
-
-### 文件格式与采集边界
-
-输出标准 little-endian PCAP 2.4，link type `101`（raw IP）、微秒时间戳，完整记录
-VPN TUN 内 IPv4/IPv6 的双向 TCP/UDP 包；保留现有 gVisor 栈。PCAP 可以用
-Wireshark/tshark 打开。这里记录的是封装进代理协议之前、仍保持 HTTPS/QUIC
-应用层加密的原始 IP 包，不是 HTTP 解密或代理服务器外层连接抓包。
-
-仅能采集经过本机 VPN 的流量。域名依赖 sing-box 的 DNS/FakeIP/协议识别信息；
-无法识别的加密域名、绕过 VPN 的应用、ICMP、IP 分片以及超出解析范围的 IPv6
-扩展头不保证采集。按 App/IP 筛选可用于无法识别域名的 TCP/UDP 连接。IP 按 TUN 内的原始目标地址
-匹配；FakeIP 连接建议按 App 或域名筛选。
-域名是在**连接级**匹配：同一条连接内复用的 HTTP/2 请求不会再按单个请求拆分。
-
-为保留域名识别前的握手，先在内存暂存最多 10 秒、每连接 128 KiB、总计 8 MiB；
-异步写队列最多 128 个包，连接表最多 4096 项。超限或磁盘故障会丢弃采集副本并
-显示计数/错误，不因 PCAP 写盘阻塞 VPN 转发。未匹配的暂存内容不落盘。
-TCP 新握手会重新分类，避免复用端口时继承旧域名；关闭连接短暂保留以采集尾包。
-
-本地路径为应用私有目录 `files/captures/<server-and-host-hash>/`，不参与 Android
-备份。正在写入的文件使用 `.part`，同步并关闭后原子重命名为 `.pcap` 才能上传。
-应用重启会截去异常退出留下的半个记录，保留完整数据包。上传以文件 SHA-256
-作为身份，服务端校验内容并幂等存储，断网重试不会重复创建文件。
-
-### 服务端升级
-
-PCAP 上传需要同时部署本次 C11 服务端与 `012_packet_captures.sql` 迁移。
-网页 **设备详情 → PCAP 采集** 提供管理员文件列表、下载和删除。
-每台设备服务端上限为 128 MiB / 1000 文件，满后拒绝新文件且客户端保留重试，
-不会自动删除历史采集。旧版服务器返回 404 时请先升级服务端。
-
-### 内核扩展与验证
-
-`libbox-overlay/` 是基于固定 sing-box 1.13.12 revision 的 GPL 扩展：在 Android
-TUN 和原网络栈之间透传包，并在路由识别后提供连接归属。`build-libbox.sh` 会调用
-`apply-capture-overlay.py` 安装扩展；发布的内核源码包含这些改动。
-
-```sh
-python3 scripts/apply-capture-overlay.py
-(cd .libbox-src && go test -race ./experimental/sbcapture)
-./gradlew testDebugUnitTest lintDebug assembleDebug :app:assembleDebugAndroidTest
-```
-
-`PacketCaptureIntegrationTest` 是面向隔离 Android 测试设备的可选真 VPN 测试，
-通过 instrumentation 参数 `captureEnrollment`、`captureAddress`、`capturePort`
-和 `captureUdpPort` 接收临时控制面注册链接及 TCP/UDP 回显服务。
-它验证 App/域名/精确 host 筛选、未匹配请求排除、握手和双向原始包、PCAP 封口、
-上传后的本地状态。必须先授予该测试设备 VPN 权限；不要对个人已注册设备运行。
+固定版本的 libbox 仍包含采集扩展，当前客户端不启用它；相关底层代码及文件格式测试保留。
+Windows 抓包和服务端历史 PCAP 管理不受此变更影响。

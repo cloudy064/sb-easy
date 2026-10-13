@@ -1,7 +1,0 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
-    <application android:label="sb-easy HTTP(S) 抓包" android:allowBackup="false" android:usesCleartextTraffic="true">
-        <service android:name=".EngineService" android:exported="true"
-            android:permission="io.sbeasy.android.permission.HTTP_DEBUG" android:stopWithTask="false" />
-    </application>
-</manifest>

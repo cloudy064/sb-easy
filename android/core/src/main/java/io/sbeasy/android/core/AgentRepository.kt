@@ -190,17 +190,6 @@ class AgentRepository internal constructor(
         }
     }
 
-    suspend fun saveCaptureConfiguration(config: CaptureConfig) = withContext(Dispatchers.IO) {
-        PacketCapture.validateFilter(config.validated().bpf)
-        PacketCapture.save(config)
-        RuntimeBridge.control?.restart()
-    }
-
-    suspend fun uploadCaptures(manual: Boolean = true) {
-        val enrollment = state.value.enrollment ?: return
-        PacketCapture.upload(enrollment, client, manual = manual)
-    }
-
     suspend fun reportTelemetry() {
         val enrollment = mutableState.value.enrollment ?: return
         val traffic = RuntimeObservability.traffic.value

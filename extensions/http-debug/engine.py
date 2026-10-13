@@ -1,10 +1,9 @@
-"""Local mitmproxy engine shared by the Windows worker and Android APK.
+"""Local mitmproxy engine used by the Windows worker.
 
 No CA private key or captured body crosses the host/plugin control channel.
 The authenticated mitmweb interface provides viewing, editing, replay and HAR.
 """
 import asyncio
-import json
 from pathlib import Path
 import secrets
 import threading
@@ -171,7 +170,3 @@ def dispatch(method, params):
     if method == "certificate":
         return engine.certificate()
     raise ValueError("Unknown engine operation")
-
-
-def android_call(method, params):
-    return json.dumps(dispatch(method, json.loads(params)))

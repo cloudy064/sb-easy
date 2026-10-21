@@ -359,3 +359,41 @@ TEST(protocol_values_and_unknown_type_suffix_preserve_bytes) {
     sb_proxy_node_free(&node);
     sbj_free(input);
 }
+
+TEST(authenticated_proxy_access_survives_script_rule_replacement) {
+    sb_render_request r; sb_render_request_init(&r); r.mode = SB_PROFILE_FULL;
+    set_profile(&r, "{\"inbounds\":[{\"tag\":\"sb-easy-access\",\"type\":\"mixed\",\"listen_port\":1081,"
+        "\"users\":[{\"username\":\"aaa\",\"password\":\"test-key\"}]}],"
+        "\"outbounds\":[{\"tag\":\"exit-a\",\"type\":\"direct\"}],\"route\":{\"rules\":["
+        "{\"inbound\":\"sb-easy-access\",\"auth_user\":\"aaa\",\"action\":\"route\",\"outbound\":\"exit-a\"}]}}");
+    r.rule_script = sb_strdup("function buildRules() { return []; }");
+    r.rule_script_len = strlen(r.rule_script);
+    sb_err err = {0}; sbj *config = render(&r, &err); REQUIRE(config);
+    CHECK_STR(at_str(config, "route.rules.0.auth_user"), "aaa");
+    CHECK_STR(at_str(config, "route.rules.0.outbound"), "exit-a");
+    CHECK_STR(at_str(config, "route.rules.1.action"), "reject");
+    sbj_free(config); sb_render_request_free(&r);
+}
+
+TEST(fixed_proxy_identity_survives_rename_and_rejects_deleted_or_disabled_nodes) {
+    sb_render_request r; sb_render_request_init(&r); r.mode = SB_PROFILE_FULL;
+    set_profile(&r, "{\"inbounds\":[{\"tag\":\"sb-easy-access\",\"type\":\"mixed\",\"listen_port\":1081,"
+        "\"users\":[{\"username\":\"node_stable-id\",\"password\":\"key\"}]}],"
+        "\"outbounds\":[{\"tag\":\"default\",\"type\":\"direct\"}],\"route\":{\"rules\":["
+        "{\"inbound\":\"sb-easy-access\",\"auth_user\":\"node_stable-id\",\"action\":\"route\",\"outbound\":\"sb-easy-node-stable-id\"}]}}");
+    sb_proxy_node *node = sb_proxy_node_vec_push(&r.nodes); shadowsocks(node, "old name");
+    sb_str_set(&node->id, "stable-id"); node->id_len = strlen(node->id);
+    r.rule_script = sb_strdup("function buildRules(c) { return c.currentRules; }"); r.rule_script_len = strlen(r.rule_script);
+    sb_err err = {0}; sbj *first = render(&r, &err); REQUIRE(first);
+    CHECK_STR(at_str(first, "route.rules.0.outbound"), "sb-easy-node-stable-id");
+    CHECK_STR(at_str(first, "outbounds.1.server"), "192.0.2.10");
+    sb_str_set(&node->tag, "renamed node"); node->tag_len = strlen(node->tag);
+    sbj *second = render(&r, &err); REQUIRE(second); CHECK(sbj_equal(first, second));
+    sbj_free(first); sbj_free(second);
+    node->enabled = false; second = render(&r, &err); REQUIRE(second);
+    CHECK_STR(at_str(second, "route.rules.0.action"), "reject");
+    CHECK(at(second, "route.rules.0.outbound") == NULL); sbj_free(second);
+    sb_proxy_node_vec_free(&r.nodes); second = render(&r, &err); REQUIRE(second);
+    CHECK_STR(at_str(second, "route.rules.0.action"), "reject"); sbj_free(second);
+    sb_render_request_free(&r);
+}

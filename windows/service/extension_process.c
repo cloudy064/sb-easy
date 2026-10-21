@@ -63,3 +63,13 @@ failed:
 }
 
 void sbw_extension_process_free(sbw_extension_process *c){if(c){close_worker(c);free(c);}}
+void sbw_extension_process_free_graceful(sbw_extension_process *c) {
+    if(!c)return;
+    /* The controller already serializes its ip-check operations; this lock also
+     * ensures no private exchange is reading/writing while stdin is closed. */
+    AcquireSRWLockExclusive(&c->lock);
+    if(c->input){CloseHandle(c->input);c->input=NULL;}
+    if(c->process)WaitForSingleObject(c->process,5000);
+    close_worker(c);
+    ReleaseSRWLockExclusive(&c->lock);free(c);
+}

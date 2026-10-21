@@ -4,11 +4,13 @@ import AppIcon from './components/AppIcon.vue'
 import SubscriptionsPanel from './components/SubscriptionsPanel.vue'
 import { parseSubscription } from './lib/subscriptions'
 import ServiceRouting from './components/ServiceRouting.vue'
-import ExtensionView from './components/ExtensionView.vue'
-import ExtensionsPanel from './components/ExtensionsPanel.vue'
+import CaptureView from './components/CaptureView.vue'
+import StatisticsView from './components/StatisticsView.vue'
+import HttpDebugView from './components/HttpDebugView.vue'
+import NodeIpSummary from './components/NodeIpSummary.vue'
+import type { DailyIpCache } from './lib/ipcheck'
 import NetworkToolsView from './components/NetworkToolsView.vue'
 import LogsView from './components/LogsView.vue'
-import type { ExtensionId, ExtensionInfo } from './lib/protocol'
 import { bytes, rates, shortVersion, nodeKind } from './lib/dashboard'
 import brandMark from '../../../assets/branding/sb-easy-mark-v2.svg'
 import { BridgeError, findNativeTransport, NativeBridge } from './lib/bridge'
@@ -19,17 +21,10 @@ import type { ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult
 
 type ConnectionState = 'checking' | 'online' | 'offline' | 'host_missing'
 const bridge = new NativeBridge(findNativeTransport())
-type Page = 'connections' | 'logs' | 'rules' | 'extensions' | 'http-debug' | 'capture' | 'statistics' | 'network-tools' | 'overview' | 'proxies' | 'profiles' | 'activity' | 'settings' | 'diagnostics'
+type Page = 'connections' | 'logs' | 'rules' | 'ip-check' | 'http-debug' | 'capture' | 'statistics' | 'network-tools' | 'overview' | 'proxies' | 'profiles' | 'activity' | 'settings' | 'diagnostics'
 const page = ref<Page>('overview')
 const toolsOpen = ref(false)
-const extensions = ref<ExtensionInfo[]>([])
-const enabledExtensions = computed(() => extensions.value.filter(e => e.installed && e.enabled && e.id !== 'network-tools'))
-const extensionPage = computed(() => enabledExtensions.value.find(e => e.id === page.value))
-const captureEnabled = computed(() => enabledExtensions.value.some(e => e.id === 'capture'))
-function openExtension(id: ExtensionId){selectPage(id === 'network-tools' ? 'connections' : id)}
-watch(extensions, () => { if (['capture','statistics','network-tools','http-debug'].includes(page.value) && !extensionPage.value) page.value = 'extensions' })
 const navigation: { id: Page; label: string; description: string }[] = [
-  { id: 'extensions', label: '扩展商店', description: '按需安装高级功能，让基础代理保持简单。' },
   { id: 'overview', label: '连接', description: '连接网络，为每项服务选择出口。' },
   { id: 'proxies', label: '节点与订阅', description: '按来源管理节点，添加只在本机使用的订阅。' },
   { id: 'connections', label: '活动连接', description: '查看当前连接、应用和实际出口。' },
@@ -37,12 +32,28 @@ const navigation: { id: Page; label: string; description: string }[] = [
   { id: 'rules', label: '规则详情', description: '查看当前生效和已下载的分流规则。' },
   { id: 'statistics', label: '流量统计', description: '按应用、域名与 host 查看累计流量和出站记录。' },
   { id: 'http-debug', label: 'HTTP(S) 抓包', description: '查看明文请求与响应，修改、重放并导出会话。' },
-  { id: 'capture', label: '网络包采集', description: '原始 PCAP 用于网络层诊断；查看 HTTPS 明文请使用 HTTP(S) 抓包插件。' },
+  { id: 'capture', label: '网络包采集', description: '原始 PCAP 用于网络层诊断；查看 HTTPS 明文请使用 HTTP(S) 抓包。' },
   { id: 'profiles', label: '配置管理', description: '同步、校验并管理此设备的服务端配置。' },
   { id: 'activity', label: '活动记录', description: '查看本次打开界面后的连接与操作记录。' },
 ]
 const currentPage = computed(() => navigation.find(item => item.id === page.value) ??
   { label: page.value === 'settings' ? '设置' : '连接诊断', description: '管理外观、状态刷新和设备信息。' })
+const ipCache = ref<DailyIpCache | null>(null)
+const ipCacheError = ref('')
+let ipCacheBusy = false
+async function refreshIpCache(): Promise<void> {
+  if (destroyed || ipCacheBusy || page.value !== 'proxies' || document.hidden || !enrollment.value?.enrolled || operation.value) return
+  if (!supports('ipcheck.daily')) { ipCacheError.value = '请更新 Windows 服务以读取中心检测结果'; return }
+  ipCacheBusy = true
+  const device = enrollment.value
+  try {
+    const result = await bridge.request('ipcheck.daily', {}, { timeoutMs: 15000 })
+    if (!destroyed && enrollment.value === device) { ipCache.value = result; ipCacheError.value = result.error ? '中心检测服务暂不可用' : '' }
+  } catch (error) {
+    if (!destroyed) ipCacheError.value = error instanceof BridgeError && error.code === 'BUSY' ? '' : '暂时无法读取中心结果，稍后自动重试'
+  } finally { ipCacheBusy = false }
+}
+watch(page, () => { void refreshIpCache() })
 const inspection = ref<ConfigInspection | null>(null)
 const catalogIssue = ref('')
 const runtime = ref<RuntimeSnapshot | null>(null)
@@ -94,7 +105,7 @@ const trafficReady = computed(() => status.value?.core_running && runtime.value?
 const sourceLabel = computed(() => catalogSource.value === 'active' ? '当前运行配置' : '已下载候选配置')
 function selectPage(value: Page): void {
   page.value = value
-  if (['profiles', 'rules', 'activity'].includes(value)) toolsOpen.value = true
+  if (['profiles', 'rules', 'activity', 'capture', 'statistics', 'http-debug'].includes(value)) toolsOpen.value = true
   search.value = ''
   window.scrollTo({ top: 0 })
 }
@@ -258,9 +269,7 @@ async function refresh(): Promise<void> {
       enrollmentUri.value = ''
       confirmForget.value = false
     }
-    if (greeting.supported_methods.includes('extensions.list')) {
-      try { extensions.value = (await bridge.request('extensions.list')).extensions } catch { extensions.value = [] }
-    }
+
     config.value = summary.result
     configIssue.value = summary.error
     connection.value = 'online'
@@ -278,6 +287,7 @@ async function refresh(): Promise<void> {
       busy.value = false
       checkedAt.value = new Date()
       void readTelemetry()
+      void refreshIpCache()
     }
   }
 }
@@ -459,6 +469,7 @@ function refreshWhenVisible(): void {
   if (autoRefresh.value && bridge.available && document.visibilityState === 'visible' && !enrollmentUri.value && !confirmForget.value) void refresh()
 }
 
+watch(() => enrollment.value?.enrolled, enrolled => { if (!enrolled) { ipCache.value = null; ipCacheError.value = '' } })
 onMounted(() => {
   try {
     const saved = JSON.parse(localStorage.getItem('sb-easy-display') ?? '{}')
@@ -494,10 +505,9 @@ onBeforeUnmount(() => {
         <div class="advanced-navigation">
           <button class="tools-toggle" data-testid="tools-toggle" :aria-expanded="toolsOpen" aria-controls="advanced-tools" @click="toolsOpen = !toolsOpen"><span>更多工具</span><svg class="tools-chevron" :class="{ expanded: toolsOpen }" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>
           <div id="advanced-tools" v-show="toolsOpen">
-          <button v-for="item in navigation.filter(item => ['profiles','rules','activity'].includes(item.id))" :key="item.id" :data-testid="`nav-${item.id}`" :class="{ selected: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)"><AppIcon :name="item.id" /><span>{{ item.label }}</span></button>
+          <button v-for="item in navigation.filter(item => ['profiles','rules','activity','capture','statistics','http-debug'].includes(item.id))" :key="item.id" :data-testid="`nav-${item.id}`" :class="{ selected: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)"><AppIcon :name="item.id" /><span>{{ item.label }}</span></button>
           </div>
         </div>
-        <button v-for="item in enabledExtensions" :key="item.id" :data-testid="`nav-${item.id}`" :class="{selected:page===item.id}" :aria-current="page===item.id ? 'page' : undefined" @click="openExtension(item.id)"><AppIcon :name="item.id"/><span>{{ item.name }}</span></button>
       </nav>
       <div class="sidebar-bottom">
         <button data-testid="nav-diagnostics" class="sidebar-service" @click="selectPage('diagnostics')"><span class="state-dot" :class="{ ready: connection === 'online' }"></span><div><strong>服务 {{ serviceLabel }}</strong><span>{{ hello ? `v${hello.service_version}` : '等待服务响应' }}</span></div><AppIcon name="arrow" /></button>
@@ -553,8 +563,9 @@ onBeforeUnmount(() => {
         <template v-else>
           <SubscriptionsPanel :summary="subscriptionSummary" :disabled="!canAct('subscriptions.save')" :busy="operation === 'subscription'" :filter="sourceFilter" @filter="sourceFilter = $event" @add="(name, url) => changeSubscription('add', '', name, url)" @refresh="(id, name) => changeSubscription('refresh', id, name)" @remove="id => changeSubscription('remove', id)" />
           <section v-if="groups.length" class="proxy-groups"><article v-for="group in groups" :key="group.tag" class="panel group-card"><div class="section-heading"><span class="group-icon"><AppIcon name="proxies" /></span><span class="status-tag">{{ nodeKind(group.type) }}</span></div><h2>{{ group.tag }}</h2><p>当前出口</p><strong>{{ group.selected || '由内核自动选择' }}</strong><span class="group-count">{{ group.member_count }} 个成员 · {{ catalogSource === 'active' && runtime ? '内核实时状态' : '配置初始值' }}</span></article></section>
+          <div class="panel ip-cache-banner"><div><strong>出口 IP · 中心自动检测</strong><p>每天自动刷新 · 与网页共享结果 · 无需逐个测试</p></div><span>{{ ipCacheError || (ipCache?.running ? '正在后台刷新' : ipCache ? '自动更新已开启' : '正在读取中心缓存') }}</span></div>
           <div class="section-heading node-heading"><h2>节点列表 <span>{{ filteredNodes.length }}</span></h2><div class="segments"><button :class="{ active: nodeFilter === 'all' }" @click="nodeFilter = 'all'">全部</button><button :class="{ active: nodeFilter === 'nodes' }" @click="nodeFilter = 'nodes'">节点</button><button :class="{ active: nodeFilter === 'groups' }" @click="nodeFilter = 'groups'">代理组</button></div></div>
-          <div class="node-grid"><article v-for="(node, index) in filteredNodes" :key="`${node.tag}-${index}`" class="node-card" :class="{ 'default-node': node.tag === catalog.final }"><div class="node-avatar">{{ node.member_count ? '组' : node.type.toLowerCase() === 'direct' ? '直' : Array.from(nodeLabel(node.tag))[0]?.toUpperCase() || 'N' }}</div><div class="node-copy"><h3>{{ nodeLabel(node.tag) || '未命名出站' }}</h3><span>{{ nodeKind(node.type) }} · {{ sourceMap.get(node.tag)?.name ?? '其他 / 未知来源' }}<b v-if="node.tag === catalog.final">默认出口</b></span></div><span class="node-delay" :class="{ measured: node.delay }">{{ node.delay ? `${node.delay} ms` : '未测速' }}</span><details v-if="node.members.length"><summary>查看组成员</summary><ul><li v-for="member in node.members" :key="member">{{ member }}</li></ul><p v-if="node.member_count > node.members.length">另有 {{ node.member_count - node.members.length }} 个成员</p></details></article></div>
+          <div class="node-grid"><article v-for="(node, index) in filteredNodes" :key="`${node.tag}-${index}`" class="node-card" :class="{ 'default-node': node.tag === catalog.final }"><div class="node-avatar">{{ node.member_count ? '组' : node.type.toLowerCase() === 'direct' ? '直' : Array.from(nodeLabel(node.tag))[0]?.toUpperCase() || 'N' }}</div><div class="node-copy"><h3>{{ nodeLabel(node.tag) || '未命名出站' }}</h3><span>{{ nodeKind(node.type) }} · {{ sourceMap.get(node.tag)?.name ?? '其他 / 未知来源' }}<b v-if="node.tag === catalog.final">默认出口</b></span></div><span class="node-delay" :class="{ measured: node.delay }">{{ node.delay ? `${node.delay} ms` : '未测速' }}</span><NodeIpSummary v-if="!node.member_count && !['direct', 'block', 'dns', 'selector', 'urltest'].includes(node.type)" :entry="node.tag.startsWith('local-') ? undefined : ipCache?.nodes[node.tag]" :local="node.tag.startsWith('local-') || !!sourceMap.get(node.tag)?.key.startsWith('local:')" :unavailable="!!ipCacheError" /><details v-if="node.members.length"><summary>查看组成员</summary><ul><li v-for="member in node.members" :key="member">{{ member }}</li></ul><p v-if="node.member_count > node.members.length">另有 {{ node.member_count - node.members.length }} 个成员</p></details></article></div>
           <div v-if="!filteredNodes.length" class="panel empty-inline"><p>没有匹配的节点</p><button class="text-button" @click="search = ''; nodeFilter = 'all'; sourceFilter = ''">清除筛选</button></div><p class="collection-note">服务出口可在“连接”页面选择。此处延迟仅显示内核已有的测速记录，尚未提供主动测速。</p><p v-if="catalog.node_count > catalog.nodes.length" class="collection-note">配置包含 {{ catalog.node_count }} 个出站，当前最多展示 1024 个。</p>
         </template>
 
@@ -600,14 +611,14 @@ onBeforeUnmount(() => {
 
       <NetworkToolsView v-else-if="page === 'connections' || page === 'rules'" :key="page" :bridge="bridge" :initial-tab="page" standalone />
       <LogsView v-else-if="page === 'logs'" :bridge="bridge" />
-      <ExtensionsPanel v-else-if="page === 'extensions'" :bridge="bridge" @changed="extensions = $event" @open="openExtension" />
-      <ExtensionView v-else-if="extensionPage" :key="extensionPage.id" :id="extensionPage.id" :bridge="bridge" :server="deviceMetadata?.server_origin ?? ''" @back="selectPage('extensions')" />
+      <CaptureView v-else-if="page === 'capture'" :bridge="bridge" :server="deviceMetadata?.server_origin ?? ''" />
+      <StatisticsView v-else-if="page === 'statistics'" :bridge="bridge" />
+      <HttpDebugView v-else-if="page === 'http-debug'" :bridge="bridge" />
       <template v-else-if="page === 'activity'">
         <div class="content-toolbar"><span class="data-source-line">本次界面会话 · {{ activities.length }} 条记录</span><button class="secondary-button" :disabled="!activities.length" @click="activities = []">清空记录</button></div><section class="panel activity-panel"><div v-for="item in activities" :key="item.id" class="activity-row" :class="{ failed: item.failed }"><time>{{ item.time }}</time><span class="activity-marker"><AppIcon :name="item.failed ? 'activity' : 'check'" /></span><div><h3>{{ item.title }}</h3><p>{{ item.detail }}</p></div></div><div v-if="!activities.length" class="empty-state"><AppIcon name="activity" /><h2>还没有活动记录</h2><p>配置同步、连接启停与状态变化会记录在这里。</p></div></section><p class="collection-note">记录只保留在当前界面内存中，最多 100 条；关闭窗口后清空。内核运行记录请查看“运行日志”。</p>
       </template>
 
       <template v-else-if="page === 'settings'">
-        <section class="panel settings-panel"><div class="section-heading"><h2>扩展商店</h2><button class="secondary-button" @click="selectPage('extensions')">浏览扩展 →</button></div><p class="input-hint">流量采集等高级能力按需安装，基础代理不依赖扩展。</p><button v-if="captureEnabled" class="text-button" @click="selectPage('capture')">打开流量采集 →</button></section>
         <section class="panel settings-panel" aria-labelledby="ipv6-title">
           <div class="section-heading"><h2 id="ipv6-title">IPv6 支持</h2><span class="status-tag">最近检查 {{ checkedTime }}</span></div>
           <div class="setting-row"><div><h3>本机 IPv6 网络</h3><p>检查可用网卡上的公网地址与默认路由，不代表已通过互联网连通测试。</p></div><strong>{{ ipv6Network }}</strong></div>

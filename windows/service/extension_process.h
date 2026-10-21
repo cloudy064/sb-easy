@@ -4,6 +4,10 @@
 typedef struct sbw_extension_process sbw_extension_process;
 sbw_extension_process *sbw_extension_process_new(const wchar_t *relative, sbw_error *error);
 void sbw_extension_process_free(sbw_extension_process *process);
+/* Close private stdin so a cooperative worker can cancel children and remove
+ * credential files. Wait at most five seconds, then kill this job only. Caller
+ * must prevent new calls while freeing its process descriptor. */
+void sbw_extension_process_free_graceful(sbw_extension_process *process);
 bool sbw_extension_process_running(sbw_extension_process *process);
 sbj *sbw_extension_process_call(sbw_extension_process *process, const char *method, const sbj *params, sbw_error *error);
 #endif

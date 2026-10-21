@@ -21,13 +21,36 @@ jobs:
         run: python -m pip install -r extensions/http-debug/requirements-windows.lock
       - name: Verify TLS, plaintext, edits, replay, HAR and restricted controls
         run: python extensions/http-debug/tests/test_engine.py
-      - name: Build standalone optional worker
+      - name: Build bundled HTTPS engine
         run: python -m PyInstaller --noconfirm --onefile --name sb-easy-http-debug --distpath build/http-debug --workpath build/http-debug-freeze --specpath build --paths extensions/http-debug --collect-all mitmproxy --collect-all mitmproxy_rs --copy-metadata mitmproxy --collect-all mitmproxy_windows extensions/http-debug/worker.py
       - name: Verify packaged worker
         run: python extensions/http-debug/tests/worker_smoke.py build/http-debug/sb-easy-http-debug.exe
+      - name: Stage bundled engine and license notices
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/windows-release/extensions/http-debug
+          Copy-Item build/http-debug/sb-easy-http-debug.exe build/windows-release/extensions/http-debug/
+          python extensions/http-debug/package.py --licenses-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-builtin-https-engine
+          path: |
+            build/windows-release/extensions/http-debug/
+            build/windows-release/licenses/http-debug.txt
+      - name: Verify isolated IP checks and offline data provider
+        run: python -m unittest discover -s extensions/ip-check/tests -v
+      - name: Build and verify frozen IP checker with loopback fixtures
+        shell: pwsh
+        run: |
+          ./windows/scripts/prepare-core.ps1
+          python -m PyInstaller --noconfirm --clean --noupx --onefile --name sb-easy-ip-check --distpath build/ip-check --workpath build/ip-check-freeze --specpath build --paths extensions/ip-check extensions/ip-check/worker.py
+          if ($LASTEXITCODE -ne 0) { throw 'IP checker packaging failed' }
+          python extensions/ip-check/tests/worker_smoke.py build/ip-check/sb-easy-ip-check.exe build/windows-release/core/sing-box.exe
+          if ($LASTEXITCODE -ne 0) { throw 'IP checker isolated acceptance failed' }
 
   windows:
     name: Windows C11 desktop preview (x64)
+    needs: http-debug-engine
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +62,10 @@ jobs:
       - name: Build UI, native service and desktop; run tests
         shell: pwsh
         run: ./windows/scripts/build.ps1
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-builtin-https-engine
+          path: build/windows-release
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
@@ -68,13 +95,13 @@ jobs:
             $setup = Start-Process ./build/WebView2Setup.exe -ArgumentList '/silent /install' -Wait -PassThru
             if ($setup.ExitCode -ne 0) { throw 'WebView2 Runtime installation failed' }
           }
-          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.6.9-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
+          ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-0.7.1-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
       - uses: actions/upload-artifact@v4
         with:
           name: sb-easy-windows-x64-packages
           path: |
-            build/sb-easy-0.6.9-windows-x64-portable.zip
-            build/sb-easy-0.6.9-windows-x64.msi
+            build/sb-easy-0.7.1-windows-x64-portable.zip
+            build/sb-easy-0.7.1-windows-x64.msi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

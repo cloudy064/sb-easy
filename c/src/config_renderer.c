@@ -1,4 +1,5 @@
 #include "sb/config_renderer.h"
+#include "sb/proxy_access.h"
 
 #include <arpa/inet.h>
 #include <stdlib.h>
@@ -579,6 +580,9 @@ sbj *sb_config_renderer_render(const sb_config_renderer *renderer,
         render_managed(request, config, &managed_has_proxy, err) != 0)
         goto fail;
 
+    if (sb_proxy_access_prepare(request, config, err) != 0) goto fail;
+    if (sb_proxy_access_apply(request->profile, config, true, err) != 0) goto fail;
+
     if (request->rule_script && request->rule_script_len > 0 &&
         render_rule_script(renderer, request, config, err) != 0)
         goto fail;
@@ -607,6 +611,7 @@ sbj *sb_config_renderer_render(const sb_config_renderer *renderer,
     /* These fields remain under server control even when scripting is enabled. */
     inject_clash_api(config, request);
     disable_clash_dashboard(config);
+    if (sb_proxy_access_apply(request->profile, config, true, err) != 0) goto fail;
     return config;
 
 fail:

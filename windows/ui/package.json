@@ -1,6 +1,6 @@
 {
   "name": "sb-easy-windows-ui",
-  "version": "0.6.9",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,10 +10,11 @@
     "dev": "vite --host 127.0.0.1",
     "check": "vue-tsc --noEmit",
     "build": "npm run check && vite build",
-    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/bridge.test.js .test-build/tests/enrollment.test.js .test-build/tests/dashboard.test.js .test-build/tests/traffic.test.js .test-build/tests/subscriptions.test.js",
+    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/bridge.test.js .test-build/tests/enrollment.test.js .test-build/tests/dashboard.test.js .test-build/tests/traffic.test.js .test-build/tests/subscriptions.test.js .test-build/tests/ipcheck.test.js",
     "preview": "vite preview --host 127.0.0.1",
     "build:capture": "vite build --config vite.capture.config.ts",
-    "build:plugins": "vite build --config vite.plugins.config.ts --mode statistics && vite build --config vite.plugins.config.ts --mode network-tools && vite build --config vite.plugins.config.ts --mode http-debug"
+    "build:plugins": "vite build --config vite.plugins.config.ts --mode statistics && vite build --config vite.plugins.config.ts --mode network-tools && vite build --config vite.plugins.config.ts --mode http-debug && vite build --config vite.plugins.config.ts --mode ip-check",
+    "build:ip-check": "vite build --config vite.plugins.config.ts --mode ip-check"
   },
   "dependencies": {
     "tldts": "7.0.25",

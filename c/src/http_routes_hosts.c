@@ -5,6 +5,8 @@
  * (profile_from_request, host_from_*_request, normalized_command, agent_token,
  * resolve_agent_host, optional_*_field, managed_render_request, ...). */
 #include "http_internal.h"
+#include "ipcheck_center.h"
+#include "sb/proxy_access.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -140,6 +142,7 @@ static int profile_from_request(const sbj *body, sb_config_profile *profile, sb_
     profile->name_len = name_value->v.str.len;
     sbj_free(profile->profile);
     profile->profile = sbj_clone(template_value);
+    if (sb_proxy_access_apply(template_value, profile->profile, false, err) != 0) return -1;
     profile->mode = mode;
     if (script) {
         sb_str_setn(&profile->rule_script, script->v.str.ptr, script->v.str.len);
@@ -970,6 +973,42 @@ static sbj *agent_subscription_sources(sb_http_server *srv,const sbj *config,sb_
 
 /* GET /api/agent/config: the rendered config as pretty JSON with the config
  * ETag; If-None-Match equal to it yields an empty 304. */
+static int handle_center_ipcheck(sb_http_req *req,sb_http_resp *resp,sb_err *err) {
+    sb_host host;sb_host_init(&host);sb_render_request render;sb_render_request_init(&render);
+    sbj *config=NULL,*body=NULL,*request=NULL;int rc=-1;
+    bool agent=sb_starts_with(req->path,"/api/agent/");
+    if(agent){if(resolve_agent_host(req,&host,err))goto done;}
+    else if(sb_require_admin(req,err)||sb_http_require_host(req->server,route_param(req),&host,err))goto done;
+    const char *action=req->params[agent?0:1];
+    if(!sb_streq(action,"daily")&&!sb_streq(action,"catalog")&&!sb_streq(action,"snapshot")&&!sb_streq(action,"start")&&!sb_streq(action,"cancel")){
+        sb_fail(err,SB_ERR_NOT_FOUND,"Unknown IP check operation");goto done;
+    }
+    body=sb_req_json_object(req,err);if(!body)goto done;
+    if(!sb_streq(action,"start")&&sbj_obj_len(body)){sb_fail(err,SB_ERR_VALIDATION,"Unexpected IP check parameters");goto done;}
+    if(sb_streq(action,"start")) {
+        const sbj *tags=sbj_get(body,"tags");
+        if(sbj_obj_len(body)!=2||!sbj_is_bool(sbj_get(body,"ipv6"))||!sbj_is_array(tags)||!sbj_arr_len(tags)||sbj_arr_len(tags)>100) {
+            sb_fail(err,SB_ERR_VALIDATION,"Select up to 100 center nodes and an IPv6 option");goto done;
+        }
+        for(size_t i=0;i<sbj_arr_len(tags);++i) {
+            const sbj *tag=sbj_arr_at(tags,i);
+            if(!sbj_is_string(tag)||!tag->v.str.len||tag->v.str.len>512||json_string_has_nul(tag)) {
+                sb_fail(err,SB_ERR_VALIDATION,"Invalid node tag");goto done;
+            }
+            for(size_t j=0;j<i;++j)if(sbj_equal(tag,sbj_arr_at(tags,j))) {
+                sb_fail(err,SB_ERR_VALIDATION,"Duplicate node tag");goto done;
+            }
+        }
+    }
+    if(managed_render_request(req->server,&host,false,req->server->enrollment_server,&render,err))goto done;
+    config=render_config(&render,err);if(!config)goto done;
+    request=sbj_object();sbj_set_str(request,"action",sb_streq(action,"daily")?"daily-device":action);sbj_set_str(request,"scope",host.profile_id?host.profile_id:"default");
+    sbj *minimal=sbj_object();sbj_set(minimal,"outbounds",sbj_clone(sbj_get(config,"outbounds")));sbj_set(request,"config",minimal);
+    sbj_set(request,"params",sbj_clone(body));
+    if(sb_streq(action,"catalog")){sbj *sources=agent_subscription_sources(req->server,config,err);if(!sources)goto done;sbj_set(request,"sources",sources);}
+    rc=sb_ipcheck_center(request,resp,err);
+done:sbj_free(request);sbj_free(body);sbj_free(config);sb_host_free(&host);sb_render_request_free(&render);return rc;
+}
 static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     sb_http_server *srv = req->server;
     int rc = -1;
@@ -1288,6 +1327,8 @@ void sb_http_register_hosts_routes(sb_http_server *srv) {
     /* Backward-compatible alias used by already released Android apps. */
     sb_http_route(srv, "POST", "/api/agent/enroll", handle_redeem_device_enrollment);
     sb_http_route(srv, "GET", "/api/agent/config", handle_agent_config);
+    sb_http_route(srv,"POST","/api/agent/ipcheck/{action}",handle_center_ipcheck);
+    sb_http_route(srv,"POST","/api/hosts/{id}/ipcheck/{action}",handle_center_ipcheck);
     sb_http_route(srv, "POST", "/api/agent/status", handle_agent_status);
     sb_http_route(srv, "GET", "/api/agent/commands", handle_agent_commands);
     sb_http_route(srv, "POST", "/api/agent/commands/{command_id}/ack", handle_agent_command_ack);

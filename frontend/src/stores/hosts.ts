@@ -55,8 +55,10 @@ export const useHostsStore = defineStore('hosts', () => {
     template: unknown,
     ruleScript: string,
     ruleScriptEnabled: boolean,
+    mode?: 'managed' | 'full',
   ): Promise<ConfigProfile> {
     const { data } = await client.put(`/hosts/profiles/${id}`, {
+      mode: mode ?? profiles.value.find(p => p.id === id)?.mode ?? 'managed',
       name,
       template,
       rule_script: ruleScript,

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "sb/auth.h"
+#include "sb/proxy_access.h"
 #include "sqlite_internal.h"
 
 struct sb_store {
@@ -3044,6 +3045,22 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
                        "ORDER BY node_type, tag",
                        NULL, &nodes, err) != 0)
             goto done;
+    }
+
+    /* Full templates need only explicitly pinned identities. Unrelated node
+     * records must not change or prevent rendering a full template. */
+    if (profile.mode == SB_PROFILE_FULL) {
+        const sbj *in, *user;
+        SBJ_ARR_FOREACH(sbj_get(profile.profile, "inbounds"), i, in) {
+            if (!sbj_string_is(sbj_get(in, "tag"), SB_PROXY_ACCESS_TAG)) continue;
+            SBJ_ARR_FOREACH(sbj_get(in, "users"), j, user) {
+                const char *name = sbj_get_str(user, "username", "");
+                if (strncmp(name, "node_", 5)) continue;
+                if (read_nodes(h, "SELECT id, tag, node_type, enabled, server, server_port, "
+                                  "protocol_config FROM proxy_nodes WHERE enabled = 1 AND id = ?1",
+                               name + 5, &nodes, err) != 0) goto done;
+            }
+        }
     }
 
     capabilities = parse_object_col(host, 2, "host capabilities", err);

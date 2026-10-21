@@ -29,6 +29,10 @@ specs = [
     ('http-debug', 'HTTP(S) 抓包', '由 mitmproxy 驱动，查看明文请求与响应，支持修改、重放和 HAR 导出。',
      '仅在本机运行。安装 CA 证书需单独操作；会话含敏感正文，默认只保存在内存。仅接管选定域名。',
      ['extension.json', 'sb-easy-http-debug.exe', 'licenses/http-debug.txt', 'licenses/vue.txt']),
+    ('ip-check', 'IP 检测', '批量检测节点出口 IPv4 / IPv6，在本地查询地区、ASN 及公开机房、VPN、Tor 名单。显示数据来源和日期。',
+     '只让出口检测请求经过指定节点，不切换当前代理。向 ipify 请求出口地址，IP 资料在本地公开数据库中查询；不会将出口 IP 发送给资料接口。结果保存在内存，数据库随扩展版本更新。',
+     ['extension.json', 'sb-easy-ip-check.exe', 'licenses/ip-check.txt', 'licenses/vue.txt',
+      'data/ip-intelligence.sqlite', 'data/manifest.json', 'licenses/ip-data.txt']),
 ]
 def quote(s):
     return json.dumps(s, ensure_ascii=False)

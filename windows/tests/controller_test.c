@@ -58,16 +58,12 @@ static void test_validation(const wchar_t *fixture) {
     expect_error(controller, "traffic.snapshot", empty, false, "FORBIDDEN");
     expect_error(controller, "traffic.clear", empty, false, "FORBIDDEN");
     expect_error(controller, "logs.snapshot", empty, false, "FORBIDDEN");
-    expect_error(controller, "traffic.snapshot", empty, true, "EXTENSION_MISSING");
+    sbj *traffic = call(controller, "traffic.snapshot", empty, true); CHECK(traffic); sbj_free(traffic);
     sbj *logs = call(controller, "logs.snapshot", empty, true);
     CHECK(sbj_is_array(sbj_get(logs, "lines"))); sbj_free(logs);
     sbj *legacy_install = sbj_object(); sbj_set_str(legacy_install, "id", "network-tools");
     expect_error(controller, "extensions.install", legacy_install, true, "BUILTIN_FEATURE"); sbj_free(legacy_install);
-    sbj *catalog = call(controller, "extensions.catalog", empty, true);
-    const sbj *items = sbj_get(catalog, "items");
-    for (size_t i = 0; i < sbj_arr_len(items); ++i)
-        CHECK(!sbj_string_is(sbj_get(sbj_arr_at(items, i), "id"), "network-tools"));
-    sbj_free(catalog);
+    expect_error(controller, "extensions.catalog", empty, true, "BUILTIN_FEATURE");
 
     expect_error(controller, "config.validate", empty, true, "NO_CANDIDATE");
     sbj *result = call(controller, "enrollment.apply", enrollment, true); sbj_free(result);
@@ -253,9 +249,9 @@ int wmain(int argc, wchar_t **argv) {
     expect_error(controller, "extensions.catalog", empty, false, "FORBIDDEN");
     expect_error(controller, "extensions.progress", empty, false, "FORBIDDEN");
     sbj *untrusted_store=sbj_parse_cstr("{\"id\":\"capture\",\"url\":\"http://untrusted.invalid\"}");
-    expect_error(controller,"extensions.install",untrusted_store,true,"INVALID_REQUEST");sbj_free(untrusted_store);
+    expect_error(controller,"extensions.install",untrusted_store,true,"BUILTIN_FEATURE");sbj_free(untrusted_store);
     expect_error(controller, "extensions.change", empty, false, "FORBIDDEN");
-    expect_error(controller, "extensions.change", empty, true, "INVALID_REQUEST");
+    expect_error(controller, "extensions.change", empty, true, "BUILTIN_FEATURE");
     result = call(controller, "enrollment.forget", empty, true); CHECK(!sbj_get_bool(result, "enrolled", true) && !data.saved); sbj_free(result);
     expect_error(controller, "enrollment.forget", empty, true, "INVALID_STATE");
     sbw_controller_free(controller);

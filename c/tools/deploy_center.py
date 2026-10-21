@@ -22,6 +22,10 @@ def docker(*args, **kwargs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--ipcheck-routing-mark", type=lambda value: int(value,0),
+                        help="explicit center probe socket mark; leaves host routing unchanged")
+    parser.add_argument("--external-ipcheck", action="store_true",
+                        help="use the bundled host-network engine through a private socket")
     parser.add_argument("--root", type=Path, default=Path("/root/workspace/sb-easy"))
     parser.add_argument("--labels-from", type=Path,
                         help="restore Compose ownership from an archived container inspect")
@@ -32,14 +36,29 @@ def main():
     image = json.loads(docker("image", "inspect", args.image))[0]
     host = old["HostConfig"]
     assert host["NetworkMode"] == "sb-easy_default", "review the network topology before cutover"
-    assert len(old["Mounts"]) == 1 and old["Mounts"][0]["Destination"] == "/app/data"
-    data = Path(old["Mounts"][0]["Source"])
-    assert data == args.root / "data" and old["Mounts"][0]["Type"] == "bind"
+    mounts = {item["Destination"]: item for item in old["Mounts"]}
+    assert "/app/data" in mounts and set(mounts) <= {"/app/data", "/app/frontend/dist/assets/store", "/run/sb-easy"}
+    data = Path(mounts["/app/data"]["Source"])
+    assert data == args.root / "data" and mounts["/app/data"]["Type"] == "bind"
+    if "/app/frontend/dist/assets/store" in mounts:
+        assets = mounts["/app/frontend/dist/assets/store"]
+        assert assets["Type"] == "bind" and Path(assets["Source"]) == args.root / "extension-store"
+    if "/run/sb-easy" in mounts:
+        assert mounts["/run/sb-easy"]["Type"] == "bind" and Path(mounts["/run/sb-easy"]["Source"]) == args.root / "ipcheck-run"
+    if args.external_ipcheck:
+        runtime=args.root / 'ipcheck-run'
+        assert (runtime / 'ipcheck.sock').is_socket(), 'validate the private engine before cutover'
+        mounts['/run/sb-easy']={'Source':str(runtime),'RW':True}
     assert not host["Privileged"] and not host.get("Devices")
     assert not host.get("SecurityOpt") and not host.get("Sysctls")
     assert not host.get("ReadonlyRootfs") and not host.get("Dns") and not host.get("ExtraHosts")
     assert old["Config"]["Cmd"] == ["sb-easy"] and old["Config"]["Entrypoint"] == ["/docker-entrypoint.sh"]
     env = dict(value.split("=", 1) for value in old["Config"]["Env"] if "=" in value)
+    if args.ipcheck_routing_mark is not None:
+        assert 0 < args.ipcheck_routing_mark <= 0xffffffff
+        env['IPCHECK_ROUTING_MARK'] = str(args.ipcheck_routing_mark)
+    if args.external_ipcheck:
+        env['IPCHECK_EXTERNAL']='true'
     label_source = json.loads(args.labels_from.read_text()) if args.labels_from else old
     labels = dict(label_source["Config"].get("Labels") or {})
     if "com.docker.compose.project" in labels:
@@ -76,6 +95,9 @@ def main():
     (backup / "image.json").write_text(json.dumps(image))
     env_file = backup / "environment"
     env_file.write_text("\n".join(old["Config"]["Env"]) + "\n")
+    if args.ipcheck_routing_mark is not None or args.external_ipcheck:
+        env_file=backup / 'candidate-environment'
+        env_file.write_text('\n'.join(key+'='+value for key,value in env.items())+'\n')
     rollback_name, failed_name = name + "-rollback-" + stamp, name + "-failed-" + stamp
     archive_ready = renamed = candidate_created = False
     started = False
@@ -89,8 +111,9 @@ def main():
         docker("rename", name, rollback_name)
         renamed = True
         command = ["run", "-d", "--name", name, "--restart", host["RestartPolicy"]["Name"],
-                   "--network", host["NetworkMode"], "--env-file", str(env_file),
-                   "-v", str(data) + ":/app/data:rw"]
+                   "--network", host["NetworkMode"], "--env-file", str(env_file)]
+        for destination, mount in mounts.items():
+            command.extend(["-v", mount["Source"] + ":" + destination + (":rw" if mount["RW"] else ":ro")])
         for cap in host.get("CapAdd") or []:
             command.extend(["--cap-add", cap])
         for key, value in labels.items():

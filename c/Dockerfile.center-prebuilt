@@ -1,0 +1,41 @@
+# Low-memory update of an existing center image (same Debian release and core).
+# Context must contain prebuilt/frontend and prebuilt/data, prepared and tested
+# outside the production host. No npm or database build runs on that host.
+# Use the legacy Docker builder for enforced memory/CPU limits, e.g.:
+# DOCKER_BUILDKIT=0 docker build --memory=448m --memory-swap=448m \
+#   --cpu-period=100000 --cpu-quota=50000 --build-arg BASE_IMAGE=<existing-image> \
+#   -f c/Dockerfile.center-prebuilt -t <candidate-image> .
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS backend
+RUN find /etc/apt/sources.list.d -type f -exec sed -i 's|http://mirrors.ustc.edu.cn|https://deb.debian.org|g' {} + \
+    && apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get install -y --no-install-recommends cmake gcc make pkg-config git ca-certificates libcurl4-openssl-dev libyaml-dev libsqlite3-dev libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY c /src/c
+COPY migrations /src/migrations
+RUN apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update \
+    && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+RUN cmake -S c -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DSB_EASY_WARNINGS_AS_ERRORS=ON \
+    && cmake --build build --parallel 1 \
+    && ctest --test-dir build --output-on-failure --timeout 180 --parallel 1
+
+FROM ${BASE_IMAGE}
+COPY --from=backend /src/build/sb-easy-c-server /usr/local/bin/sb-easy
+COPY --from=backend /src/build/sb-easy-c-agent /usr/local/bin/sb-easy-agent
+COPY --from=backend /src/build/sb-easy-c-render /usr/local/bin/sb-easy-c-render
+RUN find /etc/apt/sources.list.d -type f -exec sed -i 's|http://mirrors.ustc.edu.cn|https://deb.debian.org|g' {} + \
+    && apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY extensions/ip-check/*.py /usr/share/sb-easy/ip-check/
+COPY extensions/ip-check/licenses/ip-data.txt /usr/share/sb-easy/ip-check/licenses/ip-data.txt
+COPY prebuilt/data /usr/share/sb-easy/ip-check/data
+COPY prebuilt/frontend /app/frontend/dist
+COPY migrations /app/migrations
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.sh \
+    && find /app/migrations -type f -name '*.sql' -exec sed -i 's/\r$//' {} + \
+    && chmod +x /docker-entrypoint.sh
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["sb-easy"]

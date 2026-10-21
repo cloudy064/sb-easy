@@ -704,12 +704,28 @@ static int upload_capture(void *context, const sbj *identity, const char *digest
     server_free(&server); response_free(&response); return result;
 }
 
+static int central_ipcheck(void *context,const sbj *identity,const char *action,const sbj *params,
+                           HANDLE cancel,sbj **result,sbw_error *error) {
+    *result=NULL;
+    if(!sb_streq(action,"daily")&&!sb_streq(action,"catalog")&&!sb_streq(action,"snapshot")&&!sb_streq(action,"start")&&!sb_streq(action,"cancel"))return failure(error,"invalid_request");
+    server_address server={0};http_response response={0};int rc=-1;
+    const char *address=required_field(identity,"server",error),*token=required_field(identity,"agent_token",error);
+    char *payload=sbj_dump(params,-1);wchar_t endpoint[80];
+    swprintf_s(endpoint,80,L"/api/agent/ipcheck/%S",action);
+    if(!address||!token||!payload||parse_server(address,&server,error)<0)goto done;
+    if(send_request(&server,L"POST",endpoint,payload,strlen(payload),false,token,"",900U*1024U,cancel,
+                    ((winhttp_client *)context)->timeout,&response,error)<0)goto done;
+    if(response.status!=200){sbw_fail(error,"CENTER_IPCHECK","The center could not complete this request. Check that its IP detection service is updated and available.");goto done;}
+    *result=response_json(&response.body,error);if(*result)rc=0;
+done:sbw_secret_free(payload);server_free(&server);response_free(&response);return rc;
+}
 sbw_control_plane *sbw_winhttp_new(DWORD timeout, sbw_error *error) {
     if (!timeout || timeout > 60000) { failure(error, "invalid_server"); return NULL; }
     sbw_control_plane *api = sb_xcalloc(1, sizeof(*api));
     winhttp_client *client = sb_xcalloc(1, sizeof(*client));
     client->timeout = timeout;
     api->context = client; api->enroll = enroll; api->fetch_config = fetch_config; api->upload_capture = upload_capture; api->destroy = free;
+    api->ipcheck=central_ipcheck;
     return api;
 }
 void sbw_control_plane_free(sbw_control_plane *client) {

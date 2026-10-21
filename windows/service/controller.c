@@ -9,6 +9,7 @@
 #include "extension_store.h"
 #include "extension_process.h"
 #include "http_debug.h"
+#include "ip_check.h"
 #include <wincrypt.h>
 #include <tlhelp32.h>
 #include <stdlib.h>
@@ -38,6 +39,8 @@ struct sbw_controller {
     sbw_extension_process *httpdebug;
     char *httpdebug_base;
     sbj *httpdebug_domains;
+    sbw_extension_process *ipcheck;
+    sbj *ipcheck_latest;
     HANDLE upload_thread, upload_cancel;
     SRWLOCK upload_lock;
     char upload_status[256];
@@ -190,6 +193,8 @@ void sbw_controller_free(sbw_controller *controller) {
     if (controller->monitor_stop) CloseHandle(controller->monitor_stop);
     capture_upload_join(controller); sbw_capture_free(controller->capture); controller->capture = NULL;
     sbw_extension_process_free(controller->httpdebug);sbw_secret_free(controller->httpdebug_base);sbj_free(controller->httpdebug_domains);
+    sbw_extension_process_free_graceful(controller->ipcheck);
+    sbj_free(controller->ipcheck_latest);
     /* All IPC workers are joined by the caller before freeing this owner. */
     sbw_core_stop(controller->core, NULL);
     sbw_runtime_config_free(&controller->active_config);
@@ -216,6 +221,7 @@ void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const s
     }
 }
 bool sbw_is_mutating_method(const char *method) {
+    if(sb_streq(method,"ipcheck.start")||sb_streq(method,"ipcheck.cancel"))return true;
     if(sb_streq(method,"httpdebug.start")||sb_streq(method,"httpdebug.attach")||sb_streq(method,"httpdebug.stop"))return true;
     return sb_streq(method,"extensions.install") || sb_streq(method,"extensions.change") || !strncmp(method,"subscriptions.",14) || sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "routing.gpt_node") || sb_streq(method, "routing.set") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
         sb_streq(method, "config.refresh") || sb_streq(method, "config.validate") ||
@@ -519,9 +525,16 @@ done:
     sbj_free(connections); sbj_free(proxies);
     ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
 }
+static sbj *ipcheck_dispatch(sbw_controller *c,const char *method,const sbj *params,sbw_error *error) {
+    if(!c->identity){sbw_fail(error,"NOT_ENROLLED","Enroll with the center before checking node IPs.");return NULL;}
+    if(!c->remote->ipcheck){sbw_fail(error,"CENTER_UNAVAILABLE","The center IP check service is unavailable.");return NULL;}
+    sbj *result=NULL;
+    if(c->remote->ipcheck(c->remote->context,c->identity,method+8,params,c->cancel,&result,error))return NULL;
+    return result;
+}
 static sbj *httpdebug_dispatch(sbw_controller *c,const char *method,const sbj *params,sbw_error *error) {
     if(sb_streq(method,"httpdebug.start")) {
-        if(!sbw_extension_is_enabled("http-debug")){sbw_fail(error,"EXTENSION_MISSING","Install and enable HTTP(S) debugging first.");return NULL;}
+        if(!sbw_extension_is_enabled("http-debug")){sbw_fail(error,"EXTENSION_MISSING","The bundled HTTP(S) engine is missing. Repair the application installation.");return NULL;}
         if(!c->active||!c->runtime.core_running){sbw_fail(error,"NOT_CONNECTED","Connect the proxy first.");return NULL;}
         if(c->httpdebug){sbw_fail(error,"BUSY","Stop the existing capture session first.");return NULL;}
         c->httpdebug=sbw_extension_process_new(L"extensions\\http-debug\\sb-easy-http-debug.exe",error);
@@ -569,6 +582,47 @@ static sbj *httpdebug_dispatch(sbw_controller *c,const char *method,const sbj *p
 }
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params, bool authorized, sbw_error *error) {
     if (!controller || !method) { sbw_fail(error, "INVALID_REQUEST", "Invalid service operation."); return NULL; }
+    if(!strncmp(method,"ipcheck.",8)) {
+        if(!authorized){sbw_fail(error,"FORBIDDEN","IP detection requires the active console session.");return NULL;}
+        bool start=sb_streq(method,"ipcheck.start");
+        if(start) {
+            const sbj *tags=sbj_get(params,"tags");
+            if(!sbj_is_object(params)||sbj_obj_len(params)!=2||!sbj_is_bool(sbj_get(params,"ipv6"))||
+               !sbj_is_array(tags)||!sbj_arr_len(tags)||sbj_arr_len(tags)>100) {
+                sbw_fail(error,"INVALID_REQUEST","Select up to 100 center nodes and an IPv6 option.");return NULL;
+            }
+            for(size_t i=0;i<sbj_arr_len(tags);++i) {
+                const sbj *tag=sbj_arr_at(tags,i);
+                if(!sbj_is_string(tag)||!tag->v.str.len||tag->v.str.len>512||strlen(tag->v.str.ptr)!=tag->v.str.len) {
+                    sbw_fail(error,"INVALID_REQUEST","Invalid center node tag.");return NULL;
+                }
+                for(size_t j=0;j<i;++j)if(sbj_equal(tag,sbj_arr_at(tags,j))) {
+                    sbw_fail(error,"INVALID_REQUEST","Duplicate center node tag.");return NULL;
+                }
+            }
+        }
+        if(!sbj_is_object(params)||(!start&&sbj_obj_len(params))||
+           !(start||sb_streq(method,"ipcheck.daily")||sb_streq(method,"ipcheck.catalog")||sb_streq(method,"ipcheck.snapshot")||sb_streq(method,"ipcheck.cancel"))) {
+            sbw_fail(error,"INVALID_REQUEST","Invalid IP detection request.");return NULL;
+        }
+        if(sb_streq(method,"ipcheck.daily")) {
+            /* A cache read must not hold the connection-operation lock while
+             * waiting for the network. Take a private enrollment snapshot. */
+            if(!TryAcquireSRWLockShared(&controller->mutation_lock)){sbw_fail(error,"BUSY","Wait for the current connection operation to finish.");return NULL;}
+            sbj *identity=controller->identity?sbj_clone(controller->identity):NULL;
+            ReleaseSRWLockShared(&controller->mutation_lock);
+            if(!identity){sbw_fail(error,"NOT_ENROLLED","Enroll with the center before reading node IPs.");return NULL;}
+            sbj *result=NULL;
+            if(!controller->remote->ipcheck)sbw_fail(error,"CENTER_UNAVAILABLE","The center IP check service is unavailable.");
+            else if(controller->remote->ipcheck(controller->remote->context,identity,"daily",params,NULL,&result,error)) {
+                sbj_free(result);result=NULL;
+            }
+            sbj_free(identity);return result;
+        }
+        if(!TryAcquireSRWLockExclusive(&controller->mutation_lock)){sbw_fail(error,"BUSY","Wait for the current connection operation to finish.");return NULL;}
+        sbj *result=ipcheck_dispatch(controller,method,params,error);
+        ReleaseSRWLockExclusive(&controller->mutation_lock);return result;
+    }
     if(!strncmp(method,"httpdebug.",10)) {
         if(!authorized){sbw_fail(error,"FORBIDDEN","HTTP debugging requires the active console session.");return NULL;}
         if(!sbj_is_object(params)||(!sb_streq(method,"httpdebug.attach")&&sbj_obj_len(params))||
@@ -584,29 +638,8 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         sbw_fail(error, "INVALID_REQUEST", "This operation expects object params."); return NULL;
     }
     if (!strncmp(method, "extensions.", 11)) {
-        if (!authorized) { sbw_fail(error,"FORBIDDEN","Extension management requires the active console session."); return NULL; }
-        if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) { sbw_fail(error,"BUSY","A connection operation is in progress."); return NULL; }
-        sbj *result=NULL;
-        if (sb_streq(method,"extensions.list") && !sbj_obj_len(params)) result=sbw_extensions_snapshot(controller->capture,sbw_traffic_running(controller->traffic),controller->traffic&&!sbw_traffic_running(controller->traffic));
-        else if (sb_streq(method,"extensions.catalog") && !sbj_obj_len(params)) result=sbw_store_catalog();
-        else if (sb_streq(method,"extensions.progress") && !sbj_obj_len(params)) result=sbw_store_progress();
-        else if (sb_streq(method,"extensions.install") && sbj_obj_len(params)==1 && sbw_extension_release_find(sbj_get_str(params,"id",""))) {
-            const char *id=sbj_get_str(params,"id","");
-            if (sb_streq(id,"network-tools")) sbw_fail(error,"BUILTIN_FEATURE","Connections, rules and logs are included in the app.");
-            else if (sbw_extension_installed(id)) sbw_fail(error,"STORE_EXISTS","The extension is already installed.");
-            else if (!sbw_store_install(id,error)) result=sbw_store_progress();
-        }
-        else if (sb_streq(method,"extensions.change") && sbj_obj_len(params)==2 && sbw_extension_release_find(sbj_get_str(params,"id",""))) {
-            const char *action=sbj_get_str(params,"action",""),*id=sbj_get_str(params,"id","");
-            if (sbw_store_busy()) sbw_fail(error,"BUSY","An extension installation is in progress.");
-            else if (sb_streq(action,"enable") || sb_streq(action,"disable") || sb_streq(action,"remove")) {
-                if(sb_streq(id,"http-debug")&&controller->httpdebug){sbj *stopped=httpdebug_dispatch(controller,"httpdebug.stop",NULL,error);if(!stopped){ReleaseSRWLockExclusive(&controller->mutation_lock);return NULL;}sbj_free(stopped);}
-                if(sb_streq(id,"capture")){capture_upload_join(controller);sbw_capture_free(controller->capture);controller->capture=NULL;}
-                if(sb_streq(id,"statistics")){persist_traffic(controller);sbw_traffic_free(controller->traffic);controller->traffic=NULL;}
-                if (!sbw_extension_change(id,action,error)) result=sbw_extensions_snapshot(controller->capture,sbw_traffic_running(controller->traffic),false);
-            } else sbw_fail(error,"INVALID_REQUEST","Unknown extension action.");
-        } else sbw_fail(error,"INVALID_REQUEST","Invalid extension request.");
-        ReleaseSRWLockExclusive(&controller->mutation_lock);return result;
+        if(!authorized){sbw_fail(error,"FORBIDDEN","Tool management requires the active console session.");return NULL;}
+        sbw_fail(error,"BUILTIN_FEATURE","All tools are built into the app; no store installation is needed.");return NULL;
     }
     if (!strncmp(method, "capture.", 8)) {
         if (!authorized) { sbw_fail(error, "FORBIDDEN", "Capture requires the active console session or an administrator."); return NULL; }
@@ -616,7 +649,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     }
     if (sb_streq(method, "traffic.snapshot") || sb_streq(method, "traffic.clear") || sb_streq(method, "logs.snapshot")) {
         if (!authorized) { sbw_fail(error, "FORBIDDEN", "This operation requires the active console session."); return NULL; }
-        if (!sb_streq(method,"logs.snapshot") && !sbw_extension_is_enabled("statistics")) {sbw_fail(error,"EXTENSION_MISSING","Install and enable this extension in the store.");return NULL;}
+        if (!sb_streq(method,"logs.snapshot") && !sbw_extension_is_enabled("statistics")) {sbw_fail(error,"EXTENSION_MISSING","The bundled statistics engine is missing. Repair the application installation.");return NULL;}
         if (sb_streq(method, "logs.snapshot")) return sbw_core_logs(controller->core);
         if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
             sbw_fail(error, "BUSY", "A connection operation is in progress."); return NULL;
@@ -881,6 +914,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             sbw_fail(error, "INVALID_STATE", "Only a stopped enrolled device can be forgotten."); goto done;
         }
         if (controller->store->clear(controller->store->context, error) != 0) goto done;
+        sbw_extension_process_free_graceful(controller->ipcheck);controller->ipcheck=NULL;sbj_free(controller->ipcheck_latest);controller->ipcheck_latest=NULL;
         capture_upload_join(controller); sbw_capture_free(controller->capture); controller->capture = NULL;
         AcquireSRWLockExclusive(&controller->state_lock);
         sbj_free(controller->identity); controller->identity = NULL;
@@ -1032,7 +1066,7 @@ static sbj *capture_snapshot(sbw_controller *c) {
     sbj_set(result, "apps", apps); return result;
 }
 static sbj *capture_dispatch(sbw_controller *c, const char *method, const sbj *params, sbw_error *error) {
-    if (!sbw_extension_enabled()) { sbw_fail(error,"EXTENSION_MISSING","Install and enable the capture extension first."); return NULL; }
+    if (!sbw_extension_enabled()) { sbw_fail(error,"EXTENSION_MISSING","The bundled capture engine is missing. Repair the application installation."); return NULL; }
     if (!c->identity || !c->core) { sbw_fail(error,"NOT_ENROLLED","Register this device first."); return NULL; }
     if (!c->capture) c->capture=sbw_capture_new(sbw_core_work_directory(c->core),c->identity,error);
     if (!c->capture) return NULL;

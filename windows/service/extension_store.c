@@ -19,7 +19,7 @@ static sbw_error failure;
 static const sbw_extension_release *active_release;
 const sbw_extension_release *sbw_extension_releases(size_t *count){*count=sizeof(releases)/sizeof(releases[0]);return releases;}
 const sbw_extension_release *sbw_extension_release_find(const char *id){for(size_t i=0;i<sizeof(releases)/sizeof(releases[0]);++i)if(sb_streq(id,releases[i].id))return &releases[i];return NULL;}
-static const wchar_t *dirs[]={L"extension",L"extension\\capture",L"extension\\licenses",L"view"};
+static const wchar_t *dirs[]={L"extension",L"extension\\capture",L"extension\\licenses",L"extension\\data",L"view"};
 static void progress(const char *value,size_t bytes) {
     AcquireSRWLockExclusive(&lock);phase=value;received=bytes;ReleaseSRWLockExclusive(&lock);
 }

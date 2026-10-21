@@ -1,8 +1,8 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$SkipUi,
-    [switch]$CaptureExtension,
-    [switch]$StatisticsExtension,
+    [switch]$CaptureExtension = $true,
+    [switch]$StatisticsExtension = $true,
     [switch]$Clean
 )
 $ErrorActionPreference = 'Stop'

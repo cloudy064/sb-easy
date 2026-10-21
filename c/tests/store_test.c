@@ -340,6 +340,28 @@ TEST(profile_crud_uses_the_existing_config_profiles_schema) {
     temp_db_free(&t);
 }
 
+TEST(full_profile_fixed_access_reads_only_the_selected_database_identity) {
+    temp_db t; sb_store *s = open_store(&t); REQUIRE(s); sb_err err = {0};
+    sb_config_profile p, created; sb_config_profile_init(&p); sb_config_profile_init(&created);
+    sb_str_set(&p.name, "Fixed access"); p.name_len = strlen(p.name); p.mode = SB_PROFILE_FULL;
+    sbj_free(p.profile);
+    p.profile = sbj_parse_cstr("{\"inbounds\":[{\"tag\":\"sb-easy-access\",\"users\":[{\"username\":\"node_pinned\"}]}]}");
+    REQUIRE(sb_store_create_profile(s, &p, &created, &err) == 0);
+    char *sql = sb_asprintf("UPDATE hosts SET profile_id='%s' WHERE id='self'", created.id); exec_sql(s, sql); free(sql);
+    exec_sql(s, "INSERT INTO proxy_nodes (id,tag,node_type,enabled,server,server_port,protocol_config,fingerprint) VALUES"
+                "('pinned','old-name','http',1,'127.0.0.1',8080,'{}','pin-fp'),"
+                "('unrelated','bad-port','http',1,'127.0.0.1',70000,'{}','bad-fp')");
+    sb_render_request req; sb_render_request_init(&req);
+    REQUIRE(sb_store_render_request_for_host(s, "self", &req, &err) == 0);
+    CHECK_EQ_INT(req.nodes.len, 1); CHECK_STR(req.nodes.items[0].id, "pinned");
+    exec_sql(s, "UPDATE proxy_nodes SET tag='new-name' WHERE id='pinned'");
+    REQUIRE(sb_store_render_request_for_host(s, "self", &req, &err) == 0);
+    CHECK_STR(req.nodes.items[0].tag, "new-name");
+    exec_sql(s, "UPDATE proxy_nodes SET enabled=0 WHERE id='pinned'");
+    REQUIRE(sb_store_render_request_for_host(s, "self", &req, &err) == 0); CHECK_EQ_INT(req.nodes.len, 0);
+    sb_render_request_free(&req); sb_config_profile_free(&p); sb_config_profile_free(&created); sb_store_free(s); temp_db_free(&t);
+}
+
 TEST(host_crud_hides_secrets_and_manages_outbound_assignments) {
     temp_db t;
     sb_store *s = open_store(&t);

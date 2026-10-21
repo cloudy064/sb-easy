@@ -8,14 +8,17 @@
       <div class="flex-center gap-3">
         <HostSelect @change="load" />
         <button class="btn-secondary" @click="testAllNodes" :disabled="anyTesting" :title="'Delay-test all enabled nodes via the selected host'">
-          {{ anyTesting ? 'Testing…' : 'Test all' }}
+          {{ anyTesting ? '测延迟中…' : '测全部延迟' }}
         </button>
         <button class="btn-secondary" @click="openImport">Import</button>
         <button class="btn-primary" @click="showCreate = true">Add Node</button>
       </div>
     </div>
 
+    <p v-if="accessError" role="alert" class="text-sm ip-warning">{{ accessError }}</p>
+    <ProxyAccessEditor v-if="accessProfile" :profile="accessProfile" :nodes="store.nodes" :initial-node-id="accessNodeId" @close="accessProfile = null" />
     <!-- Latency-tier stats — click a chip to filter -->
+    <div class="ip-schedule"><div><strong>出口 IP · 中心自动检测</strong><p>每 24 小时刷新一次 · 所有设备共享结果 · IPv4 / IPv6</p></div><span :class="{ 'ip-warning': ipError }">{{ ipError || (ipRunning ? '正在后台刷新' : '自动更新已开启') }}</span></div>
     <div class="stat-bar">
       <button v-for="s in statChips" :key="s.key" class="stat-chip" :class="[s.cls, { active: tierFilter === s.key }]" @click="toggleTier(s.key)">
         <span class="stat-count">{{ s.count }}</span>
@@ -68,6 +71,17 @@
           </label>
         </div>
 
+        <div class="node-ip">
+          <div class="ip-title"><span>出口信息</span><span :class="{ 'ip-warning': ipResults[node.id]?.status === 'failed' }">{{ ipStatus(node.id) }}</span></div>
+          <template v-if="ipMeasurement(node.id)?.ipv4?.ip || ipMeasurement(node.id)?.ipv6?.ip">
+            <div class="ip-address">{{ ipMeasurement(node.id)?.ipv4?.ip || ipMeasurement(node.id)?.ipv6?.ip }}<span>{{ ipFields(node.id).country_code || '地区未知' }}</span></div>
+            <div class="ip-network">{{ ipFields(node.id).asn || 'ASN 未知' }} · {{ ipFields(node.id).organization || '运营商未知' }}</div>
+            <div class="ip-network">IPv6：{{ ipMeasurement(node.id)?.ipv6?.ip || '本次未测得出口' }}</div>
+            <div class="ip-network" v-if="ipFields(node.id).privacy?.is_datacenter === true">数据中心网络 · 开源数据标记</div>
+          </template>
+          <div v-else class="ip-network">{{ ipResults[node.id]?.status === 'failed' ? '本次未能测得出口，后台将在下一周期重试' : '等待中心自动检测，无需手动操作' }}</div>
+          <div class="ip-time" v-if="ipMeasurement(node.id)?.checked_at">测量于 {{ new Date(ipMeasurement(node.id).checked_at).toLocaleString() }}<span v-if="ipResults[node.id]?.status === 'failed'"> · 上次成功结果</span></div>
+        </div>
         <div class="node-card-bottom">
           <div class="latency-group">
             <span v-if="node.latency !== null" class="latency-value" :class="latencyColor(node.latency)">{{ node.latency }}<span class="latency-unit">ms</span></span>
@@ -81,6 +95,7 @@
             </button>
           </div>
           <div class="flex-center gap-2">
+            <button class="btn-ghost btn-sm" :disabled="!node.enabled || accessLoading" @click="openFixedAccess(node)">固定代理地址</button>
             <button class="btn-ghost btn-sm" @click="editNode(node)">Edit</button>
             <button class="btn-danger btn-sm" @click="confirmDelete(node)">Delete</button>
           </div>
@@ -269,12 +284,25 @@ const { t } = useI18n()
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useProxyNodesStore } from '../stores/proxyNodes'
 import HostSelect from '../components/HostSelect.vue'
+import ProxyAccessEditor from '../components/ProxyAccessEditor.vue'
 import { useHostTarget } from '../composables/hostTarget'
 import client from '../api/client'
 import type { ProxyNode, ConfigProfile, Subscription } from '../types'
 
 const store = useProxyNodesStore()
-const { reqParams } = useHostTarget()
+const { reqParams, hosts, selectedHost } = useHostTarget()
+const accessProfile = ref<ConfigProfile | null>(null)
+const accessNodeId = ref(''), accessError = ref(''), accessLoading = ref(false)
+async function openFixedAccess(node: ProxyNode) {
+  accessError.value = ''; accessLoading.value = true
+  try {
+    const host = hosts.value.find(h => h.id === selectedHost.value)
+    if (!host) throw Error('请先选择运行代理的设备')
+    const { data } = await client.get(`/hosts/profiles/${encodeURIComponent(host.profile_id || 'default')}`)
+    accessNodeId.value = node.id; accessProfile.value = data
+  } catch (e: any) { accessError.value = e?.response?.data?.error || e.message || '读取配置失败' }
+  finally { accessLoading.value = false }
+}
 const search = ref('')
 const filterType = ref('')
 const filterSource = ref('')
@@ -379,7 +407,33 @@ function resetForm() {
   }
 }
 
-onMounted(load)
+const ipResults = ref<Record<string, any>>({})
+const ipRunning = ref(false)
+const ipError = ref('')
+let ipTimer: ReturnType<typeof setTimeout> | undefined
+let ipDisposed = false
+async function fetchIpResults() {
+  try {
+    const { data } = await client.get('/proxy/ip-results')
+    ipResults.value = data.nodes || {}
+    ipRunning.value = data.running
+    ipError.value = data.error ? '检测服务暂不可用' : ''
+  } catch { ipError.value = '暂时无法读取检测结果' }
+  if (!ipDisposed) ipTimer = setTimeout(fetchIpResults, 15000)
+}
+function ipMeasurement(id: string) {
+  const entry = ipResults.value[id]
+  return entry?.result?.ipv4?.ip || entry?.result?.ipv6?.ip ? entry.result : entry?.last_success || entry?.result
+}
+function ipFields(id: string) {
+  const result = ipMeasurement(id)
+  return (result?.ipv4?.ip_info || result?.ipv6?.ip_info)?.fields || {}
+}
+function ipStatus(id: string) {
+  return ({ok: '已检测', failed: '刷新失败', pending: '等待检测', refreshing: '刷新中', disabled: '已停用', unsupported: '暂不支持'} as Record<string, string>)[ipResults.value[id]?.status] || '等待检测'
+}
+onMounted(() => { load(); fetchIpResults() })
+onBeforeUnmount(() => { ipDisposed = true; if (ipTimer) clearTimeout(ipTimer) })
 async function load() {
   await Promise.all([store.fetchNodes(), fetchSubs()])
 }
@@ -545,6 +599,17 @@ async function toggleNode(node: ProxyNode) {
 </script>
 
 <style scoped>
+.ip-schedule { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:1rem 1.3rem; margin-bottom:1.2rem; border:1px solid var(--paper-border); border-radius:12px; background:var(--paper-surface); font-size:.8rem; }
+.ip-schedule p { margin:.35rem 0 0; color:var(--ink-muted); font-size:.72rem; }
+.ip-schedule > span { color:var(--ok); white-space:nowrap; }
+.node-ip { padding:.85rem 0; border-top:1px solid var(--paper-border); border-bottom:1px solid var(--paper-border); }
+.ip-title { display:flex; justify-content:space-between; color:var(--ink-muted); font-size:.65rem; margin-bottom:.6rem; }
+.ip-address { font-family:var(--font-mono); font-size:1.08rem; font-weight:600; overflow-wrap:anywhere; }
+.ip-address span { font-size:.7rem; margin-left:.7rem; padding:.15rem .4rem; background:var(--paper-bg); border-radius:4px; }
+.ip-network { font-size:.72rem; color:var(--ink-secondary); margin-top:.4rem; overflow-wrap:anywhere; }
+.ip-time { font-size:.62rem; color:var(--ink-muted); margin-top:.6rem; }
+.ip-warning { color:var(--warn) !important; }
+
 .node-card {
   padding: 1.75rem;
   display: flex;

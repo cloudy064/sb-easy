@@ -1,0 +1,26 @@
+# Optional deployment override for a host whose transparent proxy intercepts
+# Docker bridge traffic. Use the same SB_EASY_IMAGE as the panel. Explicitly
+# select an existing host-proxy bypass mark; no host rules are changed here.
+services:
+  sb-easy:
+    environment:
+      IPCHECK_EXTERNAL: "true"
+    volumes:
+      - ./ipcheck-run:/run/sb-easy
+    depends_on:
+      ipcheck-engine:
+        condition: service_started
+  ipcheck-engine:
+    image: ${SB_EASY_IMAGE:?Set the same image as the panel}
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: [python3]
+    command: [/usr/share/sb-easy/ip-check/center.py]
+    cap_add: [NET_ADMIN]
+    mem_limit: 256m
+    cpus: 0.5
+    environment:
+      IPCHECK_ROUTING_MARK: ${IPCHECK_ROUTING_MARK:?Set the verified host bypass mark}
+    volumes:
+      - ./data:/app/data
+      - ./ipcheck-run:/run/sb-easy

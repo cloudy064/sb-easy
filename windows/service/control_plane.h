@@ -22,6 +22,8 @@ typedef struct sbw_control_plane {
     int (*upload_capture)(void *context, const sbj *identity, const char *digest,
                           const void *data, size_t length, HANDLE cancel, sbw_error *error);
     void (*destroy)(void *context);
+    int (*ipcheck)(void *context, const sbj *identity, const char *action, const sbj *params,
+                   HANDLE cancel, sbj **result, sbw_error *error);
 } sbw_control_plane;
 
 /* Output JSON is owned by the caller. The cancellation event is borrowed only

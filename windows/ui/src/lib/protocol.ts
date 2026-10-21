@@ -1,3 +1,7 @@
+import { validDailyIpCache, validIpCheckCatalog, validIpCheckStart, validIpCheckState } from './ipcheck.js'
+import type { DailyIpCache, IpCheckCatalog, IpCheckState } from './ipcheck.js'
+export type { IpCheckCatalog, IpCheckState, IpCheckResult, IpCheckInfo, IpCheckMeasurement } from './ipcheck.js'
+
 export interface HelloResult {
   protocol_version: 1
   service_version: string
@@ -94,13 +98,18 @@ export interface CaptureConfig {
 }
 export interface CaptureFile { digest: string; size: number; created_at: number; uploaded: boolean }
 export interface CaptureSnapshot { config: CaptureConfig; files: CaptureFile[]; running: boolean; packets: number; dropped: number; stored_bytes: number; error: string; upload_status: string; uploading: boolean; apps: string[] }
-export type ExtensionId = 'capture' | 'statistics' | 'network-tools' | 'http-debug'
-export function isExtensionId(value: unknown): value is ExtensionId { return ['capture','statistics','network-tools','http-debug'].includes(value as string) }
-export interface ExtensionInfo { id: ExtensionId; name: string; version: string; installed: boolean; enabled: boolean; running: boolean; failed: boolean }
+export type ExtensionId = 'capture' | 'statistics' | 'network-tools' | 'http-debug' | 'ip-check'
+export function isExtensionId(value: unknown): value is ExtensionId { return ['capture','statistics','network-tools','http-debug','ip-check'].includes(value as string) }
+export interface ExtensionInfo { id: ExtensionId; name: string; version: string; installed: boolean; enabled: boolean; running: boolean; failed: boolean; needs_update?: boolean }
 export interface StoreItem { id: ExtensionId; name: string; version: string; size: number; publisher: string; description: string; permissions: string }
 export interface StoreProgress { id: ExtensionId | '';  phase: 'idle' | 'downloading' | 'verifying' | 'installing' | 'complete' | 'failed'; received: number; total: number; error: string }
 export interface HttpDebugState { phase: string; error: string; url: string; attached: boolean; domains?: string[] }
 export interface ResultMap {
+  'ipcheck.daily': DailyIpCache
+  'ipcheck.catalog': IpCheckCatalog
+  'ipcheck.start': IpCheckState
+  'ipcheck.snapshot': IpCheckState
+  'ipcheck.cancel': IpCheckState
   'httpdebug.start': HttpDebugState
   'httpdebug.stop': HttpDebugState
   'httpdebug.snapshot': HttpDebugState
@@ -151,7 +160,7 @@ export interface ResultMap {
 
 export type Method = keyof ResultMap
 export type EmptyParams = Record<string, never>
-export type ParamsMap = { [M in Method]: M extends 'httpdebug.attach' ? { domains: string[] } : M extends 'extensions.install' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
+export type ParamsMap = { [M in Method]: M extends 'ipcheck.start' ? { tags: string[]; ipv6: boolean } : M extends 'httpdebug.attach' ? { domains: string[] } : M extends 'extensions.install' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -193,6 +202,8 @@ function validDeviceMetadata(value: Record<string, unknown>): boolean {
 
 export function validParams<M extends Method>(method: M, value: unknown): value is ParamsMap[M] {
   if (!isRecord(value)) return false
+  if (method === 'ipcheck.start') return validIpCheckStart(value)
+  if (['ipcheck.daily', 'ipcheck.catalog', 'ipcheck.snapshot', 'ipcheck.cancel'].includes(method)) return Object.keys(value).length === 0
   if (method === 'subscriptions.fetch') return Object.keys(value).length === 1 && (boundedString(value.url, 8192) || boundedString(value.id, 36))
   if (method === 'subscriptions.remove') return Object.keys(value).length === 1 && boundedString(value.id, 36)
   if (method === 'subscriptions.save') return Object.keys(value).every(key => ['id','name','url','nodes'].includes(key)) && boundedString(value.name, 100) && (value.id === undefined || boundedString(value.id, 36)) && (value.url === undefined ? boundedString(value.id,36) : boundedString(value.url,8192)) && Array.isArray(value.nodes) && value.nodes.length > 0 && value.nodes.length <= 256 && value.nodes.every(isRecord)
@@ -214,6 +225,9 @@ export function validParams<M extends Method>(method: M, value: unknown): value 
 export function validResult<M extends Method>(method: M, value: unknown): value is ResultMap[M] {
   if (!isRecord(value)) return false
   switch (method) {
+    case 'ipcheck.daily': return validDailyIpCache(value)
+    case 'ipcheck.catalog': return validIpCheckCatalog(value)
+    case 'ipcheck.start': case 'ipcheck.snapshot': case 'ipcheck.cancel': return validIpCheckState(value)
     case 'httpdebug.start': case 'httpdebug.stop': case 'httpdebug.snapshot': case 'httpdebug.attach': return ['starting','running','stopped','failed'].includes(value.phase as string) && typeof value.error === 'string' && typeof value.url === 'string' && typeof value.attached === 'boolean'
     case 'httpdebug.certificate': return typeof value.der === 'string' && value.der.length < 32768 && /^[0-9a-f]+$/.test(value.der)
     case 'httpdebug.export': case 'httpdebug.open': case 'httpdebug.trust': case 'httpdebug.untrust': return value.ready === true
@@ -221,7 +235,7 @@ export function validResult<M extends Method>(method: M, value: unknown): value 
     case 'extensions.install':
     case 'extensions.progress': return (isExtensionId(value.id) || (value.phase === 'idle' && value.id === '')) && ['idle','downloading','verifying','installing','complete','failed'].includes(value.phase as string) && Number.isSafeInteger(value.received) && (value.received as number) >= 0 && Number.isSafeInteger(value.total) && (value.total as number) >= (value.phase === 'idle' ? 0 : 1) && (value.received as number) <= (value.total as number) + 1 && typeof value.error === 'string' && value.error.length <= 64
     case 'extensions.list':
-    case 'extensions.change': return Array.isArray(value.extensions) && value.extensions.length <= 16 && value.extensions.every(e => isRecord(e) && isExtensionId(e.id) && boundedString(e.name,128) && typeof e.version === 'string' && e.version.length <= 32 && ['installed','enabled','running','failed'].every(k => typeof e[k] === 'boolean'))
+    case 'extensions.change': return Array.isArray(value.extensions) && value.extensions.length <= 16 && value.extensions.every(e => isRecord(e) && isExtensionId(e.id) && boundedString(e.name,128) && typeof e.version === 'string' && e.version.length <= 32 && ['installed','enabled','running','failed'].every(k => typeof e[k] === 'boolean') && (e.needs_update === undefined || typeof e.needs_update === 'boolean') && (e.needs_update !== true || (e.installed === true && e.enabled === false && e.running === false)))
     case 'subscriptions.fetch': return typeof value.body === 'string' && value.body.length <= 262144
     case 'service.start': return value.ready === true
     case 'capture.read':

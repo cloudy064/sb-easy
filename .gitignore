@@ -55,3 +55,4 @@ cutover-backup-*/
 /windows/ui/dist-statistics/
 /windows/ui/dist-network-tools/
 /windows/ui/dist-http-debug/
+/windows/ui/dist-ip-check/

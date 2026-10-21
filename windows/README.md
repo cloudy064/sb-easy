@@ -1,14 +1,29 @@
 # sb-easy Windows development preview
 
-## 0.6.9 HTTP(S) debugging preview
+## 0.7.0 built-in tools and central IP detection
 
-The extension store now offers a local mitmproxy-based HTTP(S) debugging plugin:
-read decrypted request/response bodies, edit/replay requests, use breakpoints,
-and export HAR. Install the optional engine, explicitly trust its per-device CA,
-then choose domain suffixes to capture. Stopping/disabling restores normal
-routing. Raw PCAP capture remains a separate network-diagnostics tool.
-See [setup, build instructions and limits](../extensions/http-debug/README.md).
-The base installer does not contain the Python engine or automatically install a CA.
+Capture, traffic statistics and HTTP(S) debugging now ship with the application.
+The store and install/enable steps are removed. Worker processes remain isolated
+internally; capture starts only when explicitly requested. HTTPS interception
+still requires explicitly trusting the device CA and choosing capture domains.
+An upgrade overwrites bundled engine files and ignores old enable markers.
+
+IP detection runs on the center, using only its own configured nodes. Windows
+sends selected tags and an IPv6 option, never local subscription credentials,
+configurations, interface names or executable paths. The center probes nodes
+independently and shares persisted results by profile and configuration digest.
+Changing a node configuration invalidates its previous batch. Local-only
+subscriptions must be added to the center explicitly to be checked there.
+
+Country/ASN and datacenter/VPN/Tor information use an attributed SQLite snapshot
+bundled in the server image. The Windows installer does not contain an IP-check
+engine or this database. Results show measurement/source dates; an unlisted IP
+is not proof of residential ownership or safety. Source-dependent/load-balanced
+nodes may have different exits from another host. This is not a device leak test.
+See [central IP detection](../extensions/ip-check/README.md).
+
+The sections below describing 0.6.x optional packages document the historical
+architecture; they do not describe the 0.7.0 user workflow.
 
 This is an executable Windows development preview with real core connection control.
 It connects a packaged Vue UI in an unelevated Win32/WebView2 window to a real

@@ -31,6 +31,7 @@ const router = createRouter({
         // The proxy node list is the primary "Proxies" page; the live Clash
         // selector view becomes "Proxy Groups".
         { path: 'proxies', name: 'Proxies', component: () => import('../views/NodesView.vue') },
+        { path: 'ip-check', redirect: '/proxies' },
         { path: 'nodes', redirect: '/proxies' },
         // Proxy Groups (live manual node-switching) is obsolete under the
         // simplified node+rules model — redirect any old links to the node list.
@@ -49,7 +50,7 @@ router.beforeEach((to, _from, next) => {
     next('/login')
   } else if (to.path === '/login' && auth.token) {
     next('/')
-  } else if (to.name === 'Users' && auth.role !== 'admin') {
+  } else if (['Users','IpCheck'].includes(String(to.name)) && auth.role !== 'admin') {
     next('/')
   } else {
     next()

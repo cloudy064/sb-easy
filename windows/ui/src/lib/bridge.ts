@@ -31,7 +31,7 @@ interface PendingRequest {
 }
 
 const retryableReads = new Set<Method>([
-  'httpdebug.snapshot', 'runtime.snapshot', 'traffic.snapshot', 'capture.snapshot', 'capture.read',
+  'ipcheck.daily', 'ipcheck.catalog', 'ipcheck.snapshot', 'httpdebug.snapshot', 'runtime.snapshot', 'traffic.snapshot', 'capture.snapshot', 'capture.read',
   'extensions.list', 'extensions.catalog', 'extensions.progress',
   'status.get', 'config.summary', 'config.inspect', 'logs.snapshot',
 ])

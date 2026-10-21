@@ -421,6 +421,25 @@ static void capture_upload_tests(void) {
     }
 }
 
+static void center_ipcheck_tests(void) {
+    for(int rejected=0;rejected<4;++rejected) {
+        loopback_server server;server_init(&server);
+        server_start(&server,(http_reply){(rejected%2)?"503 Unavailable":"200 OK","Content-Type: application/json\r\n",
+            (rejected%2)?"{\"error\":\"secret-response\"}":"{\"phase\":\"running\",\"execution\":\"center\"}",0,0,false});
+        sbw_error error={0};sbw_control_plane *client=sbw_winhttp_new(25000,&error);sbj *device=identity(server.origin),*output=NULL;
+        sbj *params=sbj_parse_cstr("{\"tags\":[\"Tokyo\"],\"ipv6\":true}");
+        if(rejected>=2){sbj_free(params);params=sbj_object();}
+        int result=client->ipcheck(client->context,device,rejected>=2?"daily":"start",params,NULL,&output,&error);
+        if(rejected%2)expect_error(result,&error,"http_error");
+        else REQUIRE(result==0&&sbj_string_is(sbj_get(output,"execution"),"center"),"Center response lost");
+        EnterCriticalSection(&server.mutex);
+        REQUIRE(strstr(server.request,rejected>=2?"/api/agent/ipcheck/daily HTTP/1.1":"/api/agent/ipcheck/start HTTP/1.1"),"Wrong center endpoint");
+        const char *body=strstr(server.request,"\r\n\r\n");REQUIRE(body!=NULL,"Missing body");
+        sbj *sent=sbj_parse_cstr(body+4);REQUIRE(sent&&sbj_equal(sent,params),"Unexpected config or credentials uploaded");sbj_free(sent);
+        LeaveCriticalSection(&server.mutex);
+        sbj_free(output);sbj_free(params);sbj_free(device);sbw_control_plane_free(client);server_free(&server);
+    }
+}
 int main(void) {
     WSADATA winsock;
     REQUIRE(WSAStartup(MAKEWORD(2, 2), &winsock) == 0, "WSAStartup failed");
@@ -430,6 +449,7 @@ int main(void) {
     puts("Rejected response tests"); rejected_response_tests();
     puts("Cancellation tests"); cancellation_tests();
     puts("Capture binary upload and acknowledgement tests"); capture_upload_tests();
+    puts("Central IP check transport tests"); center_ipcheck_tests();
     WSACleanup();
     puts("C11 control-plane parser and loopback transport tests passed.");
     return 0;

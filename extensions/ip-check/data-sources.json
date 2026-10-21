@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "dbip-country",
+      "name": "DB-IP Lite Country",
+      "url": "https://db-ip.com/db/download/ip-to-country-lite",
+      "license": "CC BY 4.0",
+      "updated_at": "2026-10-01",
+      "status": "ready",
+      "format": "country",
+      "expected_min_rows": 700000,
+      "inputs": [
+        {
+          "file": "dbip-country-lite-2026-10.csv.gz",
+          "url": "https://dbip.mirror.framasoft.org/files/dbip-country-lite-2026-10.csv.gz",
+          "sha256": "097426b8ddae89157d444a59ac1847e873f7943c32d52becc4371c8b0273af80",
+          "publisher_url": "https://download.db-ip.com/free/dbip-country-lite-2026-10.csv.gz",
+          "publisher_checksum_url": "https://db-ip.com/db/download/ip-to-country-lite",
+          "compression": "gzip",
+          "decoded_sha1": "c8ad1dfe98cb29bcacd82a5c3ec361c880e5bb59"
+        }
+      ]
+    },
+    {
+      "id": "dbip-asn",
+      "name": "DB-IP Lite ASN",
+      "url": "https://db-ip.com/db/download/ip-to-asn-lite",
+      "license": "CC BY 4.0",
+      "updated_at": "2026-10-01",
+      "status": "ready",
+      "inputs": [
+        {
+          "file": "dbip-asn-sapics-ipv4.csv",
+          "url": "https://raw.githubusercontent.com/sapics/ip-location-db/f7f14ed72a79d09440789554eb8955dfef6514fe/dbip-asn/dbip-asn-ipv4.csv",
+          "sha256": "5ea81872c34eb99e78c262fa3fcfaf68911e04425219bf314d3c8836635f1957",
+          "publisher_url": "https://download.db-ip.com/free/dbip-asn-lite-2026-10.csv.gz",
+          "mirror_repository": "https://github.com/sapics/ip-location-db",
+          "mirror_license_url": "https://github.com/sapics/ip-location-db/blob/f7f14ed72a79d09440789554eb8955dfef6514fe/dbip-asn/DBIP-LICENSE",
+          "mirror_updated_at": "2026-10-02T00:37:39Z",
+          "transformation": "DB-IP Lite source split into IPv4 and IPv6 CSV by sapics/ip-location-db; not byte-identical to publisher CSV",
+          "commit": "f7f14ed72a79d09440789554eb8955dfef6514fe"
+        },
+        {
+          "file": "dbip-asn-sapics-ipv6.csv",
+          "url": "https://raw.githubusercontent.com/sapics/ip-location-db/f7f14ed72a79d09440789554eb8955dfef6514fe/dbip-asn/dbip-asn-ipv6.csv",
+          "sha256": "462fef1bfb9de5921bf3051d8290aa8074f39dcd0ea4eae72d16615f04a9bd2c",
+          "publisher_url": "https://download.db-ip.com/free/dbip-asn-lite-2026-10.csv.gz",
+          "mirror_repository": "https://github.com/sapics/ip-location-db",
+          "mirror_license_url": "https://github.com/sapics/ip-location-db/blob/f7f14ed72a79d09440789554eb8955dfef6514fe/dbip-asn/DBIP-LICENSE",
+          "mirror_updated_at": "2026-10-02T00:37:39Z",
+          "transformation": "DB-IP Lite source split into IPv4 and IPv6 CSV by sapics/ip-location-db; not byte-identical to publisher CSV",
+          "commit": "f7f14ed72a79d09440789554eb8955dfef6514fe"
+        }
+      ],
+      "format": "asn",
+      "expected_min_rows": 470000
+    },
+    {
+      "id": "x4b-datacenter",
+      "name": "X4B Datacenter / VPN",
+      "url": "https://github.com/X4BNet/lists_vpn",
+      "license": "MIT",
+      "updated_at": "2026-10-12T19:04:33Z",
+      "status": "ready",
+      "format": "cidr",
+      "expected_min_rows": 100,
+      "inputs": [
+        {
+          "file": "x4b-datacenter-ipv4.txt",
+          "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/133d33d65985cca6767069c0e503e82b9f4d6d4b/output/datacenter/ipv4.txt",
+          "sha256": "121fbdd1be0a9e2ed3c23f1b434fc784a877cfe68df95f683695bfab312cc550",
+          "commit": "133d33d65985cca6767069c0e503e82b9f4d6d4b"
+        },
+        {
+          "file": "x4b-datacenter-ipv6.txt",
+          "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/133d33d65985cca6767069c0e503e82b9f4d6d4b/output/datacenter/ipv6.txt",
+          "sha256": "fb1c6e465fed11612a620e54810891d877ba65d71b4d049759511a5d4273b7fc",
+          "commit": "133d33d65985cca6767069c0e503e82b9f4d6d4b"
+        }
+      ]
+    },
+    {
+      "id": "x4b-vpn",
+      "name": "X4B VPN",
+      "url": "https://github.com/X4BNet/lists_vpn",
+      "license": "MIT",
+      "updated_at": "2026-10-12T19:04:33Z",
+      "status": "ready",
+      "format": "cidr",
+      "expected_min_rows": 100,
+      "inputs": [
+        {
+          "file": "x4b-vpn-ipv4.txt",
+          "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/133d33d65985cca6767069c0e503e82b9f4d6d4b/output/vpn/ipv4.txt",
+          "sha256": "dd22776df8b87cf96bc65b755d89e34a4fa6162fa6f5309b5665c48424b2af92",
+          "commit": "133d33d65985cca6767069c0e503e82b9f4d6d4b"
+        },
+        {
+          "file": "x4b-vpn-ipv6.txt",
+          "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/133d33d65985cca6767069c0e503e82b9f4d6d4b/output/vpn/ipv6.txt",
+          "sha256": "5b91e26f6706d20307b4f329ce2f148cfa17d5939d9c367962e2b91b65333d0a",
+          "commit": "133d33d65985cca6767069c0e503e82b9f4d6d4b"
+        }
+      ]
+    },
+    {
+      "id": "tor-exit",
+      "name": "Tor Project exit observations",
+      "url": "https://metrics.torproject.org/collector.html",
+      "license": "CC0 1.0",
+      "updated_at": "2026-10-13T03:10:10Z",
+      "status": "ready",
+      "inputs": [
+        {
+          "file": "tor-exit-2026-10-13-03-10-10.txt.gz",
+          "url": "https://collector.torproject.org/recent/exit-lists/2026-10-13-03-10-10",
+          "sha256": "f71ab92f1174a3f30126dabdf7494735e2dbc9f85bcbf5f6e7f78d4da3d319a2",
+          "license_url": "https://metrics.torproject.org/about.html",
+          "note": "Official ExitAddress observations; reproducible gzip archive bundled because the upstream recent endpoint expires",
+          "compression": "gzip",
+          "bundled": true,
+          "decoded_sha256": "731b51ac5d786a61f3ec686068a5206c7393675ab53356baccf2b31bfd5744e1",
+          "retrieved_at": "2026-10-13T04:18:09Z"
+        }
+      ],
+      "format": "tordnsel",
+      "expected_min_rows": 500
+    }
+  ]
+}

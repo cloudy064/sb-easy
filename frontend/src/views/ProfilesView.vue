@@ -17,6 +17,7 @@
             <span class="profile-id">{{ p.id }}<span v-if="p.id === 'default'" class="badge badge-gray" style="margin-left:.5rem">{{ t('profiles.builtin') }}</span><span v-if="p.rule_script_enabled" class="badge script-badge" style="margin-left:.5rem">{{ t('profiles.script.badge') }}</span></span>
           </div>
           <div class="flex-center gap-2">
+            <button class="btn-secondary btn-sm" @click="accessProfile = p">代理入口</button>
             <button class="btn-ghost btn-sm quickjs-entry" @click="openScript(p)">QuickJS</button>
             <button class="btn-ghost btn-sm" @click="openEdit(p)">{{ t('profiles.edit') }}</button>
             <button v-if="p.id !== 'default'" class="btn-danger btn-sm" @click="deleteTarget = p">{{ t('action.delete') }}</button>
@@ -26,6 +27,7 @@
       </article>
     </div>
 
+    <ProxyAccessEditor v-if="accessProfile" :profile="accessProfile" :nodes="nodesStore.nodes" @close="accessProfile = null" />
     <!-- Editor -->
     <div v-if="editor.open" class="modal-overlay" @click.self="editor.open = false">
       <div class="modal modal-wide">
@@ -162,6 +164,7 @@ import { useHostsStore } from '../stores/hosts'
 import { useProxyNodesStore } from '../stores/proxyNodes'
 import client from '../api/client'
 import RulesEditor from '../components/RulesEditor.vue'
+import ProxyAccessEditor from '../components/ProxyAccessEditor.vue'
 import type { ConfigProfile } from '../types'
 
 const { t } = useI18n()
@@ -175,6 +178,7 @@ const outboundSuggestions = computed(() => [
 ])
 const loading = ref(true)
 const deleteTarget = ref<ConfigProfile | null>(null)
+const accessProfile = ref<ConfigProfile | null>(null)
 
 interface EditorState {
   open: boolean

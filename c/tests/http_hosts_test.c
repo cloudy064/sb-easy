@@ -1711,3 +1711,23 @@ TEST(packet_capture_roundtrip) {
     r=call(&t,"GET",path,NULL); CHECK_EQ_INT(r.status,404); sb_test_response_free(&r);
     free(auth);free(url);free(digest);free(path);free(list);free(token);free(host);sb_test_server_stop(&t);
 }
+
+TEST(center_ipcheck_authorization_and_input) {
+    sb_test_server t; REQUIRE(sb_test_server_start(&t)==0);
+    char *host=create_host(&t,"{\"name\":\"IP check fixture\",\"capabilities\":{}}");REQUIRE(host);
+    char *token=host_token(&t,host);
+    char *path=sb_asprintf("/api/hosts/%s/ipcheck/start",host);
+    sb_test_response r=call_as(&t,"","POST","/api/agent/ipcheck/catalog","{}");CHECK_EQ_INT(r.status,401);sb_test_response_free(&r);
+    r=call_as(&t,token,"POST",path,"{}");CHECK_EQ_INT(r.status,401);sb_test_response_free(&r);
+    char *viewer=sb_auth_create_token(t.jwt_secret,"viewer","viewer","viewer");
+    r=call_as(&t,viewer,"POST",path,"{}");CHECK_EQ_INT(r.status,403);sb_test_response_free(&r);free(viewer);
+    const char *invalid[]={"{}","{\"tags\":[\"Node\"],\"ipv6\":false,\"config\":{}}","{\"tags\":[\"Node\",\"Node\"],\"ipv6\":true}","{\"tags\":[],\"ipv6\":false}"};
+    for(size_t i=0;i<sizeof invalid/sizeof invalid[0];++i){
+        r=call_as(&t,token,"POST","/api/agent/ipcheck/start",invalid[i]);CHECK_EQ_INT(r.status,400);sb_test_response_free(&r);
+    }
+    r=call_as(&t,token,"POST","/api/agent/ipcheck/catalog","{\"config\":{}}");CHECK_EQ_INT(r.status,400);sb_test_response_free(&r);
+    r=call_as(&t,token,"POST","/api/agent/ipcheck/arbitrary","{}");CHECK_EQ_INT(r.status,404);sb_test_response_free(&r);
+    r=call_as(&t,"","POST","/api/agent/ipcheck/daily","{}");CHECK_EQ_INT(r.status,401);sb_test_response_free(&r);
+    r=call_as(&t,token,"POST","/api/agent/ipcheck/daily","{\"tags\":[]}");CHECK_EQ_INT(r.status,400);sb_test_response_free(&r);
+    free(path);free(token);free(host);sb_test_server_stop(&t);
+}

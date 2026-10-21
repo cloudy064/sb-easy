@@ -52,7 +52,7 @@ static bool accept_client(HANDLE pipe, HANDLE stop) {
     }
     CloseHandle(event); return accepted;
 }
-static bool authorized(HANDLE pipe, HANDLE stop) {
+static bool authorized(HANDLE pipe, HANDLE stop, bool console_only) {
     if (!ImpersonateNamedPipeClient(pipe)) return false;
     bool allowed = false;
     HANDLE token = NULL;
@@ -62,7 +62,7 @@ static bool authorized(HANDLE pipe, HANDLE stop) {
         if (CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, admin_sid, &size)) CheckTokenMembership(token, admin_sid, &admin);
         DWORD session = 0, returned = 0, active = WTSGetActiveConsoleSessionId();
         bool console = active != 0xffffffff && GetTokenInformation(token, TokenSessionId, &session, sizeof session, &returned) && session == active;
-        allowed = admin || console; CloseHandle(token);
+        allowed = console || (!console_only && admin); CloseHandle(token);
     }
     if (!RevertToSelf()) { SetEvent(stop); return false; }
     return allowed;
@@ -79,9 +79,10 @@ static void serve_client(pipe_worker *worker) {
         sbj *parsed = sbw_json_parse(request, length, 32, NULL);
         const sbj *method = sbj_get(parsed, "method");
         bool mutation = sbw_json_string(method, 128, false) && sbw_is_mutating_method(method->v.str.ptr);
+        bool ipcheck = sbw_json_string(method,128,false) && !strncmp(method->v.str.ptr,"ipcheck.",8);
         bool private_read = sbw_json_string(method, 128, false) &&
             (!strncmp(method->v.str.ptr, "httpdebug.", 10) || !strncmp(method->v.str.ptr, "extensions.", 11) || !strncmp(method->v.str.ptr, "capture.", 8) || sb_streq(method->v.str.ptr, "traffic.snapshot") || sb_streq(method->v.str.ptr, "logs.snapshot") || sb_streq(method->v.str.ptr, "runtime.snapshot") || sb_streq(method->v.str.ptr, "config.inspect"));
-        bool permitted = (mutation || private_read) && authorized(worker->pipe, worker->stop);
+        bool permitted = (mutation || private_read || ipcheck) && authorized(worker->pipe, worker->stop, ipcheck);
         sbj_free(parsed);
         if (WaitForSingleObject(worker->stop, 0) == WAIT_OBJECT_0) { sbw_secret_free(request); return; }
         char *response = sbw_handle_request(request, length, worker->controller, permitted);

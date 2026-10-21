@@ -74,6 +74,12 @@ RUN --mount=type=cache,target=/var/cache/sb-easy-download set -eux; \
     /usr/local/bin/sing-box version
 
 # ===== Stage 2: Build frontend =====
+FROM ${DEBIAN_IMAGE} AS ipcheck-data
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY extensions/ip-check /src/extensions/ip-check
+RUN python3 extensions/ip-check/build_data.py --output /out/data/ip-intelligence.sqlite
+
 FROM ${NODE_IMAGE} AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* frontend/pnpm-lock.yaml* ./
@@ -85,6 +91,7 @@ RUN if [ -f pnpm-lock.yaml ]; then \
         npm install; \
     fi
 COPY frontend/ .
+COPY windows/ui/src /app/windows/ui/src
 RUN npm run build
 
 # ===== Stage 2b: Build the standalone Svelte Agent UI =====
@@ -110,10 +117,14 @@ RUN apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-g
     libssl3 \
     libzstd1 \
     procps \
+    python3 \
     zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY extensions/ip-check/*.py /usr/share/sb-easy/ip-check/
+COPY extensions/ip-check/licenses/ip-data.txt /usr/share/sb-easy/ip-check/licenses/ip-data.txt
+COPY --from=ipcheck-data /out/data /usr/share/sb-easy/ip-check/data
 COPY --from=backend-builder /out/sb-easy-c-server /usr/local/bin/sb-easy
 COPY --from=backend-builder /out/sb-easy-c-agent /usr/local/bin/sb-easy-agent
 COPY --from=backend-builder /out/sb-easy-c-render /usr/local/bin/sb-easy-c-render
@@ -122,7 +133,9 @@ COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 COPY --from=agent-ui-builder /app/agent-ui/dist /usr/share/sb-easy/agent-ui
 COPY migrations /app/migrations
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN sed -i 's/\r$//' /docker-entrypoint.sh \
+    && find /app/migrations -type f -name '*.sql' -exec sed -i 's/\r$//' {} + \
+    && chmod +x /docker-entrypoint.sh
 
 # Managed sing-box by default: the C server supervises the bundled process.
 ENV BIND_ADDR=0.0.0.0:51821 \

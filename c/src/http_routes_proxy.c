@@ -1,6 +1,7 @@
 /* Panel HTTP routes: /api/proxy/nodes*, /api/subscriptions*, /api/sing-box/... (Clash HTTP control)
  * Port of the corresponding handlers in cpp/src/http_server.cpp. */
 #include "http_internal.h"
+#include "ipcheck_center.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -390,6 +391,15 @@ static int proxy_from_update_request(const sbj *body, sb_proxy_record *node, sb_
         node->enabled = found->v.b;
     }
     return 0;
+}
+
+static int h_nodes_ip_cache(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)req;
+    sbj *request = sbj_object();
+    sbj_set_str(request, "action", "daily");
+    int rc = sb_ipcheck_center(request, resp, err);
+    sbj_free(request);
+    return rc;
 }
 
 static int h_nodes_list(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
@@ -899,6 +909,7 @@ void sb_http_register_proxy_routes(sb_http_server *srv) {
     sb_http_route(srv, "DELETE", "/api/sing-box/connections", h_clash_close_connections);
     sb_http_route(srv, "DELETE", "/api/sing-box/connections/{id}", h_clash_close_connection);
 
+    sb_http_route(srv, "GET", "/api/proxy/ip-results", h_nodes_ip_cache);
     sb_http_route(srv, "GET", "/api/proxy/nodes", h_nodes_list);
     sb_http_route(srv, "POST", "/api/proxy/nodes", h_nodes_create);
     sb_http_route(srv, "POST", "/api/proxy/nodes/import", h_nodes_import);

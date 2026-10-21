@@ -1,4 +1,5 @@
 #include "sb/agent_config.h"
+#include "sb/proxy_access.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -80,8 +81,14 @@ static void rewrite_tag_references(sbj *value, const sbj *renames) {
         return;
     }
     if (sbj_is_object(value)) {
-        for (size_t i = 0; i < value->v.obj.len; ++i)
+        const char *tag = sbj_get_str(value, "tag", "");
+        if (strncmp(tag, SB_PROXY_NODE_PREFIX, strlen(SB_PROXY_NODE_PREFIX)) == 0) return;
+        for (size_t i = 0; i < value->v.obj.len; ++i) {
+            /* Authentication identities are not outbound tag references. */
+            const char *key = value->v.obj.keys[i];
+            if (strcmp(key, "users") == 0 || strcmp(key, "auth_user") == 0) continue;
             rewrite_tag_references(value->v.obj.vals[i], renames);
+        }
     }
 }
 
@@ -127,6 +134,11 @@ static int transform_outbound(sbj **slot, const sb_agent_config_options *options
     if (!sbj_is_string(tag_value)) return 0;
     char *original_tag = sb_strdup(tag_value->v.str.ptr);
     int rc = -1;
+
+    if (strncmp(original_tag, SB_PROXY_NODE_PREFIX, strlen(SB_PROXY_NODE_PREFIX)) == 0) {
+        free(original_tag);
+        return 0; /* Pinned identities cannot be replaced by local overrides. */
+    }
 
     const sbj *replacement = sbj_get(options->outbound_overrides, original_tag);
     if (replacement) {
@@ -330,8 +342,11 @@ char *sb_prepare_agent_config(const char *body, size_t len,
             sb_fail(err, SB_ERR_VALIDATION, "route rules must be a JSON array");
             goto out;
         }
+        size_t protected_count = 0;
+        while (protected_count < sbj_arr_len(rules) &&
+               sb_proxy_access_rule(sbj_arr_at(rules, protected_count))) ++protected_count;
         for (size_t i = 0; i < local_rules->v.arr.len; ++i)
-            sbj_arr_insert(rules, i, sbj_clone(local_rules->v.arr.items[i]));
+            sbj_arr_insert(rules, protected_count + i, sbj_clone(local_rules->v.arr.items[i]));
         ++changes;
     }
 

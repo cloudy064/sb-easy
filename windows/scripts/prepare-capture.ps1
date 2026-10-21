@@ -20,4 +20,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $deps 'libpcap-1.10.6'))) {
     if ($LASTEXITCODE -ne 0) { throw 'libpcap extraction failed' }
 }
 # Only stages the driver. WinDivertOpen is called on explicit capture activation.
+$licenseRoot=Join-Path $repo 'build/windows-release/licenses'
+New-Item -ItemType Directory -Force -Path $licenseRoot | Out-Null
+Copy-Item -LiteralPath (Join-Path $deps 'WinDivert-2.2.2-A/LICENSE') -Destination (Join-Path $licenseRoot 'WinDivert.txt')
+Copy-Item -LiteralPath (Join-Path $deps 'libpcap-1.10.6/LICENSE') -Destination (Join-Path $licenseRoot 'libpcap.txt')
 Write-Output 'Pinned WinDivert and offline libpcap sources prepared; no driver started.'

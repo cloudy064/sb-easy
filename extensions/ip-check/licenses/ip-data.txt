@@ -1,0 +1,66 @@
+IP check offline data attribution and licenses
+=============================================
+
+DB-IP Lite Country and ASN
+--------------------------
+IP Geolocation by DB-IP: https://db-ip.com/
+Copyright DB-IP. Licensed under Creative Commons Attribution 4.0 International:
+https://creativecommons.org/licenses/by/4.0/
+Source: https://db-ip.com/db/lite.php
+
+sb-easy converts the free Lite CSV snapshots into a read-only SQLite range
+database. It preserves country, ASN and organization fields, and does not add a
+risk score. Lite data has reduced coverage and accuracy. Source snapshot dates,
+retrieval URLs and checksums are recorded in data/manifest.json.
+Country CSV is obtained from the Framasoft mirror of the original file; its
+decoded SHA-1 matches the checksum published by DB-IP. ASN CSV is obtained from
+the pinned sapics/ip-location-db redistribution, split into IPv4 and IPv6 files.
+That derivative has its own recorded SHA-256 hashes, not the publisher's CSV
+checksum. Its source license is preserved at:
+https://github.com/sapics/ip-location-db/blob/f7f14ed72a79d09440789554eb8955dfef6514fe/dbip-asn/DBIP-LICENSE
+The conversion does not imply endorsement by DB-IP.
+
+X4B VPN and datacenter ranges
+----------------------------
+Source: https://github.com/X4BNet/lists_vpn
+The source README explicitly applies the following MIT license to its scripts,
+source lists and generated output. sb-easy merges overlapping/adjacent ranges
+and converts them into SQLite. The datacenter list includes VPN networks;
+absence from either list does not establish that an IP is residential or safe.
+
+MIT License
+
+Copyright (c) 2024 X4B (Mathew Heard)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Tor
+---
+Tor Project CollecTor observed exit addresses, licensed under CC0:
+https://collector.torproject.org/recent/exit-lists/
+https://metrics.torproject.org/about.html
+https://creativecommons.org/publicdomain/zero/1.0/
+Only observed ExitAddress records are included. Duplicate addresses are merged;
+relay fingerprints and other relay addresses are not used as exit evidence.
+This snapshot is historical evidence, not a guarantee of present Tor membership.
+The timestamp, retrieval URL and SHA-256 are recorded in data/manifest.json.
+The dated recent/ endpoint can expire. A compressed copy is preserved in the
+source tree's snapshots/ directory, with the original downloaded SHA-256 and
+compressed SHA-256 recorded in data-sources.json. A future snapshot requires an
+explicit source-lock update.

@@ -14,4 +14,10 @@ fi
 
 # The server reads DATABASE_URL/MIGRATIONS_DIR itself and runs migrations before
 # listening. Managed mode supervises the bundled sing-box process.
+if [ "${1:-}" = "sb-easy" ]; then
+    if [ "${IPCHECK_EXTERNAL:-false}" = "true" ]; then
+        exec "$@"
+    fi
+    exec python3 /usr/share/sb-easy/ip-check/supervisor.py "$@"
+fi
 exec "$@"

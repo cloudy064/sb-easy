@@ -8,9 +8,12 @@ static bool private_write(const wchar_t *directory,const wchar_t *name,DWORD *er
     if(file==INVALID_HANDLE_VALUE)*error=GetLastError();else{DWORD count=0;bool ok=WriteFile(file,"ok",2,&count,NULL)!=FALSE;*error=ok?(count==2?ERROR_SUCCESS:ERROR_WRITE_FAULT):GetLastError();wrote=ok&&count==2;CloseHandle(file);DeleteFileW(path);}
     free(path);return wrote;
 }
-static bool environment_write(const wchar_t *key,DWORD *error){
+static bool environment_write(const wchar_t *key,const wchar_t *work_directory,DWORD *error,bool *private_scope){
     wchar_t *directory=sb_xcalloc(32768,sizeof *directory);DWORD size=GetEnvironmentVariableW(key,directory,32768);
-    if(!size||size>=32768)directory[0]=0;bool wrote=private_write(directory,L"sandbox-temporary-write-test.tmp",error);free(directory);return wrote;
+    if(!size||size>=32768)directory[0]=0;*private_scope=false;
+    const wchar_t *last=work_directory?wcsrchr(work_directory,L'\\'):NULL;size_t prefix=last?(size_t)(last-work_directory):0;
+    if(prefix&&size>prefix&&directory[prefix]==L'\\'&&CompareStringOrdinal(directory,(int)prefix,work_directory,(int)prefix,TRUE)==CSTR_EQUAL)*private_scope=true;
+    bool wrote=private_write(directory,L"sandbox-temporary-write-test.tmp",error);free(directory);return wrote;
 }
 static bool probe_file_identity(HANDLE file,BY_HANDLE_FILE_INFORMATION *identity,bool *invalid_exception){
     *invalid_exception=false;
@@ -60,9 +63,9 @@ int main(int argc,char **argv){
         /* Production capture and HTTP workers receive this explicit directory.
          * LOCALAPPDATA is Windows-owned and may be rewritten independently. */
         sbj_set_bool(result,"private_write",expected_write&&sbj_get_bool(result,"current_matches_expected",false));
-        sbj_set_int(result,"expected_private_write_error",expected_error);free(expected);
-        DWORD temp_error=0,tmp_error=0;bool temp_write=environment_write(L"TEMP",&temp_error),tmp_write=environment_write(L"TMP",&tmp_error);
-        sbj_set_bool(result,"temporary_write",temp_write&&tmp_write);sbj_set_int(result,"temp_write_error",temp_error);sbj_set_int(result,"tmp_write_error",tmp_error);
+        sbj_set_int(result,"expected_private_write_error",expected_error);
+        DWORD temp_error=0,tmp_error=0;bool temp_scope=false,tmp_scope=false,temp_write=environment_write(L"TEMP",expected,&temp_error,&temp_scope),tmp_write=environment_write(L"TMP",expected,&tmp_error,&tmp_scope);free(expected);
+        sbj_set_bool(result,"temporary_write",temp_write&&tmp_write&&temp_scope&&tmp_scope);sbj_set_int(result,"temp_write_error",temp_error);sbj_set_int(result,"tmp_write_error",tmp_error);sbj_set_bool(result,"temp_private_scope",temp_scope);sbj_set_bool(result,"tmp_private_scope",tmp_scope);
         sbj_set_bool(result,"environment_filtered",GetEnvironmentVariableW(L"SBEASY_TEST_SECRET",NULL,0)==0);
         HANDLE parent=OpenProcess(PROCESS_VM_READ|PROCESS_DUP_HANDLE,FALSE,(DWORD)sbj_get_int(params,"parent",0));sbj_set_bool(result,"parent_denied",parent==NULL);if(parent)CloseHandle(parent);
         /* Handle values are process-local slots and can be reused by the

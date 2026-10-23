@@ -3,6 +3,7 @@
 #include "secure_store.h"
 #include <aclapi.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <userenv.h>
 #include <bcrypt.h>
 #include <stdio.h>
@@ -13,7 +14,7 @@ struct sbw_extension_sandbox {
     SECURITY_CAPABILITIES security;
     SID_AND_ATTRIBUTES capabilities[2];
     BYTE network_sids[2][SECURITY_MAX_SID_SIZE];
-    wchar_t *directory,*environment;
+    wchar_t *directory,*temporary,*environment;
     bool loopback;
 };
 /* API families below do not all use GetLastError. Record their actual result
@@ -84,10 +85,21 @@ static bool grant_package(sbw_extension_sandbox *s,const char *id,const wchar_t 
 static bool environment(sbw_extension_sandbox *s,sbw_error *error){
     wchar_t system[MAX_PATH],windows[MAX_PATH];UINT n=GetSystemDirectoryW(system,MAX_PATH);if(!n||n>=MAX_PATH)return sandbox_win32(error,"environment.system",n?ERROR_INSUFFICIENT_BUFFER:GetLastError());
     n=GetWindowsDirectoryW(windows,MAX_PATH);if(!n||n>=MAX_PATH)return sandbox_win32(error,"environment.windows",n?ERROR_INSUFFICIENT_BUFFER:GetLastError());
+    /* Windows redirects AppContainer LOCALAPPDATA/TEMP/TMP itself. Its base
+     * profile values must describe the actual token user, not our work folder,
+     * otherwise the native redirection can produce nonexistent nested paths.
+     * Resolve these values from the token/known-folder APIs, never inherited
+     * environment strings; only the same eight allowlisted keys are passed. */
+    HANDLE token=NULL;wchar_t *profile=NULL,*local=NULL;const char *stage="environment.token",*kind="Win32";DWORD code=ERROR_SUCCESS,count=0;bool ok=false;
+    if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_IMPERSONATE,&token)){code=GetLastError();goto done;}
+    stage="environment.profile.size";GetUserProfileDirectoryW(token,NULL,&count);if(!count||count>32768){code=count?ERROR_BUFFER_OVERFLOW:GetLastError();goto done;}
+    profile=sb_xcalloc(count,sizeof *profile);stage="environment.profile";if(!GetUserProfileDirectoryW(token,profile,&count)){code=GetLastError();goto done;}
+    stage="environment.local";HRESULT located=SHGetKnownFolderPath(&FOLDERID_LocalAppData,0,token,&local);if(FAILED(located)){code=(DWORD)located;kind="HRESULT";goto done;}
     const wchar_t *keys[]={L"APPDATA",L"LOCALAPPDATA",L"PATH",L"SystemRoot",L"TEMP",L"TMP",L"USERPROFILE",L"WINDIR"};
-    const wchar_t *values[]={s->directory,s->directory,system,windows,s->directory,s->directory,s->directory,windows};size_t length=1;
-    for(size_t i=0;i<8;++i)length+=wcslen(keys[i])+wcslen(values[i])+2;if(length>32767)return sandbox_win32(error,"environment.size",ERROR_BUFFER_OVERFLOW);s->environment=sb_xcalloc(length,sizeof(wchar_t));size_t at=0;
-    for(size_t i=0;i<8;++i){size_t k=wcslen(keys[i]),v=wcslen(values[i]);memcpy(s->environment+at,keys[i],k*sizeof(wchar_t));at+=k;s->environment[at++]=L'=';memcpy(s->environment+at,values[i],v*sizeof(wchar_t));at+=v+1;}return true;
+    const wchar_t *values[]={s->directory,local,system,windows,s->temporary,s->temporary,profile,windows};size_t length=1;
+    for(size_t i=0;i<8;++i)length+=wcslen(keys[i])+wcslen(values[i])+2;if(length>32767){stage="environment.size";code=ERROR_BUFFER_OVERFLOW;goto done;}s->environment=sb_xcalloc(length,sizeof(wchar_t));size_t at=0;
+    for(size_t i=0;i<8;++i){size_t k=wcslen(keys[i]),v=wcslen(values[i]);memcpy(s->environment+at,keys[i],k*sizeof(wchar_t));at+=k;s->environment[at++]=L'=';memcpy(s->environment+at,values[i],v*sizeof(wchar_t));at+=v+1;}ok=true;
+done:if(token)CloseHandle(token);free(profile);if(local)CoTaskMemFree(local);return ok?true:sandbox_failure(error,stage,kind,code?code:ERROR_GEN_FAILURE);
 }
 sbw_extension_sandbox *sbw_extension_sandbox_new(const char *id,const wchar_t *root,sbw_error *error){
     if(!id||!root||!*root||!sbw_extension_release_find(id)||sb_streq(id,"network-tools")){sandbox_win32(error,"request",ERROR_INVALID_PARAMETER);return NULL;}
@@ -105,15 +117,16 @@ sbw_extension_sandbox *sbw_extension_sandbox_new(const char *id,const wchar_t *r
     else if(FAILED(created)){sandbox_failure(error,"profile.create","HRESULT",(DWORD)created);goto fail;}
     LPWSTR sid=NULL,folder=NULL;if(!ConvertSidToStringSidW(s->security.AppContainerSid,&sid)){sandbox_win32(error,"profile.sid",GetLastError());goto fail;}
     HRESULT located=GetAppContainerFolderPath(sid,&folder);LocalFree(sid);if(FAILED(located)){sandbox_failure(error,"profile.folder","HRESULT",(DWORD)located);goto fail;}
-    s->directory=sbw_path_join(folder,L"sb-easy");CoTaskMemFree(folder);
-    if(!s->directory){sandbox_win32(error,"private.path",ERROR_FILENAME_EXCED_RANGE);goto fail;}
+    s->directory=sbw_path_join(folder,L"sb-easy");s->temporary=sbw_path_join(folder,L"Temp");CoTaskMemFree(folder);
+    if(!s->directory||!s->temporary){sandbox_win32(error,"private.path",ERROR_FILENAME_EXCED_RANGE);goto fail;}
     if(!CreateDirectoryW(s->directory,NULL)&&GetLastError()!=ERROR_ALREADY_EXISTS){sandbox_win32(error,"private.create",GetLastError());goto fail;}
-    if(!grant_path(s->directory,s->security.AppContainerSid,FILE_ALL_ACCESS,true,true,"private.directory",error)||!grant_package(s,id,root,error)||!environment(s,error))goto fail;
+    if(!CreateDirectoryW(s->temporary,NULL)&&GetLastError()!=ERROR_ALREADY_EXISTS){sandbox_win32(error,"temporary.create",GetLastError());goto fail;}
+    if(!grant_path(s->directory,s->security.AppContainerSid,FILE_ALL_ACCESS,true,true,"private.directory",error)||!grant_path(s->temporary,s->security.AppContainerSid,FILE_ALL_ACCESS,true,true,"temporary.directory",error)||!grant_package(s,id,root,error)||!environment(s,error))goto fail;
     if(network){if(!loopback_config(s->security.AppContainerSid,true,error))goto fail;s->loopback=true;}
     return s;
 fail:{DWORD code=GetLastError();sbw_extension_sandbox_free(s);SetLastError(code);return NULL;}
 }
-void sbw_extension_sandbox_free(sbw_extension_sandbox *s){if(!s)return;if(s->loopback)loopback_config(s->security.AppContainerSid,false,NULL);if(s->security.AppContainerSid)FreeSid(s->security.AppContainerSid);free(s->directory);free(s->environment);free(s);}
+void sbw_extension_sandbox_free(sbw_extension_sandbox *s){if(!s)return;if(s->loopback)loopback_config(s->security.AppContainerSid,false,NULL);if(s->security.AppContainerSid)FreeSid(s->security.AppContainerSid);free(s->directory);free(s->temporary);free(s->environment);free(s);}
 const SECURITY_CAPABILITIES *sbw_extension_sandbox_capabilities(sbw_extension_sandbox *s){return s?&s->security:NULL;}
 const wchar_t *sbw_extension_sandbox_environment(sbw_extension_sandbox *s){return s?s->environment:NULL;}
 const wchar_t *sbw_extension_sandbox_directory(sbw_extension_sandbox *s){return s?s->directory:NULL;}

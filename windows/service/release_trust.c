@@ -211,9 +211,11 @@ int sbw_release_verify_file(const wchar_t *path, HANDLE file, const char *publis
         provider_fn get_provider = NULL; signer_fn get_signer = NULL;
         HMODULE trust = GetModuleHandleW(L"wintrust.dll");
         FARPROC entry = trust ? GetProcAddress(trust, "WTHelperProvDataFromStateData") : NULL;
-        if (sizeof(entry) == sizeof(get_provider)) memcpy(&get_provider, &entry, sizeof(get_provider));
+        _Static_assert(sizeof(entry) == sizeof(get_provider), "Windows function pointer sizes must match");
+        memcpy(&get_provider, &entry, sizeof(get_provider));
         entry = trust ? GetProcAddress(trust, "WTHelperGetProvSignerFromChain") : NULL;
-        if (sizeof(entry) == sizeof(get_signer)) memcpy(&get_signer, &entry, sizeof(get_signer));
+        _Static_assert(sizeof(entry) == sizeof(get_signer), "Windows function pointer sizes must match");
+        memcpy(&get_signer, &entry, sizeof(get_signer));
         CRYPT_PROVIDER_DATA *provider = get_provider ? get_provider(data.hWVTStateData) : NULL;
         CRYPT_PROVIDER_SGNR *signer = provider && get_signer ? get_signer(provider, 0, FALSE, 0) : NULL;
         valid = provider && provider->csSigners == 1 && signer && !signer->dwError && signer->csCertChain &&

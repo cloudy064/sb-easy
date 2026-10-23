@@ -1776,7 +1776,9 @@ static sbj *yaml_to_json(ynode *n, yaml_convert_limits *budget, int depth) {
         n->visiting = true;
         sbj *a = sbj_array();
         for (size_t i = 0; i < n->n; ++i) {
-            if (YAML_REJECT_LIMIT_EXHAUSTION && budget->exhausted) break;
+#if YAML_REJECT_LIMIT_EXHAUSTION
+            if (budget->exhausted) break;
+#endif
             sbj_arr_push(a, yaml_to_json(n->items[i], budget, depth + 1));
         }
         n->visiting = false;
@@ -1786,7 +1788,9 @@ static sbj *yaml_to_json(ynode *n, yaml_convert_limits *budget, int depth) {
         n->visiting = true;
         sbj *o = sbj_object();
         for (size_t i = 0; i + 1 < n->n; i += 2) {
-            if (YAML_REJECT_LIMIT_EXHAUSTION && budget->exhausted) break;
+#if YAML_REJECT_LIMIT_EXHAUSTION
+            if (budget->exhausted) break;
+#endif
             const ynode *k = n->items[i];
             /* sbj keys are C strings: a key containing NUL cannot be kept. */
             if (k->kind == Y_SCALAR && !memchr(k->s, '\0', k->slen)) {

@@ -102,6 +102,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: sb-easy-windows-x64-packages
+          if-no-files-found: error
           path: |
             build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64-portable.zip
             build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64.msi

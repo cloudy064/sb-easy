@@ -13,6 +13,7 @@ int main(void) {
         else if(capture) {
             int result=0;
             if(sb_streq(method,"snapshot"))value=sbw_capture_snapshot(capture);
+            else if(sb_streq(method,"broker"))result=sbw_capture_set_broker(capture,(HANDLE)(uintptr_t)sbj_get_int(params,"handle",0),(DWORD)sbj_get_int(params,"pid",0),(DWORD)sbj_get_int(params,"interface_index",0),&error);
             else if(sb_streq(method,"configure"))result=sbw_capture_configure(capture,params,&error);
             else if(sb_streq(method,"observe")) {
                 wchar_t *interface=sbw_wide(sbj_get_str(params,"interface",""),NULL);

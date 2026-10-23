@@ -9,10 +9,10 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import org.json.JSONObject
 
-class SecureEnrollmentStore(context: Context) {
+class SecureEnrollmentStore(context: Context) : EnrollmentStorage {
     private val preferences = context.getSharedPreferences("secure_enrollment", Context.MODE_PRIVATE)
 
-    fun load(): Enrollment? {
+    override fun load(): Enrollment? {
         val encoded = preferences.getString(KEY_PAYLOAD, null) ?: return null
         return runCatching {
             val parts = encoded.split(':', limit = 2)
@@ -33,11 +33,12 @@ class SecureEnrollmentStore(context: Context) {
                 agentToken = json.getString("agent_token"),
                 profileId = json.getString("profile_id"),
                 profileName = json.getString("profile_name"),
+                allowInsecureLocalHttp = json.optBoolean("allow_insecure_local_http", false),
             )
         }.getOrNull()
     }
 
-    fun save(enrollment: Enrollment) {
+    override fun save(enrollment: Enrollment) {
         val json = JSONObject()
             .put("server", enrollment.server)
             .put("host_id", enrollment.hostId)
@@ -45,6 +46,7 @@ class SecureEnrollmentStore(context: Context) {
             .put("agent_token", enrollment.agentToken)
             .put("profile_id", enrollment.profileId)
             .put("profile_name", enrollment.profileName)
+            .put("allow_insecure_local_http", enrollment.allowInsecureLocalHttp)
             .toString()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, encryptionKey())
@@ -53,7 +55,7 @@ class SecureEnrollmentStore(context: Context) {
         check(preferences.edit().putString(KEY_PAYLOAD, payload).commit())
     }
 
-    fun clear() {
+    override fun clear() {
         preferences.edit().remove(KEY_PAYLOAD).apply()
     }
 

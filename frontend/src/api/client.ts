@@ -16,7 +16,9 @@ client.interceptors.request.use((config) => {
 client.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const url = String(error.config?.url || '')
+    const accountProof = /^\/auth\/(login|oidc|mfa|password)(\/|$)/.test(url)
+    if (error.response?.status === 401 && !accountProof) {
       localStorage.removeItem('sb-easy-token')
       window.location.href = '/login'
     }

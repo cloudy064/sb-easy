@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=io.sbeasy.Desktop.Tunnel
+Exec=/usr/libexec/sb-easy-tunnel
+User=root
+SystemdService=sb-easy-tunnel.service

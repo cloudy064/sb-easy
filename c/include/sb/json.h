@@ -77,6 +77,9 @@ void sbj_free(sbj *value);
 /* Parses RFC 8259 JSON. Returns NULL on error and, when error is non-NULL,
  * writes a short message (at most error_size bytes). Duplicate keys: last wins. */
 sbj *sbj_parse(const char *text, size_t len, char *error, size_t error_size);
+/* Security-sensitive documents: reject duplicate decoded object keys at every
+ * depth and validate UTF-8. Legacy sbj_parse retains last-key-wins semantics. */
+sbj *sbj_parse_strict(const char *text, size_t len, char *error, size_t error_size);
 sbj *sbj_parse_cstr(const char *text);
 /* indent < 0: compact (nlohmann dump()); indent >= 0: pretty with that many
  * spaces per level (nlohmann dump(indent)). Returns a malloc'd string. */

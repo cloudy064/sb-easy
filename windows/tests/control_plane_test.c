@@ -421,15 +421,52 @@ static void capture_upload_tests(void) {
     }
 }
 
-int main(void) {
+static void management_transport_tests(void) {
+    loopback_server server; server_init(&server);
+    server_start(&server, (http_reply){"200 OK", "Content-Type: application/json\r\n", "{\"ok\":true}", 0, 0, false});
+    sbw_error error = {0}; sbw_control_plane *client = sbw_winhttp_new(25000, &error);
+    char *prefixed = sb_asprintf("%s/panel", server.origin);
+    sbj *device = identity(prefixed), *body = sbj_object(); free(prefixed);
+    sbj_set_bool(body, "singbox_running", false); sbj_set_str(body, "app_version", "0.6.9-test");
+    REQUIRE(client->report_status(client->context, device, body, NULL, &error) == 0, "Status report failed");
+    char *request = server_request(&server);
+    REQUIRE(strstr(request, "POST /panel/api/agent/status HTTP/1.") != NULL, "Status path lost server prefix");
+    REQUIRE(strstr(request, "Authorization: Bearer test-device-token-never-in-errors") != NULL, "Management request lost authentication");
+    free(request);
+    sbj_set_str(body, "status", "done"); sbj_set_str(body, "result", "Reload completed.");
+    REQUIRE(client->acknowledge_command(client->context, device, "command-1", body, NULL, &error) == 0, "Command ACK failed");
+    request = server_request(&server);
+    REQUIRE(strstr(request, "/api/agent/commands/command-1/ack HTTP/1.") != NULL, "ACK path was incorrect"); free(request);
+    LONG before = server.requests;
+    expect_error(client->acknowledge_command(client->context, device, "../status", body, NULL, &error), &error, "invalid_request");
+    REQUIRE(server.requests == before, "Invalid command ID reached transport");
+    REQUIRE(client->report_telemetry(client->context, device, body, NULL, &error) == 0, "Telemetry report failed");
+    sbj *commands = NULL;
+    expect_error(client->pending_commands(client->context, device, NULL, &commands, &error), &error, "invalid_response");
+    REQUIRE(!commands, "Object response accepted as commands");
+    sbj_free(body); sbj_free(device); sbw_control_plane_free(client); server_free(&server);
+    server_init(&server);
+    server_start(&server, (http_reply){"200 OK", "Content-Type: application/json\r\n", "[{\"id\":\"command-1\",\"command\":\"reload\"}]", 0, 0, false});
+    device = identity(server.origin); client = sbw_winhttp_new(25000, &error);
+    REQUIRE(client->pending_commands(client->context, device, NULL, &commands, &error) == 0 && sbj_arr_len(commands) == 1,
+            "Command list was not decoded");
+    sbj_free(commands); sbj_free(device); sbw_control_plane_free(client); server_free(&server);
+}
+
+int main(int argc, char **argv) {
     WSADATA winsock;
     REQUIRE(WSAStartup(MAKEWORD(2, 2), &winsock) == 0, "WSAStartup failed");
+    if (argc == 2 && !strcmp(argv[1], "--management-only")) {
+        management_transport_tests(); WSACleanup(); puts("Management status, telemetry, command transport and ACK tests passed."); return 0;
+    }
+    REQUIRE(argc == 1, "Unknown test argument");
     puts("URI parser tests"); parser_tests();
     puts("Enrollment tests"); enrollment_tests();
     puts("Config tests"); config_tests();
     puts("Rejected response tests"); rejected_response_tests();
     puts("Cancellation tests"); cancellation_tests();
     puts("Capture binary upload and acknowledgement tests"); capture_upload_tests();
+    puts("Background management transport tests"); management_transport_tests();
     WSACleanup();
     puts("C11 control-plane parser and loopback transport tests passed.");
     return 0;

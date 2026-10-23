@@ -80,25 +80,38 @@ object PacketCapture {
     @Volatile var runtimeError: String = ""
     @Volatile var nativeStatus: () -> String = { "{}" }
     @Volatile var rotate: () -> Unit = {}
+    @Volatile var stopNative: () -> Unit = {}
     @Volatile var validateFilter: (String) -> Unit = { expression ->
         check(expression.isBlank()) { "BPF 引擎尚未初始化" }
     }
-    fun initialize(context: Context) { this.context = context.applicationContext }
+    fun initialize(context: Context) {
+        this.context = context.applicationContext
+        // Never resurrect a pre-withdrawal preference or a session killed by Android.
+        runCatching { save(config().copy(enabled = false, autoUpload = false)) }
+    }
+    fun endSession() {
+        CaptureSession.end()
+        runCatching { stopNative() }
+        if (::context.isInitialized) runCatching { save(config().copy(enabled = false, autoUpload = false)) }
+    }
     private fun preferences() = context.getSharedPreferences("packet_capture", Context.MODE_PRIVATE)
     fun config(): CaptureConfig = runCatching { CaptureConfig.parse(preferences().getString("config", "{}")!!) }.getOrDefault(CaptureConfig())
     fun save(config: CaptureConfig) { check(preferences().edit().putString("config", config.validated().json().toString()).commit()) { "采集配置保存失败" }; lastAttempt = 0 }
-    fun directory(enrollment: Enrollment): File {
-        val key = sha256((enrollment.server + "\n" + enrollment.hostId).toByteArray()).take(32)
+    fun directory(enrollment: Enrollment?): File {
+        val key = enrollment?.let { sha256((it.server + "\n" + it.hostId).toByteArray()).take(32) } ?: "standalone"
         return File(context.filesDir, "captures/$key").apply { mkdirs() }
     }
-    fun nativeConfig(enrollment: Enrollment): String = config().json().put("directory", directory(enrollment).absolutePath).toString()
-    fun files(enrollment: Enrollment): List<CaptureFile> = directory(enrollment).listFiles().orEmpty()
+    fun nativeConfig(enrollment: Enrollment?): String = CaptureSession.effective(config(), enrollment != null)
+        .json().put("directory", directory(enrollment).absolutePath).toString()
+    fun files(enrollment: Enrollment?): List<CaptureFile> = directory(enrollment).listFiles().orEmpty()
         .filter { it.extension == "pcap" }.sortedByDescending { it.name }.map { CaptureFile(it, marker(it).exists()) }
     private fun marker(file: File) = File(file.parentFile, file.name + ".uploaded")
     suspend fun delete(file: CaptureFile) = uploadMutex.withLock { withContext(Dispatchers.IO) {
         check(file.file.delete() || !file.file.exists()) { "删除失败" }; marker(file.file).delete()
     } }
-    suspend fun upload(enrollment: Enrollment, client: ControlPlaneClient, manual: Boolean = false) = uploadMutex.withLock {
+    suspend fun upload(enrollment: Enrollment, client: AgentControlPlane, manual: Boolean = false) = uploadMutex.withLock {
+        if (manual) CaptureSession.requireEnabled()
+        if (!CaptureSession.enabled.value) return@withLock
         withContext(Dispatchers.IO) {
             val cfg = config()
             if (!manual && (!cfg.autoUpload || System.currentTimeMillis() - lastAttempt < cfg.uploadSeconds * 1000L)) return@withContext

@@ -33,6 +33,7 @@
         <option value="vless">VLESS</option>
         <option value="hysteria2">Hysteria2</option>
         <option value="tuic">TUIC</option>
+        <option value="socks">SOCKS5</option>
         <option value="http">HTTP</option>
       </select>
       <select v-model="filterSource" style="max-width:170px">
@@ -102,6 +103,7 @@
               <option value="vless">VLESS</option>
               <option value="hysteria2">Hysteria2</option>
               <option value="tuic">TUIC</option>
+        <option value="socks">SOCKS5</option>
               <option value="http">HTTP</option>
             </select>
           </div>
@@ -126,7 +128,7 @@
           </template>
 
           <!-- HTTP proxy fields -->
-          <template v-if="createForm.node_type === 'http'">
+          <template v-if="['http', 'socks'].includes(createForm.node_type)">
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
               <div class="form-group"><label>Username (optional)</label><input v-model="httpConfig.username" placeholder="username" /></div>
               <div class="form-group"><label>Password (optional)</label><input v-model="httpConfig.password" placeholder="password" /></div>
@@ -134,7 +136,7 @@
           </template>
 
           <!-- Advanced: TLS / transport (not for shadowsocks) -->
-          <template v-if="createForm.node_type !== 'shadowsocks'">
+          <template v-if="!['shadowsocks', 'socks'].includes(createForm.node_type)">
             <button type="button" class="btn-ghost btn-sm adv-toggle" @click="showAdvanced = !showAdvanced">
               {{ showAdvanced ? '▾' : '▸' }} Advanced (TLS{{ createForm.node_type === 'http' ? '' : ' / Reality / Transport' }})
             </button>
@@ -488,10 +490,10 @@ function notify(msg: string) {
 }
 
 function protocolLabel(t: string) {
-  return { shadowsocks:'SS', vmess:'VMess', trojan:'Trojan', vless:'VLESS', hysteria2:'HY2', tuic:'TUIC', http:'HTTP' }[t] || t
+  return { shadowsocks:'SS', vmess:'VMess', trojan:'Trojan', vless:'VLESS', hysteria2:'HY2', tuic:'TUIC', http:'HTTP', socks:'SOCKS5' }[t] || t
 }
 function protocolBadge(t: string) {
-  return { shadowsocks:'proto-ss', vmess:'proto-vmess', trojan:'proto-trojan', vless:'proto-vless', hysteria2:'proto-hy2', tuic:'proto-tuic', http:'proto-http' }[t] || 'proto-default'
+  return { shadowsocks:'proto-ss', vmess:'proto-vmess', trojan:'proto-trojan', vless:'proto-vless', hysteria2:'proto-hy2', tuic:'proto-tuic', http:'proto-http', socks:'proto-http' }[t] || 'proto-default'
 }
 function latencyColor(ms: number) {
   if (ms < 200) return 'latency-good'
@@ -507,9 +509,9 @@ async function doCreate() {
   else if (type === 'vless') config = { uuid: vmConfig.value.uuid, flow: '', packet_encoding: 'xudp' }
   else if (type === 'trojan') config = { password: trConfig.value.password }
   else if (type === 'hysteria2') config = { password: trConfig.value.password }
-  else if (type === 'http') config = { ...httpConfig.value }
+  else if (type === 'http' || type === 'socks') config = { ...httpConfig.value }
 
-  if (type !== 'shadowsocks') {
+  if (type !== 'shadowsocks' && type !== 'socks') {
     const tls = buildTls()
     if (tls) config.tls = tls
     const transport = type === 'http' ? undefined : buildTransport()

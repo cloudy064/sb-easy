@@ -31,17 +31,17 @@ object LibboxInitializer {
                 fixAndroidStack = false
                 logMaxLines = 1_000
                 debug = false
+                crashReportSource = "sb-easy"
             },
         )
         io.sbeasy.android.core.PacketCapture.nativeStatus = { Libbox.captureStatus() }
         io.sbeasy.android.core.PacketCapture.validateFilter = { Libbox.validateCaptureFilter(it) }
         io.sbeasy.android.core.PacketCapture.rotate = { Libbox.rotateCapture() }
-        io.sbeasy.android.core.CoreGraph.repository.state.value.enrollment?.let { enrollment ->
-            runCatching { Libbox.recoverCapture(io.sbeasy.android.core.PacketCapture.directory(enrollment).path) }
-                .onFailure { ClientDiagnostics.error("PacketCapture", "capture recovery failed", it) }
-        }
-        val stderrFile = File(workingDirectory, "libbox-stderr.log")
-        Libbox.redirectStderr(stderrFile.path)
+        io.sbeasy.android.core.PacketCapture.stopNative = { Libbox.configureCapture("{}") }
+        runCatching { Libbox.recoverCapture(io.sbeasy.android.core.PacketCapture.directory(
+            io.sbeasy.android.core.CoreGraph.repository.state.value.enrollment).path) }
+            .onFailure { ClientDiagnostics.error("PacketCapture", "capture recovery failed", it) }
+        val stderrFile = File(workingDirectory, "CrashReport-sb-easy.log")
         ClientDiagnostics.registerAdditionalLog("libbox-stderr", stderrFile)
         ClientDiagnostics.info("LibboxInitializer", "libbox ${Libbox.version()} initialized")
         RuntimeBridge.validator = object : ConfigValidator {

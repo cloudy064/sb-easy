@@ -90,6 +90,7 @@ int wmain(int argc, wchar_t **argv) {
     }
     BOOL in_job = FALSE;
     if (!IsProcessInJob(GetCurrentProcess(), NULL, &in_job) || !in_job) return 70;
+    if (argc == 2 && !wcscmp(argv[1], L"version")) { puts("sing-box version 1.14.3"); return 0; }
     if (argc == 2 && !wcscmp(argv[1], L"--child")) { Sleep(INFINITE); return 0; }
     if (argc != 5 || (wcscmp(argv[1], L"check") && wcscmp(argv[1], L"run")) ||
         wcscmp(argv[2], L"-c") || wcscmp(argv[4], L"--disable-color")) return 71;

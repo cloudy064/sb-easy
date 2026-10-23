@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 
 type Choice = { key: string; tag: string; label?: string; type: string; mode: 'node' | 'server' | 'default' }
-const props = defineProps<{ id: string; current?: string; mode: 'node' | 'server' | 'default'; server: string; defaultExit?: string; allowDefault: boolean; editable: boolean; disabled?: boolean; loading?: boolean; nodes: { tag: string; type: string; label?: string; source?: string }[] }>()
+const props = defineProps<{ id: string; current?: string; mode: 'node' | 'server' | 'default' | 'automatic'; server: string; defaultExit?: string; allowDefault: boolean; allowServer?: boolean; editable: boolean; disabled?: boolean; loading?: boolean; nodes: { tag: string; type: string; label?: string; source?: string }[] }>()
 const emit = defineEmits<{ select: [mode: 'node' | 'server' | 'default', node?: string] }>()
 const trigger = ref<HTMLButtonElement>()
 const popup = ref<HTMLElement>()
@@ -12,9 +12,9 @@ const open = ref(false)
 const query = ref('')
 const active = ref(0)
 const position = ref({ left: '0px', top: '0px', width: '320px', maxHeight: '360px' })
-const sourceLabel = computed(() => props.mode === 'server' ? '跟随服务器' : props.mode === 'default' ? '跟随默认代理' : '本机指定节点')
+const sourceLabel = computed(() => props.mode === 'automatic' ? '自动候选组' : props.mode === 'server' ? '跟随服务器' : props.mode === 'default' ? '跟随默认代理' : '本机指定节点')
 const choices = computed<Choice[]>(() => [
-  { key: 'server', tag: '跟随服务器', type: props.server || '由服务器决定', mode: 'server' },
+  ...(props.allowServer === false ? [] : [{ key: 'server', tag: '跟随服务器', type: props.server || '由服务器决定', mode: 'server' as const }]),
   ...(props.editable && props.allowDefault ? [{ key: 'default', tag: '跟随默认代理', type: props.defaultExit || '与默认代理保持一致', mode: 'default' as const }] : []),
   ...(props.editable ? props.nodes.map(n => ({ key: `node:${n.tag}`, tag: n.tag, label: n.label, type: `${n.type.toUpperCase()}${n.source ? ' · ' + n.source : ''}`, mode: 'node' as const })) : []),
 ])

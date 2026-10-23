@@ -238,9 +238,14 @@ class LocalRoutingTest {
             return objects(dns.getJSONArray("rules")).filter { it.optString("server") == tag }
         }
         assertTrue(fakeRules(source.toString()).isNotEmpty())
-        assertTrue(fakeRules(source.toString()).all { it.getString("strategy") == "ipv4_only" })
+        assertTrue(fakeRules(source.toString()).all { strings(it.getJSONArray("query_type")) == listOf("A") && !it.has("strategy") })
+        val ipv4Dns = JSONObject(LocalRouting.render(source.toString(), independentPolicy()).content).getJSONObject("dns")
+        val emptyAnswers = objects(ipv4Dns.getJSONArray("rules")).filter { it.optString("action") == "predefined" }
+        assertTrue(emptyAnswers.isNotEmpty())
+        assertTrue(emptyAnswers.all { "AAAA" in strings(it.getJSONArray("query_type")) && it.getString("rcode") == "NOERROR" })
+        assertFalse(ipv4Dns.has("independent_cache"))
         source.getJSONArray("inbounds").getJSONObject(0).getJSONArray("address").put("fdfe:dcba:9876::1/126")
-        assertTrue(fakeRules(source.toString()).all { !it.has("strategy") })
+        assertTrue(fakeRules(source.toString()).all { strings(it.getJSONArray("query_type")) == listOf("A", "AAAA") && !it.has("strategy") })
     }
 
     @Test fun officialAppTrafficUsesItsGroupEvenForUnlistedDomainsAndCanBeDisabled() {
@@ -256,24 +261,25 @@ class LocalRoutingTest {
         assertFalse(objects(JSONObject(disabled.content).getJSONObject("route").getJSONArray("rules")).any { it.has("package_name") })
     }
 
-    @Test fun officialAppsPrecedeEveryDestinationRouteAndDoNotRestrictProtocolOrDomain() {
+    @Test fun managementPrecedesAppsAndAppsPrecedeOtherDestinationRoutes() {
         val policy = independentPolicy().let { it.copy(groups = it.groups.reversed()) }
         val rendered = LocalRouting.render(base, policy, "https://manage.example.com:51821")
         val rules = objects(JSONObject(rendered.content).getJSONObject("route").getJSONArray("rules"))
         val terminal = rules.filter { it.has("outbound") }
-        val apps = terminal.take(2)
+        assertEquals("manage.example.com", terminal.first().getJSONArray("domain").getString(0))
+        val apps = terminal.filter { it.has("package_name") }
         assertEquals(setOf("com.anthropic.claude", "com.openai.chatgpt"), apps.map { it.getJSONArray("package_name").getString(0) }.toSet())
         apps.forEach { rule ->
             // Owner-only conditions cover unlisted domains, literal/private IPs, TCP and UDP.
             assertEquals(setOf("package_name", "outbound"), rule.keys().asSequence().toSet())
             assertTrue(rules.indexOf(rule) < rules.indexOfFirst { it.optBoolean("ip_is_private") })
-            assertTrue(rules.indexOf(rule) < rules.indexOfFirst { it.has("domain") })
+            assertTrue(rules.indexOf(rule) > rules.indexOfFirst { it.has("domain") })
             assertTrue(rules.indexOf(rule) < rules.indexOfFirst { it.has("domain_suffix") })
         }
         assertTrue(rules.indexOfFirst { it.optString("action") == "hijack-dns" } < rules.indexOf(apps.first()))
     }
 
-    @Test fun appDnsPrecedesEveryDomainRuleIncludingOtherGroupsAndManagement() {
+    @Test fun managementDnsPrecedesAppsAndAppsPrecedeOtherDomainRules() {
         val httpBase = JSONObject(base).also { root ->
             objects(root.getJSONArray("outbounds")).single { it.getString("tag") == "Tokyo" }.put("type", "http")
         }.toString()
@@ -282,7 +288,7 @@ class LocalRoutingTest {
             val dns = JSONObject(rendered.content).getJSONObject("dns")
             val rules = objects(dns.getJSONArray("rules"))
             val appIndexes = rules.indices.filter { rules[it].has("package_name") }
-            val domainIndexes = rules.indices.filter { rules[it].has("domain") || rules[it].has("domain_suffix") || rules[it].has("rule_set") }
+            val domainIndexes = rules.indices.filter { rules[it].has("domain_suffix") || rules[it].has("rule_set") }
             assertTrue(appIndexes.max() < domainIndexes.min())
             fun lookup(owner: String, host: String, queryType: String): JSONObject = rules.first { rule ->
                 !rule.has("rule_set") &&
@@ -294,10 +300,12 @@ class LocalRoutingTest {
             val gptTag = rendered.snapshot.groupTags.getValue("gpt")
             val gptDns = objects(dns.getJSONArray("servers")).single { it.optString("detour") == gptTag }.getString("tag")
             for (query in listOf("A", "AAAA", "HTTPS", "SVCB", "TXT")) {
-                for (host in listOf("claude.ai", "manage.example.com", "unlisted.example.net")) {
+                for (host in listOf("claude.ai", "unlisted.example.net")) {
                     assertEquals(gptDns, lookup("com.openai.chatgpt", host, query).getString("server"))
                 }
             }
+            val managementDns = lookup("com.openai.chatgpt", "manage.example.com", "A").getString("server")
+            assertFalse(objects(dns.getJSONArray("servers")).single { it.getString("tag") == managementDns }.has("detour"))
             val fakeDns = objects(dns.getJSONArray("servers")).single { it.getString("type") == "fakeip" }.getString("tag")
             assertEquals(fakeDns, lookup("com.anthropic.claude", "chatgpt.com", "A").getString("server"))
             assertEquals("predefined", lookup("com.anthropic.claude", "chatgpt.com", "HTTPS").getString("action"))
@@ -340,7 +348,7 @@ class LocalRoutingTest {
         assertEquals("Proxy", JSONObject(base).getJSONObject("route").getString("final"))
     }
 
-    @Test fun removedNodesHaveAVisibleConcreteFallbackWithoutChangingSavedChoice() {
+    @Test fun removedFixedNodesRejectTrafficAndDnsWithoutChangingSavedChoice() {
         val policy = independentPolicy()
         val root = JSONObject(base)
         val updated = JSONArray()
@@ -348,7 +356,13 @@ class LocalRoutingTest {
         root.put("outbounds", updated)
         val result = LocalRouting.render(root.toString(), policy)
         assertEquals("Tokyo", result.snapshot.policy!!.groups.single { it.id == "claude" }.outbound)
-        assertEquals("US", result.snapshot.selections[result.snapshot.groupTags["claude"]])
+        assertTrue(result.snapshot.groupTags.getValue("claude") in result.snapshot.blockedGroups)
+        val rendered = JSONObject(result.content)
+        val routeRules = objects(rendered.getJSONObject("route").getJSONArray("rules"))
+        assertEquals("reject", routeRules.single { it.optJSONArray("package_name")?.toString()?.contains("com.anthropic.claude") == true }.getString("action"))
+        assertEquals("reject", routeRules.single { it.optJSONArray("domain_suffix")?.toString()?.contains("claude.ai") == true }.getString("action"))
+        val dnsRules = objects(rendered.getJSONObject("dns").getJSONArray("rules"))
+        assertEquals("REFUSED", dnsRules.single { it.optJSONArray("package_name")?.toString()?.contains("com.anthropic.claude") == true }.getString("rcode"))
         assertTrue(result.snapshot.warnings.single().contains("Tokyo"))
         assertFalse(result.snapshot.selections.values.any { it == "auto" || it == "Proxy" })
     }
@@ -398,6 +412,50 @@ class LocalRoutingTest {
             LocalRoutingGroup("another", "另一个", listOf("api.anthropic.com"), "US"))) }.isFailure)
         assertTrue(runCatching { LocalRouting.validate(defaults.copy(groups = defaults.groups +
             LocalRoutingGroup("another", "Claude", listOf("another.example.net"), "US"))) }.isFailure)
+    }
+
+
+    @Test fun customApplicationsUseSeparateOrRulesAndRoundTripWithoutDomains() {
+        val appOnly = LocalRoutingGroup("apps", "Apps", emptyList(), "US", false, listOf("org.example.mail", "com.example.video"))
+        val both = LocalRoutingGroup("both", "Both", listOf("work.example"), "Tokyo", false, listOf("org.example.chat"))
+        val policy = independentPolicy().copy(groups = listOf(appOnly, both))
+        assertEquals(policy, LocalRouting.decode(LocalRouting.encode(policy)))
+        val rendered = LocalRouting.render(base, policy)
+        for (section in listOf("route", "dns")) {
+            val rules = objects(JSONObject(rendered.content).getJSONObject(section).getJSONArray("rules"))
+            val appRule = rules.single { it.optJSONArray("package_name")?.toString()?.contains("org.example.chat") == true }
+            val domainRule = rules.single { it.optJSONArray("domain_suffix")?.toString()?.contains("work.example") == true }
+            assertFalse(appRule.has("domain_suffix"))
+            assertFalse(domainRule.has("package_name"))
+            val key = if (section == "route") "outbound" else "server"
+            assertEquals(appRule.getString(key), domainRule.getString(key))
+            assertFalse(rules.any { it.has("domain_suffix") && it.getJSONArray("domain_suffix").length() == 0 })
+        }
+    }
+
+    @Test fun packageValidationRejectsOverlapAndBadIdentifiersButSupportsFutureInstalledApps() {
+        assertEquals(listOf("org.example.future", "org.example.mail"), LocalRouting.normalizePackages("org.example.future\norg.example.mail,org.example.future"))
+        val one = LocalRoutingGroup("apps", "Apps", emptyList(), "US", false, listOf("org.example.future"))
+        LocalRouting.validate(independentPolicy().copy(groups = listOf(one)))
+        for (invalid in listOf("com.example.*", "https://package", "com.example/Activity", "org..example", "unknown")) {
+            assertTrue(runCatching { LocalRouting.normalizePackages(invalid) }.isFailure)
+        }
+        assertTrue(runCatching { LocalRouting.validate(independentPolicy().copy(groups = listOf(one, one.copy(id = "two", name = "Other")))) }.isFailure)
+        assertTrue(runCatching { LocalRouting.validate(independentPolicy().copy(groups = listOf(one.copy(packages = emptyList())))) }.isFailure)
+        assertTrue(runCatching { LocalRouting.validate(independentPolicy().let { it.copy(groups = it.groups + one.copy(packages = listOf("com.openai.chatgpt"))) }) }.isFailure)
+    }
+
+    @Test fun wireguardRoutesAndPrivateDnsPrecedeApplicationRules() {
+        val root = JSONObject(base)
+        root.put("endpoints", JSONArray().put(JSONObject().put("type", "wireguard").put("tag", "corp-wg")))
+        root.getJSONObject("route").getJSONArray("rules").put(JSONObject().put("domain_suffix", JSONArray(listOf("corp.example"))).put("outbound", "corp-wg"))
+        root.getJSONObject("dns").getJSONArray("servers").put(JSONObject().put("type", "udp").put("tag", "corp-dns").put("server", "10.0.0.53").put("detour", "corp-wg"))
+        root.getJSONObject("dns").getJSONArray("rules").put(JSONObject().put("domain_suffix", JSONArray(listOf("corp.example"))).put("action", "route").put("server", "corp-dns"))
+        val rendered = JSONObject(LocalRouting.render(root.toString(), independentPolicy(), "https://center.example").content)
+        val routeRules = objects(rendered.getJSONObject("route").getJSONArray("rules"))
+        assertTrue(routeRules.indexOfFirst { it.optString("outbound") == "corp-wg" } < routeRules.indexOfFirst { it.has("package_name") })
+        val dnsRules = objects(rendered.getJSONObject("dns").getJSONArray("rules"))
+        assertTrue(dnsRules.indexOfFirst { it.optString("server") == "corp-dns" } < dnsRules.indexOfFirst { it.has("package_name") })
     }
 
     @Test fun writesOptionalNativePreflightFixtures() {

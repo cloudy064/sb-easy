@@ -23,7 +23,15 @@
 #include "sb/config_renderer.h"
 #include "sb/singbox_supervisor.h"
 #include "sb/subscription_fetcher.h"
+#include "sb/subscription_service.h"
+#include "sb/observability.h"
+#include "sb/proxy_runtime.h"
+#include "sb/proxy_users.h"
 #include "sb/wireguard.h"
+
+#ifndef SB_EASY_VERSION
+#define SB_EASY_VERSION "1.0.0"
+#endif
 
 /* ---- options ---------------------------------------------------------- */
 
@@ -39,6 +47,7 @@ void sb_http_server_options_init(sb_http_server_options *o) {
     o->admin_password = sb_strdup("admin");
     o->clash_api_url = sb_strdup("http://127.0.0.1:9090");
     o->clash_api_secret = sb_strdup("");
+    o->subscription_auto_refresh = true;
     o->singbox_managed = false;
     o->singbox_binary = sb_strdup("sing-box");
     o->self_singbox_config_path = sb_strdup("");
@@ -111,6 +120,7 @@ void sb_http_server_options_copy(sb_http_server_options *dst, const sb_http_serv
 
 static char *ascii_lower_dup(const char *s, size_t len);
 static void self_singbox_join(sb_http_server *srv);
+static void self_singbox_request_stop(sb_http_server *srv);
 
 /* ---- small helpers (C++ anonymous namespace) -------------------------- */
 
@@ -1451,8 +1461,12 @@ static bool clash_websocket_path(const char *path) {
 }
 
 static bool public_api_path(const char *path) {
-    return strcmp(path, "/api/health") == 0 || strcmp(path, "/api/system/status") == 0 ||
-           strcmp(path, "/api/devices/enroll") == 0 || sb_starts_with(path, "/api/auth/") ||
+    return strcmp(path, "/api/health") == 0 ||
+           strcmp(path, "/api/metrics") == 0 || /* handler requires its own read-only scrape credential */
+           sb_starts_with(path, "/api/proxy-self/") || /* independent proxy claim/device credentials */
+           strcmp(path, "/api/devices/enroll") == 0 || strcmp(path, "/api/auth/login") == 0 ||
+           strcmp(path, "/api/auth/login/mfa") == 0 || strcmp(path, "/api/auth/oidc") == 0 ||
+           strcmp(path, "/api/auth/oidc/start") == 0 || strcmp(path, "/api/auth/oidc/finish") == 0 ||
            sb_starts_with(path, "/api/agent/");
 }
 
@@ -1471,7 +1485,7 @@ static char *bearer_token(const http_exchange *ex) {
 static bool verify_into(http_exchange *ex, const char *token) {
     sb_auth_claims claims;
     memset(&claims, 0, sizeof claims);
-    if (!token || !*token || !sb_auth_verify_token(ex->srv->opts.jwt_secret, token, &claims)) {
+    if (!token || !*token || !sb_auth_security_verify(ex->srv->security, token, &claims, NULL)) {
         sb_auth_claims_free(&claims);
         return false;
     }
@@ -1496,6 +1510,10 @@ static bool auth_advice(http_exchange *ex, wire_response *w) {
             return false;
         }
         ex->req.claims = &ex->claims;
+        sb_err error = {0};
+        if (sb_http_security_authorize(&ex->req, &error) != 0) {
+            wire_error(w, 403, error.msg); return false;
+        }
         return true;
     }
     char *lowered = ascii_lower_dup(ex->path, strlen(ex->path));
@@ -1509,11 +1527,11 @@ static bool auth_advice(http_exchange *ex, wire_response *w) {
         wire_error(w, 401, "Invalid or expired token");
         return false;
     }
-    if (sb_streq(ex->claims.role, "viewer") && !safe_method(ex->method)) {
-        wire_error(w, 403, "Viewer role is read-only");
-        return false;
-    }
     ex->req.claims = &ex->claims;
+    sb_err error = {0};
+    if (sb_http_security_authorize(&ex->req, &error) != 0) {
+        wire_error(w, 403, error.msg); return false;
+    }
     return true;
 }
 
@@ -1634,6 +1652,14 @@ static int h_assets(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     return 0;
 }
 
+/* Public branding files live beside index.html, outside Vite's hashed assets. */
+static int h_public_asset(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)err;
+    resp->file_path = sb_path_join(req->server->opts.static_directory, req->path + 1);
+    resp->immutable = false;
+    return 0;
+}
+
 static int h_api_not_found(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     (void)req;
     (void)err;
@@ -1654,6 +1680,8 @@ static sb_http_handler builtin_route(const http_exchange *ex) {
     const char *path = ex->path;
     if (!no_line_breaks(path)) return NULL;
     if (ex->method == M_GET && starts_with_ci(path, "/assets/")) return h_assets;
+    if (ex->method == M_GET && (strcmp(path, "/sb-easy-mark.svg") == 0 || strcmp(path, "/favicon.svg") == 0))
+        return h_public_asset;
     if ((ex->method == M_GET || ex->method == M_POST || ex->method == M_PUT || ex->method == M_DELETE ||
          ex->method == M_PATCH) &&
         (strcasecmp(path, "/api") == 0 || starts_with_ci(path, "/api/")))
@@ -2100,6 +2128,15 @@ sb_http_server *sb_http_server_new(sb_store *store, const sb_http_server_options
     srv->fetcher = sb_subscription_fetcher_new(NULL, err);
     srv->clash = srv->fetcher ? sb_clash_client_new(NULL, err) : NULL;
     if (!srv->clash) goto fail;
+    srv->subscriptions = sb_subscription_service_new(store, srv->fetcher);
+    srv->security = sb_auth_security_new(sb_store_database(store), srv->opts.jwt_secret, false, err);
+    if (!srv->security) goto fail;
+    srv->observability = sb_observability_new(sb_store_database(store));
+    /* A prior process's capability report must not authorize a newly started
+     * external or disabled self runtime for the remainder of its freshness TTL. */
+    sbj *no_proxy = sbj_array();
+    int cleared_proxy = sb_proxy_runtime_report(sb_store_database(store), "self", no_proxy, sb_unix_now(), err);
+    sbj_free(no_proxy); if (cleared_proxy) goto fail;
     sb_wireguard_options wg;
     wireguard_options_from(&srv->opts, &wg);
     srv->wireguard = sb_wireguard_new(store, &wg);
@@ -2116,7 +2153,11 @@ sb_http_server *sb_http_server_new(sb_store *store, const sb_http_server_options
     cors_init(srv, srv->opts.cors_origins);
     /* Same registration order as the C++ register_http_routes(). */
     sb_http_register_admin_routes(srv);
+    sb_http_register_security_routes(srv);
+    sb_http_register_preferences_routes(srv);
+    sb_http_register_observability_routes(srv);
     sb_http_register_proxy_routes(srv);
+    sb_http_register_proxy_user_routes(srv);
     sb_http_register_hosts_routes(srv);
     sb_log_set_level(level);
     if (options == &defaults) sb_http_server_options_free(&defaults);
@@ -2171,7 +2212,16 @@ int sb_http_server_start(sb_http_server *srv, sb_err *err) {
     memset(bound, 0, sizeof bound);
     int count = mg_get_server_ports(srv->mg, 4, bound);
     srv->bound_port = count > 0 ? (uint16_t)bound[0].port : srv->opts.port;
+    srv->stopping = 0;
+    if (srv->opts.subscription_auto_refresh &&
+        sb_subscription_service_start(srv->subscriptions, err) != 0) {
+        sb_http_server_stop(srv);
+        return -1;
+    }
     sb_http_register_clash_websocket(srv);
+    if (sb_observability_start(srv->observability, err) != 0) {
+        sb_http_server_stop(srv); return -1;
+    }
     return srv->bound_port;
 }
 
@@ -2181,8 +2231,13 @@ uint16_t sb_http_server_port(const sb_http_server *srv) {
 }
 
 void sb_http_server_stop(sb_http_server *srv) {
-    if (!srv || !srv->mg) return;
+    if (!srv) return;
+    self_singbox_request_stop(srv);
+    sb_proxy_runtime_stop(srv->self_proxy);
+    if (!srv->mg) return;
     srv->stopping = 1;
+    sb_subscription_service_stop(srv->subscriptions);
+    sb_observability_stop(srv->observability);
     mg_stop(srv->mg);
     srv->mg = NULL;
 }
@@ -2191,6 +2246,7 @@ void sb_http_server_free(sb_http_server *srv) {
     if (!srv) return;
     sb_http_server_stop(srv);
     self_singbox_join(srv);
+    sb_proxy_runtime_free(srv->self_proxy);
     pthread_mutex_lock(&g_sink_owner_mutex);
     if (g_sink_owner == srv) {
         sb_log_set_sink(NULL, NULL);
@@ -2199,6 +2255,9 @@ void sb_http_server_free(sb_http_server *srv) {
     pthread_mutex_unlock(&g_sink_owner_mutex);
     if (srv->wireguard) sb_wireguard_free(srv->wireguard);
     if (srv->clash) sb_clash_client_free(srv->clash);
+    sb_subscription_service_free(srv->subscriptions);
+    sb_auth_security_free(srv->security);
+    sb_observability_free(srv->observability);
     if (srv->fetcher) sb_subscription_fetcher_free(srv->fetcher);
     router_free(router_of(srv));
     sbj_free(srv->telemetry);
@@ -2267,6 +2326,7 @@ static int self_singbox_render(sb_http_server *srv, sb_singbox_supervisor *super
                 (config = sb_config_renderer_render(&renderer, &request, err)) != NULL) {
                 body = sbj_dump(config, 2);
                 etag = sb_config_etag("self", body, srv->opts.config_hash_seed);
+                if (etag) sb_observability_target(sb_store_database(srv->store), "self", etag, sb_unix_now(), NULL);
                 if (!etag) {
                     sb_fail(err, SB_ERR_GENERIC, "config ETag hashing failed");
                 } else if (*last_etag && strcmp(*last_etag, etag) == 0) {
@@ -2309,7 +2369,12 @@ static void *self_singbox_main(void *arg) {
     uint64_t interval = o->self_singbox_interval_seconds < 2 ? 2 : o->self_singbox_interval_seconds;
     SB_INFO("managed sing-box enabled: binary=%s config=%s interval=%llus", o->singbox_binary, config_path,
             (unsigned long long)interval);
-    char *last_etag = NULL, *logged_error = NULL;
+    char *last_etag = NULL, *logged_error = NULL, *core_version = NULL;
+    sb_clash_client_options observation_options; sb_clash_client_options_init(&observation_options);
+    observation_options.timeout_ms = 1500; observation_options.maximum_body_bytes = 1024 * 1024;
+    sb_clash_client *observation = sb_clash_client_new(&observation_options, NULL);
+    sb_clash_target observation_target = {o->clash_api_url, o->clash_api_secret};
+    int64_t sampled_ms = 0, previous_up = 0, previous_down = 0;
     while (!self_singbox_stop_requested(srv)) {
         sb_err_clear(&e);
         if (self_singbox_render(srv, supervisor, &last_etag, &e) == 0) {
@@ -2326,6 +2391,36 @@ static void *self_singbox_main(void *arg) {
             SB_ERROR("managed sing-box cycle failed: %s", e.msg);
             sb_str_set(&logged_error, e.msg);
         }
+        bool running = sb_singbox_supervisor_running(supervisor);
+        if (running && observation) {
+            sb_clash_response response = {0};
+            if (!core_version && sb_clash_get(observation, &observation_target, "/version", &response, NULL) == 0 && response.status == 200) {
+                const char *version = sbj_get_str(response.body, "version", "");
+                if (*version && strlen(version) <= 128) core_version = sb_strdup(version);
+            }
+            sb_clash_response_free(&response);
+            if (sb_clash_get(observation, &observation_target, "/connections", &response, NULL) == 0 && response.status == 200 &&
+                sbj_is_integer(sbj_get(response.body, "uploadTotal")) && sbj_is_integer(sbj_get(response.body, "downloadTotal")) &&
+                sbj_get_int(response.body, "uploadTotal", -1) >= 0 && sbj_get_int(response.body, "uploadTotal", INT64_MAX) <= INT64_C(9007199254740991) &&
+                sbj_get_int(response.body, "downloadTotal", -1) >= 0 && sbj_get_int(response.body, "downloadTotal", INT64_MAX) <= INT64_C(9007199254740991)) {
+                int64_t now_ms = sb_monotonic_ms();
+                int64_t up = sbj_get_int(response.body, "uploadTotal", 0), down = sbj_get_int(response.body, "downloadTotal", 0);
+                sbj *sample = sbj_object(); sbj_set_int(sample, "up_total", up); sbj_set_int(sample, "down_total", down);
+                sbj_set_int(sample, "up", sampled_ms && now_ms > sampled_ms && up >= previous_up ? (int64_t)((double)(up - previous_up) * 1000.0 / (double)(now_ms - sampled_ms)) : 0);
+                sbj_set_int(sample, "down", sampled_ms && now_ms > sampled_ms && down >= previous_down ? (int64_t)((double)(down - previous_down) * 1000.0 / (double)(now_ms - sampled_ms)) : 0);
+                sbj_set_int(sample, "conn_count", (int64_t)sbj_arr_len(sbj_get(response.body, "connections")));
+                if (sb_observability_sample(sb_store_database(srv->store), "self", sample, sb_unix_now(), NULL) == 0) {
+                    sampled_ms = now_ms; previous_up = up; previous_down = down;
+                }
+                sbj_free(sample);
+            }
+            sb_clash_response_free(&response);
+        }
+        sbj *state = sbj_object(); sbj_set_str(state, "app_version", SB_EASY_VERSION);
+        sbj_set_str(state, "version", core_version ? core_version : ""); sbj_set_bool(state, "running", running);
+        sbj_set_str(state, "etag", last_etag ? last_etag : ""); sbj_set_str(state, "last_error", logged_error ? logged_error : "");
+        sb_store_update_agent_status(srv->store, "self", state, NULL);
+        sb_observability_status(sb_store_database(srv->store), "self", state, sb_unix_now(), NULL); sbj_free(state);
         struct timespec deadline;
         clock_gettime(CLOCK_MONOTONIC, &deadline);
         deadline.tv_sec += (time_t)interval;
@@ -2339,19 +2434,29 @@ static void *self_singbox_main(void *arg) {
     sb_singbox_supervisor_free(supervisor);
     free(last_etag);
     free(logged_error);
+    free(core_version);
+    sb_clash_client_free(observation);
     free(config_path);
     return NULL;
 }
 
 static int self_singbox_start(sb_http_server *srv, sb_err *err) {
+    if (srv->self_singbox_running) return 0;
     srv->self_singbox_stop = false;
-    if (pthread_create(&srv->self_singbox_thread, NULL, self_singbox_main, srv) != 0)
+    if (sb_proxy_runtime_available()) {
+        if (!srv->self_proxy) srv->self_proxy = sb_proxy_runtime_new_self(sb_store_database(srv->store), NULL, err);
+        if (!srv->self_proxy || sb_proxy_runtime_start(srv->self_proxy, err)) return -1;
+    }
+    if (pthread_create(&srv->self_singbox_thread, NULL, self_singbox_main, srv) != 0) {
+        sb_proxy_runtime_stop(srv->self_proxy);
         return sb_fail(err, SB_ERR_GENERIC, "could not start the managed sing-box thread");
+    }
     srv->self_singbox_running = true;
     return 0;
 }
 
 static void self_singbox_request_stop(sb_http_server *srv) {
+    sb_proxy_runtime_request_stop(srv->self_proxy);
     if (!srv->self_singbox_running) return;
     pthread_mutex_lock(&srv->self_singbox_mutex);
     srv->self_singbox_stop = true;
@@ -2360,10 +2465,11 @@ static void self_singbox_request_stop(sb_http_server *srv) {
 }
 
 static void self_singbox_join(sb_http_server *srv) {
-    if (!srv->self_singbox_running) return;
+    if (!srv->self_singbox_running) { sb_proxy_runtime_stop(srv->self_proxy); return; }
     self_singbox_request_stop(srv);
     pthread_join(srv->self_singbox_thread, NULL);
     srv->self_singbox_running = false;
+    sb_proxy_runtime_stop(srv->self_proxy);
 }
 
 /* ---- run_http_server ---------------------------------------------------------- */

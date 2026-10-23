@@ -10,11 +10,21 @@ class EnrollmentUriParserTest {
     @Test
     fun parsesServerGeneratedEnrollmentUri() {
         val target = EnrollmentUriParser.parse(
-            "sbeasy://enroll?server=http%3A%2F%2F39.108.98.208%3A51821&code=$code",
+            "sbeasy://enroll?server=https%3A%2F%2Fpanel.example.com%3A51821&code=$code",
         )
 
-        assertEquals("http://39.108.98.208:51821", target.first)
+        assertEquals("https://panel.example.com:51821", target.first)
         assertEquals(code.lowercase(), target.second)
+    }
+
+    @Test fun localHttpRequiresExplicitAuthorizationAndPublicHttpCannotOptIn() {
+        val local = "sbeasy://enroll?server=http%3A%2F%2F192.168.50.1%3A51821&code=$code"
+        assertThrows(IllegalArgumentException::class.java) { EnrollmentUriParser.parse(local) }
+        assertEquals("http://192.168.50.1:51821", EnrollmentUriParser.inspect(local).first)
+        assertEquals("http://192.168.50.1:51821", EnrollmentUriParser.parse(local, true).first)
+        for (address in listOf("http://39.108.98.208", "http://panel.example.com", "http://localhost", "http://169.254.169.254")) {
+            assertThrows(IllegalArgumentException::class.java) { EnrollmentUriParser.normalizeServer(address, true) }
+        }
     }
 
     @Test

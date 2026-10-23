@@ -4,18 +4,18 @@ import android.content.Context
 import android.util.AtomicFile
 import java.io.File
 
-class LocalRoutingStore(context: Context) {
-    private val file = AtomicFile(File(context.filesDir, "local-routing.json"))
+class LocalRoutingStore(context: Context, fileName: String = "local-routing.json") : RoutingStorage {
+    private val file = AtomicFile(File(context.filesDir, fileName))
 
     @Synchronized
-    fun load(): LocalRoutingPolicy? {
+    override fun load(): LocalRoutingPolicy? {
         if (!file.baseFile.isFile) return null
         // Never silently discard a user's policy if storage is corrupt.
         return LocalRouting.decode(file.openRead().bufferedReader().use { it.readText() })
     }
 
     @Synchronized
-    fun save(policy: LocalRoutingPolicy) {
+    override fun save(policy: LocalRoutingPolicy) {
         LocalRouting.validate(policy)
         val output = file.startWrite()
         try {
@@ -28,5 +28,5 @@ class LocalRoutingStore(context: Context) {
     }
 
     @Synchronized
-    fun clear() = file.delete()
+    override fun clear() = file.delete()
 }

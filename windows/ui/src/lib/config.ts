@@ -18,7 +18,7 @@ export function configStage(summary: (ConfigMetadata & { validation?: ConfigVali
   const same = active && summary.active_etag === summary.downloaded_etag
   const running = runtime?.core_running === true
   const suffix = active
-    ? same ? '此配置已激活；运行状态以本机服务为准。' : '当前仍使用先前激活的配置；下载和校验不会自动切换。'
+    ? same ? '此配置已激活；运行状态以本机服务为准。' : '当前仍使用先前激活的配置；后台同步会校验新配置并尝试应用，失败时保留先前配置。'
     : running ? '本地内核运行中，其激活版本尚未确认。'
       : runtime && ['STARTING', 'ROLLING_BACK', 'STOPPING', 'DEGRADED'].includes(runtime.phase)
         ? '本地连接正在处理或需要恢复，请以最新运行状态为准。' : '此配置尚未激活，VPN 未启动。'

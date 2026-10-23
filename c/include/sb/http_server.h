@@ -26,6 +26,7 @@ typedef struct {
     char *admin_password;          /* "admin" */
     char *clash_api_url;           /* "http://127.0.0.1:9090" */
     char *clash_api_secret;        /* "" */
+    bool subscription_auto_refresh; /* true; enabled sources refresh in background */
     bool singbox_managed;          /* false */
     char *singbox_binary;          /* "sing-box" */
     char *self_singbox_config_path;/* "" */

@@ -612,10 +612,10 @@ TEST(contract) {
     }
     ws_client_close(&ws);
 
-    /* Viewers keep read access but are blocked before mutations. */
+    /* Global node credentials require admin, including read requests. */
     char *viewer = sb_test_token(&t, "viewer-id", "contract-viewer", "viewer");
     sb_test_request_ex(&t, "GET", "/api/proxy/nodes", NULL, viewer, NULL, &r);
-    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(r.status, 403);
     sb_test_response_free(&r);
     sb_test_request_ex(&t, "POST", "/api/proxy/nodes", "{}", viewer, NULL, &r);
     CHECK_EQ_INT(r.status, 403);
@@ -1302,7 +1302,7 @@ TEST(subscription_fetching) {
     sb_test_request(&t, "POST", path, NULL, &r);
     free(path);
     CHECK_EQ_INT(r.status, 200);
-    CHECK_STR(r.body, "{\"added\":2,\"errors\":[],\"found\":2,\"skipped\":0,\"updated\":0}");
+    CHECK_STR(r.body, "{\"added\":2,\"errors\":[],\"found\":2,\"skipped\":0,\"updated\":0,\"usage\":{}}");
     sb_test_response_free(&r);
     path = sb_asprintf("/api/subscriptions/%s/fetch", yaml);
     sb_test_request(&t, "POST", path, NULL, &r);
@@ -1476,9 +1476,9 @@ TEST(websocket_authentication) {
     free(target);
     CHECK_EQ_INT(ws.status, 401);
     ws_client_close(&ws);
-    /* Viewers may stream (only a valid token is required). */
+    /* Viewers may stream an explicitly authorized host. */
     char *viewer = sb_test_token(&t, "viewer-id", "viewer", "viewer");
-    target = sb_asprintf("/api/sing-box/ws/connections?token=%s", viewer);
+    target = sb_asprintf("/api/sing-box/ws/connections?token=%s&host=self", viewer);
     REQUIRE(ws_client_open(&ws, t.port, target) == 0);
     free(target);
     CHECK_EQ_INT(ws.status, 101);

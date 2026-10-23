@@ -1,1 +1,1 @@
-{"id":"http-debug","version":"1.0.0","api_version":1,"name":"HTTP(S) debugging","engine":"mitmproxy 12.2.3"}
+{"id":"http-debug","version":"1.1.0","api_version":1,"name":"HTTP(S) debugging","engine":"mitmproxy 12.2.3","build":2}

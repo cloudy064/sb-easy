@@ -16,6 +16,8 @@
 #include "sb/script_engine.h"
 #include "sb/types.h"
 #include "sb/wireguard.h"
+#include "sb/observability.h"
+#include "sb/proxy_users.h"
 
 #define S(x) ((x) ? (x) : "")
 
@@ -379,12 +381,23 @@ static void provision_host_logged(sb_http_server *srv, sb_host *host, bool set_d
     }
 }
 
+static sbj *host_access_json(const sb_http_req *req, const sb_host *host) {
+    sbj *out = sb_host_to_json(host), *access = sbj_object();
+    sbj_set_bool(access, "operate", req->claims && sb_auth_device_allowed(req->server->security,
+        req->claims->subject, host->id, true, NULL));
+    sbj_set(out, "access", access); return out;
+}
+
 /* GET /api/hosts */
 static int handle_list_hosts(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     sb_host_vec hosts = {0};
     if (sb_store_list_hosts(req->server->store, &hosts, err) != 0) return fail_json_aware(err);
     sbj *out = sbj_array();
-    for (size_t i = 0; i < hosts.len; ++i) sbj_arr_push(out, sb_host_to_json(&hosts.items[i]));
+    for (size_t i = 0; i < hosts.len; ++i) {
+        if (req->claims && sb_auth_device_allowed(req->server->security, req->claims->subject,
+                                                  hosts.items[i].id, false, NULL))
+            sbj_arr_push(out, host_access_json(req, &hosts.items[i]));
+    }
     sb_host_vec_free(&hosts);
     sb_resp_json(resp, 200, out);
     return 0;
@@ -420,7 +433,7 @@ static int handle_get_host(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     sb_host host;
     sb_host_init(&host);
     int rc = sb_http_require_host(req->server, route_param(req), &host, err);
-    if (rc == 0) sb_resp_json(resp, 200, sb_host_to_json(&host));
+    if (rc == 0) sb_resp_json(resp, 200, host_access_json(req, &host));
     sb_host_free(&host);
     return rc == 0 ? 0 : fail_json_aware(err);
 }
@@ -472,8 +485,7 @@ static int handle_delete_host(sb_http_req *req, sb_http_resp *resp, sb_err *err)
  * managed_render_request()
  * ====================================================================== */
 
-/* uses_embedded_managed_network(): capabilities.embedded_wireguard, or
- * capabilities.platform == "android" (json type errors propagate). */
+/* Native libbox clients run their own embedded network and command service. */
 static int uses_embedded_managed_network(const sb_host *host, bool *out, sb_err *err) {
     *out = false;
     if (!sbj_is_object(host->capabilities)) return 0;
@@ -486,7 +498,8 @@ static int uses_embedded_managed_network(const sb_host *host, bool *out, sb_err 
     const sbj *found = NULL;
     const char *platform = NULL;
     if (json_value_string(host->capabilities, "platform", "", &found, &platform, err) != 0) return -1;
-    *out = found && json_string_is(found, "android");
+    *out = found && (json_string_is(found, "android") || json_string_is(found, "ios") ||
+                     json_string_is(found, "macos") || json_string_is(found, "tvos"));
     return 0;
 }
 
@@ -1003,6 +1016,7 @@ static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err
         goto done;
     }
     if (sb_store_touch_host(srv->store, host.id, err) != 0) goto done;
+    if (sb_observability_target(sb_store_database(srv->store), host.id, etag, sb_unix_now(), err) != 0) goto done;
 
     const char *if_none_match = sb_req_header(req, "If-None-Match");
     if (if_none_match && strcmp(if_none_match, etag) == 0) {
@@ -1053,7 +1067,10 @@ static int handle_agent_status(sb_http_req *req, sb_http_resp *resp, sb_err *err
         if (!value) goto done;
         sbj_set(state, fields[i].key, value);
     }
+    if (sb_proxy_runtime_report(sb_store_database(req->server->store), host.id,
+                                sbj_get(body, "capabilities"), sb_unix_now(), err) != 0) goto done;
     if (sb_store_update_agent_status(req->server->store, host.id, state, err) != 0) goto done;
+    if (sb_observability_status(sb_store_database(req->server->store), host.id, state, sb_unix_now(), err) != 0) goto done;
     respond_ok(resp);
     rc = 0;
 done:
@@ -1145,6 +1162,7 @@ static int handle_agent_telemetry(sb_http_req *req, sb_http_resp *resp, sb_err *
     if (!body) goto done;
     telemetry = sb_http_normalize_telemetry(body, err);
     if (!telemetry) goto done;
+    if (sb_observability_sample(sb_store_database(req->server->store), host.id, telemetry, sb_unix_now(), err) != 0) goto done;
     sb_http_telemetry_put(req->server, host.id, telemetry);
     telemetry = NULL;
     respond_ok(resp);

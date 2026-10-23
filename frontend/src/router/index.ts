@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/auth'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/proxy-access', name: 'ProxyAccess', component: () => import('../views/ProxyAccessView.vue') },
     {
       path: '/login',
       name: 'Login',
@@ -37,6 +38,9 @@ const router = createRouter({
         { path: 'proxy-groups', redirect: '/proxies' },
         { path: 'subscriptions', name: 'Subscriptions', component: () => import('../views/SubscriptionsView.vue') },
         { path: 'users', name: 'Users', component: () => import('../views/UsersView.vue') },
+        { path: 'proxy-users', name: 'ProxyUsers', component: () => import('../views/ProxyUsersView.vue') },
+        { path: 'security', name: 'Security', component: () => import('../views/SecurityView.vue') },
+        { path: 'observability', name: 'Observability', component: () => import('../views/ObservabilityView.vue') },
         { path: 'settings', name: 'Settings', component: () => import('../views/SettingsView.vue') },
       ],
     },
@@ -49,8 +53,8 @@ router.beforeEach((to, _from, next) => {
     next('/login')
   } else if (to.path === '/login' && auth.token) {
     next('/')
-  } else if (to.name === 'Users' && auth.role !== 'admin') {
-    next('/')
+  } else if (auth.role !== 'admin' && ['Dashboard', 'Users', 'ProxyUsers', 'Settings', 'Profiles', 'Proxies', 'Subscriptions', 'ServerLogs', 'Observability'].includes(String(to.name))) {
+    next('/devices')
   } else {
     next()
   }

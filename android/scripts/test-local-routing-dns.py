@@ -233,7 +233,7 @@ def main():
                 check = subprocess.run([core, "check", "-c", str(config)], capture_output=True, text=True)
                 assert check.returncode == 0, check.stderr
                 process = subprocess.Popen([core, "run", "-c", str(config)], stdout=log, stderr=subprocess.STDOUT)
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + 15
                 while True:
                     assert process.poll() is None, (directory / "core.log").read_text()
                     try:

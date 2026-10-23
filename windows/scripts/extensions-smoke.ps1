@@ -1,8 +1,11 @@
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
-    [switch]$HttpDebug
+    [switch]$HttpDebug,
+    [Parameter(Mandatory=$true)][string]$SignedCatalog
 )
 $ErrorActionPreference = 'Stop'
+$catalogEnvelope = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $SignedCatalog).Path, [Text.Encoding]::UTF8)
+if ([Text.Encoding]::UTF8.GetByteCount($catalogEnvelope) -gt 900*1024) { throw 'Catalog exceeds the native IPC input limit.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $buildDir = Join-Path $repoRoot "build\windows-$($Configuration.ToLowerInvariant())"
 $serviceExe = Join-Path $buildDir 'sb-easy-service.exe'
@@ -94,6 +97,7 @@ try {
     $null=Invoke-TestRpc 'config.refresh'
     $null=Invoke-TestRpc 'connection.start';$connected=$true
     $before=Invoke-TestRpc 'runtime.snapshot'
+    $null=Invoke-TestRpc 'extensions.catalog_update' @{envelope=$catalogEnvelope}
     if((Invoke-TestRpc 'extensions.list').extensions[0].installed){throw 'Base unexpectedly contains capture'}
     $null=Invoke-TestRpc 'capture.snapshot' @{} 'EXTENSION_MISSING'
     Install-FromStore

@@ -202,7 +202,7 @@ static int one_time_link_rows(sb_test_server *t, const char *token, const char *
  * /api/health, /api/system/...
  * ====================================================================== */
 
-TEST(health_and_public_system_routes) {
+TEST(health_and_protected_system_routes) {
     sb_test_server t;
     sb_test_response r = {0};
     REQUIRE(sb_test_server_start(&t) == 0);
@@ -223,11 +223,13 @@ TEST(health_and_public_system_routes) {
     call_h(&t, &r, "GET", "/api/health", NULL, ADMIN, rejected);
     CHECK(r.allow_origin == NULL);
 
-    /* "system status must remain public for health dashboards" */
+    /* Global counts require an administrator; health remains public. */
     call(&t, &r, "GET", "/api/system/status", NULL, NO_AUTH);
+    CHECK_ERROR(r, 401, "Invalid or expired token");
+    call(&t, &r, "GET", "/api/system/status", NULL, ADMIN);
     CHECK_EQ_INT(r.status, 200);
     CHECK_STR(str_of(r.json, "status"), "running");
-    CHECK_STR(str_of(r.json, "version"), "1.0.0");
+    CHECK_STR(str_of(r.json, "version"), SB_EASY_VERSION);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "wireguard"), "peer_count", -1), 0);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "sing_box"), "node_count", -1), 0);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "subscriptions"), "count", -1), 0);
@@ -241,12 +243,9 @@ TEST(health_and_public_system_routes) {
     call(&t, &r, "POST", "/api/system/migrate/wg-easy", NULL, NO_AUTH);
     CHECK_ERROR(r, 401, "Invalid or expired token");
 
-    /* "the legacy wg-easy migration placeholder must preserve its contract" */
+    /* Migration now validates input rather than returning a placeholder. */
     call(&t, &r, "POST", "/api/system/migrate/wg-easy", NULL, ADMIN);
-    CHECK_EQ_INT(r.status, 200);
-    CHECK_STR(str_of(r.json, "status"), "not_implemented");
-    CHECK_STR(str_of(r.json, "message"),
-              "wg-easy migration coming in a future update. Use manual import for now.");
+    CHECK_EQ_INT(r.status, 400);
 
     /* "system logs must expose the bounded server log buffer" */
     call(&t, &r, "GET", "/api/system/logs", NULL, ADMIN);
@@ -446,7 +445,7 @@ TEST(user_administration) {
     /* Viewers keep read access but are blocked before mutations run (the
      * C++ contract uses /api/proxy/nodes; the admin group has equivalents). */
     call(&t, &r, "GET", "/api/settings", NULL, viewer_token);
-    CHECK_EQ_INT(r.status, 200);
+    CHECK_ERROR(r, 403, "Admin role required");
     call(&t, &r, "PUT", "/api/settings", "{\"general\":{\"app_name\":\"viewer\"}}", viewer_token);
     CHECK_ERROR(r, 403, "Viewer role is read-only");
     call(&t, &r, "POST", "/api/wireguard/peers", "{}", viewer_token);
@@ -484,7 +483,7 @@ TEST(user_administration) {
     CHECK_ERROR(r, 400, "Username required, password must be at least 4 characters");
     call(&t, &r, "POST", "/api/users", "{\"username\":\"someone\",\"password\":\"long-enough\",\"role\":\"root\"}",
          ADMIN);
-    CHECK_ERROR(r, 400, "Role must be admin or viewer");
+    CHECK_ERROR(r, 400, "Role must be admin, operator or viewer");
     call(&t, &r, "POST", "/api/users", "{\"username\":\"contract-viewer\",\"password\":\"long-enough\"}", ADMIN);
     CHECK_ERROR(r, 409, "Username already exists");
     /* Role defaults to viewer; null role too. */
@@ -512,7 +511,7 @@ TEST(user_administration) {
     call(&t, &r, "POST", path, "\"text\"", ADMIN);
     CHECK_ERROR(r, 400, "Request body must be a JSON object");
     call(&t, &r, "POST", path, "{\"password\":\"replacement-password\"}", viewer_token);
-    CHECK_ERROR(r, 403, "Viewer role is read-only");
+    CHECK_ERROR(r, 401, "Invalid or expired token"); /* password reset revoked it */
     call(&t, &r, "POST", "/api/users/missing-user/password", "{\"password\":\"replacement-password\"}", ADMIN);
     CHECK_ERROR(r, 404, "User not found");
 
@@ -546,10 +545,15 @@ TEST(user_administration) {
     CHECK_SUCCESS(r);
     free(path);
     path = sb_asprintf("/api/users/%s", second_id);
-    char *other_token = sb_test_token(&t, "someone-else", "ghost", "admin");
+    /* An unregistered token cannot impersonate a non-existent administrator. */
+    char *other_token = sb_auth_create_token(t.jwt_secret, "someone-else", "ghost", "admin");
     call(&t, &r, "DELETE", path, NULL, other_token);
-    CHECK_ERROR(r, 400, "Cannot delete the last admin");
+    CHECK_ERROR(r, 401, "Invalid or expired token");
+    sb_err last_admin_error = {0};
+    CHECK_EQ_INT(sb_store_delete_user(t.store, "someone-else", second_id, &last_admin_error), -1);
+    CHECK_STR(last_admin_error.msg, "Cannot delete the last admin");
     free(other_token);
+    free(t.token); t.token = sb_strdup(second_token);
     free(second_token);
     free(second_id);
 
@@ -667,7 +671,7 @@ TEST(backup_restore_and_config_downloads) {
                          NULL);
     REQUIRE(peer_id);
 
-    call(&t, &r, "GET", "/api/system/status", NULL, NO_AUTH);
+    call(&t, &r, "GET", "/api/system/status", NULL, ADMIN);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "wireguard"), "peer_count", -1), 1);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "sing_box"), "node_count", -1), 3);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "subscriptions"), "count", -1), 1);
@@ -692,7 +696,7 @@ TEST(backup_restore_and_config_downloads) {
     CHECK_EQ_INT(sbj_get_int(restored, "wireguard_peers", -1), 1);
     CHECK_EQ_INT(sbj_get_int(restored, "subscriptions", -1), 1);
     CHECK_EQ_INT(sbj_get_int(restored, "app_settings", -1), 3);
-    call(&t, &r, "GET", "/api/system/status", NULL, NO_AUTH);
+    call(&t, &r, "GET", "/api/system/status", NULL, ADMIN);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "sing_box"), "node_count", -1), 3);
 
     call(&t, &r, "POST", "/api/settings/restore", "{\"proxy_nodes\":{}}", ADMIN);
@@ -871,7 +875,7 @@ TEST(wireguard_peer_contract) {
     CHECK_SUCCESS(r);
 
     /* "system status must report persisted WireGuard peers" */
-    call(&t, &r, "GET", "/api/system/status", NULL, NO_AUTH);
+    call(&t, &r, "GET", "/api/system/status", NULL, ADMIN);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "wireguard"), "peer_count", -1), 1);
 
     /* Explicit fields on create; the next free address is allocated. */
@@ -902,7 +906,7 @@ TEST(wireguard_peer_contract) {
     CHECK_ERROR(r, 404, "Peer not found");
     call(&t, &r, "DELETE", path, NULL, ADMIN);
     CHECK_ERROR(r, 404, "Peer not found");
-    call(&t, &r, "GET", "/api/system/status", NULL, NO_AUTH);
+    call(&t, &r, "GET", "/api/system/status", NULL, ADMIN);
     CHECK_EQ_INT(sbj_get_int(sbj_get(r.json, "wireguard"), "peer_count", -1), 1);
 
     free(token);

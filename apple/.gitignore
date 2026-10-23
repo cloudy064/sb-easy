@@ -1,0 +1,9 @@
+.build/
+DerivedData/
+Vendor/
+SBEasy.xcodeproj/
+Signing.xcconfig
+*.xcarchive
+*.ipa
+*.dmg
+*.xcresult

@@ -7,6 +7,8 @@ typedef struct sbw_runtime_config {
     char *json;                 /* private adapted bytes, never expose to UI */
     char *secret;               /* ephemeral local API bearer secret */
     unsigned short port;       /* 127.0.0.1 only; ownership checked by health */
+    unsigned short probe_port; /* authenticated HTTP diagnostic inbound */
+    char *probe_secret;        /* separate ephemeral proxy credential; private */
     bool has_tun;
     bool auto_route;            /* copied from candidate; never enabled implicitly */
     bool remote_rule_sets;      /* first start may download rule-set data */
@@ -32,5 +34,12 @@ int sbw_runtime_select_gpt(const sbw_runtime_config *config, DWORD pid, HANDLE c
                            const char *target, sbw_error *error);
 int sbw_runtime_select_group(const sbw_runtime_config *config, DWORD pid, HANDLE cancel,
                            const char *selector, const char *target, sbw_error *error);
+/* Rechecks TCP listener ownership before any diagnostic proxy credential is
+ * sent. No request may bypass this check or fall back to a direct request. */
+int sbw_runtime_probe_owner(const sbw_runtime_config *config, DWORD pid, sbw_error *error);
+int sbw_runtime_delay(const sbw_runtime_config *config, DWORD pid, HANDLE cancel,
+                       const char *target, const char *url, DWORD timeout_ms,
+                       sbj **out, sbw_error *error);
+#define SBW_PROBE_INBOUND "sb-easy-diagnostic"
 
 #endif

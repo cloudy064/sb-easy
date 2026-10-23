@@ -42,6 +42,9 @@ class Tunnel(socketserver.StreamRequestHandler):
             if header in (b'\r\n', b'\n', b''): break
             k, v = header.decode().split(':', 1); headers[k.lower()] = v.strip()
         self.server.headers.append(headers)
+        expected = getattr(self.server, 'required_auth', None)
+        if expected and headers.get('proxy-authorization') != expected:
+            self.wfile.write(b'HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n'); self.wfile.flush(); return
         if not line.startswith('CONNECT '): return
         host, target_port = line.split()[1].rsplit(':', 1)
         with socket.create_connection((host, int(target_port)), timeout=5) as upstream:
@@ -68,6 +71,12 @@ class Target(BaseHTTPRequestHandler):
 
 class EngineTest(unittest.TestCase):
     def test_https_plaintext_edit_replay_and_web_auth(self):
+        self.exercise_engine(False)
+
+    def test_android_authenticated_return_leg_and_ca_cleanup(self):
+        self.exercise_engine(True)
+
+    def exercise_engine(self, authenticated_upstream):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -85,7 +94,7 @@ class EngineTest(unittest.TestCase):
             for server in (target, upstream): threading.Thread(target=server.serve_forever, daemon=True).start()
             engine = Engine(); proxy, web = port(), port()
             try:
-                engine.start(str(directory/'engine'), proxy, web, upstream.server_address[1])
+                engine.start(str(directory/'engine'), proxy, web, upstream.server_address[1], authenticated_upstream=authenticated_upstream)
                 deadline = time.monotonic()+15
                 while engine.phase == 'starting' and time.monotonic() < deadline: time.sleep(.1)
                 self.assertEqual(engine.phase, 'running', engine.error)
@@ -97,11 +106,13 @@ class EngineTest(unittest.TestCase):
                 client_ca = directory/'client.pem'; client_ca.write_bytes((directory/'engine/mitmproxy-ca-cert.pem').read_bytes())
                 connection = http.client.HTTPSConnection('127.0.0.1', proxy, timeout=10, context=ssl.create_default_context(cafile=str(client_ca)))
                 credential = base64.b64encode(f'sbeasy:{engine.password}'.encode()).decode()
+                if authenticated_upstream: upstream.required_auth = f'Basic {credential}'
                 connection.set_tunnel('localhost', target.server_port, {'Proxy-Authorization': f'Basic {credential}'})
                 connection.request('POST', '/fixture', body=b'{"prompt":"plaintext-fixture"}', headers={'Content-Type': 'application/json'})
                 response = connection.getresponse(); self.assertEqual(response.status, 200); self.assertIn(b'plaintext-fixture', response.read()); connection.close()
                 self.assertTrue(upstream.headers)
-                self.assertNotIn('proxy-authorization', upstream.headers[0])
+                if authenticated_upstream: self.assertEqual(upstream.headers[0]['proxy-authorization'], f'Basic {credential}')
+                else: self.assertNotIn('proxy-authorization', upstream.headers[0])
                 base = f'http://127.0.0.1:{web}'
                 with self.assertRaises(urllib.error.HTTPError) as denied: urllib.request.urlopen(base+'/flows.json')
                 self.assertIn(denied.exception.code, (401, 403))
@@ -130,8 +141,30 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(denied.exception.code, 403)
                 self.assertGreater(len(bytes.fromhex(engine.certificate()['der'])), 500)
             finally:
-                engine.stop(); target.shutdown(); target.server_close(); upstream.shutdown(); upstream.server_close()
+                if authenticated_upstream:
+                    import engine as module
+                    previous = module.engine
+                    try:
+                        module.engine = engine
+                        result = json.loads(module.android_call('stop', json.dumps({'directory': str(directory/'engine')})))
+                        self.assertEqual(result['protocol_version'], 2)
+                        self.assertFalse((directory/'engine').exists())
+                    finally: module.engine = previous
+                else:
+                    engine.stop()
+                target.shutdown(); target.server_close(); upstream.shutdown(); upstream.server_close()
             self.assertEqual(engine.phase, 'stopped')
+            if authenticated_upstream:
+                import engine as module
+                previous = module.engine
+                try:
+                    module.engine = engine
+                    result = json.loads(module.android_call('clear', json.dumps({'directory': str(directory/'engine')})))
+                    self.assertEqual(result['protocol_version'], 2)
+                    self.assertFalse((directory/'engine').exists())
+                    self.assertTrue(ca.exists())
+                    with self.assertRaises(ValueError): module.dispatch('clear', {'directory': str(directory)})
+                finally: module.engine = previous
 
 
 if __name__ == '__main__': unittest.main()

@@ -1,9 +1,11 @@
 #include "pipe_server.h"
+#include "kill_switch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
 
 static HANDLE stop_event;
+static sbw_controller *running_controller;
 static SERVICE_STATUS_HANDLE status_handle;
 static SERVICE_STATUS service_status;
 static SRWLOCK status_lock = SRWLOCK_INIT, event_lock = SRWLOCK_INIT;
@@ -11,7 +13,7 @@ static void report_status(DWORD state, DWORD error) {
     AcquireSRWLockExclusive(&status_lock);
     service_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     service_status.dwCurrentState = state;
-    service_status.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN : 0;
+    service_status.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT : 0;
     service_status.dwWin32ExitCode = error;
     service_status.dwWaitHint = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING ? 10000 : 0;
     service_status.dwCheckPoint = service_status.dwWaitHint ? 1 : 0;
@@ -30,7 +32,15 @@ static void close_stop(void) {
     ReleaseSRWLockExclusive(&event_lock);
 }
 static DWORD WINAPI service_control(DWORD control, DWORD event_type, void *event_data, void *context) {
-    (void)event_type; (void)event_data; (void)context;
+    (void)event_data; (void)context;
+    if (control == SERVICE_CONTROL_POWEREVENT) {
+        if (event_type == PBT_APMRESUMEAUTOMATIC || event_type == PBT_APMRESUMESUSPEND || event_type == PBT_APMRESUMECRITICAL) {
+            AcquireSRWLockShared(&event_lock);
+            sbw_controller_network_changed(running_controller);
+            ReleaseSRWLockShared(&event_lock);
+        }
+        return NO_ERROR;
+    }
     if (control == SERVICE_CONTROL_STOP || control == SERVICE_CONTROL_SHUTDOWN) {
         report_status(SERVICE_STOP_PENDING, ERROR_SUCCESS); signal_stop(); return NO_ERROR;
     }
@@ -50,7 +60,8 @@ static DWORD run(bool console, const wchar_t *directory, sbw_pipe_options *optio
     sbw_control_plane *remote = store ? sbw_winhttp_new(25000, &error) : NULL;
     if (!store || !remote) {
         sbw_store_free(store); sbw_control_plane_free(remote); free(default_directory);
-        if (console) fprintf(stderr, "%s\n", error.message); return ERROR_OPEN_FAILED;
+        if (console) fprintf(stderr, "%s\n", error.message);
+        return ERROR_OPEN_FAILED;
     }
     sbw_controller *controller = sbw_controller_new(remote, store, stop_event, &error);
     if (!controller) { free(default_directory); if (console) fprintf(stderr, "%s\n", error.message); return ERROR_OPEN_FAILED; }
@@ -61,9 +72,18 @@ static DWORD run(bool console, const wchar_t *directory, sbw_pipe_options *optio
     sbw_core_options core_options = {core_binary, work_directory, 8000, 5000};
     sbw_core *core = core_binary && work_directory ? sbw_core_new(&core_options, &core_error) : NULL;
     sbw_controller_set_core(controller, core, &core_error);
+    sbw_error updater_error = {0};
+    sbw_controller_set_updater(controller, sbw_updater_new(binary_dir, location, !console, &updater_error));
     free(binary_dir); free(core_binary); free(work_directory); free(default_directory);
+    if (sbw_controller_start_background(controller, &error) != 0) {
+        sbw_controller_free(controller);
+        if (console) fprintf(stderr, "%s\n", error.message);
+        return ERROR_SERVICE_NOT_ACTIVE;
+    }
     options->controller = controller;
+    AcquireSRWLockExclusive(&event_lock); running_controller = controller; ReleaseSRWLockExclusive(&event_lock);
     DWORD result = sbw_run_pipe_server(options, stop_event);
+    AcquireSRWLockExclusive(&event_lock); running_controller = NULL; ReleaseSRWLockExclusive(&event_lock);
     sbw_controller_free(controller); options->controller = NULL; return result;
 }
 static void WINAPI service_main(DWORD argc, wchar_t **argv) {
@@ -77,9 +97,44 @@ static void WINAPI service_main(DWORD argc, wchar_t **argv) {
     DWORD result = run(false, NULL, &options);
     report_status(SERVICE_STOPPED, result); close_stop();
 }
+static int disable_kill_switch(void) {
+    SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY; PSID administrators = NULL; BOOL member = FALSE;
+    if (!AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+        0, 0, 0, 0, 0, 0, &administrators)) return 1;
+    BOOL checked = CheckTokenMembership(NULL, administrators, &member); FreeSid(administrators);
+    if (!checked || !member) { fputs("Run leak-protection recovery from an elevated administrator terminal.\n", stderr); return 1; }
+    SC_HANDLE manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!manager) { fputs("The service manager could not be inspected.\n", stderr); return 1; }
+    SC_HANDLE service = OpenServiceW(manager, L"sb-easy", SERVICE_QUERY_STATUS);
+    bool stopped = false;
+    if (service) {
+        SERVICE_STATUS_PROCESS status = {0}; DWORD needed = 0;
+        stopped = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof status, &needed) &&
+            status.dwCurrentState == SERVICE_STOPPED;
+        CloseServiceHandle(service);
+    } else stopped = GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST;
+    CloseServiceHandle(manager);
+    if (!stopped) { fputs("Stop the sb-easy Windows service before leak-protection recovery.\n", stderr); return 1; }
+    /* DPAPI state belongs to LocalSystem. A durable administrator-only marker
+     * lets its next successful startup persist disabled without decrypting or
+     * replacing any device credentials in this administrator process. */
+    sbw_error error = {0};
+    if (sbw_kill_switch_set_recovery_disabled(true, &error) != 0 ||
+        sbw_kill_switch_apply(false, NULL, NULL, &error) != 0) {
+        fprintf(stderr, "%s: %s\n", error.code, error.message); return 1;
+    }
+    puts("sb-easy leak-protection rules removed. Recovery remains recorded until the service saves the disabled setting.");
+    return 0;
+}
 int wmain(int argc, wchar_t **argv) {
     int helper = sbw_core_signal_helper(argc, argv);
     if (helper >= 0) return helper;
+    if (argc == 2 && !wcscmp(argv[1], L"--disable-kill-switch")) return disable_kill_switch();
+    if (argc == 2 && !wcscmp(argv[1], L"--upgrade-health-check")) return sbw_update_health_check();
+    if (argc == 2 && !wcscmp(argv[1], L"--publisher-info")) {
+        printf("{\"publisher_thumbprint\":\"%s\",\"version\":\"%s\",\"core_version\":\"%s\"}\n",
+            SB_EASY_PUBLISHER_THUMBPRINT, SB_EASY_VERSION, SB_EASY_CORE_VERSION); return 0;
+    }
     bool console = false, custom_pipe = false;
     const wchar_t *directory = NULL;
     sbw_pipe_options options; sbw_pipe_options_init(&options);
@@ -89,6 +144,7 @@ int wmain(int argc, wchar_t **argv) {
         else if (wcscmp(argv[i], L"--data-dir") == 0 && i + 1 < argc) directory = argv[++i];
         else if (wcscmp(argv[i], L"--help") == 0) {
             puts("sb-easy-service [--console [--pipe-name \\\\.\\pipe\\name] [--data-dir path]]\n"
+                 "sb-easy-service --disable-kill-switch (administrator; service must be stopped)\n"
                  "C11 Windows service. Managed core connection control; TUN requires an elevated service."); return 0;
         } else { fputs("Unknown or incomplete argument. Use --help.\n", stderr); return 2; }
     }

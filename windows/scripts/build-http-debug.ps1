@@ -21,5 +21,5 @@ try {
     Push-Location windows/ui
     try { & npx.cmd vite build --config vite.plugins.config.ts --mode http-debug; if ($LASTEXITCODE) { throw 'Plugin UI build failed' } }
     finally { Pop-Location }
-    Write-Output 'HTTP debug engine and UI built. Run package-plugins.py, rebuild the base service, then package the client.'
+    Write-Output 'HTTP debug engine and UI built. Build a signed catalog with package-plugins.py --base-url <HTTPS origin> --sequence <next sequence>; embed the reviewed publisher public key in the host.'
 } finally { Pop-Location }

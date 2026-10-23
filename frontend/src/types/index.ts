@@ -44,6 +44,7 @@ export interface AgentEnrollment {
 }
 
 export interface Host {
+  access?: { operate: boolean }
   id: string
   name: string
   capabilities: HostCapabilities
@@ -77,7 +78,7 @@ export interface ConfigProfile {
 export interface ProxyNode {
   id: string
   tag: string
-  node_type: 'shadowsocks' | 'vmess' | 'trojan' | 'vless' | 'hysteria2' | 'tuic' | 'http'
+  node_type: 'shadowsocks' | 'vmess' | 'trojan' | 'vless' | 'hysteria2' | 'tuic' | 'http' | 'socks'
   enabled: boolean
   server: string
   server_port: number
@@ -90,6 +91,13 @@ export interface ProxyNode {
   updated_at: string
 }
 
+export interface SubscriptionUsage {
+  upload?: number
+  download?: number
+  total?: number
+  expire?: number
+}
+
 export interface Subscription {
   id: string
   name: string
@@ -98,6 +106,12 @@ export interface Subscription {
   refresh_interval: number
   last_fetched_at: string | null
   last_fetch_result: string | null
+  usage?: SubscriptionUsage
+  last_attempt_at?: string | null
+  last_error?: string | null
+  next_refresh_at?: number
+  failure_count?: number
+  background_refresh_enabled?: boolean
   created_at: string
   updated_at: string
 }
@@ -108,6 +122,7 @@ export interface FetchResult {
   skipped: number
   found?: number
   errors: string[]
+  usage?: SubscriptionUsage
 }
 
 export interface ProxyGroup {

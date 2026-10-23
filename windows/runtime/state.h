@@ -2,6 +2,7 @@
 #define SB_WINDOWS_RUNTIME_STATE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,18 @@ void sb_windows_runtime_init(sb_windows_runtime_state *state);
 /* Invalid transitions return false and leave state unchanged. */
 bool sb_windows_runtime_apply(sb_windows_runtime_state *state, sb_windows_event event);
 const char *sb_windows_phase_name(sb_windows_phase phase);
+
+/* Retry scheduling is independent of the clock and platform. A manual stop
+ * disables recovery; callers persist that intent separately from core state. */
+typedef struct sb_windows_recovery {
+    bool desired_connected;
+    unsigned attempts;
+    uint64_t retry_at_ms, healthy_since_ms;
+} sb_windows_recovery;
+void sb_windows_recovery_request(sb_windows_recovery *recovery, bool connect, uint64_t now_ms);
+void sb_windows_recovery_failed(sb_windows_recovery *recovery, uint64_t now_ms);
+void sb_windows_recovery_healthy(sb_windows_recovery *recovery, uint64_t now_ms);
+bool sb_windows_recovery_due(const sb_windows_recovery *recovery, uint64_t now_ms);
 
 #ifdef __cplusplus
 }

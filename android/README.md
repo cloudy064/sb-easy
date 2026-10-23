@@ -1,5 +1,90 @@
 # sb-easy Android
 
+## 未发布：Android 1.4.0（版本码 29）/ sing-box 1.14.3
+
+当前应用版本从统一的 [`client-releases.json`](../config/client-releases.json) 读取，为 `1.4.0` / `29`；内核从 [`runtime-versions.json`](../config/runtime-versions.json) 读取，锁定 `1.14.3` / `7054cac5124465ffdb145870d7c01885566711b1`。已重建包含采集扩展的四 ABI libbox AAR，并适配 DNS 服务器迭代器、原生 JNI 证书存储、CrashReport 路径及新增平台回调；普通 VPN 不提供 root shell、二层桥接或 SSH 托管能力。1.4.0 当前仅为本地构建，尚未发布。已发布的 Android 1.3.4 下载与升级身份仍对应旧核心，不代表新版已发布或真机验收完成。
+
+新版原生验证覆盖本地健康 API 的鉴权/TLS/截止时间，以及 Claude/GPT/自定义/默认分流和 DNS 出口、FakeIP/IPv6、HTTPS/SVCB 地址提示、核心重启映射和直连切换。IPv4-only TUN 通过显式 A 查询与 AAAA 空答案保留原行为，不再使用 `strategy` DNS 规则字段；1.14 已按服务器隔离 DNS 缓存，因此移除旧 `independent_cache`。
+
+受管注册、配置、命令、状态与诊断请求默认要求 HTTPS，并拒绝 HTTP 重定向和注册响应更换服务器地址。开发/局域网测试可在注册页明确允许当前内网或回环 IP 的 HTTP 中心；不接受域名、公共 IP 或链路本地地址作为例外。该授权和设备令牌一起加密保存，不随偏好导出；已有 HTTP 注册默认不授权，可在停止 VPN 后到“设置 → 设备与中心”明确启用合格的局域网地址，或使用 HTTPS 重新注册。使用反向代理时应把中心公开地址配置为二维码所用的最终 HTTPS 地址。
+
+## 未发布：应用分组与健康策略
+
+“代理 → 编辑规则”支持搜索已安装应用或填写包名，分组允许只匹配应用、只匹配域名或两者任选。域名与应用按 **OR** 匹配，同一包名不能落入多个组；Android 官方 Claude/ChatGPT 开关兼容旧配置。数据连接和 DNS 都跟随同一组，中心地址与受管 WireGuard 网络/DNS 保持优先，之后应用规则优先于普通目的域名。中心更新不会清除包名列表。
+
+每组及默认代理可以选择固定节点，或在用户确认的候选池内启用自动模式（1–32 个节点，不含直连）。健康设置包括 HTTPS 探测 URL、间隔 30–86400 秒、超时 500–30000 ms、择优容差 0–10000 ms；默认“仅故障切换”，也可选择“改善超过容差才择优切换”。固定节点故障只提示，不更换出口；全部候选失败时保持当前出口，不回退直连。固定节点被中心移除、或自动池的节点全部被移除时，生成显式数据拒绝和 DNS REFUSED 规则，保留中心/私网的既有例外。独立订阅更新仍优先保留上次可用节点，要求用户先调整已移除的固定出口。
+
+探测运行在 VPN 服务中，UI 退出后继续；切网后重新检测，核心/配置变化期间的旧结果会丢弃。运行时注入仅监听 `127.0.0.1` 的随机端口和随机 token，使用核心的逐节点测速 API；此 token 不进入已保存/展示配置。客户端总截止时间会取消挂起请求。关闭健康设置只影响后台探测，仍可手动测速；启用自动组需开启后台探测。
+
+实现依据：[官方 URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/)、[路由规则](https://sing-box.sagernet.org/configuration/route/rule/)、[DNS 规则](https://sing-box.sagernet.org/configuration/dns/rule/) 与 sing-box 1.13.12/1.14.3 Clash API 源码。两版 URLTest JSON 都没有探测 timeout 字段，因此本机通过原生逐节点 API 执行完整健康策略。可设置 `SB_EASY_SINGBOX=/path/to/sing-box` 运行 `:core:testDebugUnitTest --tests '*NativeHealthApiTest' --rerun-tasks`，验证本机隔离核心的鉴权、TLS 探测、超时及选择组边界；未配置路径时该用例明确跳过。尚需真机验证应用归属、VPN 退出后任务及实际 DNS/IPv6 路径。
+
+## 未发布：独立模式与本机订阅
+
+当前工作区新增独立模式：新装页面选择“无需中心，使用本机订阅”，在“订阅”页添加订阅 URL 或粘贴内容，导入通过核心校验后即可连接。支持 sing-box JSON、Clash YAML、普通分享链接和 Base64 订阅，节点协议为 Shadowsocks、VMess、VLESS、Trojan、Hysteria2、TUIC、HTTP、SOCKS。只提取代理节点；源路由、DNS、选择组和脚本不迁移。插件、文件路径和跨节点引用会被拒绝，并展示按输入序号说明的跳过原因。核心不支持的参数仍会导致校验失败并保留原配置。
+
+- 独立配置由本机生成双栈 TUN、DNS 和服务分组。默认直连私网、代理公网，无首次启动必须下载的 Geo 规则；可继续编辑默认/Claude/GPT/自定义域名分组。受管模式保留原有 Geo 分流行为。
+- 订阅支持添加、编辑、删除、手动更新和 15 分钟至 7 天自动更新间隔；0 表示关闭自动更新。Android JobScheduler 在 UI/VPN 退出后继续安排刷新，重启后保留任务，休眠及省电策略可能推迟执行。提供方返回 `Subscription-Userinfo` 时显示余量与到期时间。
+- 下载限制 1 MB，每个订阅最多 512 节点，最多 16 个订阅。HTTPS 默认开启；HTTP 须在该订阅显式允许，HTTPS 重定向禁止降级。下载客户端不持有中心 token，禁止 URL 用户名/密码，不调用第三方订阅转换服务。
+- 更新先解析、校验和应用，再提交缓存。下载/校验/应用/磁盘失败保留旧节点和配置；已选固定出口从更新内容消失时拒绝替换，须先改选出口。订阅更新保留本机分组与选择。已缓存配置优先启动，刷新在 VPN 建立后进行。
+- 订阅原文、URL 和节点集合使用 Android Keystore AES-GCM 加密，运行配置保存在禁止备份的应用私有目录。独立/受管模式拥有独立缓存和路由偏好，须断开 VPN 才可切换；切换清除会话日志和连接统计，避免独立流量元数据进入中心。独立模式不发送心跳、遥测、测速或诊断，既有受管注册凭据保留在 Keystore 中以供切回。
+
+本机验证：`ANDROID_HOME=/path/to/sdk ./gradlew :core:testDebugUnitTest :libbox-bridge:testDebugUnitTest :app:assembleDebug`。新增解析/下载和仓储测试覆盖模式/凭据隔离、缓存重建、固定出口消失、刷新失败及磁盘提交失败回滚。生成配置另通过 sing-box 1.13.12 `check`。这些是 JVM/构建与配置检查，尚不等同真机 VPN/休眠/切网与 DNS/IPv6 泄漏验收。
+
+## 未发布：可选 PCAP 与 HTTP(S) 调试
+
+“诊断 → 可选流量采集”恢复实验入口，默认关闭，每次必须明确启用本次会话；进程重启、VPN 停止或切换模式后清除授权。旧设置不会自动恢复采集。PCAP 保留在本机，独立模式禁止上传；受管模式仍须单独选择自动上传或手动上传。会话停止保留已有 PCAP 文件。
+
+HTTPS 调试需要另外构建并安装 1.0.1 或更新的同签名插件。入口通过系统文件选择器读取 APK，检查包名、最低版本和主应用签名后交给 Android 安装；不自动下载旧版插件。使用 `extensions/http-debug/build-android.sh` 构建 arm64/x86_64 插件；需要与主应用相同的签名身份。仅对明确指定的域名及 TCP 80/443 截获，管理地址、WireGuard 网络/解析器和应用专属分流保留原优先级。回程 HTTP 入口与插件入口仅绑定 loopback，并分别要求每次生成的凭据。被截获的连接从原有域名分流选择出口；应用分组优先的流量不被调试覆盖。
+
+停止调试先撤销拦截，再释放插件；插件异常断开撤销拦截并保留错误。正常退出删除插件本地 CA 私钥与会话，崩溃遗留文件在下一次插件启动前删除。已导出的 CA/HAR/PCAP 文件由用户管理。Android 普通应用不能卸载用户已安装的系统 CA：界面保留所有已导出证书的指纹与系统安全设置入口，实际读取信任存储确认这些 CA 都不存在后才能清除提醒。重新开始生成新 CA，旧 CA 需在系统设置移除。参考 [Android KeyChain](https://developer.android.com/reference/android/security/KeyChain) 与 [DevicePolicyManager](https://developer.android.com/reference/android/app/admin/DevicePolicyManager)。
+
+JVM 测试覆盖会话授权、回程鉴权、路由优先级与退出配置；原生 1.14.3 测试验证未鉴权回程被拒绝、鉴权 CONNECT 与恢复原配置；Python 测试实际执行 HTTPS 截获、编辑重放、鉴权及 CA 清理。[Android 隔离验收说明](../docs/android-device-acceptance.md) 提供可运行的临时 C 中心、HTTP/UDP echo、PCAP 上传校验和显式 adb 驱动。已编译设备用例覆盖原始 TUN 采集、插件引擎、真实 VPN 调试 overlay/HAR/停止恢复/CA 轮换，以及同签名不同 UID 的私有文件与 IPC 拒绝；不安装系统 CA。当前无在线测试设备，**这些 instrumentation 尚未执行，也没有重新发布此前撤回的移动抓包功能**。
+
+## 未发布：加密偏好与中心漫游
+
+“设置 → 加密偏好备份与中心漫游”支持系统文件选择器导出/导入、Android 设备之间迁移以及中心私有槽位同步。文件采用共同 `sb-easy.preferences` v1 格式：PBKDF2-HMAC-SHA256（600000 次、16 字节随机盐、32 字节密钥）与 AES-256-GCM（12 字节随机 nonce、16 字节 tag、固定用途 AAD）。口令按 UTF-8 编码、不做 Unicode 归一化，至少 12 字节，不保存或上传；加密文件限制 1 MiB。丢失口令无法由中心恢复。
+
+内容只包含本机订阅来源/缓存节点及独立、受管模式的一般域名/出口/健康偏好。手动粘贴来源重新生成为已接受节点的 JSON，丢弃原文中未采用的 WireGuard、路由或脚本内容。中心 Agent token、WireGuard 密钥、设备绑定、应用包名/应用专属规则、采集授权与 CA 没有对应的可导出字段。纯应用组不导出；混合组只导出域名部分。导入保留目标设备应用规则；节点/分组/应用出口冲突会拒绝导入，必须先调整本机设置。两种模式与中心注册保持不变。解密后先验证内容与核心配置并显示替换预览，VPN 运行时拒绝导入；预览后本机变更会要求重新预览，磁盘失败回滚原订阅/策略/配置。
+
+中心漫游使用单独的 HTTPS 账户登录与 MFA 动态码/恢复码，保留登录流程绑定 cookie，完全不使用设备 Agent token。会话只留在此页面的内存中，退出账户会请求撤销会话。用户显式点击时才传输加密文件；中心只存密文。默认私有槽位 `android-personal`，读到的 revision 通过 `If-Match` 传入写入/删除，409 显示冲突并拒绝覆盖。删除后保留递增版本，旧设备不能用版本 0 恢复已删除的旧内容。当前 Android 拒绝其他平台的 payload，通用 envelope 不代表跨平台路由转换已经实现。
+
+JVM 验证使用共享 [`testdata/preferences-v1.json`](../testdata/preferences-v1.json) Unicode 向量，WebCrypto 密文解密与重新加密逐字节一致；覆盖错误口令、篡改、参数/大小拒绝、白名单和设备规则隔离、预览冲突与磁盘回滚。真实 loopback HTTPS 测试覆盖 MFA cookie 绑定、账户 token、If-Match、409、删除版本及退出会话。尚未执行实际 Android SAF、系统键盘、中心账户登录和跨设备 UI 验收。
+
+
+## 未发布：插件签名目录、更新与恢复
+
+Current unreleased plugin lifecycle work is documented in the
+[signed catalog specification](../docs/plugin-catalog-v1.md). In “HTTP(S) 调试 →
+插件目录、更新与恢复”, signed catalogs authorize HTTPS downloads, exact artifact
+hash/size, ABI, host/core/API compatibility and cumulative build revocations.
+Catalog sequence rollback, changed payload at the same sequence, expired new
+downloads and unknown publisher keys are rejected. Known revoked installed
+builds are stopped and cannot be started through the local APK path either.
+Before replacement, a catalog-authorized installed APK is copied and verified;
+up to two package versions and their signed receipts are retained. Explicit
+offline recovery rechecks receipt, hash, compatibility and known revocations.
+Android recovery to a lower version requires OS-confirmed plugin removal and
+reinstallation; it is not an atomic rollback and ends capture.
+
+The compiled publisher allowlist defaults to empty until a release owner provides
+a public trust configuration; remote installs then remain unavailable. Explicit
+local-file installation still requires the actual APK signer to match the host,
+and applies the same package/manifest/compatibility/revocation checks. Shared
+external signing parameters for host and plugin are in `signing.gradle`; neither
+keys nor passwords are committed. The current build environment's default debug
+identity changed from `5d7a2a82…` to `14a2ddad…`; both newly built APKs match each
+other, but they are not an accepted upgrade of the older signing identity.
+Use an explicitly chosen keystore for consistent upgrade identity and perform
+real installation/recovery/UID acceptance before publication.
+
+## 未发布：主应用更新与旧版恢复
+
+“设置 → 应用与内核更新、旧版恢复”使用独立应用签名目录。目录公钥默认空，正式发布者尚未配置时更新关闭；通过 `-PsbAppCatalogKeys=/absolute/public-keys.json` 注入外部公钥。下载同时检查实际 APK 的版本、单一当前签名证书、ABI/min SDK，以及由实际 AAR 构建生成的内核版本、源码 revision、overlay 和逐架构原生库摘要；内核跟随应用整体更新。目录序号防重放、累计撤销、HTTPS/长度/摘要验证和原子缓存提交均在本机执行。
+
+安装前保存已验证的当前 APK，并强制通过系统文档选择器导出**应用外救援 ZIP**：恢复 APK、签名目录、加密偏好与无需打开应用即可阅读的恢复说明一起保存。只有写入后重新读回、摘要匹配，且当前 APK/目标 APK/偏好未变化时才允许提交 Android PackageInstaller；安装仍要求断开 VPN 和系统确认。新版启动即崩溃时也能从系统文件管理器取得救援材料。当前版已撤销时不作为恢复候选，无安全旧版时明确提示只能保存目标 APK、不能回退。较旧 APK 仍需手动卸载重装；卸载丢失设备秘密、缓存及本机防重放/撤销状态，受管设备需重新注册，不声称无损或静默回滚。完整发布命令、信任格式和恢复限制见 [Android 应用更新协议](../docs/android-app-updates-v1.md)。
+
+本地 JVM/OpenSSL/HTTPS 负例与 APK 构建检查不等于真机自更新验收。`AppUpdatePackageTest` 可在设备上检查实际安装包的 manifest、证书与内核来源；系统确认、自更新重启、取消/失败及卸载恢复仍需在线设备验收，当前没有正式更新源或生产信任密钥。
+
 ## 1.3.4 — packet capture temporarily withdrawn
 
 Version code 28 removes mobile capture features while preserving ordinary VPN,
@@ -22,9 +107,11 @@ builds, not production-key-signed builds. All five APK variants, 89 JVM tests,
 and lint pass. No new physical-device VPN acceptance is claimed for this release.
 The pinned native libraries are unchanged from the published 1.3.1 ARM64 APK.
 
-This directory contains the managed sb-easy Android client. It embeds sing-box
-1.13.12 through `libbox.aar`; no root access, external executable, local HTTP
-server, or administrator account is required on the phone.
+This directory contains the managed and standalone sb-easy Android client. Current builds embed sing-box
+1.14.3 through `libbox.aar`; no root access, external executable or administrator account is required on the phone.
+The authenticated health controller binds only to loopback and is created per VPN runtime.
+
+“设置 → 系统 VPN”分别说明 Always-on 与“阻止未通过 VPN 的连接”，并提供系统 VPN 设置入口。Android 10/API 29+ 通过当前运行中的 `VpnService` 读取两项真实状态；旧系统或服务未运行时显示未知，不把历史值当作当前保护。应用不能替用户打开系统断线阻断。实际退出、切网、DNS/IPv6/UDP 阻断仍需设备联网验收。
 
 ## Features
 
@@ -61,13 +148,13 @@ hostname, IP address, network protocol or the other group's domain list. Selecti
 `direct` for the group remains an explicit direct-exit choice. Existing saved
 node selections, domain edits and manually disabled app switches are retained.
 
-Application routing now precedes every destination-based route, including
+In the published 1.2.8 behavior, application routing precedes every destination-based route, including
 private-address, management-host and management-endpoint exceptions; sniffing and
 DNS interception still run first. Non-matching apps retain these exceptions and
 the established domain/default policy. All application DNS rules now precede
 all group-domain and management DNS rules, so a ChatGPT-owned lookup for a Claude
 hostname uses GPT's DNS/FakeIP policy, regardless of group ordering. Bootstrap
-DNS for proxy nodes remains explicitly direct to avoid resolver loops.
+DNS for proxy nodes remains explicitly direct to avoid resolver loops. The unreleased custom-application work above restores management/WireGuard exceptions ahead of app matching.
 
 Browser traffic continues to match service domains. External browser login
 belongs to the browser, not the originating app; unidentified owners fall back
@@ -325,7 +412,7 @@ Requirements:
 - JDK 17
 - Android SDK platform/build-tools 36
 - Android NDK 28.0.13004108
-- Go supported by sing-box 1.13.12
+- Go 1.25.5 or newer, as required by sing-box 1.14.3
 
 ```sh
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
@@ -337,7 +424,7 @@ export ANDROID_HOME=/path/to/android-sdk
 
 The generated AAR and APK are intentionally ignored by Git. The libbox build
 is pinned to sing-box revision
-`1086ab2563320e0da0c23b3a491d8dfa0939dff4`, gomobile 0.1.12, and NDK
+`7054cac5124465ffdb145870d7c01885566711b1`, gomobile 0.1.12, and NDK
 28.0.13004108.
 
 `assembleDebug` produces architecture-specific APKs for `arm64-v8a`,
@@ -359,16 +446,16 @@ users do not need to download native libraries for unrelated architectures.
 5. Use the four tabs for connection status, proxies, route/config/log tools, and
    device settings.
 
-The current test deployment is plain HTTP and the App calls this out visibly.
-Production deployments should put the control plane behind HTTPS; the App never
-offers a switch that disables TLS certificate verification.
+Historical test deployments used plain HTTP. Current enrollment requires HTTPS
+unless the user explicitly allows a literal private or loopback IP for local
+testing. There is no option to disable TLS certificate verification.
 
 ## Verification
 
 The checked-in project is covered by Kotlin config-inspection tests, Android
 lint, APK signing/ABI inspection, C++ enrollment/rendering/HTTP contract tests,
 and an end-to-end preflight that feeds a rendered Android profile to sing-box
-1.13.12 `check`. A physical Android device remains necessary for the final VPN,
+1.14.3 `check`. A physical Android device remains necessary for the final VPN,
 network-switch, Doze, and vendor-ROM acceptance pass.
 
 For a native routing preflight, generate the Kotlin fixtures and run the loopback
@@ -392,8 +479,9 @@ on-device verification.
 The embedded sing-box/libbox core is GPL-3.0-or-later. See
 [`NOTICE.md`](NOTICE.md) and the corresponding source/build instructions before
 redistributing the APK outside controlled testing. GitHub releases include the
-exact `sing-box-1.13.12-source.tar.gz` corresponding-source archive alongside
-the APKs.
+exact corresponding-source archive alongside the APKs. New 1.14.3 builds must ship
+`sing-box-1.14.3-source.tar.gz`, including the capture overlay and build scripts;
+previous 1.3.4 artifacts retain their matching 1.13.12 source archive.
 
 ## Network handover recovery
 
@@ -448,9 +536,9 @@ missing cores and reset exceptions also rebuild. Stale generations and service
 cancellation cannot report recovery or start an obsolete fallback. No permanent
 wake lock is added. Device acceptance remains necessary.
 
-## 原始流量采集（暂时停用）
+## 原始流量采集（1.3.4 历史状态）
 
-移动端暂不提供 PCAP 或 HTTP(S) 抓包。网络包采集入口、后台采集初始化及自动上传循环已移除；
+已发布的 1.3.4 不提供 PCAP 或 HTTP(S) 抓包。网络包采集入口、后台采集初始化及自动上传循环已移除；
 VPN 启动时显式关闭内核采集，因此旧版本保存的启用设置也不会恢复采集。
 已有私有目录中的 PCAP 文件保留，不会自动上传。普通流量统计、路由测试和日志仍可使用。
 

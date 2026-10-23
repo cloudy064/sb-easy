@@ -16,6 +16,7 @@
 #include "sb/config_renderer.h"
 #include "sb/types.h"
 #include "sb/wireguard.h"
+#include "sb/wg_migration.h"
 #include <ctype.h>
 
 #ifndef SB_EASY_VERSION
@@ -231,13 +232,57 @@ static int handle_system_logs(sb_http_req *req, sb_http_resp *resp, sb_err *err)
 }
 
 /* POST /api/system/migrate/wg-easy */
-static int handle_migrate_wg_easy(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
-    sbj *body = sbj_object();
-    sbj_set_str(body, "status", "not_implemented");
-    sbj_set_str(body, "message",
-                "wg-easy migration coming in a future update. Use manual import for now.");
-    sb_resp_json(resp, 200, body);
+static int handle_wg_import_history(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    if (sb_require_admin(req, err) != 0) return -1;
+    sbj *history = sb_store_list_wg_imports(req->server->store, err);
+    if (!history) return -1;
+    sb_resp_json(resp, 200, history);
     return 0;
+}
+
+static int handle_migrate_wg_easy(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    if (sb_require_admin(req, err) != 0) return -1;
+    sbj *body = sb_req_json_object(req, err);
+    if (!body) return -1;
+    sbj *batch = NULL, *result = NULL;
+    int rc = -1;
+    const char *action = sbj_get_str(body, "action", "preview");
+    if (sbj_has(body, "action") && !sbj_is_string(sbj_get(body, "action"))) {
+        sb_fail(err, SB_ERR_VALIDATION, "Migration action must be preview, apply or rollback"); goto done;
+    }
+    bool apply = strcmp(action, "apply") == 0, rollback = strcmp(action, "rollback") == 0;
+    if (!apply && !rollback && strcmp(action, "preview") != 0) {
+        sb_fail(err, SB_ERR_VALIDATION, "Migration action must be preview, apply or rollback"); goto done;
+    }
+    if ((apply || rollback) && req->server->opts.wireguard_enabled) {
+        sb_fail(err, SB_ERR_CONFLICT, "Stop WireGuard with WG_ENABLED=false and restart the panel before applying or rolling back a migration"); goto done;
+    }
+    const char *actor = req->claims->username;
+    size_t actor_len = req->claims->username_len;
+    if (rollback) {
+        const char *id = sb_json_required_string(body, "migration_id", err);
+        if (id) rc = sb_store_wg_import_rollback(req->server->store, id, actor, actor_len, &result, err);
+    } else {
+        if (!sbj_string_is(sbj_get(body, "format"), "wg-easy-v14")) {
+            sb_fail(err, SB_ERR_VALIDATION, "Supported migration format is wg-easy-v14 (wg0.json); v15 SQLite backups require conversion"); goto done;
+        }
+        sb_wireguard_options runtime;
+        if (sb_wireguard_runtime_options(req->server->wireguard, &runtime, err) != 0) goto done;
+        batch = sb_wg_easy_v14_normalize(sbj_get(body, "configuration"), sbj_get(body, "options"), runtime.dns, err);
+        sb_wireguard_options_free(&runtime);
+        if (!batch) goto done;
+        rc = sb_store_wg_import(req->server->store, batch, apply,
+            sbj_get_str(body, "preview_digest", NULL), actor, actor_len, &result, err);
+        if (rc == 0) {
+            sbj_set_bool(result, "wireguard_running", req->server->opts.wireguard_enabled);
+            sbj_set_str(result, "activation", "Import while WG_ENABLED=false; restart with WG_ENABLED=true after checking endpoint, DNS and firewall settings");
+            sbj_set(result, "client_defaults", sbj_clone(sbj_get(batch, "client_defaults")));
+        }
+    }
+    if (rc == 0) { sb_resp_json(resp, 200, result); result = NULL; }
+done:
+    sbj_free(body); sbj_free(batch); sbj_free(result);
+    return rc;
 }
 
 /* ======================================================================
@@ -252,8 +297,6 @@ static int handle_auth_login(sb_http_req *req, sb_http_resp *resp, sb_err *err) 
     const sbj *found;
     size_t username_len = 5;
     const char *username = "admin", *password;
-    char *token;
-    sbj *out;
     int rc = -1, status;
 
     sbj *body = sb_req_json_object(req, err);
@@ -276,17 +319,8 @@ static int handle_auth_login(sb_http_req *req, sb_http_resp *resp, sb_err *err) 
         sb_fail(err, SB_ERR_AUTH, "Invalid credentials");
         goto done;
     }
-    token = sb_auth_create_token_n(srv->opts.jwt_secret, user.id, user.username, user.username_len, user.role);
-    if (!token) {
-        sb_fail(err, SB_ERR_GENERIC, "JWT secret is not configured");
-        goto done;
-    }
-    out = sbj_object();
-    sbj_set(out, "token", sbj_str_take(token));
-    sbj_set(out, "username", sbj_strn(S(user.username), user.username_len));
-    sbj_set_str(out, "role", S(user.role));
-    sb_resp_json(resp, 200, out);
-    rc = 0;
+    rc = sb_http_security_login(req, resp, user.id, "password", err);
+
 done:
     sbj_free(body);
     sb_user_account_free(&user);
@@ -298,7 +332,7 @@ static int handle_auth_session(sb_http_req *req, sb_http_resp *resp, sb_err *err
     sb_auth_claims claims;
     memset(&claims, 0, sizeof claims);
     char *token = bearer_token(req);
-    bool valid = token && sb_auth_verify_token(req->server->opts.jwt_secret, token, &claims);
+    bool valid = token && sb_auth_security_verify(req->server->security, token, &claims, err);
     free(token);
     if (!valid) {
         sb_auth_claims_free(&claims);
@@ -383,8 +417,8 @@ static int handle_users_create(sb_http_req *req, sb_http_resp *resp, sb_err *err
         sb_fail(err, SB_ERR_VALIDATION, "Username required, password must be at least 4 characters");
         goto done;
     }
-    if (role_value && !json_string_is(role_value, "admin") && !json_string_is(role_value, "viewer")) {
-        sb_fail(err, SB_ERR_VALIDATION, "Role must be admin or viewer");
+    if (role_value && !json_string_is(role_value, "admin") && !json_string_is(role_value, "viewer") && !json_string_is(role_value, "operator")) {
+        sb_fail(err, SB_ERR_VALIDATION, "Role must be admin, operator or viewer");
         goto done;
     }
     hash = sb_hash_password_n(password, sbj_get(body, "password")->v.str.len, err);
@@ -427,7 +461,8 @@ static int handle_users_password(sb_http_req *req, sb_http_resp *resp, sb_err *e
     }
     hash = sb_hash_password_n(password, sbj_get(body, "password")->v.str.len, err);
     if (!hash) goto done;
-    if (sb_store_reset_user_password(req->server->store, req->params[0], hash, err) != 0) goto done;
+    if (sb_store_reset_user_password(req->server->store, req->params[0], hash, err) != 0 ||
+        sb_auth_security_revoke(req->server->security, req->params[0], NULL, NULL, err) != 0) goto done;
     respond_success(resp);
     rc = 0;
 done:
@@ -871,6 +906,7 @@ void sb_http_register_admin_routes(sb_http_server *srv) {
     sb_http_route(srv, "GET", "/api/system/status", handle_system_status);
     sb_http_route(srv, "GET", "/api/system/logs", handle_system_logs);
     sb_http_route(srv, "POST", "/api/system/migrate/wg-easy", handle_migrate_wg_easy);
+    sb_http_route(srv, "GET", "/api/system/migrate/wg-easy", handle_wg_import_history);
     sb_http_route(srv, "POST", "/api/auth/login", handle_auth_login);
     sb_http_route(srv, "GET", "/api/auth/session", handle_auth_session);
     sb_http_route(srv, "GET", "/api/users/audit", handle_users_audit);

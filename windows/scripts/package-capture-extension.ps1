@@ -15,12 +15,13 @@ Copy-Item -LiteralPath (Join-Path $root 'build/capture-deps/WinDivert-2.2.2-A/LI
 Copy-Item -LiteralPath (Join-Path $root 'build/capture-deps/libpcap-1.10.6/LICENSE') -Destination (Join-Path $licenses 'libpcap.txt')
 Copy-Item -LiteralPath (Join-Path $root 'windows/ui/node_modules/vue/LICENSE') -Destination (Join-Path $licenses 'vue.txt')
 Copy-Item -LiteralPath (Join-Path $root 'windows/licenses/sbj-grisu2-MIT.txt') -Destination $licenses
-foreach($name in @('install.ps1','Install.cmd')){Copy-Item -LiteralPath (Join-Path $root "windows/extensions/capture/$name") -Destination $stage}
 $hashes=@(Get-ChildItem -LiteralPath (Join-Path $stage 'payload'),(Join-Path $stage 'ui') -Recurse -File | ForEach-Object {
     @{path=$_.FullName.Substring($stage.Length+1).Replace('\','/');sha256=(Get-FileHash -LiteralPath $_.FullName).Hash}
 })
 $hashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'checksums.json') -Encoding utf8
-$archive=Join-Path $root 'build/sb-easy-capture-1.0.0-windows-x64.zip'
+$manifest=Get-Content -LiteralPath (Join-Path $stage 'payload/extension.json') -Raw | ConvertFrom-Json
+if ($manifest.version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $manifest.build -lt 2) { throw 'Rebuild the capture worker with a current versioned manifest.' }
+$archive=Join-Path $root "build/sb-easy-capture-$($manifest.version)-windows-x64.zip"
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
 Write-Output $stage
 Write-Output $archive

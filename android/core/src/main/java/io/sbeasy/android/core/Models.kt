@@ -7,6 +7,7 @@ data class Enrollment(
     val agentToken: String,
     val profileId: String,
     val profileName: String,
+    val allowInsecureLocalHttp: Boolean = false,
 )
 
 data class ManagedConfig(
@@ -19,8 +20,10 @@ data class ManagedConfig(
 )
 
 enum class SyncPhase { IDLE, SYNCING, CURRENT, ERROR }
+enum class ClientMode { MANAGED, STANDALONE }
 
 data class ControlPlaneSnapshot(
+    val mode: ClientMode = ClientMode.MANAGED,
     val enrollment: Enrollment? = null,
     val config: ManagedConfig? = null,
     val syncPhase: SyncPhase = SyncPhase.IDLE,

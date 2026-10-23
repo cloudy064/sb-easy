@@ -1,0 +1,460 @@
+{
+  "name": "SBEasy",
+  "options": {
+    "minimumXcodeGenVersion": "2.42.0",
+    "deploymentTarget": {
+      "iOS": "16.0",
+      "macOS": "13.0",
+      "tvOS": "17.0"
+    },
+    "developmentLanguage": "zh-Hans",
+    "createIntermediateGroups": true
+  },
+  "configs": {
+    "Debug": "debug",
+    "Release": "release"
+  },
+  "configFiles": {
+    "Debug": "Config/Base.xcconfig",
+    "Release": "Config/Base.xcconfig"
+  },
+  "settings": {
+    "base": {
+      "SWIFT_VERSION": "5.0",
+      "CLANG_ENABLE_MODULES": "YES",
+      "CLANG_ENABLE_OBJC_ARC": "YES",
+      "GCC_C_LANGUAGE_STANDARD": "c11",
+      "MARKETING_VERSION": "0.1.0",
+      "CURRENT_PROJECT_VERSION": "1",
+      "CODE_SIGN_STYLE": "Automatic",
+      "ENABLE_USER_SCRIPT_SANDBOXING": "YES",
+      "SWIFT_STRICT_CONCURRENCY": "minimal",
+      "HEADER_SEARCH_PATHS": [
+        "$(inherited)",
+        "$(SRCROOT)/Core/include",
+        "$(SRCROOT)/../c/include",
+        "$(SRCROOT)/Vendor/libyaml/include"
+      ],
+      "SWIFT_INCLUDE_PATHS": [
+        "$(inherited)",
+        "$(SRCROOT)/Core"
+      ],
+      "GCC_PREPROCESSOR_DEFINITIONS": [
+        "$(inherited)",
+        "YAML_DECLARE_STATIC",
+        "YAML_VERSION_MAJOR=0",
+        "YAML_VERSION_MINOR=2",
+        "YAML_VERSION_PATCH=5",
+        "YAML_VERSION_STRING=\"0.2.5\"",
+        "YAML_MAX_DEPTH=64",
+        "YAML_MAX_NODES=20000",
+        "YAML_CONVERT_BUDGET=30000",
+        "YAML_CONVERT_DEPTH=64",
+        "YAML_CONVERT_STRING_BUDGET=2097152",
+        "YAML_MAX_FIX_BYTES=2097152",
+        "YAML_MAX_FIX_ROUNDS=32",
+        "YAML_REJECT_LIMIT_EXHAUSTION=1"
+      ]
+    }
+  },
+  "targets": {
+    "Core-iOS": {
+      "type": "library.static",
+      "platform": "iOS",
+      "sources": [
+        "Core/core.c",
+        "Core/support.c",
+        "../c/src/json.c",
+        "../c/src/types.c",
+        "../c/src/proxy_parser.c",
+        "Vendor/libyaml/src/api.c",
+        "Vendor/libyaml/src/dumper.c",
+        "Vendor/libyaml/src/emitter.c",
+        "Vendor/libyaml/src/loader.c",
+        "Vendor/libyaml/src/parser.c",
+        "Vendor/libyaml/src/reader.c",
+        "Vendor/libyaml/src/scanner.c",
+        "Vendor/libyaml/src/writer.c"
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_NAME": "SBEasyCore-iOS",
+          "SKIP_INSTALL": "YES",
+          "APPLICATION_EXTENSION_API_ONLY": "YES"
+        }
+      }
+    },
+    "SBEasy-iOS": {
+      "type": "application",
+      "platform": "iOS",
+      "sources": [
+        "App",
+        "Shared"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-iOS"
+        },
+        {
+          "sdk": "NetworkExtension.framework"
+        },
+        {
+          "sdk": "Security.framework"
+        },
+        {
+          "target": "Tunnel-iOS",
+          "embed": true
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).ios",
+          "INFOPLIST_FILE": "Resources/App-iOS.plist",
+          "CODE_SIGN_ENTITLEMENTS": "Resources/App-iOS.entitlements",
+          "TARGETED_DEVICE_FAMILY": "1,2"
+        }
+      }
+    },
+    "Tunnel-iOS": {
+      "type": "app-extension",
+      "platform": "iOS",
+      "sources": [
+        "Tunnel",
+        "Shared"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-iOS"
+        },
+        {
+          "sdk": "NetworkExtension.framework"
+        },
+        {
+          "sdk": "Security.framework"
+        },
+        {
+          "framework": "Vendor/Libbox.xcframework",
+          "embed": false
+        },
+        {
+          "sdk": "Network.framework"
+        },
+        {
+          "sdk": "SystemConfiguration.framework"
+        },
+        {
+          "sdk": "libresolv.tbd"
+        },
+        {
+          "sdk": "libc++.tbd"
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).ios.tunnel",
+          "INFOPLIST_FILE": "Resources/Tunnel-iOS.plist",
+          "CODE_SIGN_ENTITLEMENTS": "Resources/Tunnel-iOS.entitlements",
+          "SWIFT_OBJC_BRIDGING_HEADER": "Tunnel/Bridge.h",
+          "APPLICATION_EXTENSION_API_ONLY": "YES",
+          "SKIP_INSTALL": "YES",
+          "LD_RUNPATH_SEARCH_PATHS": [
+            "$(inherited)",
+            "@executable_path/Frameworks",
+            "@executable_path/../../Frameworks"
+          ]
+        }
+      }
+    },
+    "Core-macOS": {
+      "type": "library.static",
+      "platform": "macOS",
+      "sources": [
+        "Core/core.c",
+        "Core/support.c",
+        "../c/src/json.c",
+        "../c/src/types.c",
+        "../c/src/proxy_parser.c",
+        "Vendor/libyaml/src/api.c",
+        "Vendor/libyaml/src/dumper.c",
+        "Vendor/libyaml/src/emitter.c",
+        "Vendor/libyaml/src/loader.c",
+        "Vendor/libyaml/src/parser.c",
+        "Vendor/libyaml/src/reader.c",
+        "Vendor/libyaml/src/scanner.c",
+        "Vendor/libyaml/src/writer.c"
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_NAME": "SBEasyCore-macOS",
+          "SKIP_INSTALL": "YES",
+          "APPLICATION_EXTENSION_API_ONLY": "YES"
+        }
+      }
+    },
+    "SBEasy-macOS": {
+      "type": "application",
+      "platform": "macOS",
+      "sources": [
+        "App",
+        "Shared"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-macOS"
+        },
+        {
+          "sdk": "NetworkExtension.framework"
+        },
+        {
+          "sdk": "Security.framework"
+        },
+        {
+          "target": "Tunnel-macOS",
+          "embed": true
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).macos",
+          "INFOPLIST_FILE": "Resources/App-macOS.plist",
+          "CODE_SIGN_ENTITLEMENTS": "Resources/App-macOS.entitlements",
+          "TARGETED_DEVICE_FAMILY": ""
+        }
+      }
+    },
+    "Tunnel-macOS": {
+      "type": "app-extension",
+      "platform": "macOS",
+      "sources": [
+        "Tunnel",
+        "Shared"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-macOS"
+        },
+        {
+          "sdk": "NetworkExtension.framework"
+        },
+        {
+          "sdk": "Security.framework"
+        },
+        {
+          "framework": "Vendor/Libbox.xcframework",
+          "embed": false
+        },
+        {
+          "sdk": "Network.framework"
+        },
+        {
+          "sdk": "SystemConfiguration.framework"
+        },
+        {
+          "sdk": "libresolv.tbd"
+        },
+        {
+          "sdk": "libc++.tbd"
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).macos.tunnel",
+          "INFOPLIST_FILE": "Resources/Tunnel-macOS.plist",
+          "CODE_SIGN_ENTITLEMENTS": "Resources/Tunnel-macOS.entitlements",
+          "SWIFT_OBJC_BRIDGING_HEADER": "Tunnel/Bridge.h",
+          "APPLICATION_EXTENSION_API_ONLY": "YES",
+          "SKIP_INSTALL": "YES",
+          "LD_RUNPATH_SEARCH_PATHS": [
+            "$(inherited)",
+            "@executable_path/Frameworks",
+            "@executable_path/../../Frameworks"
+          ]
+        }
+      }
+    },
+    "Core-tvOS": {
+      "type": "library.static",
+      "platform": "tvOS",
+      "sources": [
+        "Core/core.c",
+        "Core/support.c",
+        "../c/src/json.c",
+        "../c/src/types.c",
+        "../c/src/proxy_parser.c",
+        "Vendor/libyaml/src/api.c",
+        "Vendor/libyaml/src/dumper.c",
+        "Vendor/libyaml/src/emitter.c",
+        "Vendor/libyaml/src/loader.c",
+        "Vendor/libyaml/src/parser.c",
+        "Vendor/libyaml/src/reader.c",
+        "Vendor/libyaml/src/scanner.c",
+        "Vendor/libyaml/src/writer.c"
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_NAME": "SBEasyCore-tvOS",
+          "SKIP_INSTALL": "YES",
+          "APPLICATION_EXTENSION_API_ONLY": "YES"
+        }
+      }
+    },
+    "SBEasy-tvOS": {
+      "type": "application",
+      "platform": "tvOS",
+      "sources": [
+        "App",
+        "Shared"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-tvOS"
+        },
+        {
+          "sdk": "NetworkExtension.framework"
+        },
+        {
+          "sdk": "Security.framework"
+        },
+        {
+          "target": "Tunnel-tvOS",
+          "embed": true
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).tvos",
+          "INFOPLIST_FILE": "Resources/App-tvOS.plist",
+          "CODE_SIGN_ENTITLEMENTS": "Resources/App-tvOS.entitlements",
+          "TARGETED_DEVICE_FAMILY": "3"
+        }
+      }
+    },
+    "Tunnel-tvOS": {
+      "type": "app-extension",
+      "platform": "tvOS",
+      "sources": [
+        "Tunnel",
+        "Shared"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-tvOS"
+        },
+        {
+          "sdk": "NetworkExtension.framework"
+        },
+        {
+          "sdk": "Security.framework"
+        },
+        {
+          "framework": "Vendor/Libbox.xcframework",
+          "embed": false
+        },
+        {
+          "sdk": "Network.framework"
+        },
+        {
+          "sdk": "SystemConfiguration.framework"
+        },
+        {
+          "sdk": "libresolv.tbd"
+        },
+        {
+          "sdk": "libc++.tbd"
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).tvos.tunnel",
+          "INFOPLIST_FILE": "Resources/Tunnel-tvOS.plist",
+          "CODE_SIGN_ENTITLEMENTS": "Resources/Tunnel-tvOS.entitlements",
+          "SWIFT_OBJC_BRIDGING_HEADER": "Tunnel/Bridge.h",
+          "APPLICATION_EXTENSION_API_ONLY": "YES",
+          "SKIP_INSTALL": "YES",
+          "LD_RUNPATH_SEARCH_PATHS": [
+            "$(inherited)",
+            "@executable_path/Frameworks",
+            "@executable_path/../../Frameworks"
+          ]
+        }
+      }
+    },
+    "SharedTests": {
+      "type": "bundle.unit-test",
+      "platform": "macOS",
+      "sources": [
+        "Shared",
+        "Tests/SharedTests.swift"
+      ],
+      "dependencies": [
+        {
+          "target": "Core-macOS"
+        },
+        {
+          "sdk": "Security.framework"
+        }
+      ],
+      "settings": {
+        "base": {
+          "PRODUCT_BUNDLE_IDENTIFIER": "$(SB_BUNDLE_PREFIX).tests",
+          "GENERATE_INFOPLIST_FILE": "YES",
+          "CODE_SIGNING_ALLOWED": "NO"
+        }
+      }
+    }
+  },
+  "schemes": {
+    "SBEasy-iOS": {
+      "build": {
+        "targets": {
+          "SBEasy-iOS": "all"
+        }
+      },
+      "run": {
+        "config": "Debug"
+      },
+      "archive": {
+        "config": "Release"
+      }
+    },
+    "SBEasy-macOS": {
+      "build": {
+        "targets": {
+          "SBEasy-macOS": "all"
+        }
+      },
+      "run": {
+        "config": "Debug"
+      },
+      "archive": {
+        "config": "Release"
+      }
+    },
+    "SBEasy-tvOS": {
+      "build": {
+        "targets": {
+          "SBEasy-tvOS": "all"
+        }
+      },
+      "run": {
+        "config": "Debug"
+      },
+      "archive": {
+        "config": "Release"
+      }
+    },
+    "SharedTests": {
+      "build": {
+        "targets": {
+          "SharedTests": "all"
+        }
+      },
+      "test": {
+        "config": "Debug",
+        "targets": [
+          "SharedTests"
+        ]
+      }
+    }
+  }
+}

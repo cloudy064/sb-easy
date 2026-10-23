@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>sb-easy</vendor>
+  <action id="io.sbeasy.Desktop.tunnel">
+    <description>Connect the sb-easy network tunnel</description>
+    <description xml:lang="zh_CN">连接 sb-easy 网络隧道</description>
+    <message>Administrator authorization is required to route your network traffic through sb-easy.</message>
+    <message xml:lang="zh_CN">使用 sb-easy 接管网络流量需要管理员授权。</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

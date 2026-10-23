@@ -40,14 +40,13 @@ static int transfer(HANDLE pipe, void *data, DWORD size, bool writing, HANDLE ca
     }
     return 0;
 }
-int sbw_pipe_request(const wchar_t *pipe, const char *body, HANDLE cancel, DWORD timeout_ms,
-                     char **response, sbw_error *error) {
+int sbw_pipe_request_expected(const wchar_t *pipe, const wchar_t *expected_binary, const char *body,
+    HANDLE cancel, DWORD timeout_ms, char **response, sbw_error *error) {
     HANDLE connection = INVALID_HANDLE_VALUE;
     const size_t length = body ? strlen(body) : 0;
     ULONGLONG started, deadline;
     unsigned char header[4];
     uint32_t response_size = 0;
-    wchar_t *expected = NULL;
     char *result = NULL;
     int rc = -1;
     *response = NULL;
@@ -65,8 +64,7 @@ int sbw_pipe_request(const wchar_t *pipe, const char *body, HANDLE cancel, DWORD
         WaitNamedPipeW(pipe, 100);
     }
     if (connection == INVALID_HANDLE_VALUE) { sbw_fail(error, "SERVICE_UNAVAILABLE", "Local service is unavailable"); goto done; }
-    expected = sbw_expected_service_binary();
-    if (!sbw_verified_pipe_server(connection, expected)) { sbw_fail(error, "UNTRUSTED_SERVICE", "Local service identity verification failed"); goto done; }
+    if (!sbw_verified_pipe_server(connection, expected_binary)) { sbw_fail(error, "UNTRUSTED_SERVICE", "Local service identity verification failed"); goto done; }
     for (unsigned i = 0; i < 4; ++i) header[i] = (unsigned char)(((uint32_t)length >> (8U * i)) & 0xffU);
     if (transfer(connection, header, 4, true, cancel, deadline, error) ||
         transfer(connection, (void *)body, (DWORD)length, true, cancel, deadline, error) ||
@@ -78,7 +76,13 @@ int sbw_pipe_request(const wchar_t *pipe, const char *body, HANDLE cancel, DWORD
     if (memchr(result, '\0', response_size)) { sbw_fail(error, "INVALID_RESPONSE", "Invalid response encoding"); goto done; }
     *response = result; result = NULL; rc = 0;
 done:
-    free(expected); free(result);
+    free(result);
     if (connection != INVALID_HANDLE_VALUE) CloseHandle(connection);
     return rc;
+}
+int sbw_pipe_request(const wchar_t *pipe, const char *body, HANDLE cancel, DWORD timeout_ms,
+    char **response, sbw_error *error) {
+    wchar_t *expected = sbw_expected_service_binary();
+    int result = sbw_pipe_request_expected(pipe, expected, body, cancel, timeout_ms, response, error);
+    free(expected); return result;
 }

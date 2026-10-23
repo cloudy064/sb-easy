@@ -26,6 +26,8 @@
       </div>
     </div>
 
+    <IdentityAccessPanel :users="users" @changed="loadUsers" />
+
     <!-- Audit log -->
     <div class="card">
       <div class="flex-between mb-4">
@@ -54,6 +56,7 @@
           <div class="form-group"><label>Role</label>
             <select v-model="form.role">
               <option value="viewer">viewer (read-only)</option>
+              <option value="operator">operator (device operations)</option>
               <option value="admin">admin (full access)</option>
             </select>
           </div>
@@ -85,6 +88,7 @@
 </template>
 
 <script setup lang="ts">
+import IdentityAccessPanel from '../components/IdentityAccessPanel.vue'
 import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
 import { ref, onMounted } from 'vue'
@@ -127,7 +131,7 @@ async function createUser() {
     showCreate.value = false
     form.value = { username: '', password: '', role: 'viewer' }
     await loadUsers()
-    notify('User created')
+    notify('User created. Assign device access below.')
   } catch (e: any) {
     createErr.value = e.response?.data?.error || 'Failed to create user'
   }

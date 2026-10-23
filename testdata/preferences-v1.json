@@ -1,0 +1,22 @@
+{
+  "description": "Public interoperability test vector; never use these fixed random values for real archives",
+  "passphrase": "测试-passphrase-🧭-2026",
+  "payload": {
+    "format": "sb-easy.preferences.payload",
+    "version": 1,
+    "platform": "test",
+    "preferences": {
+      "theme": "dark",
+      "label": "域名规则"
+    }
+  },
+  "envelope": {
+    "format": "sb-easy.preferences",
+    "version": 1,
+    "kdf": "pbkdf2-sha256",
+    "iterations": 600000,
+    "salt": "AAECAwQFBgcICQoLDA0ODw==",
+    "nonce": "EBESExQVFhcYGRob",
+    "ciphertext": "16hJPJIAqaWIIwzoSYdrPeW8GCFpJ67/8w4NOvgZHUifqZwvHmVBmgVche03f07x2imNYRpwXmVuPf/BvSwjVglUMVgi1T9vNuVTo4uLYVxSiPlDzlSJJ3CYDBKRPpaXlOB+L3tWBO9/la7t1KLThoz65tC3l4ft6vekJcSBhLBZdx8dNhS88fpPvvQ="
+  }
+}

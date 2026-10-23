@@ -92,3 +92,15 @@ TEST(object_ops) {
     sbj_free(c);
     sbj_free(o);
 }
+
+TEST(strict_documents_reject_duplicate_decoded_keys_and_invalid_utf8) {
+    const char *invalid[] = {"{\"key\":1,\"key\":2}", "{\"k\\u0065y\":null,\"key\":2}",
+        "{\"nested\":[{\"a\":1,\"a\":2}]}", "{\"a\\u0000b\":1,\"a\\u0000b\":2}", "{\"value\":\"\xff\"}"};
+    for (size_t i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+        char error[128]; sbj *value = sbj_parse_strict(invalid[i], strlen(invalid[i]), error, sizeof error);
+        CHECK(!value); CHECK(*error); sbj_free(value);
+    }
+    const char *valid = "{\"a\":1,\"a\\u0000b\":2,\"nested\":[{\"a\":3}]}";
+    sbj *value = sbj_parse_strict(valid, strlen(valid), NULL, 0); REQUIRE(value); sbj_free(value);
+    value = sbj_parse_cstr(invalid[0]); REQUIRE(value); CHECK_EQ_INT(sbj_get_int(value, "key", 0), 2); sbj_free(value);
+}

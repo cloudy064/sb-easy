@@ -372,7 +372,7 @@ static int stop_child(sbw_core *core, sbw_error *error) {
 }
 
 static int launch(sbw_core *core, const wchar_t *verb, const private_config *config,
-                   child_process *child, sbw_error *error) {
+                   child_process *child, HANDLE *raw_output, sbw_error *error) {
     STARTUPINFOEXW startup = {0};
     PROCESS_INFORMATION process = {0};
     SECURITY_ATTRIBUTES inheritable = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
@@ -407,10 +407,11 @@ static int launch(sbw_core *core, const wchar_t *verb, const private_config *con
     startup.StartupInfo.hStdOutput = output;
     startup.StartupInfo.hStdError = output;
     startup.lpAttributeList = attributes;
-    size_t command_length = wcslen(core->executable) + wcslen(config->path) + wcslen(verb) + 32;
+    size_t command_length = wcslen(core->executable) + (config ? wcslen(config->path) : 0) + wcslen(verb) + 32;
     command = sb_xcalloc(command_length, sizeof(*command));
-    if (_snwprintf_s(command, command_length, _TRUNCATE, L"\"%ls\" %ls -c \"%ls\" --disable-color",
-                    core->executable, verb, config->path) < 0) goto done;
+    int formatted = config ? _snwprintf_s(command, command_length, _TRUNCATE, L"\"%ls\" %ls -c \"%ls\" --disable-color",
+        core->executable, verb, config->path) : _snwprintf_s(command, command_length, _TRUNCATE, L"\"%ls\" version", core->executable);
+    if (formatted < 0) goto done;
     if (!CreateProcessW(core->executable, command, NULL, NULL, TRUE,
                         CREATE_SUSPENDED | (running ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW) | EXTENDED_STARTUPINFO_PRESENT,
                         NULL, core->directory, &startup.StartupInfo, &process)) goto done;
@@ -423,8 +424,11 @@ static int launch(sbw_core *core, const wchar_t *verb, const private_config *con
     child->id = process.dwProcessId;
     child->private_console = running;
     process.hProcess = NULL;
-    child->logs = sbw_diagnostics_capture(core->logs, log_reader, config->redaction_json); log_reader = NULL;
-    if (!child->logs) goto done;
+    if (raw_output) { *raw_output = log_reader; log_reader = NULL; }
+    else {
+        child->logs = sbw_diagnostics_capture(core->logs, log_reader, config ? config->redaction_json : NULL); log_reader = NULL;
+        if (!child->logs) goto done;
+    }
     char launch_detail[80]; sprintf_s(launch_detail, sizeof launch_detail, "%s pid=%lu", running ? "run" : "check", child->id);
     sbw_diagnostics_event(core->logs, "core.launch", launch_detail);
     if (ResumeThread(process.hThread) == (DWORD)-1) goto done;
@@ -446,7 +450,7 @@ static int check_file(sbw_core *core, const private_config *config, HANDLE cance
     child_process check = {0};
     if (exit_code) *exit_code = MAXDWORD;
     if (cancelled(cancel)) return core_fail(error, "CORE_CANCELLED");
-    if (launch(core, L"check", config, &check, error) != 0) return -1;
+    if (launch(core, L"check", config, &check, NULL, error) != 0) return -1;
     HANDLE events[] = {cancel, check.process};
     DWORD waited = cancel ? WaitForMultipleObjects(2, events, FALSE, core->check_timeout_ms)
                          : WaitForSingleObject(check.process, core->check_timeout_ms);
@@ -526,7 +530,7 @@ int sbw_core_preflight(sbw_core *core, bool has_tun, sbw_error *error) {
         if (token) CloseHandle(token);
         if (!allowed) result = core_fail(error, "CORE_ELEVATION_REQUIRED");
     }
-    /* sing-box v1.13.12 -> sing-tun v0.8.9 embeds its signed Wintun DLL and
+    /* The manifest-pinned sing-box/sing-tun embeds its signed Wintun DLL and
      * loads it from memory. A sibling wintun.dll is neither used nor required.
      * Loading/creating an adapter here would mutate the machine, so do not. */
     ReleaseSRWLockExclusive(&core->mutex);
@@ -553,6 +557,41 @@ int sbw_core_config_check(sbw_core *core, const char *json, size_t length, HANDL
     return result;
 }
 
+int sbw_core_version_check(sbw_core *core, const char *expected, HANDLE cancel, sbw_error *error) {
+    if (!core) return core_fail(error, "CORE_UNAVAILABLE");
+    if (!expected || !*expected || strlen(expected) > 31) return core_fail(error, "CORE_VERSION_MISMATCH");
+    if (!TryAcquireSRWLockExclusive(&core->mutex)) return core_fail(error, "CORE_BUSY");
+    child_process child = {0}; HANDLE output = NULL; sb_buf text = {0};
+    int result = cancelled(cancel) ? core_fail(error, "CORE_CANCELLED") : launch(core, L"version", NULL, &child, &output, error);
+    ULONGLONG deadline = GetTickCount64() + 5000;
+    while (!result) {
+        if (cancelled(cancel)) { result = core_fail(error, "CORE_CANCELLED"); break; }
+        if (GetTickCount64() >= deadline) { result = core_fail(error, "CORE_CHECK_TIMEOUT"); break; }
+        DWORD available = 0;
+        if (!PeekNamedPipe(output, NULL, 0, NULL, &available, NULL) && GetLastError() != ERROR_BROKEN_PIPE) { result = -1; break; }
+        if (available) {
+            char buffer[1024]; DWORD read = 0, wanted = available < sizeof(buffer) ? available : (DWORD)sizeof(buffer);
+            if (!ReadFile(output, buffer, wanted, &read, NULL) || !read || text.len + read > 4096) { result = -1; break; }
+            sb_buf_append(&text, buffer, read); continue;
+        }
+        if (WaitForSingleObject(child.process, 10) == WAIT_OBJECT_0) {
+            /* A final iteration drains bytes written immediately before exit. */
+            if (PeekNamedPipe(output, NULL, 0, NULL, &available, NULL) && available) continue;
+            DWORD code = MAXDWORD;
+            if (!GetExitCodeProcess(child.process, &code) || code) { result = -1; break; }
+            sb_buf prefix = {0}; sb_buf_printf(&prefix, "sing-box version %s", expected);
+            bool matches = text.len >= prefix.len && !memcmp(text.p, prefix.p, prefix.len) &&
+                (text.len == prefix.len || text.p[prefix.len] == '\r' || text.p[prefix.len] == '\n');
+            sb_buf_free(&prefix); if (!matches) result = -1; break;
+        }
+    }
+    if (output) CloseHandle(output);
+    if (dispose_child(&child, core->stop_timeout_ms, NULL) != 0) result = -1;
+    sb_buf_free(&text); ReleaseSRWLockExclusive(&core->mutex);
+    if (result && (!error || !error->code[0])) return sbw_fail(error, "CORE_VERSION_MISMATCH", "The installed core does not report the version required by this release.");
+    return result;
+}
+
 int sbw_core_start(sbw_core *core, const char *json, size_t length, HANDLE cancel, sbw_error *error) {
     if (!core) return core_fail(error, "CORE_UNAVAILABLE");
     if (!TryAcquireSRWLockExclusive(&core->mutex)) return core_fail(error, "CORE_BUSY");
@@ -566,7 +605,7 @@ int sbw_core_start(sbw_core *core, const char *json, size_t length, HANDLE cance
     if (result == 0) result = prepare_config(core, json, length, &config, error);
     if (result == 0 && !checked) result = check_file(core, &config, cancel, NULL, error);
     if (result == 0 && cancelled(cancel)) result = core_fail(error, "CORE_CANCELLED");
-    if (result == 0) result = launch(core, L"run", &config, &core->child, error);
+    if (result == 0) result = launch(core, L"run", &config, &core->child, NULL, error);
     if (result == 0) {
         core->config = config;
         memset(&config, 0, sizeof(config));
@@ -630,3 +669,4 @@ int sbw_core_traffic_save(sbw_core *core, const sbj *data, sbw_error *error) {
 }
 
 const wchar_t *sbw_core_work_directory(sbw_core *core) { return core ? core->directory : NULL; }
+const wchar_t *sbw_core_executable(sbw_core *core) { return core ? core->executable : NULL; }

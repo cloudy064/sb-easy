@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+project(sbeasy_apple_contract C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+find_package(PkgConfig REQUIRED)
+find_package(OpenSSL REQUIRED)
+pkg_check_modules(YAML REQUIRED IMPORTED_TARGET yaml-0.1)
+add_library(sbeasy_apple_core STATIC Core/core.c Core/support.c ../c/src/json.c ../c/src/types.c ../c/src/proxy_parser.c)
+target_include_directories(sbeasy_apple_core PUBLIC Core/include ../c/include)
+# Exercise the same portable base64 branch that Xcode compiles on Apple hosts.
+set_source_files_properties(../c/src/proxy_parser.c PROPERTIES COMPILE_DEFINITIONS __APPLE__)
+target_link_libraries(sbeasy_apple_core PUBLIC PkgConfig::YAML OpenSSL::Crypto m)
+target_compile_options(sbeasy_apple_core PRIVATE -Wall -Wextra -Wshadow -Werror)
+add_executable(apple_core_test Tests/core_test.c)
+target_link_libraries(apple_core_test PRIVATE sbeasy_apple_core)
+enable_testing()
+add_test(NAME apple_core_contract COMMAND apple_core_test)
+
+# The NetworkExtension process has a much smaller memory allowance than a server.
+target_compile_definitions(sbeasy_apple_core PRIVATE YAML_MAX_DEPTH=64 YAML_MAX_NODES=20000 YAML_CONVERT_BUDGET=30000 YAML_CONVERT_DEPTH=64 YAML_CONVERT_STRING_BUDGET=2097152 YAML_MAX_FIX_BYTES=2097152 YAML_MAX_FIX_ROUNDS=32 YAML_REJECT_LIMIT_EXHAUSTION=1)

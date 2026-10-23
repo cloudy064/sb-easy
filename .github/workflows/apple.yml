@@ -1,0 +1,55 @@
+name: Apple native clients
+on:
+  pull_request:
+    paths: ['apple/**', 'c/src/proxy_parser.c', 'c/src/json.c', 'c/src/types.c', 'c/include/**', 'config/runtime-versions.json', 'config/client-releases.json', '.github/workflows/apple.yml']
+  push:
+    branches: [master]
+    paths: ['apple/**', 'c/src/proxy_parser.c', 'c/src/json.c', 'c/src/types.c', 'c/include/**', 'config/runtime-versions.json', 'config/client-releases.json', '.github/workflows/apple.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: apple-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libyaml-dev libssl-dev
+      - run: cmake -S apple -B build/apple -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'
+      - run: cmake --build build/apple -j2
+      - run: ctest --test-dir build/apple --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+  native:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+      - run: brew install xcodegen
+      - name: Build pinned libbox for simulators and macOS
+        run: python3 apple/scripts/build-deps.py --platform iossimulator,tvossimulator,macos
+      - name: Generate native projects
+        run: xcodegen generate --spec apple/project.yml
+      - name: Shared Swift contracts
+        run: xcodebuild -project apple/SBEasy.xcodeproj -scheme SharedTests -destination 'platform=macOS' -derivedDataPath apple/DerivedData test CODE_SIGNING_ALLOWED=NO
+      - name: iOS native app and packet tunnel
+        run: xcodebuild -project apple/SBEasy.xcodeproj -scheme SBEasy-iOS -destination 'generic/platform=iOS Simulator' -derivedDataPath apple/DerivedData build CODE_SIGNING_ALLOWED=NO
+      - name: tvOS native app and packet tunnel
+        run: xcodebuild -project apple/SBEasy.xcodeproj -scheme SBEasy-tvOS -destination 'generic/platform=tvOS Simulator' -derivedDataPath apple/DerivedData build CODE_SIGNING_ALLOWED=NO
+      - name: macOS App Store app and packet tunnel
+        run: xcodebuild -project apple/SBEasy.xcodeproj -scheme SBEasy-macOS -destination 'platform=macOS' -derivedDataPath apple/DerivedData build CODE_SIGNING_ALLOWED=NO
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apple-native-results
+          path: |
+            apple/DerivedData/Logs/Test/*.xcresult
+            apple/Vendor/runtime-build.json
+          if-no-files-found: ignore

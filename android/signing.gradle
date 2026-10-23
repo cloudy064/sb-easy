@@ -1,0 +1,17 @@
+// Shared by the host and optional APK. Secrets are read only from the build environment.
+def configuredStore = project.findProperty('sbAndroidKeystore') ?: System.getenv('SB_ANDROID_KEYSTORE')
+if (configuredStore) {
+    def store = new File(configuredStore.toString())
+    if (!store.isAbsolute() || !store.isFile()) throw new GradleException('External Android keystore must be an existing absolute path')
+    def alias = project.findProperty('sbAndroidKeyAlias') ?: System.getenv('SB_ANDROID_KEY_ALIAS')
+    def storeSecret = System.getenv('SB_ANDROID_KEYSTORE_PASSWORD')
+    def keySecret = System.getenv('SB_ANDROID_KEY_PASSWORD') ?: storeSecret
+    if (!alias || !storeSecret || !keySecret) throw new GradleException('External signing requires an alias and keystore/key passwords in the environment')
+    def extension = project.extensions.getByName('android')
+    def signing = extension.signingConfigs.maybeCreate('sbExternal')
+    signing.storeFile = store
+    signing.storePassword = storeSecret
+    signing.keyAlias = alias.toString()
+    signing.keyPassword = keySecret
+    extension.buildTypes.configureEach { buildType -> buildType.signingConfig = signing }
+}

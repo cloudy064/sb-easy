@@ -3,6 +3,10 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <permission android:name="io.sbeasy.android.permission.HTTP_DEBUG" android:protectionLevel="signature" />
+    <uses-permission android:name="io.sbeasy.android.permission.HTTP_DEBUG" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
@@ -15,6 +19,7 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
 
     <queries>
+        <package android:name="io.sbeasy.httpdebug" />
         <package android:name="com.anthropic.claude" />
         <package android:name="com.openai.chatgpt" />
     </queries>
@@ -35,6 +40,13 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SbEasy"
         android:usesCleartextTraffic="true">
+
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.httpdebug.files" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/http_debug_files" />
+        </provider>
+
+        <activity android:name=".AppUpdateInstallResultActivity" android:exported="false" android:excludeFromRecents="true" />
 
         <activity
             android:name=".MainActivity"
@@ -65,6 +77,11 @@
                 android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
                 android:value="true" />
         </service>
+
+        <service
+            android:name=".SubscriptionRefreshService"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
 
         <service
             android:name=".SbEasyTileService"

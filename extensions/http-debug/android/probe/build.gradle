@@ -1,0 +1,14 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'io.sbeasy.sandboxprobe'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'io.sbeasy.sandboxprobe'
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName '1.0-test-only'
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+apply from: rootProject.file('../../../android/signing.gradle')

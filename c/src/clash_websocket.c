@@ -134,7 +134,7 @@ static void clash_target_free(clash_target *t) {
 }
 
 /* resolve_target(): same rules as the HTTP routes' resolve_clash_target(). */
-static int resolve_target(sb_http_server *srv, const char *host_param, clash_target *out, sb_err *err) {
+static int resolve_target(sb_http_server *srv, const char *host_param, bool allow_fallback, clash_target *out, sb_err *err) {
     out->base_url = out->secret = NULL;
     char *host_id = sb_http_trim(host_param);
     if (*host_id && strcmp(host_id, "self") != 0) {
@@ -158,6 +158,10 @@ static int resolve_target(sb_http_server *srv, const char *host_param, clash_tar
             free(url);
         }
         sb_host_free(&host);
+        if (!allow_fallback) {
+            free(host_id);
+            return sb_fail(err, SB_ERR_UNAVAILABLE, "Selected device has no Clash API configured");
+        }
     }
     free(host_id);
     out->base_url = sb_http_trim_trailing_slashes(srv->opts.clash_api_url ? srv->opts.clash_api_url : "");
@@ -280,19 +284,20 @@ static void append_cors_headers(sb_http_server *srv, const struct mg_connection 
     free(origin);
 }
 
-static void reject_unauthorized(sb_http_server *srv, const struct mg_connection *conn) {
+static void reject_unauthorized(sb_http_server *srv, const struct mg_connection *conn, bool authenticated) {
     sbj *body = sbj_object();
-    sbj_set_str(body, "error", "Invalid or expired token");
+    sbj_set_str(body, "error", authenticated ? "Authorized device scope required" : "Invalid or expired token");
     char *text = sbj_dump(body, -1);
     sbj_free(body);
     sb_buf headers = {0};
     append_cors_headers(srv, conn, &headers);
     mg_printf((struct mg_connection *)conn,
-              "HTTP/1.1 401 Unauthorized\r\n"
+              "HTTP/1.1 %s\r\n"
               "Content-Type: application/json; charset=utf-8\r\n"
               "Content-Length: %zu\r\n"
               "%s"
               "Connection: close\r\n\r\n%s",
+              authenticated ? "403 Forbidden" : "401 Unauthorized",
               strlen(text), headers.p ? headers.p : "", text);
     sb_buf_free(&headers);
     free(text);
@@ -304,22 +309,25 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata) {
     sb_http_server *srv = cbdata;
     sb_http_req req;
     request_view(srv, conn, &req);
-    bool authorized = false;
+    bool authorized = false, authenticated = false;
     if (request_stream_kind(conn)) {
         char *raw = sb_req_query_param(&req, "token");
         char *token = sb_http_trim(raw ? raw : "");
         free(raw);
         sb_auth_claims claims = {0};
-        if (*token && sb_auth_verify_token(srv->opts.jwt_secret ? srv->opts.jwt_secret : "", token, &claims)) {
-            authorized = true;
-            sb_auth_claims_free(&claims);
+        if (*token && sb_auth_security_verify(srv->security, token, &claims, NULL)) {
+            authenticated = true;
+            req.path = "/api/sing-box/ws/traffic";
+            req.claims = &claims;
+            authorized = sb_http_security_authorize(&req, NULL) == 0;
         }
+        sb_auth_claims_free(&claims);
         free(token);
     }
     /* The core only lets upgrades of exact Clash stream paths reach civetweb's
      * WebSocket dispatch, so the kind check is a safety net. */
     if (authorized) return 0;
-    reject_unauthorized(srv, conn);
+    reject_unauthorized(srv, conn, authenticated);
     return 1;
 }
 
@@ -604,6 +612,8 @@ typedef struct ws_bridge {
     char kind[16];
     char *host;  /* raw ?host= */
     char *level; /* trimmed ?level= */
+    char *token; /* session registry rechecked during the stream */
+    bool admin;
 } ws_bridge;
 
 /* Live bridges keyed by browser connection (the connection user-data slot is
@@ -638,6 +648,7 @@ static void bridge_free(ws_bridge *b) {
     pthread_mutex_destroy(&b->mutex);
     free(b->host);
     free(b->level);
+    free(b->token);
     free(b);
 }
 
@@ -731,12 +742,31 @@ typedef enum { PUMP_UPSTREAM_CLOSED, PUMP_UPSTREAM_CLOSE_FRAME, PUMP_BROWSER_GON
 /* Relays upstream messages until either side ends. Drogon forwards every
  * reassembled message with its type (text, binary, ping, pong, close) and
  * answers upstream pings itself; both sides are pinged every 30 s. */
+static bool bridge_authorized(ws_bridge *b) {
+    sb_auth_claims claims = {0};
+    bool allowed = sb_auth_security_verify(b->srv->security, b->token, &claims, NULL);
+    if (allowed && !sb_streq(claims.role, "admin")) {
+        char *host = sb_http_trim(b->host);
+        allowed = *host && sb_auth_device_allowed(b->srv->security, claims.subject, host, false, NULL);
+        free(host);
+    }
+    sb_auth_claims_free(&claims); return allowed;
+}
 static pump_end relay_pump(ws_bridge *b, upstream_io *io, sb_buf *in) {
     sb_buf message = {0};
     int message_opcode = 0;
     int64_t next_ping = sb_monotonic_ms() + PING_INTERVAL_MS;
+    int64_t next_auth = 0;
     pump_end end = PUMP_UPSTREAM_CLOSED;
     for (;;) {
+        int64_t auth_now = sb_monotonic_ms();
+        if (auth_now >= next_auth) {
+            if (!bridge_authorized(b)) {
+                browser_close(b, 1008, "session or device access revoked");
+                end = PUMP_BROWSER_GONE; goto out;
+            }
+            next_auth = auth_now + 5000;
+        }
         size_t offset = 0;
         int opcode = 0;
         bool fin = false;
@@ -805,7 +835,7 @@ static pump_end relay_pump(ws_bridge *b, upstream_io *io, sb_buf *in) {
             next_ping = now + PING_INTERVAL_MS;
         }
         char chunk[16384];
-        ssize_t n = io_read(io, chunk, sizeof chunk, (int)(next_ping - now));
+        ssize_t n = io_read(io, chunk, sizeof chunk, (int)((next_ping < next_auth ? next_ping : next_auth) - now));
         if (n == IO_TIMEOUT) continue;
         if (n == IO_WOKEN) {
             end = PUMP_BROWSER_GONE;
@@ -831,7 +861,7 @@ static void *relay_main(void *arg) {
     upstream_io io = {.fd = -1, .wake_fd = b->wake[0], .ctx = NULL, .ssl = NULL};
     sb_buf in = {0};
     sb_err err = {0};
-    if (resolve_target(b->srv, b->host, &target, &err) != 0) {
+    if (resolve_target(b->srv, b->host, b->admin, &target, &err) != 0) {
         close_with_error(b, err.msg);
         goto done;
     }
@@ -894,6 +924,11 @@ static void ws_ready(struct mg_connection *conn, void *cbdata) {
     pthread_mutex_init(&b->mutex, NULL);
     snprintf(b->kind, sizeof b->kind, "%s", kind ? kind : "");
     b->host = param_or_empty(&req, "host");
+    char *raw_token = param_or_empty(&req, "token");
+    b->token = sb_http_trim(raw_token); free(raw_token);
+    sb_auth_claims claims = {0};
+    b->admin = sb_auth_security_verify(srv->security, b->token, &claims, NULL) && sb_streq(claims.role, "admin");
+    sb_auth_claims_free(&claims);
     char *level = param_or_empty(&req, "level");
     b->level = sb_http_trim(level);
     free(level);

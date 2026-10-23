@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="io.sbeasy.android.permission.HTTP_DEBUG" />
+    <queries>
+        <package android:name="io.sbeasy.android" />
+        <package android:name="io.sbeasy.httpdebug" />
+    </queries>
+    <application android:label="sb-easy sandbox TEST ONLY" android:allowBackup="false">
+        <service android:name=".ProbeService" android:exported="true"
+            android:permission="io.sbeasy.android.permission.HTTP_DEBUG" />
+    </application>
+</manifest>

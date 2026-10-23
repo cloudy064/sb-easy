@@ -45,7 +45,9 @@ cutover-backup-*/
 /android/local.properties
 /android/**/build/
 /android/libbox-bridge/libs/*.aar
+/android/libbox-bridge/libs/libbox-provenance.json
 /android/.libbox-src/
+/extensions/http-debug/android/**/build/
 
 # Downloadable release artifacts
 /downloads/*.apk

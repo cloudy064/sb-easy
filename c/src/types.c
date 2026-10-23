@@ -182,7 +182,7 @@ char *sb_parsed_node_fingerprint(const sb_parsed_node *n) {
     else if (sb_strn_eq(t, n->node_type_len, "vmess") || sb_strn_eq(t, n->node_type_len, "vless"))
         first = "uuid";
     else if (sb_strn_eq(t, n->node_type_len, "tuic")) { first = "uuid"; second = "password"; }
-    else if (sb_strn_eq(t, n->node_type_len, "http")) { first = "username"; second = "password"; }
+    else if (sb_strn_eq(t, n->node_type_len, "http") || sb_strn_eq(t, n->node_type_len, "socks")) { first = "username"; second = "password"; }
     sb_buf raw = {0};
     sb_buf_append(&raw, n->server ? n->server : "", n->server_len);
     sb_buf_printf(&raw, ":%u:", (unsigned)n->server_port);

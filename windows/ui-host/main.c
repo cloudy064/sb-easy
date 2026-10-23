@@ -22,7 +22,8 @@
 static const wchar_t app_uri[] = L"https://sbeasy.local/index.html";
 static const wchar_t default_pipe[] = L"\\\\.\\pipe\\sb-easy-control-v1";
 enum { TRAY_MESSAGE = WM_APP + 1, REPLY_MESSAGE = WM_APP + 2,
-       COMMAND_OPEN = 100, COMMAND_EXIT = 101, COMMAND_EXPORT = 102, SMOKE_TIMER = 1 };
+       UPDATE_CLOSE_MESSAGE = WM_APP + 3,
+       COMMAND_OPEN = 100, COMMAND_EXIT = 101, COMMAND_EXPORT = 102, SMOKE_TIMER = 1, UPDATE_CLOSE_TIMER = 2 };
 typedef struct message { char *text; struct message *next; } message;
 typedef struct desktop {
     LONG refs, alive;
@@ -121,7 +122,9 @@ static bool httpdebug_local(desktop *app,sbj *request,char **response,sbw_error 
         if(ok){store=CertOpenStore(CERT_STORE_PROV_SYSTEM_W,0,0,CERT_SYSTEM_STORE_CURRENT_USER,L"ROOT");ok=store!=NULL;}
         if(ok&&remove){PCCERT_CONTEXT found=CertFindCertificateInStore(store,X509_ASN_ENCODING,0,CERT_FIND_EXISTING,cert,NULL);ok=!found||CertDeleteCertificateFromStore(found);}
         else if(ok)ok=CertAddCertificateContextToStore(store,cert,CERT_STORE_ADD_USE_EXISTING,NULL);
-        if(store)CertCloseStore(store,0);if(cert)CertFreeCertificateContext(cert);free(bytes);
+        if (store) CertCloseStore(store, 0);
+        if (cert) CertFreeCertificateContext(cert);
+        free(bytes);
     }
     if(ok){sbj *body=sbj_object();sbj_set_bool(body,"ready",true);sbj_set(reply,"result",body);*response=sbj_dump(reply,-1);}
     else sbw_fail(error,"HTTP_DEBUG_ERROR",open?"Could not open the local capture window.":"Could not update this user's capture certificate.");
@@ -135,8 +138,9 @@ static void receive(desktop *app, ICoreWebView2WebMessageReceivedEventArgs *args
     const sbj *id = NULL, *version, *method;
     bool allowed = false, queued = false;
     static const char *methods[] = {"service.start", "protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
-                                   "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server", "routing.gpt_node", "routing.set", "subscriptions.fetch", "subscriptions.save", "subscriptions.remove",
-                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "extensions.list", "extensions.change", "extensions.catalog", "extensions.install", "extensions.progress", "httpdebug.open", "httpdebug.export", "httpdebug.trust", "httpdebug.untrust", "httpdebug.start", "httpdebug.stop", "httpdebug.snapshot", "httpdebug.attach", "httpdebug.certificate", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
+                                   "updates.status", "updates.check", "updates.download", "updates.install", "updates.cancel", "updates.recover",
+                                   "enrollment.forget", "config.summary", "config.refresh", "config.validate", "routing.gpt_default", "routing.gpt_server", "routing.gpt_node", "routing.set", "routing.group_save", "routing.group_remove", "routing.probe", "routing.delay", "preferences.export", "preferences.preview", "preferences.apply", "preferences.cloud.login", "preferences.cloud.mfa", "preferences.cloud.logout", "preferences.cloud.get", "preferences.cloud.put", "preferences.cloud.delete", "routing.health.set", "routing.health.check", "routing.automatic.set", "mode.set", "management.settings.get", "management.settings.set", "subscriptions.import", "subscriptions.refresh", "subscriptions.fetch", "subscriptions.save", "subscriptions.remove",
+                                   "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "extensions.list", "extensions.change", "extensions.catalog", "extensions.catalog_update", "extensions.rollback", "extensions.install", "extensions.progress", "httpdebug.open", "httpdebug.export", "httpdebug.trust", "httpdebug.untrust", "httpdebug.start", "httpdebug.stop", "httpdebug.snapshot", "httpdebug.attach", "httpdebug.certificate", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
     if (FAILED(ICoreWebView2WebMessageReceivedEventArgs_get_Source(args, &source))) return;
     allowed = source && wcscmp(source, app_uri) == 0; CoTaskMemFree(source);
     if (!allowed) return;
@@ -208,7 +212,8 @@ static unsigned __stdcall work(void *context) {
             ready = sbw_service_ensure(&options, app->cancel, 12000, NULL, &error);
             free(binary);
         }
-        DWORD request_timeout = sbj_string_is(sbj_get(parsed_request, "method"), "connection.start") ? 90000 : 35000;
+        DWORD request_timeout = sbj_string_is(sbj_get(parsed_request, "method"), "connection.start") ||
+            sbj_string_is(sbj_get(parsed_request, "method"), "updates.install") ? 90000 : 35000;
         if (parsed_request && !local && !debug_local && !ready && !sbw_pipe_request(app->pipe, request, app->cancel, request_timeout, &response, &error)) {
             parsed_response = sbw_json_parse(response, strlen(response), 32, &error);
             valid = sbj_is_object(parsed_response) && sbj_equal(sbj_get(parsed_response, "id"), id) &&
@@ -220,12 +225,15 @@ static unsigned __stdcall work(void *context) {
             sbj *failed = failure(id, *error.code ? error.code : "SERVICE_UNAVAILABLE", *error.message ? error.message : "Invalid service response");
             free(response); response = sbj_dump(failed, -1); sbj_free(failed);
         }
+        bool close_for_update = valid && sb_streq(operation, "updates.install") && sbj_get_bool(parsed_response, "ok", false) &&
+            sbj_string_is(sbj_get(sbj_get(parsed_response, "result"), "phase"), "installing");
         sbj_free(parsed_request); sbj_free(parsed_response); sbw_secret_free(request);
         EnterCriticalSection(&app->mutex);
         if (app->stopping) { LeaveCriticalSection(&app->mutex); free(response); break; }
         queue_push(&app->responses, &app->responses_tail, response);
         LeaveCriticalSection(&app->mutex);
         PostMessageW(app->window, REPLY_MESSAGE, 0, 0);
+        if (close_for_update) PostMessageW(app->window, UPDATE_CLOSE_MESSAGE, 0, 0);
     }
     app_release(app); return 0;
 }
@@ -246,7 +254,8 @@ static void deliver(desktop *app) {
     typedef struct Name { Interface iface; LONG refs; desktop *app; IStream *stream; bool block_all; } Name; \
     static HRESULT STDMETHODCALLTYPE Name##_invoke Arguments; \
     static HRESULT STDMETHODCALLTYPE Name##_query(Interface *self, REFIID iid, void **out) { \
-        if (!out) return E_POINTER; *out = NULL; \
+        if (!out) return E_POINTER; \
+        *out = NULL; \
         if (!IsEqualIID(iid, &IID_IUnknown) && !IsEqualIID(iid, &IID_##Interface)) return E_NOINTERFACE; \
         *out = self; InterlockedIncrement(&((Name *)self)->refs); return S_OK; } \
     static ULONG STDMETHODCALLTYPE Name##_addref(Interface *self) { return (ULONG)InterlockedIncrement(&((Name *)self)->refs); } \
@@ -292,7 +301,8 @@ static HRESULT STDMETHODCALLTYPE permission_handler_invoke(ICoreWebView2Permissi
 static HRESULT STDMETHODCALLTYPE message_handler_invoke(ICoreWebView2WebMessageReceivedEventHandler *self,
     ICoreWebView2 *sender, ICoreWebView2WebMessageReceivedEventArgs *args) {
     desktop *app = ((message_handler *)self)->app; (void)sender;
-    if (app_alive(app)) receive(app, args); return S_OK;
+    if (app_alive(app)) receive(app, args);
+    return S_OK;
 }
 static void configure(desktop *app) {
     ICoreWebView2Settings *settings = NULL;
@@ -587,7 +597,11 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message_id, WPARAM wparam,
     case WM_DESTROY: app_shutdown(app); PostQuitMessage(app->exit_code); return 0;
     case TRAY_MESSAGE: tray_action(app, lparam); return 0;
     case REPLY_MESSAGE: deliver(app); return 0;
-    case WM_TIMER: if (wparam == SMOKE_TIMER) smoke_tick(app); return 0;
+    case UPDATE_CLOSE_MESSAGE: SetTimer(window, UPDATE_CLOSE_TIMER, 700, NULL); return 0;
+    case WM_TIMER:
+        if (wparam == SMOKE_TIMER) smoke_tick(app);
+        else if (wparam == UPDATE_CLOSE_TIMER) { KillTimer(window, UPDATE_CLOSE_TIMER); DestroyWindow(window); }
+        return 0;
     default: return DefWindowProcW(window, message_id, wparam, lparam);
     }
 }

@@ -1,5 +1,6 @@
 #include "test_support.h"
 #include "../service/protocol.h"
+#include "../service/health.h"
 #include <wchar.h>
 
 static sbj *call(sbw_controller *controller, const char *method, const sbj *params, bool authorized) {
@@ -20,7 +21,7 @@ static void expect_validation(const sbj *summary, const char *state, const char 
     const sbj *validation = sbj_get(summary, "validation");
     CHECK(sbj_is_object(validation));
     CHECK(sb_streq(sbj_get_str(validation, "state", ""), state));
-    CHECK(sb_streq(sbj_get_str(validation, "core_version", ""), "1.13.12"));
+    CHECK(sb_streq(sbj_get_str(validation, "core_version", ""), SB_EASY_CORE_VERSION));
     CHECK(etag ? sb_streq(sbj_get_str(validation, "checked_etag", ""), etag) : sbj_is_null(sbj_get(validation, "checked_etag")));
     if (error_code) {
         const sbj *error = sbj_get(validation, "error");
@@ -194,6 +195,117 @@ static void test_routing(const wchar_t *fixture) {
 }
 
 typedef struct refresh_task { sbw_controller *controller; sbj *params; sbj *result; } refresh_task;
+static void test_independent_modes(void) {
+    test_data data; test_data_init(&data);
+    sbw_controller *controller = test_controller(&data, NULL);
+    sbj *empty = sbj_object(), *enrollment = test_enrollment();
+    sbj *mode = sbj_parse_cstr("{\"mode\":\"independent\"}");
+    sbj *input = sbj_parse_cstr("{\"name\":\"Offline\",\"body\":\"http://user:PRIVATE_OFFLINE@proxy.test:8080#Office\"}");
+    expect_error(controller, "mode.set", mode, false, "FORBIDDEN");
+    expect_error(controller, "subscriptions.import", input, false, "FORBIDDEN");
+    sbj *invalid = sbj_parse_cstr("{\"name\":\"Bad\",\"body\":\"invalid://private\"}");
+    sbw_error error = {0};
+    CHECK(!sbw_controller_dispatch(controller, "subscriptions.import", invalid, true, &error));
+    CHECK(!data.saved && !data.enrollments && !data.downloads);
+    sbj *result = call(controller, "subscriptions.import", input, true);
+    const sbj *subs = sbj_get(sbj_get(result, "subscriptions"), "local");
+    CHECK(sbj_arr_len(subs) == 1 && !sbj_get_bool(sbj_arr_at(subs, 0), "remote", true));
+    char *id = sb_strdup(sbj_get_str(sbj_arr_at(subs, 0), "id", ""));
+    char *serialized = sbj_dump(result, -1); CHECK(!strstr(serialized, "PRIVATE_OFFLINE")); free(serialized); sbj_free(result);
+    result = call(controller, "status.get", empty, false);
+    CHECK(sbj_string_is(sbj_get(result, "mode"), "independent") && !sbj_get_bool(result, "enrolled", true)); sbj_free(result);
+    expect_error(controller, "config.refresh", empty, true, "INDEPENDENT_MODE");
+    expect_error(controller, "enrollment.apply", enrollment, true, "INDEPENDENT_MODE");
+    sbw_controller_background_tick(controller, GetTickCount64() + 100000);
+    CHECK(!data.downloads && !data.enrollments);
+    sbw_controller_free(controller); controller = test_controller(&data, NULL);
+    result = call(controller, "config.summary", empty, false);
+    CHECK(sbj_arr_len(sbj_get(sbj_get(result, "subscriptions"), "local")) == 1); sbj_free(result);
+    sbj *before = sbj_clone(data.saved); data.fail_write = true; sbj_set_str(mode, "mode", "managed");
+    expect_error(controller, "mode.set", mode, true, "STORAGE_ERROR"); CHECK(sbj_equal(before, data.saved));
+    sbj_free(before); data.fail_write = false;
+    result = call(controller, "mode.set", mode, true); CHECK(sbj_string_is(sbj_get(result, "mode"), "unconfigured")); sbj_free(result);
+    result = call(controller, "enrollment.apply", enrollment, true); sbj_free(result);
+    result = call(controller, "config.refresh", empty, true); sbj_free(result);
+    sbj_set_str(mode, "mode", "independent"); result = call(controller, "mode.set", mode, true);
+    CHECK(sbj_get_bool(result, "managed_available", false)); sbj_free(result);
+    result = call(controller, "config.summary", empty, false);
+    subs = sbj_get(sbj_get(result, "subscriptions"), "local");
+    CHECK(sbj_arr_len(subs) == 1 && sbj_string_is(sbj_get(sbj_arr_at(subs, 0), "id"), id)); sbj_free(result);
+    sbw_controller_free(controller); controller = test_controller(&data, NULL);
+    unsigned downloads = data.downloads; sbw_controller_background_tick(controller, GetTickCount64() + 100000);
+    CHECK(data.downloads == downloads);
+    sbj_set_str(mode, "mode", "managed"); result = call(controller, "mode.set", mode, true);
+    CHECK(sbj_get_bool(result, "enrolled", false) && sbj_get_bool(result, "independent_available", false)); sbj_free(result);
+    result = call(controller, "enrollment.forget", empty, true); sbj_free(result);
+    sbj_set_str(mode, "mode", "independent"); result = call(controller, "mode.set", mode, true); sbj_free(result);
+    result = call(controller, "config.summary", empty, false);
+    CHECK(sbj_arr_len(sbj_get(sbj_get(result, "subscriptions"), "local")) == 1); sbj_free(result);
+    sbw_controller_free(controller); test_data_free(&data);
+    free(id); sbj_free(input); sbj_free(invalid); sbj_free(mode); sbj_free(enrollment); sbj_free(empty);
+}
+static void test_health_settings(void) {
+    test_data data; test_data_init(&data); sbw_controller *controller = test_controller(&data, NULL);
+    sbj *empty = sbj_object(), *policy = sbw_health_policy(NULL);
+    expect_error(controller, "routing.health.set", policy, false, "FORBIDDEN");
+    expect_error(controller, "routing.health.set", policy, true, "NOT_ENROLLED");
+    sbj *input = sbj_parse_cstr("{\"name\":\"Offline\",\"body\":\"http://user:PRIVATE_OFFLINE@proxy.test:8080#Office\"}");
+    sbj *result = call(controller, "subscriptions.import", input, true);
+    const sbj *source = sbj_arr_at(sbj_get(sbj_get(result, "subscriptions"), "local"), 0);
+    char *tag = sb_strdup(sbj_as_str(sbj_arr_at(sbj_get(source, "tags"), 0), "")); CHECK(*tag); sbj_free(result);
+    sbj_set_int(policy, "interval_seconds", 60); sbj_set_str(policy, "selection", "fastest");
+    result = call(controller, "routing.health.set", policy, true); CHECK(sbj_equal(sbj_get(result, "health_policy"), policy)); sbj_free(result);
+    CHECK(!sbj_has(sbj_get(data.saved, "management"), "kill_switch_enabled"));
+    sbj *management = sbj_parse_cstr("{\"telemetry_enabled\":false}");
+    result = call(controller, "management.settings.set", management, true); sbj_free(result); sbj_free(management);
+    CHECK(!sbj_has(sbj_get(data.saved, "management"), "kill_switch_enabled"));
+    sbj *before = sbj_clone(data.saved); data.fail_write = true; sbj_set_int(policy, "interval_seconds", 90);
+    expect_error(controller, "routing.health.set", policy, true, "STORAGE_ERROR"); CHECK(sbj_equal(before, data.saved));
+    sbj_free(before); data.fail_write = false;
+    sbw_controller_free(controller); controller = test_controller(&data, NULL);
+    result = call(controller, "config.summary", empty, false); CHECK(sbj_get_int(sbj_get(result, "health_policy"), "interval_seconds", 0) == 60); sbj_free(result);
+    sbj *automatic = sbj_object(), *candidates = sbj_array(); sbj_arr_push(candidates, sbj_str(tag));
+    sbj_set_str(automatic, "group", "default"); sbj_set(automatic, "candidates", candidates);
+    expect_error(controller, "routing.automatic.set", automatic, false, "FORBIDDEN");
+    result = call(controller, "routing.automatic.set", automatic, true);
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(sbj_get(result, "routing_groups"), 0), "mode"), "automatic")); sbj_free(result);
+    sbj_set_bool(policy, "enabled", false); expect_error(controller, "routing.health.set", policy, true, "HEALTH_REQUIRED");
+    result = call(controller, "routing.health.check", empty, true); CHECK(!sbj_get_bool(sbj_get(result, "health"), "checking", true)); sbj_free(result);
+    sbw_controller_free(controller); controller = test_controller(&data, NULL);
+    result = call(controller, "config.summary", empty, false);
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(sbj_get(result, "routing_groups"), 0), "mode"), "automatic")); sbj_free(result);
+    CHECK(!data.enrollments && !data.downloads);
+    sbw_controller_free(controller); test_data_free(&data); sbj_free(empty); sbj_free(input); sbj_free(policy); sbj_free(automatic); free(tag);
+}
+static void test_preferences_import(void) {
+    test_data source_data, destination_data; test_data_init(&source_data); test_data_init(&destination_data);
+    sbw_controller *source = test_controller(&source_data, NULL), *destination = test_controller(&destination_data, NULL);
+    sbj *empty = sbj_object(), *password = sbj_parse_cstr("{\"password\":\"ARCHIVE_PASSWORD_2026\"}");
+    sbj *input = sbj_parse_cstr("{\"name\":\"Portable\",\"body\":\"http://user:PRIVATE_OFFLINE@proxy.test:8080#Office\"}");
+    sbj *result = call(source, "subscriptions.import", input, true); sbj_free(result);
+    expect_error(source, "preferences.export", password, false, "FORBIDDEN");
+    sbj *archive = call(source, "preferences.export", password, true);
+    sbj *request = sbj_clone(password); sbj_set(request, "envelope", sbj_clone(sbj_get(archive, "envelope")));
+    expect_error(destination, "preferences.preview", request, false, "FORBIDDEN");
+    result = call(destination, "preferences.preview", request, true);
+    CHECK(sbj_get_int(result, "node_count", 0) == 1 && !destination_data.saved);
+    sbj *apply = sbj_object(); sbj_set(apply, "preview_id", sbj_clone(sbj_get(result, "preview_id"))); sbj_free(result);
+    destination_data.fail_write = true;
+    expect_error(destination, "preferences.apply", apply, true, "STORAGE_ERROR"); CHECK(!destination_data.saved);
+    destination_data.fail_write = false; expect_error(destination, "preferences.apply", apply, true, "PREFERENCES_PREVIEW_EXPIRED");
+    result = call(destination, "preferences.preview", request, true); sbj_set(apply, "preview_id", sbj_clone(sbj_get(result, "preview_id"))); sbj_free(result);
+    sbj *mode = sbj_parse_cstr("{\"mode\":\"independent\"}"); result = call(destination, "mode.set", mode, true); sbj_free(result);
+    expect_error(destination, "preferences.apply", apply, true, "PREFERENCES_LOCAL_CONFLICT");
+    result = call(destination, "preferences.preview", request, true); sbj_set(apply, "preview_id", sbj_clone(sbj_get(result, "preview_id"))); sbj_free(result);
+    result = call(destination, "preferences.apply", apply, true);
+    CHECK(sbj_arr_len(sbj_get(sbj_get(result, "subscriptions"), "local")) == 1); sbj_free(result);
+    expect_error(destination, "preferences.apply", apply, true, "PREFERENCES_PREVIEW_EXPIRED");
+    result = call(destination, "status.get", empty, false);
+    CHECK(sbj_string_is(sbj_get(result, "mode"), "independent") && !sbj_get_bool(result, "core_running", true)); sbj_free(result);
+    CHECK(!destination_data.enrollments && !destination_data.downloads);
+    sbw_controller_free(source); sbw_controller_free(destination); test_data_free(&source_data); test_data_free(&destination_data);
+    sbj_free(empty); sbj_free(password); sbj_free(input); sbj_free(archive); sbj_free(request); sbj_free(apply); sbj_free(mode);
+}
 static DWORD WINAPI refresh_worker(void *context) {
     refresh_task *task = context; task->result = call(task->controller, "config.refresh", task->params, true); return 0;
 }
@@ -204,6 +316,22 @@ int wmain(int argc, wchar_t **argv) {
     test_data data; test_data_init(&data);
     sbj *empty = sbj_object(), *enrollment = test_enrollment();
     sbw_controller *controller = test_controller(&data, NULL);
+    sbj *update = call(controller, "updates.status", empty, false);
+    CHECK(!sbj_get_bool(update, "supported", true) && sbj_string_is(sbj_get(update, "phase"), "unavailable")); sbj_free(update);
+    sbj *update_request = sbj_object(); sbj_set_str(update_request, "manifest_url", "https://release.example.test/windows/release.json");
+    expect_error(controller, "updates.check", update_request, false, "FORBIDDEN");
+    expect_error(controller, "updates.check", update_request, true, "UPDATE_UNAVAILABLE");
+    sbj_set_str(update_request, "publisher_thumbprint", "attacker-selected");
+    expect_error(controller, "updates.check", update_request, true, "INVALID_REQUEST"); sbj_free(update_request);
+    expect_error(controller, "updates.health", empty, true, "INVALID_REQUEST");
+    sbj *catalog_request = sbj_object(); sbj_set_str(catalog_request, "envelope", "{}");
+    expect_error(controller, "extensions.catalog_update", catalog_request, false, "FORBIDDEN");
+    sbj_set_str(catalog_request, "public_key", "caller-selected");
+    expect_error(controller, "extensions.catalog_update", catalog_request, true, "INVALID_REQUEST");
+    sbj_del(catalog_request, "public_key"); sbj_del(catalog_request, "envelope"); sbj_set_str(catalog_request, "id", "capture");
+    expect_error(controller, "extensions.rollback", catalog_request, false, "FORBIDDEN");
+    sbj_set_int(catalog_request, "build", 1);
+    expect_error(controller, "extensions.rollback", catalog_request, true, "INVALID_REQUEST"); sbj_free(catalog_request);
     sbj *result = call(controller, "config.summary", empty, false);
     CHECK(sbj_is_null(sbj_get(result, "active_etag")) && !sbj_get_bool(result, "candidate_available", true));
     expect_validation(result, "unavailable", NULL, NULL); sbj_free(result);
@@ -273,5 +401,8 @@ int wmain(int argc, wchar_t **argv) {
     sbj_free(enrollment); sbj_free(empty); test_data_free(&data);
     test_validation(argv[1]);
     test_routing(argv[1]);
+    test_independent_modes();
+    test_health_settings();
+    test_preferences_import();
     puts("C controller: enrollment, persistence, 304, fixture validation, revision binding, authorization, concurrency and redaction passed."); return 0;
 }

@@ -1,4 +1,29 @@
 #include "state.h"
+#include <string.h>
+
+void sb_windows_recovery_request(sb_windows_recovery *recovery, bool connect, uint64_t now_ms) {
+    memset(recovery, 0, sizeof *recovery);
+    recovery->desired_connected = connect;
+    recovery->retry_at_ms = now_ms;
+}
+void sb_windows_recovery_failed(sb_windows_recovery *recovery, uint64_t now_ms) {
+    if (!recovery->desired_connected) return;
+    /* 2, 4, 8, 16, 32, 60 seconds; sustained health resets flapping history. */
+    unsigned shift = recovery->attempts < 5 ? recovery->attempts : 5;
+    uint64_t delay = (uint64_t)2000 << shift;
+    if (delay > 60000) delay = 60000;
+    if (recovery->attempts < 1000000) ++recovery->attempts;
+    recovery->retry_at_ms = now_ms + delay;
+    recovery->healthy_since_ms = 0;
+}
+void sb_windows_recovery_healthy(sb_windows_recovery *recovery, uint64_t now_ms) {
+    if (!recovery->healthy_since_ms) recovery->healthy_since_ms = now_ms;
+    if (now_ms - recovery->healthy_since_ms >= 60000) recovery->attempts = 0;
+    recovery->retry_at_ms = 0;
+}
+bool sb_windows_recovery_due(const sb_windows_recovery *recovery, uint64_t now_ms) {
+    return recovery->desired_connected && recovery->retry_at_ms && now_ms >= recovery->retry_at_ms;
+}
 
 void sb_windows_runtime_init(sb_windows_runtime_state *state) {
     if (!state) return;

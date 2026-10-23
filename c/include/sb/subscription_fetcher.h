@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "sb/util.h"
+#include "sb/json.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,14 @@ char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *fetcher, const char
  * Embedded NUL in the authority is rejected (libcurl accepts C-string origins). */
 char *sb_subscription_fetcher_fetch_n(sb_subscription_fetcher *fetcher, const char *url,
                                       size_t url_len, size_t *len, sb_err *err);
+
+/* Final-response Subscription-Userinfo only; redirects cannot supply metadata.
+ * usage is caller-owned and contains only valid nonnegative integer fields.
+ * Missing or invalid fields are unknown, never interpreted as unlimited. */
+char *sb_subscription_fetcher_fetch_metadata(sb_subscription_fetcher *fetcher, const char *url,
+                                             size_t url_len, size_t *len, sbj **usage,
+                                             sb_err *err);
+sbj *sb_subscription_parse_usage(const char *header);
 
 #ifdef __cplusplus
 }

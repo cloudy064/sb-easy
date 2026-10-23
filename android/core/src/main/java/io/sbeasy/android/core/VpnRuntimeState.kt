@@ -42,7 +42,7 @@ object VpnRuntimeState {
     fun connected(config: ManagedConfig?) {
         mutableState.value = mutableState.value.copy(
             phase = VpnPhase.CONNECTED,
-            detail = "受管代理运行中",
+            detail = if (config?.ruleSource == "local-subscriptions") "独立代理运行中" else "受管代理运行中",
             startedAtMillis = System.currentTimeMillis(),
             error = null,
             configEtag = config?.etag,

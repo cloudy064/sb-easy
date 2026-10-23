@@ -1,5 +1,13 @@
 # Android / Windows feature comparison (0.6.0)
 
+This is a historical 0.6.0 comparison. The current development tree adds independent
+mode, native background subscription refresh with quota/expiry and import reports,
+custom local domain/process groups, active latency and URL probes, center management
+and bounded connection recovery. See [implementation notes](README.md#implemented).
+Android 1.3.4 has withdrawn packet capture and HTTP(S) debugging. See the
+[2026-10-23 product assessment](../docs/product-gap-analysis-2026-10-23.md)
+for the current platform comparison.
+
 Reviewed against `android/app/src/main/java/io/sbeasy/android/MainActivity.kt`,
 `android/core/src/main/java/io/sbeasy/android/core/AppTrafficLedger.kt`,
 `TrafficDomain.kt`, `TrafficBreakdown.kt`, and `LocalRoutingPolicy.kt`.
@@ -8,7 +16,7 @@ Reviewed against `android/app/src/main/java/io/sbeasy/android/MainActivity.kt`,
 | --- | --- |
 | Device enrollment and automatic configuration download | Available in the existing enrollment workflow |
 | Configuration validation, activation and rollback | Available; preserves previous working configuration on candidate failure |
-| TUN start/stop, managed WireGuard endpoint | Available with the pinned sing-box 1.13.12 |
+| TUN start/stop, managed WireGuard endpoint | Available with the pinned sing-box 1.14.3 |
 | Live connections, speeds and node latency history | Available |
 | App traffic totals | Added in 0.5.0; process basename instead of Android package/UID |
 | Domain totals, host and outbound drill-down | Added in 0.5.0 with public/private suffix grouping |
@@ -18,9 +26,9 @@ Reviewed against `android/app/src/main/java/io/sbeasy/android/MainActivity.kt`,
 | Recent host/outbound observations | Available through statistics sorted by recent access; does not include all rejected/short connections |
 | Runtime configuration overview and service routing | Available as a credential-free projection; raw JSON is not exposed to WebView |
 | Default GPT routing override | Available and persistent |
-| Local custom service groups, domain editing, arbitrary node selection | Not yet ported; Android has a more complete local routing policy layer |
-| Active node/group latency tests | Not yet ported; Windows displays existing core latency results |
-| Actual URL route tests and route-record synchronization to center | Not yet ported |
+| Local custom service groups, domain editing, arbitrary node selection | Available in the current development tree; Windows matches process names |
+| Active node/group latency tests | Available through the authenticated, process-owned core API |
+| Actual URL route tests and route-record synchronization to center | Local URL tests available; diagnostic detail is not automatically uploaded |
 | Android package-specific routing, battery exemptions, Always-on VPN | Platform-specific; no direct Windows equivalent in this release |
 | Windows service autostart, tray and installer | Available; service autostart does not imply automatic VPN connection |
 
@@ -41,10 +49,10 @@ the API does not expose full local paths. Statistics and sanitized logs require
 the active console user or an administrator, just like runtime/config inspection.
 Domain grouping uses tldts with private suffixes enabled and performs no DNS lookup.
 
-The next parity work requires a general local routing-policy layer (including DNS
-detours and preservation of center-managed WireGuard routes), controlled core
-mutations for node tests/selection, and an actual proxy-routed URL probe. These are
-not simulated by the new statistics UI.
+The routing-policy layer preserves center-managed WireGuard protection and adds
+DNS detours. Delay and URL tests use real core transport; observations that the
+core does not expose remain explicitly unavailable. Real Windows driver, suspend,
+adapter-transition and installer acceptance remain separate from fixture tests.
 
 ## Android 1.3.1 capture alignment (Windows 0.6.0)
 

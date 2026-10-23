@@ -90,6 +90,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import io.sbeasy.android.core.ClientMode
 import io.sbeasy.android.core.ConfigInspector
 import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.ControlPlaneSnapshot
@@ -106,6 +107,7 @@ import io.sbeasy.android.core.AppTrafficStat
 import io.sbeasy.android.core.DomainRouteStat
 import io.sbeasy.android.core.EnrollmentUriParser
 import io.sbeasy.android.core.ManagedConfig
+import io.sbeasy.android.core.ManagedTransportPolicy
 import io.sbeasy.android.core.LocalRouting
 import io.sbeasy.android.core.LocalRoutingGroup
 import io.sbeasy.android.core.LocalRoutingPolicy
@@ -120,6 +122,7 @@ import io.sbeasy.android.core.TrafficSnapshot
 import io.sbeasy.android.core.VpnPhase
 import io.sbeasy.android.core.VpnRuntimeState
 import io.sbeasy.android.libbox.SbEasyVpnService
+import io.sbeasy.android.libbox.AndroidVpnProtection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -227,7 +230,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun deliverScannedEnrollment(value: String) {
-        runCatching { EnrollmentUriParser.parse(value) }
+        runCatching { EnrollmentUriParser.inspect(value) }
             .onSuccess { pendingScanResult?.invoke(value.trim()) }
             .onFailure {
                 pendingScanError?.invoke(it.message ?: "二维码不是有效的 sb-easy 注册链接")
@@ -330,6 +333,9 @@ private fun SbEasyApp(
     var selectedTab by remember { mutableIntStateOf(0) }
     var actionError by remember { mutableStateOf<String?>(null) }
 
+    LaunchedEffect(control.mode) {
+        if (control.mode == ClientMode.STANDALONE && control.config == null) selectedTab = 2
+    }
     LaunchedEffect(control.enrollment?.hostId) {
         if (control.enrollment != null && vpn.phase != VpnPhase.CONNECTED) {
             runCatching { CoreGraph.repository.syncConfiguration() }
@@ -352,21 +358,24 @@ private fun SbEasyApp(
             color = Background,
             modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding(),
         ) {
-            if (control.enrollment == null) {
+            if (control.mode == ClientMode.MANAGED && control.enrollment == null) {
                 EnrollmentScreen(
                     initialUri = initialEnrollmentUri,
                     coreVersion = vpn.coreVersion.orEmpty(),
                     onConsumed = onEnrollmentConsumed,
                     onScan = onScan,
                     onPickImage = onPickImage,
-                    onEnroll = { uri ->
+                    onEnroll = { uri, allowLocalHttp ->
                         scope.launch {
                             actionError = null
                             runCatching {
-                                CoreGraph.repository.enroll(uri, BuildConfig.VERSION_NAME, vpn.coreVersion.orEmpty())
+                                CoreGraph.repository.enroll(uri, BuildConfig.VERSION_NAME, vpn.coreVersion.orEmpty(), allowLocalHttp)
                             }.onFailure { actionError = it.message ?: "注册失败" }
                         }
                     },
+                    onStandalone = { scope.launch {
+                        runCatching { CoreGraph.repository.switchMode(ClientMode.STANDALONE) }.onFailure { actionError = it.message }
+                    } },
                     syncing = control.syncPhase == SyncPhase.SYNCING,
                     error = actionError ?: control.lastError,
                 )
@@ -381,7 +390,8 @@ private fun SbEasyApp(
                 when (selectedTab) {
                     0 -> HomeScreen(control, vpn.phase, vpn.detail, vpn.error, traffic, groups, routing, onConnect, onDisconnect)
                     1 -> ProxiesScreen(groups, routing, vpn.phase)
-                    2 -> ToolsScreen(control.config, connections.size, domainRoutes, logs, diagnosticLogs, vpn.phase, vpn.coreVersion)
+                    2 -> SubscriptionsScreen(control.mode, vpn.phase)
+                    3 -> ToolsScreen(control.config, connections.size, domainRoutes, logs, diagnosticLogs, vpn.phase, vpn.coreVersion)
                     else -> SettingsScreen(control, vpn.coreVersion, vpn.phase, onDisconnect)
                 }
             }
@@ -389,7 +399,7 @@ private fun SbEasyApp(
     }
 }
 
-private val destinations = listOf("总览", "代理", "诊断", "设置")
+private val destinations = listOf("总览", "代理", "订阅", "诊断", "设置")
 
 @Composable
 private fun AppShell(
@@ -482,7 +492,7 @@ private fun AppHeader(control: ControlPlaneSnapshot, vpnPhase: VpnPhase) {
         ) { Text("S", color = Color.White, fontWeight = FontWeight.Black, fontSize = 18.sp) }
         Column(Modifier.padding(start = 10.dp)) {
             Text("sb-easy", color = Ink, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-            Text(control.enrollment?.hostName.orEmpty(), color = Muted, fontSize = 11.sp)
+            Text(if (control.mode == ClientMode.STANDALONE) "独立模式 · 本机订阅" else control.enrollment?.hostName.orEmpty(), color = Muted, fontSize = 11.sp)
         }
         Spacer(Modifier.weight(1f))
         StatusChip(vpnPhase == VpnPhase.CONNECTED, if (vpnPhase == VpnPhase.CONNECTED) "已连接" else "未连接")
@@ -496,11 +506,14 @@ private fun EnrollmentScreen(
     onConsumed: () -> Unit,
     onScan: ((String) -> Unit, (String) -> Unit) -> Unit,
     onPickImage: ((String) -> Unit, (String) -> Unit) -> Unit,
-    onEnroll: (String) -> Unit,
+    onEnroll: (String, Boolean) -> Unit,
+    onStandalone: () -> Unit,
     syncing: Boolean,
     error: String?,
 ) {
     var value by remember { mutableStateOf("") }
+    var allowLocalHttp by remember(value) { mutableStateOf(false) }
+    val localHttp = remember(value) { runCatching { EnrollmentUriParser.inspect(value).first.startsWith("http://") }.getOrDefault(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(initialUri) {
         if (!initialUri.isNullOrBlank()) {
@@ -547,9 +560,18 @@ private fun EnrollmentScreen(
                     minLines = 3,
                     shape = RoundedCornerShape(14.dp),
                 )
+                if (localHttp) {
+                    Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("允许此局域网 HTTP 测试中心", color = Warn, fontSize = 13.sp)
+                            Text("注册码、设备令牌和配置会明文传输。仅允许内网或回环 IP；授权只绑定此次注册，可在设置中关闭。", color = Warn, fontSize = 11.sp, lineHeight = 16.sp)
+                        }
+                        Switch(checked = allowLocalHttp, onCheckedChange = { allowLocalHttp = it }, enabled = !syncing)
+                    }
+                } else Text("中心连接默认要求 HTTPS，不接受重定向或服务端更换地址。", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 10.dp))
                 Button(
-                    onClick = { onEnroll(value) },
-                    enabled = value.isNotBlank() && !syncing,
+                    onClick = { onEnroll(value, allowLocalHttp) },
+                    enabled = value.isNotBlank() && !syncing && (!localHttp || allowLocalHttp),
                     modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
                     shape = RoundedCornerShape(14.dp),
                 ) {
@@ -557,6 +579,9 @@ private fun EnrollmentScreen(
                     else Text("注册并同步配置")
                 }
                 (scanError ?: error)?.let { ErrorText(it) }
+            }
+            OutlinedButton(onClick = onStandalone, enabled = !syncing, modifier = Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                Text("无需中心，使用本机订阅")
             }
             Text("凭据由 Android Keystore 加密 · sing-box $coreVersion", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 18.dp))
         }
@@ -577,6 +602,7 @@ private fun HomeScreen(
 ) {
     val scope = rememberCoroutineScope()
     val connected = phase == VpnPhase.CONNECTED
+    val runtimeActive = io.sbeasy.android.core.RuntimeBridge.control != null
     val busy = phase == VpnPhase.STARTING || phase == VpnPhase.STOPPING
     val selectedProxy = groups.firstOrNull { it.tag == routing.defaultTag && it.selected.isNotBlank() }?.selected
         ?: routing.selections[routing.defaultTag]
@@ -595,18 +621,18 @@ private fun HomeScreen(
                             Text(if (connected) "网络已受保护" else detail, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             Text(selectedProxy, color = if (connected) AccentDark else Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp))
                         }
-                        StatusChip(connected, if (connected) "运行中" else "已停止")
+                        StatusChip(connected, if (connected) "运行中" else if (runtimeActive) "恢复中" else "已停止")
                     }
                     Button(
-                        onClick = if (connected) onDisconnect else onConnect,
-                        enabled = !busy && control.config != null,
+                        onClick = if (connected || runtimeActive) onDisconnect else onConnect,
+                        enabled = !busy && (runtimeActive || control.config != null),
                         modifier = Modifier.padding(top = 14.dp).fillMaxWidth().height(52.dp),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (connected) Color(0xFF26343A) else Accent,
                             contentColor = if (connected) Ink else Color(0xFF052018),
                         ),
-                    ) { Text(if (busy) "正在处理…" else if (connected) "断开 VPN" else "启动 VPN", fontSize = 15.sp, fontWeight = FontWeight.Bold) }
+                    ) { Text(if (busy) "正在处理…" else if (connected || runtimeActive) "停止 VPN" else "启动 VPN", fontSize = 15.sp, fontWeight = FontWeight.Bold) }
                     if (control.config == null) Text("先同步配置后才能连接", color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp))
                 }
             }
@@ -658,16 +684,19 @@ private fun ProxiesScreen(
     var expandedTag by remember { mutableStateOf<String?>(null) }
     var editor by remember { mutableStateOf<LocalRoutingGroup?>(null) }
     var deleting by remember { mutableStateOf<LocalRoutingGroup?>(null) }
+    var showHealth by remember { mutableStateOf(false) }
+    var editingPool by remember { mutableStateOf<String?>(null) }
+    val health by CoreGraph.repository.health.collectAsStateWithLifecycle()
     var error by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     val policy = routing.policy
     if (policy == null) {
-        EmptyPanel("先同步服务器配置，即可设置默认代理和服务分组")
+        EmptyPanel("先同步配置或导入本机订阅，即可设置默认代理和服务分组")
         return
     }
     val changingVpn = phase == VpnPhase.STARTING || phase == VpnPhase.STOPPING
     val canEdit = !busy && !changingVpn
-    val latencyGroup = groups.firstOrNull { it.type.equals("urltest", ignoreCase = true) }
+    val latencyGroup = groups.firstOrNull { it.type.equals("urltest", ignoreCase = true) } ?: groups.firstOrNull { it.tag == routing.defaultTag }
     val latencyByTag = latencyGroup?.items?.associateBy { it.tag }.orEmpty()
     val rows = listOf(Triple(routing.defaultTag, "默认代理", null)) + policy.groups.map {
         Triple(routing.groupTags.getValue(it.id), it.name, it)
@@ -676,7 +705,7 @@ private fun ProxiesScreen(
         item {
             AppCard {
                 Text("服务分组", color = Ink, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                Text("每组使用一个固定节点，国内和局域网直连，其余流量使用默认代理。",
+                Text("每组可使用固定节点或明确候选池内的自动出口，其余流量使用默认代理。",
                     color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
                 Text("设置保存在本机，重启和服务器同步后继续生效。",
                     color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
@@ -701,6 +730,7 @@ private fun ProxiesScreen(
                         Text(if (testing) "测速中…" else "节点测速")
                     }
                 }
+                TextButton(onClick = { showHealth = true; error = null }, enabled = canEdit) { Text("健康探测与自动切换设置") }
                 if (phase != VpnPhase.CONNECTED) {
                     Text("可在未连接时设置，启动 VPN 后生效。", color = AccentDark, fontSize = 12.sp,
                         modifier = Modifier.padding(top = 9.dp))
@@ -714,20 +744,38 @@ private fun ProxiesScreen(
                 error?.let { ErrorText(it) }
             }
         }
+        item {
+            AppCard {
+                Text("节点健康", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text(if (health.checking) "正在探测已用节点和自动候选池…" else if (health.checkedAtMillis > 0)
+                    "最近检测 ${java.text.DateFormat.getTimeInstance().format(java.util.Date(health.checkedAtMillis))} · ${health.results.count { it.healthy }}/${health.results.size} 可用"
+                    else "尚未检测", color = Muted, fontSize = 12.sp)
+                Text(if (policy.health.enabled) "每 ${policy.health.intervalSeconds} 秒检测 · 超时 ${policy.health.timeoutMillis} ms" else "后台探测已关闭",
+                    color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+                health.warnings.forEach { Text(it, color = Warn, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp)) }
+                TextButton(onClick = { scope.launch { runCatching { CoreGraph.repository.runHealthCycle(force = true) }.onFailure { error = it.message } } },
+                    enabled = phase == VpnPhase.CONNECTED && !health.checking && canEdit) { Text("立即检测已用节点 / 候选池") }
+            }
+        }
         items(rows, key = { it.first }) { (tag, name, group) ->
             val selected = groups.firstOrNull { it.tag == tag }?.selected
                 ?: routing.selections[tag].orEmpty()
+            val automatic = (group?.outbound ?: policy.defaultOutbound) == LocalRouting.AUTOMATIC
+            val blocked = tag in routing.blockedGroups
             val expanded = expandedTag == tag
             AppCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(name, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        Text(selected.ifBlank { "尚未选择" }, color = AccentDark, fontSize = 13.sp,
+                        Text(if (blocked) "出口不可用 · 已阻断" else if (automatic) "自动 · ${selected.ifBlank { "等待检测" }}" else selected.ifBlank { "尚未选择" }, color = if (blocked) Warn else AccentDark, fontSize = 13.sp,
                             modifier = Modifier.padding(top = 5.dp))
                     }
                     TextButton(onClick = { expandedTag = if (expanded) null else tag; query = "" }, enabled = canEdit) {
                         Text(if (expanded) "收起" else "选择节点")
                     }
+                }
+                if (automatic) TextButton(onClick = { editingPool = group?.id ?: "default"; error = null }, enabled = canEdit) {
+                    Text("编辑候选池（${(group?.automaticCandidates ?: policy.defaultAutomaticCandidates).size} 个节点）")
                 }
                 if (group == null) {
                     Text("未命中服务分组且需要代理的流量", color = Muted, fontSize = 12.sp,
@@ -738,7 +786,7 @@ private fun ProxiesScreen(
                             color = if (group.includeOfficialApp) AccentDark else Muted, fontSize = 12.sp,
                             modifier = Modifier.padding(top = 8.dp))
                     }
-                    Text("网页 / 其他应用：${group.domains.size} 个域名及其子域名", color = Muted, fontSize = 12.sp,
+                    Text("匹配 ${group.domains.size} 个域名及其子域名 · ${LocalRouting.effectivePackages(group).size} 个应用", color = Muted, fontSize = 12.sp,
                         modifier = Modifier.padding(top = 5.dp))
                     Text(group.domains.take(3).joinToString(" · ") + if (group.domains.size > 3) " …" else "",
                         color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
@@ -750,15 +798,20 @@ private fun ProxiesScreen(
                 if (expanded) {
                     OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("搜索节点") },
                         singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-                    val visible = routing.availableNodes.filter { query.isBlank() || it.tag.contains(query.trim(), ignoreCase = true) }
+                    val visible = routing.availableNodes.filter { query.isBlank() || it.tag.contains(query.trim(), ignoreCase = true) || (it.type == "automatic" && "自动".contains(query.trim())) }
                     visible.forEach { proxy ->
-                        val isSelected = selected == proxy.tag
+                        val isSelected = if (proxy.tag == LocalRouting.AUTOMATIC) automatic else !automatic && selected == proxy.tag && !blocked
                         val latency = latencyByTag[proxy.tag] ?: proxy
+                        val measured = health.results.firstOrNull { it.tag == proxy.tag }
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(13.dp))
                                 .background(if (isSelected) AccentSoft else Color.Transparent)
                                 .clickable(enabled = canEdit) {
-                                    scope.launch {
+                                    if (proxy.tag == LocalRouting.AUTOMATIC) {
+                                        editingPool = group?.id ?: "default"
+                                        expandedTag = null
+                                        error = null
+                                    } else scope.launch {
                                         busy = true
                                         error = null
                                         message = null
@@ -772,13 +825,13 @@ private fun ProxiesScreen(
                         ) {
                             RadioButton(selected = isSelected, onClick = null, enabled = canEdit)
                             Column(Modifier.weight(1f)) {
-                                Text(proxy.tag, color = if (isSelected) AccentDark else Ink, fontSize = 14.sp,
+                                Text(if (proxy.tag == LocalRouting.AUTOMATIC) "自动（仅所选候选池）" else proxy.tag, color = if (isSelected) AccentDark else Ink, fontSize = 14.sp,
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                Text(if (proxy.tag == "direct") "直接连接" else "固定节点 · ${proxy.type}",
+                                Text(if (proxy.tag == "direct") "直接连接" else if (proxy.tag == LocalRouting.AUTOMATIC) "故障切换 / 容差择优" else "固定节点 · ${proxy.type}",
                                     color = Muted, fontSize = 11.sp)
                             }
-                            if (proxy.tag != "direct") DelayBadge(latency.urlTestDelay)
+                            if (proxy.tag != "direct" && proxy.type != "automatic") DelayBadge(measured?.latencyMillis ?: latency.urlTestDelay)
                         }
                     }
                     if (visible.isEmpty()) Text("没有匹配的节点", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
@@ -788,10 +841,37 @@ private fun ProxiesScreen(
         item {
             AppCard {
                 Text("直连", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                Text("未命中 App 规则时，国内域名、国内 IP、局域网和管理服务器 → direct", color = Muted, fontSize = 12.sp,
+                Text("中心地址和受管 WireGuard 网络优先；其余流量依次匹配应用、私网和域名规则。", color = Muted, fontSize = 12.sp,
                     modifier = Modifier.padding(top = 7.dp))
-                Text("启用 App 全流量后，Claude / ChatGPT 官方 Android App 的所有连接优先跟随各自分组节点。浏览器仍按域名匹配。",
+                Text("每个应用只能属于一个分组。应用与域名为“或”匹配；应用命中时其 DNS 和数据连接使用相同出口。",
                     color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 7.dp))
+            }
+        }
+    }
+    if (showHealth) HealthPolicyEditor(policy.health, busy, error, onDismiss = { if (!busy) showHealth = false }) { updated ->
+        scope.launch {
+            busy = true; error = null
+            runCatching { CoreGraph.repository.updateLocalRouting((CoreGraph.repository.routing.value.policy ?: policy).copy(health = updated)) }
+                .onSuccess { showHealth = false; message = "健康探测设置已保存" }.onFailure { error = it.message }
+            busy = false
+        }
+    }
+    editingPool?.let { id ->
+        val target = policy.groups.firstOrNull { it.id == id }
+        val currentFixed = target?.outbound ?: policy.defaultOutbound
+        val initialCandidates = (target?.automaticCandidates ?: policy.defaultAutomaticCandidates).ifEmpty {
+            listOf(currentFixed).filter { tag -> routing.availableNodes.any { it.tag == tag && it.type !in setOf("direct", "automatic") } }
+        }
+        AutomaticPoolEditor(target?.name ?: "默认代理", initialCandidates,
+            routing.availableNodes, busy, error, onDismiss = { if (!busy) editingPool = null }) { candidates ->
+            scope.launch {
+                busy = true; error = null
+                val fresh = CoreGraph.repository.routing.value.policy ?: policy
+                val next = if (id == "default") fresh.copy(defaultOutbound = LocalRouting.AUTOMATIC, defaultAutomaticCandidates = candidates) else fresh.copy(groups = fresh.groups.map {
+                    if (it.id == id) it.copy(outbound = LocalRouting.AUTOMATIC, automaticCandidates = candidates) else it
+                })
+                runCatching { CoreGraph.repository.updateLocalRouting(next.copy(health = next.health.copy(enabled = true))) }.onSuccess { editingPool = null; message = "自动候选池已保存" }.onFailure { error = it.message }
+                busy = false
             }
         }
     }
@@ -845,6 +925,8 @@ private fun RoutingGroupEditor(
     var name by remember(original.id) { mutableStateOf(original.name) }
     var domains by remember(original.id) { mutableStateOf(original.domains.joinToString("\n")) }
     var includeApp by remember(original.id) { mutableStateOf(original.includeOfficialApp) }
+    var packages by remember(original.id) { mutableStateOf(original.packages.joinToString("\n")) }
+    var showApplications by remember(original.id) { mutableStateOf(false) }
     var error by remember(original.id) { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -855,14 +937,17 @@ private fun RoutingGroupEditor(
                     enabled = !busy, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(domains, { domains = it }, label = { Text("域名，每行一个") }, minLines = 5, maxLines = 10,
                     enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
-                Text("例如 anthropic.com，会同时匹配其子域名。保存后可单独选择该组的固定节点。",
+                Text("例如 anthropic.com，会同时匹配其子域名。域名和应用任一命中即跟随本组出口；两者至少填写一个。",
                     color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                OutlinedTextField(packages, { packages = it }, label = { Text("应用包名，每行一个（可选）") }, minLines = 2, maxLines = 5,
+                    enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 12.dp))
+                OutlinedButton(onClick = { showApplications = true }, enabled = !busy) { Text("搜索已安装应用") }
                 LocalRouting.officialAppName(original.id)?.let { appName ->
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
                         Text("代理官方 $appName Android App 的全部流量", color = Ink, fontSize = 12.sp, modifier = Modifier.weight(1f))
                         Switch(checked = includeApp, onCheckedChange = { includeApp = it }, enabled = !busy)
                     }
-                    Text("启用后，App 的所有目标地址和 DNS 都优先使用本组规则，不限于上面的域名列表；实际出口跟随本组所选节点。外部浏览器登录仍按浏览器的域名规则处理。",
+                    Text("启用后，App 的连接和 DNS 使用本组规则，不限于域名列表；中心地址和受管 WireGuard 网络保持优先。外部浏览器仍按域名匹配。",
                         color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
                 }
                 (error ?: saveError)?.let { ErrorText(it) }
@@ -872,13 +957,16 @@ private fun RoutingGroupEditor(
         confirmButton = {
             TextButton(onClick = {
                 runCatching {
-                    val updated = original.copy(name = name.trim(), domains = LocalRouting.normalizeDomains(domains), includeOfficialApp = includeApp)
+                    val updated = original.copy(name = name.trim(), domains = if (domains.isBlank()) emptyList() else LocalRouting.normalizeDomains(domains),
+                        includeOfficialApp = includeApp, packages = LocalRouting.normalizePackages(packages))
                     LocalRouting.validate(policy.copy(groups = policy.groups.filterNot { it.id == updated.id } + updated))
                     updated
                 }.onSuccess(onSave).onFailure { error = it.message }
             }, enabled = !busy) { Text(if (busy) "保存中…" else "保存") }
         },
     )
+    if (showApplications) ApplicationPicker(packages.split(Regex("[\\s,，;；]+" )).filter(String::isNotBlank),
+        onDismiss = { showApplications = false }, onSelect = { selected -> packages = selected.joinToString("\n"); showApplications = false })
 }
 
 @Composable
@@ -894,7 +982,7 @@ private fun ToolsScreen(
     var section by remember { mutableIntStateOf(0) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
-            listOf("流量统计", "路由测试", "路由记录", "运行配置", "日志").forEachIndexed { index, label ->
+            listOf("流量统计", "路由测试", "路由记录", "运行配置", "日志", "可选采集").forEachIndexed { index, label ->
                 TextButton(onClick = { section = index }) {
                     Text(label, color = if (section == index) AccentDark else Muted)
                 }
@@ -906,6 +994,7 @@ private fun ToolsScreen(
             2 -> DomainRouteStatsScreen(domainRoutes)
             3 -> ConfigurationScreen(config)
             4 -> LogsScreen(logs, diagnosticLogs, coreVersion)
+            5 -> CaptureToolsScreen()
         }
     }
 }
@@ -1493,6 +1582,7 @@ private fun ConfigurationScreen(config: ManagedConfig?) {
 @Composable
 private fun LogsScreen(logs: List<RuntimeLog>, diagnosticLogs: List<RuntimeLog>, coreVersion: String?) {
     val scope = rememberCoroutineScope()
+    val control by CoreGraph.repository.state.collectAsStateWithLifecycle()
     var uploading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize()) {
@@ -1516,7 +1606,7 @@ private fun LogsScreen(logs: List<RuntimeLog>, diagnosticLogs: List<RuntimeLog>,
                         uploading = false
                     }
                 },
-                enabled = !uploading,
+                enabled = !uploading && control.mode == ClientMode.MANAGED,
             ) { Text(if (uploading) "上传中…" else "上传诊断") }
             TextButton(onClick = { scope.launch { CoreGraph.repository.clearRuntimeLogs() } }) { Text("清空") }
         }
@@ -1541,11 +1631,17 @@ private fun LogsScreen(logs: List<RuntimeLog>, diagnosticLogs: List<RuntimeLog>,
 
 @Composable
 private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, phase: VpnPhase, onDisconnect: () -> Unit) {
+    var updates by remember { mutableStateOf(false) }
+    if (updates) { AppUpdatesScreen(onBack = { updates = false }, onDisconnect = onDisconnect); return }
+    var preferences by remember { mutableStateOf(false) }
+    if (preferences) { PreferencesScreen(onBack = { preferences = false }); return }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val context = androidx.compose.ui.platform.LocalContext.current
+    val vpnProtection by AndroidVpnProtection.state.collectAsStateWithLifecycle()
     var batteryExempt by remember { mutableStateOf(false) }
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+        AndroidVpnProtection.refresh()
         batteryExempt = context.getSystemService(android.os.PowerManager::class.java)
             .isIgnoringBatteryOptimizations(context.packageName)
     }
@@ -1553,23 +1649,35 @@ private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, 
     LazyColumn(contentPadding = PaddingValues(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             AppCard {
-                Text("设备与中心", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(if (control.mode == ClientMode.STANDALONE) "独立客户端" else "设备与中心", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
                 Spacer(Modifier.height(10.dp))
-                InfoRow("设备", control.enrollment?.hostName.orEmpty())
+                InfoRow("模式", if (control.mode == ClientMode.STANDALONE) "独立模式，不向中心发送状态或诊断" else "受管模式")
+                InfoRow("设备", control.enrollment?.hostName ?: "本机")
                 InfoRow("服务器", control.enrollment?.server.orEmpty())
                 InfoRow("Profile", control.config?.profileName ?: control.enrollment?.profileName.orEmpty())
                 InfoRow("App / Core", "${BuildConfig.VERSION_NAME} / ${coreVersion.orEmpty()}")
-                if (control.enrollment?.server?.startsWith("http://") == true) {
-                    Text("当前中心使用明文 HTTP，仅适合受控测试。正式使用请配置 HTTPS。", color = Warn, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
+                control.enrollment?.takeIf { it.server.startsWith("http://", ignoreCase = true) }?.let { enrollment ->
+                    val eligible = ManagedTransportPolicy.canAllowLocalHttp(enrollment.server)
+                    Text(if (eligible) "局域网 HTTP 会明文传输设备令牌与配置。旧注册不会自动授权；正式使用请迁移至 HTTPS。"
+                        else "此 HTTP 中心不符合局域网 IP 例外，联网管理已阻止。请用 HTTPS 地址生成新的注册链接。", color = Warn, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp))
+                    if (eligible) Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("允许此局域网 HTTP 中心", color = Warn, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(checked = enrollment.allowInsecureLocalHttp, onCheckedChange = { allowed -> scope.launch {
+                            runCatching { CoreGraph.repository.allowManagedLocalHttp(allowed) }.onFailure { message = it.message }
+                        } }, enabled = io.sbeasy.android.core.RuntimeBridge.control == null && phase in setOf(VpnPhase.DISCONNECTED, VpnPhase.ERROR))
+                    }
+                    if (eligible && phase !in setOf(VpnPhase.DISCONNECTED, VpnPhase.ERROR)) Text("断开 VPN 后可更改此授权。", color = Muted, fontSize = 11.sp)
                 }
             }
         }
         item {
             AppCard {
                 Text("配置与恢复", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                OutlinedButton(onClick = { updates = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("应用与内核更新、旧版恢复") }
+                OutlinedButton(onClick = { preferences = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("加密偏好备份与中心漫游") }
                 Text("新配置会先校验，再热更新；失败时保留上一份可用配置。控制面请求始终绕过 VPN 走底层网络。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 7.dp))
                 OutlinedButton(onClick = { scope.launch { runCatching { CoreGraph.repository.syncConfiguration(force = true) }.onFailure { message = it.message } } }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("立即同步配置") }
-                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(control.enrollment?.server.orEmpty())); message = "服务器地址已复制" }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("复制服务器地址") }
+                if (control.mode == ClientMode.MANAGED) OutlinedButton(onClick = { clipboard.setText(AnnotatedString(control.enrollment?.server.orEmpty())); message = "服务器地址已复制" }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("复制服务器地址") }
                 message?.let { Text(it, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
             }
         }
@@ -1588,19 +1696,38 @@ private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, 
                 }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("应用后台与省电设置") }
                 Spacer(Modifier.height(12.dp))
                 Text("系统 VPN", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                Text("支持 Android Always-on VPN；可在系统的 VPN 设置中启用。网络切换时会自动选择已验证的 Wi‑Fi、以太网或蜂窝网络。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 7.dp))
-                if (phase == VpnPhase.CONNECTED) OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("断开 VPN", color = Danger) }
+                Text("Always-on（始终开启）负责自动启动 VPN；“阻止未通过 VPN 的连接”负责 VPN 断开时阻断联网，两项需要在系统中分别启用。应用只能读取状态，不能替你打开系统阻断。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 7.dp))
+                InfoRow("系统 Always-on", vpnProtection.alwaysOn?.let { if (it) "已启用" else "未启用" } ?: "未知，以系统设置为准")
+                InfoRow("系统断线阻断", vpnProtection.lockdown?.let { if (it) "已启用" else "未启用" } ?: "未知，以系统设置为准")
+                if (vpnProtection.alwaysOn == null || vpnProtection.lockdown == null) Text(if (Build.VERSION.SDK_INT < 29)
+                    "当前 Android 版本没有向应用提供这两项状态查询接口，请在系统 VPN 设置中确认。"
+                    else "启动 VPN 后可读取实时系统状态；停止时不沿用旧状态。", color = Muted, fontSize = 11.sp)
+                OutlinedButton(onClick = {
+                    runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS)) }
+                        .onFailure { message = "无法直接打开 VPN 设置，请到系统设置 → VPN 选择 sb-easy。" }
+                }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("打开系统 VPN 设置") }
+                Text("阻断启用后，VPN 停止时部分系统及局域网访问也可能被阻止。实际 DNS、IPv6、UDP 与切网行为仍应在设备上验证。", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                if (phase == VpnPhase.CONNECTED || io.sbeasy.android.core.RuntimeBridge.control != null) OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("断开 VPN", color = Danger) }
             }
         }
         item {
             AppCard {
+                Text("客户端模式", color = Ink, fontWeight = FontWeight.Bold)
+                Text("切换模式保留各自的配置、分组和凭据，并清除会话日志和连接统计。独立模式不使用中心凭据，不上报状态、日志或测速结果。", color = Muted, fontSize = 12.sp)
+                OutlinedButton(onClick = { scope.launch {
+                    runCatching { CoreGraph.repository.switchMode(if (control.mode == ClientMode.STANDALONE) ClientMode.MANAGED else ClientMode.STANDALONE) }.onFailure { message = it.message }
+                } }, enabled = phase in setOf(VpnPhase.DISCONNECTED, VpnPhase.ERROR) && io.sbeasy.android.core.RuntimeBridge.control == null, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                    Text(if (control.mode == ClientMode.STANDALONE) "切换到受管模式" else "切换到独立模式")
+                }
+                if (control.mode == ClientMode.MANAGED) {
                 Text("重新注册", color = Danger, fontWeight = FontWeight.Bold)
                 Text("会清除本机凭据、配置和服务分组设置。中心端设备不会被删除。", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
                 OutlinedButton(
                     onClick = { scope.launch { runCatching { CoreGraph.repository.forgetDevice() }.onFailure { message = it.message } } },
-                    enabled = (phase == VpnPhase.DISCONNECTED || phase == VpnPhase.ERROR) && control.syncPhase != SyncPhase.SYNCING,
+                    enabled = io.sbeasy.android.core.RuntimeBridge.control == null && (phase == VpnPhase.DISCONNECTED || phase == VpnPhase.ERROR) && control.syncPhase != SyncPhase.SYNCING,
                     modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
                 ) { Text("清除本机并重新注册", color = Danger) }
+                }
             }
         }
     }

@@ -5,10 +5,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -21,40 +19,36 @@ sealed interface ConfigFetchResult {
     data class Updated(val config: ManagedConfig) : ConfigFetchResult
 }
 
-class ControlPlaneClient(context: Context) {
+class ControlPlaneClient(context: Context) : AgentControlPlane {
     private val appContext = context.applicationContext
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
-    private val baseClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(30, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val transport = ManagedControlTransport()
+    private val baseClient = transport.client
 
-    fun parseEnrollmentUri(raw: String): Pair<String, String> {
-        return EnrollmentUriParser.parse(raw)
+    fun parseEnrollmentUri(raw: String, allowInsecureLocalHttp: Boolean = false): Pair<String, String> {
+        return EnrollmentUriParser.parse(raw, allowInsecureLocalHttp)
     }
 
-    fun enroll(rawUri: String, device: JSONObject): Enrollment {
-        val (server, code) = parseEnrollmentUri(rawUri)
+    override fun enroll(rawUri: String, device: JSONObject, allowInsecureLocalHttp: Boolean): Enrollment {
+        val (server, code) = parseEnrollmentUri(rawUri, allowInsecureLocalHttp)
         val body = JSONObject().put("code", code).put("device", device)
-        val response = execute(server, "/api/devices/enroll", "POST", body)
+        val response = execute(server, "/api/devices/enroll", "POST", body, allowInsecureLocalHttp)
         response.use {
             val json = requireJson(it.code, it.body?.string())
             val profile = json.getJSONObject("profile")
             return Enrollment(
-                server = EnrollmentUriParser.normalizeServer(json.optString("server", server)),
+                server = ManagedTransportPolicy.returnedServer(server, json.optString("server", server), allowInsecureLocalHttp),
                 hostId = json.getString("host_id"),
                 hostName = json.getString("host_name"),
                 agentToken = json.getString("agent_token"),
                 profileId = profile.getString("id"),
                 profileName = profile.getString("name"),
+                allowInsecureLocalHttp = allowInsecureLocalHttp && server.startsWith("http://"),
             )
         }
     }
 
-    fun fetchConfig(enrollment: Enrollment, etag: String?, force: Boolean): ConfigFetchResult {
+    override fun fetchConfig(enrollment: Enrollment, etag: String?, force: Boolean): ConfigFetchResult {
         val request = authenticatedRequest(enrollment, "/api/agent/config")
             .get()
             .apply { if (!force && !etag.isNullOrBlank()) header("If-None-Match", etag) }
@@ -78,11 +72,11 @@ class ControlPlaneClient(context: Context) {
         }
     }
 
-    fun reportStatus(enrollment: Enrollment, body: JSONObject) {
+    override fun reportStatus(enrollment: Enrollment, body: JSONObject) {
         executeAuthenticated(enrollment, "/api/agent/status", "POST", body).close()
     }
 
-    fun commands(enrollment: Enrollment): List<AgentCommand> {
+    override fun commands(enrollment: Enrollment): List<AgentCommand> {
         val response = executeAuthenticated(enrollment, "/api/agent/commands", "GET", null)
         response.use {
             val raw = it.body?.string().orEmpty()
@@ -97,7 +91,7 @@ class ControlPlaneClient(context: Context) {
         }
     }
 
-    fun acknowledge(enrollment: Enrollment, command: AgentCommand, success: Boolean, result: String) {
+    override fun acknowledge(enrollment: Enrollment, command: AgentCommand, success: Boolean, result: String) {
         executeAuthenticated(
             enrollment,
             "/api/agent/commands/${command.id}/ack",
@@ -106,11 +100,11 @@ class ControlPlaneClient(context: Context) {
         ).close()
     }
 
-    fun reportTelemetry(enrollment: Enrollment, body: JSONObject) {
+    override fun reportTelemetry(enrollment: Enrollment, body: JSONObject) {
         executeAuthenticated(enrollment, "/api/agent/telemetry", "POST", body).close()
     }
 
-    fun uploadDiagnostics(enrollment: Enrollment, body: JSONObject): String {
+    override fun uploadDiagnostics(enrollment: Enrollment, body: JSONObject): String {
         val response = executeAuthenticated(enrollment, "/api/agent/diagnostics", "POST", body)
         response.use {
             val raw = it.body?.string().orEmpty()
@@ -119,7 +113,7 @@ class ControlPlaneClient(context: Context) {
         }
     }
 
-    fun uploadCapture(enrollment: Enrollment, digest: String, data: ByteArray, wifiOnly: Boolean) {
+    override fun uploadCapture(enrollment: Enrollment, digest: String, data: ByteArray, wifiOnly: Boolean) {
         val request = authenticatedRequest(enrollment, "/api/agent/captures/$digest")
             .post(data.toRequestBody("application/vnd.tcpdump.pcap".toMediaType())).build()
         // Bind uploads to a physical network so PCAP uploads cannot capture
@@ -127,9 +121,10 @@ class ControlPlaneClient(context: Context) {
         val network = preferredUnderlyingNetworks().firstOrNull {
             !wifiOnly || connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
         } ?: throw IOException(if (wifiOnly) "等待 Wi-Fi" else "没有可用的物理网络")
-        val response = baseClient.newBuilder().socketFactory(network.socketFactory).dns(object : Dns {
+        val routeClient = baseClient.newBuilder().socketFactory(network.socketFactory).dns(object : Dns {
             override fun lookup(hostname: String) = network.getAllByName(hostname).toList()
-        }).build().newCall(request).execute()
+        }).build()
+        val response = transport.execute(request, routeClient)
         response.use {
             val raw = it.body?.string().orEmpty()
             if (!it.isSuccessful) throw apiError(it.code, raw)
@@ -140,7 +135,7 @@ class ControlPlaneClient(context: Context) {
         }
     }
 
-    fun networkSnapshot(): JSONObject {
+    override fun networkSnapshot(): JSONObject {
         val networks = JSONArray()
         preferredUnderlyingNetworks().forEach { network ->
             val capabilities = connectivity.getNetworkCapabilities(network)
@@ -165,7 +160,7 @@ class ControlPlaneClient(context: Context) {
             .put("underlying_networks", networks)
     }
 
-    fun reportLatencies(enrollment: Enrollment, values: Map<String, Int?>) {
+    override fun reportLatencies(enrollment: Enrollment, values: Map<String, Int?>) {
         val results = JSONObject()
         values.forEach { (tag, delay) -> results.put(tag, delay ?: JSONObject.NULL) }
         executeAuthenticated(
@@ -198,13 +193,12 @@ class ControlPlaneClient(context: Context) {
     }
 
     private fun authenticatedRequest(enrollment: Enrollment, path: String): Request.Builder =
-        Request.Builder()
-            .url(enrollment.server + path)
+        transport.request(enrollment.server, path, enrollment.allowInsecureLocalHttp)
             .header("Authorization", "Bearer ${enrollment.agentToken}")
             .header("Accept", "application/json")
 
-    private fun execute(server: String, path: String, method: String, body: JSONObject): okhttp3.Response {
-        val builder = Request.Builder().url(server + path).header("Accept", "application/json")
+    private fun execute(server: String, path: String, method: String, body: JSONObject, allowInsecureLocalHttp: Boolean): okhttp3.Response {
+        val builder = transport.request(server, path, allowInsecureLocalHttp).header("Accept", "application/json")
         if (method == "POST") builder.post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
         return execute(builder.build())
     }
@@ -215,7 +209,7 @@ class ControlPlaneClient(context: Context) {
             // allNetworks is observable, but the current app UID is not
             // necessarily allowed to bind sockets to it (some vendors return
             // EPERM for inactive cellular networks while Wi-Fi is active).
-            return baseClient.newCall(request).execute()
+            return transport.execute(request)
         } catch (error: IOException) {
             ClientDiagnostics.warn(
                 "ControlPlane",
@@ -239,7 +233,7 @@ class ControlPlaneClient(context: Context) {
                 })
                 .build()
             try {
-                val response = client.newCall(request).execute()
+                val response = transport.execute(request, client)
                 ClientDiagnostics.info("ControlPlane", "physical fallback reached server via ${networkLabel(network)} status=${response.code}")
                 return response
             } catch (error: IOException) {

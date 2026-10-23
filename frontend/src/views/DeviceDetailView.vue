@@ -11,19 +11,20 @@
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ host?.wg_address || '' }} · {{ statusText }}</p>
       </div>
       <div class="flex-center gap-2" v-if="host">
-        <button class="btn-ghost btn-sm" @click="showManage = true">{{ t('hosts.edit') }}</button>
-        <button v-if="!isSelf" class="btn-ghost btn-sm" @click="cmd('reload')">{{ t('hosts.reload') }}</button>
-        <button v-if="!isSelf" class="btn-ghost btn-sm" @click="cmd('restart')">{{ t('hosts.restart') }}</button>
+        <button v-if="auth.isAdmin" class="btn-ghost btn-sm" @click="showManage = true">{{ t('hosts.edit') }}</button>
+        <button v-if="!isSelf && (auth.isAdmin || host?.access?.operate)" class="btn-ghost btn-sm" @click="cmd('reload')">{{ t('hosts.reload') }}</button>
+        <button v-if="!isSelf && (auth.isAdmin || host?.access?.operate)" class="btn-ghost btn-sm" @click="cmd('restart')">{{ t('hosts.restart') }}</button>
       </div>
     </div>
 
     <div class="tabs">
       <button v-for="tb in tabs" :key="tb.key" :class="['tab', { active: tab === tb.key }]" @click="tab = tb.key">{{ tb.label }}</button>
     </div>
+    <DeviceHistoryPanel v-if="tab === 'history'" :host-id="id" />
 
     <div v-if="tab === 'captures'" class="card">
       <div class="flex-between mb-3"><h3>PCAP 流量采集</h3><button class="btn-secondary btn-sm" @click="loadCaptures">刷新</button></div>
-      <p class="text-sm text-muted">在 Android 的“诊断 → 流量采集”中配置并上传。每台设备最多保留 128 MiB / 1000 个文件，满后请下载并删除。仅管理员可访问。</p>
+      <p class="text-sm text-muted">Windows 可通过可选 PCAP 插件采集并上传。Android 1.3.4 已暂停采集与上传，既有文件仍可下载和删除。每台设备最多保留 128 MiB / 1000 个文件，满后请下载并删除。仅管理员可访问。</p>
       <p v-if="captureError">{{ captureError }}</p>
       <p v-if="!captures.length" class="text-muted">暂无采集文件</p>
       <div v-for="capture in captures" :key="capture.digest" class="flex-between mb-3" style="gap:1rem;flex-wrap:wrap">
@@ -180,27 +181,31 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from '../composables/i18n'
+import { useAuthStore } from '../stores/auth'
 import { useHostsStore } from '../stores/hosts'
 import HostManageModal from '../components/HostManageModal.vue'
+import DeviceHistoryPanel from '../components/DeviceHistoryPanel.vue'
 import client from '../api/client'
 import { formatRate, formatBytes } from '../api/realtime'
 import { serverTimestampAgeMs } from '../api/time'
 import type { Host } from '../types'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const route = useRoute()
 const hostsStore = useHostsStore()
+const auth = useAuthStore()
 
 const id = computed(() => String(route.params.id || ''))
-const tab = ref<'config' | 'monitor' | 'domains' | 'logs' | 'diagnostics' | 'captures'>('config')
+const tab = ref<'config' | 'monitor' | 'domains' | 'logs' | 'diagnostics' | 'captures' | 'history'>(auth.isAdmin ? 'config' : 'monitor')
 const tabs = computed(() => [
   { key: 'config' as const, label: t('device.tab.config') },
   { key: 'monitor' as const, label: t('device.tab.monitor') },
+  { key: 'history' as const, label: locale.value === 'zh' ? '历史统计' : 'History' },
   { key: 'domains' as const, label: t('device.tab.domains') },
   { key: 'logs' as const, label: t('device.tab.logs') },
   { key: 'captures' as const, label: 'PCAP 采集' },
   { key: 'diagnostics' as const, label: t('device.tab.diagnostics') },
-])
+].filter(item => auth.isAdmin || !['config', 'captures'].includes(item.key)))
 
 const host = ref<Host | null>(null)
 const isSelf = computed(() => !!host.value?.capabilities?.is_self)
@@ -265,7 +270,7 @@ let poll: ReturnType<typeof setInterval> | null = null
 onMounted(async () => {
   if (!hostsStore.hosts.length) await hostsStore.fetchHosts()
   host.value = hostsStore.hosts.find((h) => h.id === id.value) || null
-  await loadConfig()
+  if (auth.isAdmin) await loadConfig()
   startPoll()
 })
 onBeforeUnmount(() => { if (poll) clearInterval(poll) })

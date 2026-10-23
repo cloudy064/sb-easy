@@ -1,6 +1,23 @@
 # sb-easy Windows development preview
 
-## 0.6.9 HTTP(S) debugging preview
+## 0.7.0 source development build (unpublished)
+
+The application version comes from `development.windows.version` in
+[`config/client-releases.json`](../config/client-releases.json); the core version
+comes from [`config/runtime-versions.json`](../config/runtime-versions.json).
+The current source builds application **0.7.0** with sing-box **1.14.3**. Unsigned
+development binaries report `0.7.0-dev`; their ZIP/MSI filenames use `0.7.0` and
+their numeric PE version is `0.7.0.0`. Packaging rejects stale or mixed identities.
+The private UI package's npm metadata is not the application version: the UI
+displays the version reported by its connected service.
+
+The published download inventory still points to the **0.6.9 unsigned preview**
+with sing-box **1.13.12**. The changes documented below describe this source tree;
+they do not imply that a 0.7.0 installer or a publisher-signed release has shipped.
+The signed updater and signed extension catalog require 0.7.0 or later; install
+the first trusted updater-capable build manually when it becomes available.
+
+### HTTP(S) debugging extension
 
 The extension store now offers a local mitmproxy-based HTTP(S) debugging plugin:
 read decrypted request/response bodies, edit/replay requests, use breakpoints,
@@ -18,6 +35,28 @@ This is not a completed or signed VPN release.
 
 ## Implemented
 
+- Independent mode imports subscriptions without center enrollment. URL and
+  offline JSON/YAML/URI/Base64 imports are parsed by the C service and return a
+  redacted compatibility report. Local subscription IDs remain stable on
+  refresh; failed downloads, parsing or configuration checks preserve saved nodes.
+  URL imports support 15-minute to seven-day refresh intervals or manual refresh,
+  including with the desktop window closed. Traffic quota and expiry come only
+  from a valid `Subscription-Userinfo` header; absent values remain unknown.
+  Mode switching requires a stopped connection and preserves both profiles in
+  the protected store. Independent mode never sends center heartbeats or commands.
+- The background service polls managed configuration with ETags, reports status,
+  optionally reports aggregate traffic, and acknowledges center reload/restart
+  commands with durable receipts. New configuration is checked, activated and
+  health-checked before replacing the known-good source and local policy.
+  Manual disconnect persists across restarts. Optional boot connection and
+  bounded recovery handle core exits, physical-interface changes and resume.
+  The default boot-connection setting is off; closing the UI does not stop work.
+- Local custom routing groups support domain suffixes and Windows process names,
+  with validated default/node choices and DNS detours. Diagnostics can request
+  live core delay tests and actual proxy-routed HTTP(S) URL probes. Probe results
+  distinguish response success from observed core connection/rule evidence;
+  unavailable DNS or public-exit-IP observations are labeled unobserved.
+
 - Windows accepts managed WireGuard endpoints using sing-box's userspace engine,
   preserves per-device keys/peers and the server's intranet route, and includes
   endpoints in the node catalog without exposing keys. The center device must
@@ -26,23 +65,17 @@ This is not a completed or signed VPN release.
   causes the next config fetch to provision its own peer. No separate Windows
   WireGuard service is needed. Unknown endpoint types remain unsupported.
 
-- GPT/Codex can follow the server, use the default proxy, or use a chosen node via a persisted local routing preference.
-  The service keeps the downloaded server snapshot unchanged and overlays the local
-  choice on both the GPT route and its DNS detour during validation and startup.
-  Sync and service restarts preserve the choice. Open Service Routing, select a
-  node, then save the local choice. A runtime-only selector switches GPT traffic
-  and DNS through the authenticated Clash API without restarting the core or TUN.
-  Existing user connections retain their exit; new connections use the selection.
-  A failed durable save restores the previous live selection. Restore server settings removes
-  the override. No separate server profile is needed. If the chosen node disappears,
-  refresh fails explicitly and retains the previous candidate instead of silently
-  changing exits. Arbitrary rule editing and other service groups remain future work.
-  Both its domain route and a dedicated clone of its DNS server use that exit;
-  other services sharing the original DNS server stay unchanged. The server
-  snapshot/ETag remain intact. Switching requires a stopped core and validates
-  the effective configuration before saving. Unsupported rule shapes or sync
-  changes are rejected without replacing the last downloaded configuration.
-  This is a manual exit selection, not automatic failover or a node repair.
+- Service Routing supports persisted local exit choices for the default route,
+  GPT/Codex, Claude, and other supported domain groups discovered in the center
+  configuration. The service preserves the downloaded snapshot and ETag, then
+  overlays route and DNS choices during validation and startup. A dedicated DNS
+  clone prevents an override from changing other services sharing that resolver.
+  Runtime selectors can change exits through the authenticated Clash API without
+  restarting the core or TUN; existing connections retain their previous exit.
+  Failed durable saves restore the previous live selection. Missing selected
+  nodes and unsupported rule/DNS shapes are rejected instead of silently changing
+  exits. Custom local groups can be added, edited and removed from the desktop.
+  These are manual exit preferences; automatic failover is not provided by this UI.
 
 - The 0.4.4 diagnostic test build captures sing-box debug output through a C11
   pipe reader, filters credentials before disk writes, and retains four 4 MiB
@@ -83,7 +116,7 @@ This is not a completed or signed VPN release.
   download through the existing Devices API, including URL path prefixes and ETag 304.
 - DPAPI-encrypted device identity, candidate and last-good configuration, restricted filesystem
   ACLs, atomic replacement, one writer per data directory and recovery after restart.
-- Candidate validation through a separately prepared sing-box 1.13.12 executable's
+- Candidate validation through a separately prepared sing-box 1.14.3 executable's
   real `check` command, with a deadline, cancellation and private temporary files.
 - Real `connection.start`/`connection.stop` from the GUI through the service to the
   pinned core, Windows runtime adaptation, authenticated local API health checks,
@@ -148,9 +181,15 @@ Install Visual Studio 2022 Build Tools with these components:
 The Visual Studio component names use “C++”; this project compiles its native
 sources and tests as C11.
 
-Also install Node.js 22 LTS or a compatible version >=20.19, and WebView2
-Evergreen Runtime to run the desktop. The SDK is restored automatically at its
-pinned version; the Runtime is not pinned or bundled.
+Also install PowerShell 7, Node.js 22 LTS or a compatible version >=20.19,
+Python 3.10 or newer, and the OpenSSL CLI. `python` (or `python3`) and `openssl`
+must run from PATH. The build checks both tools before invoking CMake; Python
+and OpenSSL generate isolated test signatures for the native plugin storage and
+sandbox tests. They are build dependencies and are not required by the base
+desktop application.
+
+Install WebView2 Evergreen Runtime to run the desktop. The SDK is restored
+automatically at its pinned version; the Runtime is not pinned or bundled.
 
 From a normal PowerShell at the repository root:
 
@@ -179,16 +218,18 @@ the service:
 ./windows/scripts/connection-smoke.ps1 -Dashboard
 ```
 
-The preparation script downloads the official Windows x64 sing-box 1.13.12 archive,
+The preparation script reads `config/runtime-versions.json` (or the packaged
+`runtime-versions.json`) and downloads the pinned official Windows x64 sing-box
+1.14.3 archive,
 verifies its fixed SHA-256 and copies `sing-box.exe`, `libcronet.dll` and `LICENSE`
 to `build/windows-release/core/`. Use `-Configuration Debug` for the debug output.
 It does not launch the core. Restart an already running service after preparation.
 
-This official core embeds Wintun through sing-tun v0.8.9; it does not require an
+This official core embeds Wintun through the pinned sing-tun revision; it does not require an
 adjacent `wintun.dll` download. The pinned dependency and embedded amd64 bytes are
-documented in [sing-box v1.13.12 go.mod](https://github.com/SagerNet/sing-box/blob/v1.13.12/go.mod),
-[sing-tun's amd64 embedding](https://github.com/SagerNet/sing-tun/blob/v0.8.9/internal/wintun/dll_windows_amd64.go)
-and [its in-memory loader](https://github.com/SagerNet/sing-tun/blob/v0.8.9/internal/wintun/dll_windows.go).
+documented in [sing-box v1.14.3 go.mod](https://github.com/SagerNet/sing-box/blob/v1.14.3/go.mod),
+[sing-tun's amd64 embedding](https://github.com/SagerNet/sing-tun/blob/bca4bf029237/internal/wintun/dll_windows_amd64.go)
+and [its in-memory loader](https://github.com/SagerNet/sing-tun/blob/bca4bf029237/internal/wintun/dll_windows.go).
 Preparation does not create an adapter or install a service.
 
 To create a portable development archive after building:
@@ -197,7 +238,7 @@ To create a portable development archive after building:
 ./windows/scripts/package.ps1
 ```
 
-This writes `build/sb-easy-0.6.0-windows-x64-portable.zip` and prints its
+This writes `build/sb-easy-0.7.0-windows-x64-portable.zip` and prints its
 SHA-256. An explicit file list includes the desktop, service, loader, UI, notices
 and preparation script; an optional core already present in the build directory
 is not included unless `-IncludeCore` is supplied. That switch verifies and
@@ -216,7 +257,7 @@ dotnet tool install wix --version 5.0.2 --tool-path build/wix
 ./windows/scripts/package.ps1 -Msi -IncludeCore -WixPath ./build/wix/wix.exe
 ```
 
-This produces both `build/sb-easy-0.6.0-windows-x64.msi` and the portable ZIP
+This produces both `build/sb-easy-0.7.0-windows-x64.msi` and the portable ZIP
 above, from the same staged payload, with sing-box and its license included.
 Omit `-IncludeCore` for lightweight packages. MSI requires the machine-wide
 [WebView2 Evergreen Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703);
@@ -247,8 +288,8 @@ preferences. Use **忘记设备** before uninstall to clear locally stored regis
 For a quiet installation/removal with logs, from an administrator terminal:
 
 ```powershell
-msiexec /i "build\sb-easy-0.6.0-windows-x64.msi" /qn /norestart /l*v install.log
-msiexec /x "build\sb-easy-0.6.0-windows-x64.msi" /qn /norestart /l*v uninstall.log
+msiexec /i "build\sb-easy-0.7.0-windows-x64.msi" /qn /norestart /l*v install.log
+msiexec /x "build\sb-easy-0.7.0-windows-x64.msi" /qn /norestart /l*v uninstall.log
 ```
 
 `scripts/installer-smoke.ps1 -Msi <new.msi> -PreviousMsi <older.msi>` exercises
@@ -545,125 +586,262 @@ release. The isolated service-routing smoke test covers real traffic through an
 imported node, persistence, used-node deletion rejection and failed-save rollback.
 
 
-## Optional capture extension (API 1)
+## Signed optional plugins
 
-The default Windows build and portable/MSI payload exclude capture implementation,
-libpcap, WinDivert, and the capture UI. The first official extension is `capture`
-version 1.0.0. Settings > Extension Store manages its lifecycle. This is the first
-migration. Windows 0.6.4 also extracts historical statistics and the network troubleshooting UI as described below.
+The base installer excludes the capture, statistics and HTTP(S) debugging workers
+and their UI modules. New plugin packages declare API 1, version 1.1.0 and build 2.
+A signed publisher catalog authorizes installation and upgrades. The default
+`config/plugin-catalog-keys.json` is empty, so a development build cannot accept
+remote plugin releases until a reviewed public key is supplied at build time.
+The catalog cannot replace this trust anchor. See the
+[shared catalog specification](../docs/plugin-catalog-v1.md).
 
-Build the optional package with `-DSB_EASY_BUILD_CAPTURE_EXTENSION=ON`, run
-`npm --prefix windows/ui run build:capture`, then
-`windows/scripts/package-capture-extension.ps1`. Default builds set the option OFF
-and do not require capture dependencies. The `build.ps1 -CaptureExtension` switch
-prepares those dependencies when requested.
+Import the catalog in Extensions, then install its compatible release. Downloads
+use HTTPS, send no device/account credentials and reject redirects. The service
+checks signature, sequence, expiry, host/core/OS versions, capability allowlist,
+artifact length and SHA-256, fixed archive layout and the embedded manifest.
+Installed files are checked again before activation. Legacy 1.0.0 digests remain
+only to verify already-installed packages and support their first signed upgrade;
+new installs never use the old HTTP URLs or self-supplied checksum files.
 
-In Windows 0.6.3, open Settings > Extension Store and click Install. The service
-downloads the official package in the background, reports progress, verifies the
-release SHA-256, and publishes staged files. Installation leaves the extension
-disabled and does not restart sing-box. The Installed tab provides enable,
-disable and uninstall. Re-enabling permits saved capture preferences to resume;
-new installations have capture disabled. Failed downloads/installations can be
-retried. The separate ZIP/Install.cmd remains an offline fallback.
+Downloading and verification leave an existing worker running. The controller
+stops it only for publication, after restoring any HTTP debugging routes. A DPAPI
+journal and same-volume directory moves recover interrupted replacement; cached
+signed receipts keep a previous verified version available for explicit rollback.
+A failed activation can restore that version. New installations and replacements
+remain disabled until enabled. Known revoked builds cannot start or be selected
+for rollback, including offline. Catalog expiry blocks new installation; previously
+verified, non-revoked installed code and cached recovery remain usable. Catalog
+sequence and the highest installed build survive removal and rollback.
 
-This first store is an official curated catalog shipped with the client, with three
-available extensions. It does not accept third-party repositories or silently
-trust new code advertised by a remote catalog. Adding a release requires reviewing
-and updating the client catalog pin. Build a store release with
-`python windows/scripts/package-plugins.py`; it writes all `.sbe` artifacts,
-`build/store-release-index.json` and `service/store_catalog.h`. Rebuild the host
-after pinning. The old package-store.py creates a capture artifact only.
-The fixed-layout bundle contains only the predefined files for each release, no executable
-installer, archive paths, or links. Size is pinned and capped at 16 MiB. The
-compiled digest authenticates package contents even over the current HTTP
-hosting endpoint. Downloads send no device credentials and reject redirects.
+Workers use Windows AppContainer with a private profile, a filtered environment,
+private framed pipes, an explicit inherited-handle list and job limits. Statistics
+and PCAP receive no network capabilities. HTTP debugging receives network
+capabilities and a loopback exemption for its local proxy/UI; the host preserves
+other applications' exemptions and removes its own on normal shutdown. The host
+verifies the child's AppContainer SID, low integrity and absence of dangerous
+privileges before resuming it. If sandbox creation fails, the plugin stays stopped.
+This boundary still requires native Windows acceptance; Wine cannot establish it.
 
-`scripts/deploy-extension-store.py <bundle> <sha256>` runs on the Docker host.
-It publishes the package under `/assets/store/` using a persistent read-only
-Compose mount, preserves other Compose settings, and rolls back on failed
-download verification. It does not change device profiles or subscriptions.
+PCAP parsing, BPF and capture files remain in the worker. Only the host opens the
+WinDivert driver, and only after capture is explicitly enabled. It checks the
+vendor DLL/driver against independent host pins, copies them to a host-only
+location, and opens a fixed read-only/sniff handle for the managed TUN interface.
+The child receives that handle through the private broker. It cannot nominate a
+filter, load a different privileged DLL, or obtain packet-injection access. The
+host shuts down the shared handle on disable, core stop or worker failure.
 
-The protected `extensions/capture/extension.json` declares `id`, `version` and
-`api_version`. The first host only accepts the official capture ID/API/version.
-It launches `sb-easy-capture.exe` in a kill-on-close job, with an explicit inherited
-handle list and private framed pipes. Calls have a three-second deadline and a
-2 MiB frame ceiling. Failure stops the child, not sing-box. This is process crash
-isolation, not a security sandbox: capture runs with the service's privileges.
-Only the device storage scope and requested connection metadata are sent; device
-authentication credentials and server upload authentication remain in the host.
+Statistics state remains encrypted in the host and is loaded only while enabled.
+The first sample establishes a baseline; re-enabling cannot recount traffic from
+while the plugin was disabled. Optional UI modules load only when opened. Removal
+retires binaries/UI and preserves private settings and captures. Connections,
+rules and redacted logs remain built-in features; `network-tools` is retained only
+for removing legacy installations.
 
-The extension UI is a separately built module at `ui/extensions/capture/view.js`.
-It is loaded only when opened. Disable/uninstall stops its worker without stopping
-the proxy. Uninstall retires extension binaries/UI into timestamped `*-removed-*`
-directories, preserving existing device-scoped capture settings and PCAP files.
-Reinstalling and enabling restores those settings. Saved data is not deleted by
-uninstallation. Compatible updates use uninstall, then install the newly approved
-release from an updated client catalog.
+Build and publish a reviewed release:
 
-`extensions.list` and `extensions.change` (`id: capture`, `action: enable|disable|remove`)
-require the same authorized local session as other private operations. Capture
-calls return `EXTENSION_MISSING` while absent/disabled and `EXTENSION_FAILED` if
-the worker exits. Re-enable to restart a failed worker.
+1. Build the optional native workers with `build.ps1 -CaptureExtension
+   -StatisticsExtension`, build the HTTP worker with `build-http-debug.ps1`, and
+   run `npm --prefix windows/ui run build:plugins`.
+2. Run `windows/scripts/package-capture-extension.ps1` to stage the versioned
+   capture ZIP. It is a build input, not an unsigned installation bypass.
+3. Run `python windows/scripts/package-plugins.py --base-url
+   https://downloads.example.com/plugins --sequence 1`. Review
+   `build/plugin-release/catalog-payload.json` and all artifact hashes. Supply
+   `--revocations reviewed-revocations.json` when required.
+4. Sign with the shared publisher using an external private key and the same
+   reviewed public-key allowlist embedded in the host. The packaging tool also
+   accepts `--private-key`, `--key-id` and `--keys` together. Upload only the signed
+   catalog and verified artifacts to the HTTPS origin. No private keys enter the
+   repository or packages.
 
-`extensions.catalog` lists trusted releases, `extensions.install` accepts only
-`{id: "capture"|"statistics"}`, and `extensions.progress` reports the asynchronous install job.
-The legacy `network-tools` installation request returns `BUILTIN_FEATURE` in 0.6.6.
-All three require the authorized local session. URLs, digests and destination
-paths cannot be supplied by RPC. Downloading does not hold the connection mutation
-lock. Extension lifecycle changes are rejected while installation is active.
+Native CTest includes RSA-PSS cross-language vectors, installation/upgrade,
+interrupted publication at every rename, locked directories, tampering, durable
+revocations and rollback/downgrade tests. `windows_plugin_sandbox` runs a real
+signed fixture worker and checks private data/code/environment/handle/process
+boundaries. `extensions-smoke.ps1 -SignedCatalog ...` additionally exercises real
+host lifecycle and optional HTTP debugging with a matching trusted build and
+HTTPS artifacts. These scripts are acceptance requirements, not evidence that
+Windows TUN, driver capture, AppContainer networking or production signatures have
+already been verified in this Linux workspace.
 
-Verification: `windows/scripts/extensions-smoke.ps1` exercises absent/disabled
-states, real store download/installation, worker crash recovery, disable, uninstall, reinstall,
-saved preferences, unchanged sing-box PID and real proxy requests on an isolated
-loopback fixture. `capture_test` continues testing packet filtering and files
-against the optional implementation.
-`windows_extension_store_test <bundle>` additionally verifies corruption rejection,
-occupied-destination rollback, disabled installation and overwrite rejection.
+## Publisher-signed release packages
 
+Ordinary CI packages remain development previews. `Windows trusted release packages`
+(`.github/workflows/windows-release.yml`) is a separate manual workflow restricted
+in code to `master` and the `windows-release` environment. Configure that environment's
+reviewers/branch protection, secrets `WINDOWS_SIGNING_PFX_BASE64` and
+`WINDOWS_SIGNING_PFX_PASSWORD`, and variables `WINDOWS_SIGNING_THUMBPRINT` and
+`WINDOWS_TIMESTAMP_URL` before running it. No publisher certificate or private key
+is included in this repository. Missing credentials, untrusted certificate chains,
+signing failures or missing timestamps fail the release instead of producing an
+artifact labeled signed. Environment approval requirements are repository settings;
+the workflow cannot create them.
 
-## Additional optional plugins (Windows 0.6.4)
+For a Windows signing workstation with PowerShell 7 and an approved code-signing
+key already in `Cert:\CurrentUser\My`, run:
 
-The store offers `statistics` in addition to capture, each API 1/version 1.0.0.
-Both install disabled. Sidebar entries appear only for enabled plugins, and
-their Vue modules load only when opened. Neither optional module is part of the
-base UI bundle. Installed settings/history survive uninstall.
+```powershell
+./windows/scripts/build.ps1 -PublisherThumbprint $publisherThumbprint
+./windows/scripts/package.ps1 -Msi -IncludeCore -TrustedRelease `
+  -CertificateThumbprint $publisherThumbprint -TimestampUrl $rfc3161Endpoint
+```
 
-Statistics aggregation (`traffic.c`) is linked only into the optional
-`sb-easy-statistics.exe` worker and its tests. The host links `traffic_proxy.c`,
-a small broker using the shared, bounded `extension_process` transport. With
-statistics disabled, the host does not launch that worker, load its history,
-accumulate per-application/domain history, or poll connections for statistics.
-Capture can still request its own samples independently. Basic live speed and
-connection counts remain available through sing-box's runtime API.
+The pipeline signs this project's executables and distributed PowerShell scripts
+before packaging, signs the MSI, and verifies the expected publisher and RFC3161
+SHA-256 timestamp using SignTool and Authenticode. Upstream core/DLL bytes retain
+upstream provenance and are covered by the package digest. ZIP and MSI hashes are
+written to `sb-easy-0.7.0-windows-x64-release.json`; its detached CMS `.p7s` signature
+covers the exact manifest bytes. The workflow uploads verified artifacts for review;
+it does not automatically publish a GitHub Release or change installed services.
 
-Existing encrypted history is loaded lazily when statistics is enabled and saved
-through the protected host store. The first sample after a worker start only
-establishes a baseline, so reinstall/re-enable cannot recount earlier traffic.
-A crashed or unresponsive worker never overwrites saved history with empty data.
-Disable saves a final checkpoint, then terminates the worker without restarting
-sing-box. The history was already bounded to 512 aggregate rows; that limit stays.
+Download both packages, the JSON manifest and its `.p7s` beside one another. Obtain
+the expected publisher thumbprint through a trusted release channel, then run the
+repository's verifier:
 
-As of Windows 0.6.6, active connections and runtime logs are default sidebar
-pages. Effective rule inspection is also built in under advanced navigation.
-These pages require no installed or enabled extension. `logs.snapshot` retains
-local-session authorization and redaction, but no longer requires Network Tools.
-The store no longer advertises Network Tools to new users. Existing legacy
-packages remain manageable under Installed, with an explanation that removal
-only deletes the old extension files and does not remove the built-in pages.
-Legacy package identities and integrity pins are retained for that migration.
+```powershell
+./windows/scripts/verify-release.ps1 `
+  -Manifest ./sb-easy-0.7.0-windows-x64-release.json `
+  -CertificateThumbprint $publisherThumbprint
+```
 
-Release build order:
-1. Build the base and optional worker with
-   `-DSB_EASY_BUILD_STATISTICS_EXTENSION=ON` (or `build.ps1 -StatisticsExtension`).
-2. Run `npm --prefix windows/ui run build:plugins`. Keep the approved capture ZIP
-   in `build/sb-easy-capture-1.0.0-windows-x64.zip`.
-3. Run `python windows/scripts/package-plugins.py`, upload every indexed artifact
-   to the existing server's read-only store mount, then rebuild the base service.
-4. Build the base UI and package the MSI. Base packaging excludes all plugin
-   workers and modules. A bootstrap catalog cannot be packaged.
+The verifier requires a trusted signer, the externally supplied publisher identity,
+exact file sizes and SHA-256 hashes; on Windows it also validates the installer's
+publisher signature and timestamp. The detached manifest itself is not timestamped,
+so its trust check requires a currently valid certificate chain. Real release-key
+access, RFC3161 availability, signed MSI lifecycle, SmartScreen reputation and
+Windows driver/network acceptance remain release-environment checks. Source tests
+verify rejection paths; they do not establish that a signed production release exists.
+See [SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)
+and [Get-AuthenticodeSignature](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-authenticodesignature).
 
-`extensions-smoke.ps1` now covers all three real store downloads, concurrent
-plugin lifecycle independence, statistics persistence, first-sample baselines,
-disabled-period exclusion, worker crash recovery and unchanged proxy PID/traffic.
-Run `windows_extension_store_test <bundle> <id>` for each indexed release to verify
-integrity and atomic disabled installation for each layout.
+### Verified application and core updates
+
+Settings provides explicit check, download, install and recovery actions. Updates
+require an installed LocalSystem service, a matching registered MSI version, and
+the publisher thumbprint embedded at build time. Portable and unconfigured builds
+report that updates are unavailable. Neither the UI nor the feed can nominate a
+new trusted publisher. The application and pinned core move together in one MSI;
+there is no independent unverified core download or automatic installation.
+
+Enter a direct HTTPS manifest URL. The service fetches its adjacent `.p7s`, verifies
+the exact bytes with the embedded publisher, and checks the schema-2 Windows/x64
+version matrix before offering a download. A persisted random cohort honors the
+signed rollout percentage. Older versions, incompatible protocol/minimum versions,
+unknown fields, duplicate keys and malformed UTF-8 are rejected. Artifact names
+resolve only beside the manifest on the same origin. Downloads reject redirects,
+credentials, cookies and ambient authentication, enforce deadlines and size limits,
+and support cancellation before installation.
+
+The installer must match the signed SHA-256/size, trusted timestamped Authenticode
+publisher, product/upgrade identity, x64 architecture and version. It is checked
+again immediately before use. Staging and encrypted state backups use protected
+non-reparse directories. A verified helper runs outside the installation directory,
+stops the service, and snapshots the existing encrypted device state before starting
+the Windows Installer transaction. The UI closes after the install request is
+accepted; reopen it after the transaction to inspect the final result.
+
+Before MSI commit, a service health action verifies the new protocol/application
+version, executes the packaged core's version command, and checks the stored
+configuration. A previously connected device must reconnect using its known-good
+configuration. Failure aborts the MSI transaction; after Windows Installer restores
+the previous product, the helper restores the exact encrypted state backup and
+checks the old service. A durable journal supports interrupted-update recovery.
+Ambiguous installer/product state is reported as recovery required and preserves
+the backup. Requested WFP disconnect protection remains through major upgrades.
+
+`scripts/update-acceptance.ps1` is the disposable, elevated Windows VM gate. Supply
+a trusted previous MSI, a valid newer signed manifest, and a separately signed
+newer test MSI whose declared core version intentionally differs from its core.
+It checks pre-commit health rollback, altered staged-package rejection and successful
+application/core commit, and retains a receipt and installer logs. It refuses an
+existing installation/data store and never changes certificate trust. Linux/Wine
+source tests cover manifest/hash rejection, bounded downloads, version checks,
+private encrypted backup/restoration and RPC guards; they do not establish successful
+Windows Installer rollback or a production signing identity.
+
+## Optional disconnect protection
+
+The Settings page offers a default-off WFP kill switch. Enabling it requires the
+installed, automatic `sb-easy` Windows service and its pinned core. Persistent
+IPv4/IPv6 connect/receive filters block ordinary applications outside loopback or
+the current TUN. Only the fixed service/core programs, constrained DHCP and IPv6
+neighbor discovery are exempt. There is no blanket physical-interface DNS permit.
+An uncached center hostname can therefore be unavailable while the tunnel is down.
+The status view reports observed filter state separately from the saved preference;
+the service checks it periodically and attempts to restore requested protection.
+
+Manual disconnect, core failure and service exit retain protection. Turning the
+setting off explicitly removes this product's WFP objects. To recover when the UI
+or saved state is unavailable, open an elevated terminal, stop the installed
+service, and run its fixed command:
+
+```powershell
+Stop-Service sb-easy
+& "$env:ProgramFiles\sb-easy\sb-easy-service.exe" --disable-kill-switch
+Start-Service sb-easy
+```
+
+Recovery removes only sb-easy rules and records an administrator-only machine
+marker. The next service startup persists the disabled preference under LocalSystem
+without exposing or replacing DPAPI credentials. If storage is damaged, the marker
+remains and protection cannot silently return. Genuine MSI uninstall runs recovery
+after stopping the service and before deleting its executable; major upgrades
+retain protection. Cleanup failures abort uninstall instead of stranding unreported
+rules. This lifecycle still requires the disposable Windows VM acceptance script;
+policy-emitter tests and Wine runs do not prove packet-level leak prevention.
+
+### Exit health and explicit automatic groups
+
+The connection page exposes service-owned health policy: HTTPS probe URL, interval
+(default 180 seconds), timeout (default 5000 ms), failover/fastest strategy, and
+improvement tolerance (default 100 ms). A background cycle performs one owned-core
+probe or selector change per tick; closing the UI does not stop it. PID, physical
+network generation, group or policy changes discard incomplete results.
+
+A fixed selection reports probe failure and keeps its exit. Automatic groups
+require an explicit list of 1–32 leaf proxy nodes (128 candidates across groups).
+Their generated selectors contain only those available candidates, and DNS uses
+the same selector. Direct, nested selectors and unknown nodes cannot be added.
+Failover keeps a healthy current choice; fastest changes only when improvement
+exceeds the configured tolerance. If every candidate fails, the current choice is
+retained. If a downloaded configuration removes every allowed candidate, that
+configuration is rejected and the known-good configuration remains. Choosing a
+fixed exit rebuilds the selector and leaves automatic mode.
+
+Native policy/controller/transport tests cover these rules under Wine. This does
+not replace Windows TUN, sleep/resume or packet-leak acceptance on a disposable VM.
+If stored kill-switch preference is absent or invalid while persistent WFP filters
+exist, startup preserves those filters and reports recovery required. Unrelated
+settings writes keep the preference unknown; only an explicit valid opt-out or
+administrator recovery removes the rules.
+
+### Encrypted preferences and personal synchronization
+
+Settings can export an encrypted JSON file, read a selected file, preview its
+contents, and apply that reviewed preview. Imports replace local subscriptions,
+general group selections and health policy. Device registration, custom domain
+and process groups, automatic connection, kill-switch policy, capture/MITM state
+and certificates remain on the destination. The service checks the resulting
+configuration before saving or reconnecting. Preview capabilities are one-use,
+expire after five minutes, and reject intervening local changes. Failed writes
+leave the previous preferences intact. Import never implicitly connects a stopped
+device.
+
+The encryption envelope follows [the shared format](../docs/preferences-format.md):
+PBKDF2-HMAC-SHA256 with 600,000 iterations and AES-256-GCM, random salt/nonce and
+fixed authenticated context. Windows accepts 12–1024 UTF-8 password bytes and
+limits plaintext to 640 KiB/envelopes to 900 KiB to fit bounded IPC frames. The
+shared Unicode vector is tested with the native Windows CNG implementation.
+Windows imports Windows payloads only. Subscription URLs and cached credentials
+are encrypted inside the archive; they are absent from the preview.
+
+Personal synchronization signs into an HTTPS panel with a separate account
+session and supports authenticator/recovery-code MFA. Panel tokens and binding
+cookies remain in service memory, never in device enrollment state or WebView
+responses. A random per-window capability gates later requests. Passwords are
+cleared from the form after each operation. The panel stores only ciphertext in
+`windows-personal`; it cannot decrypt the archive. Fetch the remote state before
+uploading/deleting. Conditional revisions reject conflicts, and deletion preserves
+a tombstone revision so stale clients cannot recreate an old version silently.
+Sign out to revoke the panel session; reopening the window requires a fresh login.

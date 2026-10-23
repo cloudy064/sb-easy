@@ -5,7 +5,7 @@
         <h2>{{ t('page.subscriptions.title') }}</h2>
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.subscriptions.desc') }}</p>
       </div>
-      <button class="btn-primary" @click="showAdd = true">{{ t('subs.add') }}</button>
+      <button class="btn-primary" @click="startAdd">{{ t('subs.add') }}</button>
     </div>
 
     <div v-if="store.loading" class="loading-center"><div class="spinner"></div></div>
@@ -19,22 +19,36 @@
         <div class="sub-main">
           <div class="sub-info">
             <h3 class="sub-name">{{ sub.name }}</h3>
-            <div class="sub-url text-xs font-mono text-muted truncate">{{ sub.url }}</div>
+            <div class="sub-url text-xs font-mono text-muted truncate">{{ sourceOrigin(sub.url) }}</div>
             <div class="sub-meta">
-              <span>{{ t('subs.refreshEvery') }} {{ sub.refresh_interval }}{{ t('subs.seconds') }}</span>
+              <span v-if="sub.enabled && sub.background_refresh_enabled !== false">{{ t('subs.refreshEvery') }} {{ Math.max(60, sub.refresh_interval) }}{{ t('subs.seconds') }}</span>
+              <span v-else>{{ t(sub.enabled ? 'subs.schedulerDisabled' : 'subs.paused') }}</span>
               <span class="sub-sep">·</span>
               <span>{{ t('subs.lastFetched') }}: <strong>{{ sub.last_fetched_at ? formatTime(sub.last_fetched_at) : t('subs.never') }}</strong></span>
+            </div>
+            <div class="sub-meta" v-if="sub.enabled && sub.background_refresh_enabled !== false">
+              {{ t('subs.nextRefresh') }}: {{ sub.next_refresh_at ? formatUnix(sub.next_refresh_at) : t('subs.pending') }}
+            </div>
+            <div class="sub-usage text-xs">
+              {{ t('subs.used') }}: {{ usedBytes(sub) }} · {{ t('subs.total') }}: {{ formatBytes(sub.usage?.total) }}
+              · {{ t('subs.expires') }}: {{ sub.usage?.expire ? formatUnix(sub.usage.expire) : t('subs.unknown') }}
+            </div>
+            <div v-if="sub.last_error" class="text-xs sub-error" role="status">
+              {{ sub.last_error }} · {{ t('subs.failureCount') }}: {{ sub.failure_count }}
+              <span v-if="sub.last_attempt_at"> · {{ formatTime(sub.last_attempt_at) }}</span>
             </div>
           </div>
           <div class="sub-actions">
             <button
               class="btn-primary btn-sm"
               @click="fetchSub(sub.id)"
-              :disabled="fetchingId === sub.id"
+              :disabled="fetchingId !== null"
             >
               <span v-if="fetchingId === sub.id" class="spinner" style="width:14px;height:14px;border-width:1.5px"></span>
               <span v-else>{{ t('subs.fetchNow') }}</span>
             </button>
+            <button class="btn-secondary btn-sm" @click="editSub(sub)">{{ t('subs.edit') }}</button>
+            <button class="btn-secondary btn-sm" @click="toggleEnabled(sub)" :disabled="saving">{{ t(sub.enabled ? 'subs.pause' : 'subs.resume') }}</button>
             <button class="btn-danger btn-sm" @click="confirmDelete(sub)">{{ t('subs.delete') }}</button>
           </div>
         </div>
@@ -43,6 +57,10 @@
         <div v-if="sub.last_fetch_result" class="sub-result">
           <div class="sub-result-title">{{ t('subs.lastImport') }}</div>
           <div class="text-xs text-muted">{{ parseResult(sub.last_fetch_result) }}</div>
+          <details v-if="resultErrors(sub.last_fetch_result).length" class="text-xs result-errors">
+            <summary>{{ t('subs.compatibility') }} ({{ resultErrors(sub.last_fetch_result).length }})</summary>
+            <p v-for="(reason, index) in resultErrors(sub.last_fetch_result)" :key="index">{{ reason }}</p>
+          </details>
         </div>
       </article>
     </div>
@@ -81,6 +99,10 @@
               <span class="result-num" style="color:var(--ink-muted)">{{ foundCount(fetchResult) }}</span>
               <span class="result-label">{{ t('subs.result.found') }}</span>
             </div>
+            <div class="result-item">
+              <span class="result-num" style="color:var(--warn)">{{ fetchResult.skipped }}</span>
+              <span class="result-label">{{ t('subs.skipped') }}</span>
+            </div>
           </div>
           <div v-if="fetchResult.errors.length" class="result-errors">
             <div v-for="(e, i) in fetchResult.errors" :key="i" class="text-xs" style="color:var(--bad)">{{ e }}</div>
@@ -96,15 +118,15 @@
     <!-- Add Dialog -->
     <div v-if="showAdd" class="modal-overlay" @click.self="showAdd = false">
       <div class="modal">
-        <h3>{{ t('subs.add') }}</h3>
+        <h3>{{ t(editingId ? 'subs.edit' : 'subs.add') }}</h3>
         <form @submit.prevent="doAdd">
           <div class="form-group"><label>{{ t('subs.form.name') }}</label><input v-model="addForm.name" required :placeholder="t('subs.form.namePlaceholder')" /></div>
           <div class="form-group"><label>{{ t('subs.form.url') }}</label><input v-model="addForm.url" required :placeholder="t('subs.form.urlPlaceholder')" /></div>
-          <div class="form-group"><label>{{ t('subs.form.interval') }}</label><input v-model.number="addForm.refresh_interval" type="number" placeholder="3600" /></div>
+          <div class="form-group"><label>{{ t('subs.form.interval') }}</label><input v-model.number="addForm.refresh_interval" type="number" min="60" required placeholder="3600" /></div>
           <p class="text-xs text-muted mb-3">{{ t('subs.form.hint') }}</p>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" @click="showAdd = false">{{ t('subs.form.cancel') }}</button>
-            <button type="submit" class="btn-primary">{{ t('subs.form.submit') }}</button>
+            <button type="submit" class="btn-primary" :disabled="saving">{{ t(editingId ? 'subs.save' : 'subs.form.submit') }}</button>
           </div>
         </form>
       </div>
@@ -125,7 +147,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from '../composables/i18n'
 import { useSubscriptionsStore } from '../stores/subscriptions'
@@ -138,13 +160,68 @@ const store = useSubscriptionsStore()
 const proxyNodes = useProxyNodesStore()
 
 const showAdd = ref(false)
+const editingId = ref<string | null>(null)
+const saving = ref(false)
 const deleteTarget = ref<Subscription | null>(null)
 const fetchingId = ref<string | null>(null)
 const fetchResult = ref<FetchResult | null>(null)
 const fetchError = ref<string | null>(null)
 const addForm = ref({ name: '', url: '', refresh_interval: 3600 })
 
-onMounted(() => store.fetchAll())
+let refreshTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  store.fetchAll().catch(e => { fetchError.value = errMessage(e) })
+  refreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') store.fetchAll(true).catch(() => {})
+  }, 15000)
+})
+onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer) })
+
+function sourceOrigin(url: string) {
+  try { return new URL(url).origin } catch { return t('subs.form.url') }
+}
+
+function formatBytes(bytes?: number) {
+  if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return t('subs.unknown')
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
+  let unit = 0
+  while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; ++unit }
+  return `${bytes.toFixed(unit ? 1 : 0)} ${units[unit]}`
+}
+
+function usedBytes(sub: Subscription) {
+  const usage = sub.usage
+  return formatBytes(usage?.upload !== undefined && usage.download !== undefined ? usage.upload + usage.download : undefined)
+}
+
+function formatUnix(seconds: number) {
+  const date = new Date(seconds * 1000)
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : t('subs.unknown')
+}
+
+function resultErrors(raw: string): string[] {
+  try { const value = JSON.parse(raw).errors; return Array.isArray(value) ? value.filter(x => typeof x === 'string') : [] }
+  catch { return [] }
+}
+
+function startAdd() {
+  editingId.value = null
+  addForm.value = { name: '', url: '', refresh_interval: 3600 }
+  showAdd.value = true
+}
+
+function editSub(sub: Subscription) {
+  editingId.value = sub.id
+  addForm.value = { name: sub.name, url: sub.url, refresh_interval: Math.max(60, sub.refresh_interval) }
+  showAdd.value = true
+}
+
+async function toggleEnabled(sub: Subscription) {
+  saving.value = true
+  try { await store.update(sub.id, { enabled: !sub.enabled }) }
+  catch (e) { fetchError.value = errMessage(e) }
+  finally { saving.value = false }
+}
 
 // `found` (total parsed) may be absent on older backends — fall back to add+update.
 function foundCount(r: FetchResult): number {
@@ -155,12 +232,12 @@ function parseResult(raw: string) {
   try {
     const r = JSON.parse(raw)
     const total = r.total ?? r.found ?? r.added + r.updated
-    return `${r.added} ${t('subs.sum.added')} · ${r.updated} ${t('subs.sum.updated')} · ${total} ${t('subs.sum.found')}`
+    return `${r.added} ${t('subs.sum.added')} · ${r.updated} ${t('subs.sum.updated')} · ${total} ${t('subs.sum.found')} · ${r.skipped ?? 0} ${t('subs.skipped')}`
   } catch { return raw }
 }
 
 function formatTime(ts: string) {
-  const d = new Date(ts)
+  const d = new Date(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(ts) ? ts.replace(' ', 'T') + 'Z' : ts)
   return isNaN(d.getTime()) ? ts : d.toLocaleString()
 }
 
@@ -181,6 +258,7 @@ async function runFetch(id: string) {
     return
   } finally {
     fetchingId.value = null
+    store.fetchAll(true).catch(() => {})
   }
   // Refresh card metadata (last_fetched_at) + node list so a following
   // "View Nodes" is fresh. A refresh failure must NOT mask the successful
@@ -189,13 +267,20 @@ async function runFetch(id: string) {
 }
 
 async function doAdd() {
+  saving.value = true
+  if (editingId.value) {
+    try { await store.update(editingId.value, addForm.value); showAdd.value = false }
+    catch (e) { fetchError.value = errMessage(e) }
+    finally { saving.value = false }
+    return
+  }
   let sub: Subscription
   try {
     sub = await store.create(addForm.value)
   } catch (e) {
     fetchError.value = errMessage(e)
     return
-  }
+  } finally { saving.value = false }
   showAdd.value = false
   addForm.value = { name: '', url: '', refresh_interval: 3600 }
   await runFetch(sub.id)
@@ -258,6 +343,8 @@ async function doDelete() {
   font-size: 0.72rem;
   color: var(--ink-muted);
 }
+.sub-usage { margin-top: 0.65rem; color: var(--ink-muted); }
+.sub-error { margin-top: 0.5rem; color: var(--bad); }
 .sub-sep { margin: 0 0.4rem; }
 
 .sub-actions {

@@ -67,6 +67,10 @@ typedef struct sb_agent_client sb_agent_client;
 /* SB_ERR_VALIDATION for a bad server URL, empty token or bad timeout. */
 sb_agent_client *sb_agent_client_new(const sb_agent_client_options *options, sb_err *err);
 void sb_agent_client_free(sb_agent_client *client);
+/* Disabled by default. Only an actual runtime owner should enable reporting;
+ * this can never enable support in an external build or an archive without
+ * the complete embedded proxy API. */
+void sb_agent_client_proxy_capability(sb_agent_client *client, bool enabled);
 
 /* etag may be NULL. */
 int sb_agent_client_poll_config(sb_agent_client *client, const char *etag,
@@ -79,6 +83,11 @@ int sb_agent_client_acknowledge_command(sb_agent_client *client, const char *id,
 /* running: NULL -> null; etag: NULL -> null. */
 int sb_agent_client_report_status(sb_agent_client *client, const char *version,
                                   const bool *running, const char *etag, sb_err *err);
+/* Raw, bounded lease request transport. It sends these exact bytes with no
+ * redirects, caps the total network deadline at 5 seconds and response at
+ * 4 MiB. The caller owns identity/sequence validation and frees *response. */
+int sb_agent_client_proxy_exchange(sb_agent_client *client, const char *request, size_t length,
+    char **response, size_t *response_length, sb_err *err);
 int sb_agent_client_report_telemetry(sb_agent_client *client, const sbj *telemetry,
                                      sb_err *err);
 /* Stores the server's "updated" count in *updated. */

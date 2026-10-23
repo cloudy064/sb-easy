@@ -1,0 +1,2 @@
+/* Generated at build time from the reviewed public-key allowlist. */
+#define SBW_PLUGIN_CATALOG_KEYS "@SBW_PLUGIN_KEYS_ESCAPED@"

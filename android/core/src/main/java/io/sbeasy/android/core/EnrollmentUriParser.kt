@@ -5,7 +5,7 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 object EnrollmentUriParser {
-    fun parse(raw: String): Pair<String, String> {
+    fun parse(raw: String, allowInsecureLocalHttp: Boolean = false): Pair<String, String> {
         val value = clean(raw)
         val uri = runCatching { URI(value) }
             .getOrElse { throw IllegalArgumentException("不是有效的 sb-easy 注册链接") }
@@ -15,26 +15,18 @@ object EnrollmentUriParser {
         }
         val parameters = parseQuery(uri.rawQuery)
         val server = normalizeServer(parameters["server"]?.singleOrNull()
-            ?: throw IllegalArgumentException("注册链接缺少服务器地址"))
+            ?: throw IllegalArgumentException("注册链接缺少服务器地址"), allowInsecureLocalHttp)
         val code = parameters["code"]?.singleOrNull()
             ?: throw IllegalArgumentException("注册链接缺少注册码")
         require(ENROLLMENT_CODE.matches(code)) { "注册码格式无效" }
         return server to code.lowercase()
     }
 
-    fun normalizeServer(raw: String): String {
-        val value = raw.trim().trimEnd('/')
-        val uri = runCatching { URI(value) }
-            .getOrElse { throw IllegalArgumentException("服务器地址格式无效") }
-        require(uri.scheme.equals("http", ignoreCase = true) ||
-            uri.scheme.equals("https", ignoreCase = true)) {
-            "服务器地址必须使用 HTTP 或 HTTPS"
-        }
-        require(uri.host != null && uri.userInfo == null && uri.query == null && uri.fragment == null) {
-            "服务器地址格式无效"
-        }
-        return value
-    }
+    /** Inspection shows an eligible local HTTP link without authorizing a request. */
+    fun inspect(raw: String): Pair<String, String> = parse(raw, allowInsecureLocalHttp = true)
+
+    fun normalizeServer(raw: String, allowInsecureLocalHttp: Boolean = false): String =
+        ManagedTransportPolicy.normalizeServer(raw, allowInsecureLocalHttp)
 
     private fun clean(raw: String): String {
         var value = raw.replace("\u0000", "").trim()

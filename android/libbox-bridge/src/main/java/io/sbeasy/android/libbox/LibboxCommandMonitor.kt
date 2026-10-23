@@ -144,6 +144,9 @@ internal class LibboxCommandMonitor(
         onGroupsUpdated(groups)
     }
 
+    // No CommandOutbounds subscription: all visible nodes arrive in CommandGroup snapshots.
+    override fun writeOutbounds(message: io.nekohasekai.libbox.OutboundGroupItemIterator?) = Unit
+
     override fun initializeClashMode(modeList: StringIterator?, currentMode: String?) = Unit
 
     override fun updateClashMode(newMode: String?) = Unit

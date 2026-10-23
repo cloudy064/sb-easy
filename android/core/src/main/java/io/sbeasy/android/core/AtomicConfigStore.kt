@@ -5,20 +5,20 @@ import android.util.AtomicFile
 import java.io.File
 import org.json.JSONObject
 
-class AtomicConfigStore(context: Context) {
-    private val directory = File(context.filesDir, "managed-config").apply { mkdirs() }
+class AtomicConfigStore(context: Context, directoryName: String = "managed-config") : ConfigurationStorage {
+    private val directory = File(context.filesDir, directoryName).apply { mkdirs() }
 
     @Synchronized
-    fun active(): ManagedConfig? = read("active")
+    override fun active(): ManagedConfig? = read("active")
 
     @Synchronized
-    fun candidate(): ManagedConfig? = read("candidate")
+    override fun candidate(): ManagedConfig? = read("candidate")
 
     @Synchronized
-    fun saveCandidate(config: ManagedConfig) = write("candidate", config)
+    override fun saveCandidate(config: ManagedConfig) = write("candidate", config)
 
     @Synchronized
-    fun promoteCandidate(): ManagedConfig {
+    override fun promoteCandidate(): ManagedConfig {
         val candidate = requireNotNull(candidate()) { "No candidate configuration" }
         active()?.let { write("rollback", it) }
         write("active", candidate)
@@ -27,14 +27,14 @@ class AtomicConfigStore(context: Context) {
     }
 
     @Synchronized
-    fun rollback(): ManagedConfig? {
+    override fun rollback(): ManagedConfig? {
         val rollback = read("rollback") ?: return null
         write("active", rollback)
         return rollback
     }
 
     @Synchronized
-    fun clear() {
+    override fun clear() {
         listOf("active", "candidate", "rollback").forEach(::delete)
     }
 

@@ -1697,7 +1697,7 @@ TEST(packet_capture_roundtrip) {
     char *path = sb_asprintf("%s/%s",list,digest);
     r=call(&t,"GET",path,NULL); CHECK_EQ_INT(r.status,200); CHECK_EQ_INT(r.body_len,80); CHECK(memcmp(r.body,pcap,80)==0); sb_test_response_free(&r);
     r=call_as(&t,token,"GET",path,NULL); CHECK_EQ_INT(r.status,401); sb_test_response_free(&r);
-    char *viewer = sb_auth_create_token(t.jwt_secret,"viewer","viewer","viewer");
+    char *viewer = sb_test_token(&t,"viewer","viewer","viewer");
     r=call_as(&t,viewer,"GET",path,NULL); CHECK_EQ_INT(r.status,403); sb_test_response_free(&r); free(viewer);
     char *other_host_path = sb_asprintf("/api/hosts/self/captures/%s", digest);
     r=call(&t,"GET",other_host_path,NULL); CHECK_EQ_INT(r.status,404); sb_test_response_free(&r); free(other_host_path);
@@ -1710,4 +1710,23 @@ TEST(packet_capture_roundtrip) {
     r=call(&t,"DELETE",path,NULL); CHECK_EQ_INT(r.status,200); sb_test_response_free(&r);
     r=call(&t,"GET",path,NULL); CHECK_EQ_INT(r.status,404); sb_test_response_free(&r);
     free(auth);free(url);free(digest);free(path);free(list);free(token);free(host);sb_test_server_stop(&t);
+}
+
+TEST(apple_native_clients_receive_embedded_managed_network) {
+    sb_test_server t; REQUIRE(sb_test_server_start(&t) == 0);
+    const char *platforms[] = {"ios", "macos", "tvos"};
+    for (size_t i = 0; i < sizeof platforms / sizeof *platforms; ++i) {
+        char *body = sb_asprintf("{\"name\":\"Apple %s\",\"capabilities\":{\"platform\":\"%s\"},\"profile_id\":\"android-client\"}", platforms[i], platforms[i]);
+        char *id = create_host(&t, body); free(body); REQUIRE(id);
+        char *token = host_token(&t, id); REQUIRE(token);
+        sb_test_response r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+        CHECK_EQ_INT(r.status, 200); CHECK(!jpath(r.json, "experimental.clash_api"));
+        bool wireguard = false; const sbj *endpoints = sbj_get(r.json, "endpoints");
+        for (size_t n = 0; n < sbj_arr_len(endpoints); ++n)
+            if (sbj_string_is(sbj_get(sbj_arr_at(endpoints, n), "type"), "wireguard")) wireguard = true;
+        CHECK(wireguard); sb_test_response_free(&r);
+        sb_host host; sb_host_init(&host); CHECK(find_host(&t, id, &host) == 1);
+        CHECK(host.wg_address != NULL); CHECK(host.clash_api == NULL); sb_host_free(&host); free(token); free(id);
+    }
+    sb_test_server_stop(&t);
 }

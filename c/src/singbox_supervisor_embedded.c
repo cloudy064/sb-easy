@@ -2,6 +2,7 @@
  * Only compiled with -DSB_EASY_EMBED_SINGBOX. */
 #include "sb/singbox_supervisor.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -129,9 +130,27 @@ static int reload_running(sb_singbox_supervisor *s, sb_err *err) {
 
 int sb_singbox_supervisor_apply_config(sb_singbox_supervisor *s, const char *contents,
                                        size_t len, sb_err *err) {
-    if (sb_atomic_replace_file(s->config_path, contents, len, validate, s, err) != 0) return -1;
-    if (!sb_singbox_supervisor_running(s)) return start(s, true, err);
-    return reload_running(s, err);
+    size_t previous_len = 0;
+    bool had_previous = is_regular_file(s->config_path);
+    char *previous = had_previous ? sb_read_file(s->config_path, &previous_len) : NULL;
+    if (had_previous && !previous)
+        return sb_fail(err, SB_ERR_IO, "read prior sing-box configuration: %s", strerror(errno));
+    int rc = sb_atomic_replace_file(s->config_path, contents, len, validate, s, err);
+    if (rc != 0) { free(previous); return -1; }
+    rc = sb_singbox_supervisor_running(s) ? reload_running(s, err) : start(s, true, err);
+    if (rc != 0) {
+        sb_err restore_error = {0};
+        if (previous) {
+            if (sb_atomic_replace_file(s->config_path, previous, previous_len, NULL, NULL, &restore_error) != 0)
+                sb_fail(err, SB_ERR_IO, "sing-box replacement failed and prior configuration could not be restored: %s", restore_error.msg);
+        } else {
+            (void)unlink(s->config_path);
+        }
+        s->running = SBEasySingBoxRunning() != 0;
+        set_last_error(s, sb_strdup(err ? err->msg : "sing-box replacement failed"));
+    }
+    free(previous);
+    return rc;
 }
 
 void sb_singbox_supervisor_ensure_alive(sb_singbox_supervisor *s) {

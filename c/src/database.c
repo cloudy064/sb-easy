@@ -13,10 +13,12 @@
 #include <openssl/sha.h>
 
 #include "sqlite_internal.h"
+#include "proxy_clock_internal.h"
 
 struct sb_database {
     sqlite3 *handle;
     pthread_mutex_t mutex;
+    sb_proxy_clock *proxy_clock;
 };
 
 typedef struct {
@@ -147,17 +149,21 @@ sb_database *sb_database_open(const char *path, sb_err *err) {
     sb_database *db = sb_xcalloc(1, sizeof *db);
     db->handle = handle;
     pthread_mutex_init(&db->mutex, NULL);
+    db->proxy_clock = sb_proxy_clock_attach(handle, err);
+    if (!db->proxy_clock) { sb_database_free(db); return NULL; }
     return db;
 }
 
 void sb_database_free(sb_database *db) {
     if (!db) return;
+    sb_proxy_clock_detach(db->proxy_clock);
     if (db->handle) sqlite3_close(db->handle);
     pthread_mutex_destroy(&db->mutex);
     free(db);
 }
 
 struct sqlite3 *sb_database_handle(sb_database *db) { return db->handle; }
+struct sb_proxy_clock *sb_database_proxy_clock(sb_database *db) { return db->proxy_clock; }
 void sb_database_lock(sb_database *db) { pthread_mutex_lock(&db->mutex); }
 void sb_database_unlock(sb_database *db) { pthread_mutex_unlock(&db->mutex); }
 

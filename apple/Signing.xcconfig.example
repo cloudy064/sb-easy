@@ -1,0 +1,7 @@
+// Register app IDs, this App Group and Keychain group in your Apple team.
+// Enable Network Extensions / packet-tunnel-provider on all app+extension IDs.
+DEVELOPMENT_TEAM = YOURTEAMID
+SB_BUNDLE_PREFIX = com.example.sbeasy
+SB_APP_GROUP = group.com.example.sbeasy
+SB_KEYCHAIN_GROUP = com.example.sbeasy.shared
+CODE_SIGN_STYLE = Automatic

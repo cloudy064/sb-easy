@@ -5,6 +5,56 @@ import { validParams, validResult } from '../src/lib/protocol.js'
 import { configStage } from '../src/lib/config.js'
 import { connectionActions, runtimeDetail } from '../src/lib/connection.js'
 
+test('update actions require a direct HTTPS manifest and the previously verified release identity', () => {
+  assert.equal(validParams('updates.check', { manifest_url: 'https://downloads.test/windows/release.json' }), true)
+  for (const url of ['http://downloads.test/release.json', 'https://user@downloads.test/release.json', 'https://downloads.test/release.json?key=x', 'https://downloads.test/../release.json', 'https://downloads.test']) assert.equal(validParams('updates.check', { manifest_url: url }), false)
+  assert.equal(validParams('updates.install', { release_id: 'a'.repeat(64) }), true)
+  assert.equal(validParams('updates.install', { release_id: 'a'.repeat(64), path: 'C:\\attacker.msi' }), false)
+  assert.equal(validParams('updates.download', { release_id: 'package.msi' }), false)
+  const status = { supported: true, installed_service: true, publisher_configured: true, current_version: '0.6.9', current_core_version: '1.14.3', phase: 'downloading', busy: true, cancellable: true, received_bytes: 4096, release: { id: 'b'.repeat(64), version: '0.7.0', core_version: '1.14.4', channel: 'stable', bytes: 8192, rollout_percent: 30 } }
+  assert.equal(validResult('updates.status', status), true)
+  assert.equal(validResult('updates.status', { ...status, received_bytes: -1 }), false)
+  assert.equal(validResult('updates.status', { ...status, phase: 'verified-by-browser' }), false)
+  assert.equal(validResult('updates.status', { ...status, release: { ...status.release, bytes: 536870913 } }), false)
+  assert.equal(validParams('updates.recover', {}), true)
+  assert.equal(validParams('updates.recover', { force: true }), false)
+})
+
+test('encrypted preference operations require bounded archives, passwords and window capabilities', () => {
+  const envelope = { format: 'sb-easy.preferences', version: 1, kdf: 'pbkdf2-sha256', iterations: 600000, salt: 'AAECAwQFBgcICQoLDA0ODw==', nonce: 'EBESExQVFhcYGRob', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAAA=' }
+  const session = 'a'.repeat(64)
+  assert.equal(validParams('preferences.export', { password: 'long-archive-password' }), true)
+  assert.equal(validParams('preferences.export', { password: 'short' }), false)
+  assert.equal(validParams('preferences.preview', { password: 'long-archive-password', envelope }), true)
+  assert.equal(validParams('preferences.preview', { password: 'long-archive-password', envelope: { ...envelope, iterations: 1 } }), false)
+  assert.equal(validParams('preferences.preview', { password: 'long-archive-password', envelope: { ...envelope, nonce: 'EBESExQVFhcYGRob=' } }), false)
+  assert.equal(validParams('preferences.apply', { preview_id: session }), true)
+  assert.equal(validParams('preferences.apply', { preview_id: session, overwrite: true }), false)
+  assert.equal(validParams('preferences.cloud.login', { server: 'http://panel.test', username: 'alice', password: 'account-password' }), false)
+  assert.equal(validParams('preferences.cloud.login', { server: 'https://panel.test', username: 'alice', password: 'account-password' }), true)
+  assert.equal(validParams('preferences.cloud.get', { session_id: session }), true)
+  assert.equal(validParams('preferences.cloud.get', {}), false)
+  assert.equal(validParams('preferences.cloud.put', { session_id: session, revision: 2, password: 'long-archive-password' }), true)
+  assert.equal(validParams('preferences.cloud.put', { session_id: session, revision: -1, password: 'long-archive-password' }), false)
+  assert.equal(validResult('preferences.export', { envelope }), true)
+  assert.equal(validResult('preferences.cloud.get', { connected: true, mfa_required: false, server: 'https://panel.test', username: 'alice', session_id: session, revision_known: true, revision: 2, envelope, updated_at: 1780000000, deleted: false }), true)
+})
+
+test('health policy bounds and explicit candidate lists are validated before native dispatch', () => {
+  const policy = { enabled: true, probe_url: 'https://www.gstatic.com/generate_204', interval_seconds: 180, timeout_millis: 5000, tolerance_millis: 100, selection: 'failover' }
+  assert.equal(validParams('routing.health.set', policy), true)
+  for (const url of ['http://example.test', 'https://user@example.test', 'https://@example.test', 'https://example.test/#fragment']) assert.equal(validParams('routing.health.set', { ...policy, probe_url: url }), false)
+  assert.equal(validParams('routing.health.set', { ...policy, timeout_millis: 30001 }), false)
+  assert.equal(validParams('routing.health.set', { ...policy, interval_seconds: 29 }), false)
+  assert.equal(validParams('routing.health.set', { ...policy, tolerance_millis: 10001 }), false)
+  assert.equal(validParams('routing.health.check', {}), true)
+  assert.equal(validParams('routing.health.check', { force: true }), false)
+  assert.equal(validParams('routing.automatic.set', { group: 'default', candidates: ['a', 'b'] }), true)
+  assert.equal(validParams('routing.automatic.set', { group: 'default', candidates: [] }), false)
+  assert.equal(validParams('routing.automatic.set', { group: 'default', candidates: ['a', 'a'] }), false)
+  assert.equal(validParams('routing.automatic.set', { group: 'default', candidates: ['a'], fallback: 'direct' }), false)
+})
+
 test('HTTP debug certificates and browser launch cannot accept arbitrary files or URLs', () => {
   for (const method of ['httpdebug.open','httpdebug.trust','httpdebug.untrust','httpdebug.export'] as const) {
     assert.equal(validParams(method, {}), true)
@@ -18,6 +68,12 @@ test('HTTP debug certificates and browser launch cannot accept arbitrary files o
 })
 
 test('extension commands require known identities and explicit lifecycle actions', () => {
+  assert.equal(validParams('extensions.catalog_update', { envelope: '{"payload":"signed","signature":"bytes"}' }), true)
+  assert.equal(validParams('extensions.catalog_update', { envelope: 'x'.repeat(900 * 1024 + 1) }), false)
+  assert.equal(validParams('extensions.catalog_update', { envelope: '{}', public_key: 'caller-key' }), false)
+  assert.equal(validParams('extensions.rollback', { id: 'capture' }), true)
+  assert.equal(validParams('extensions.rollback', { id: 'capture', build: 1 }), false)
+  assert.equal(validResult('extensions.progress', { id: 'capture', phase: 'ready', received: 100, total: 100, error: '' }), true)
   assert.equal(validResult('extensions.progress', { id: '', phase: 'idle', received: 0, total: 846176, error: '' }), true)
   assert.equal(validResult('extensions.progress', { id: 'statistics', phase: 'complete', received: 846176, total: 846176, error: '' }), true)
   for (const id of ['capture','statistics','network-tools']) {
@@ -38,6 +94,12 @@ test('extension commands require known identities and explicit lifecycle actions
   assert.equal(validResult('extensions.list', { extensions: [item] }), true)
   assert.equal(validResult('extensions.list', { extensions: [{ ...item, version: '', installed: false }] }), true)
   assert.equal(validResult('extensions.list', { extensions: [{ ...item, enabled: 'yes' }] }), false)
+  assert.equal(validResult('extensions.rollback', { extensions: [{ ...item, revoked: true, verified: false, rollback_available: true, build: 4 }] }), true)
+  assert.equal(validResult('extensions.list', { extensions: [{ ...item, verified: 'yes' }] }), false)
+  const catalogItem = { ...item, publisher: 'sb-easy', description: 'Capture', permissions: 'Read tunnel packets', size: 100, installed_version: '1.0.0', available_build: 5, install_available: true }
+  assert.equal(validResult('extensions.catalog_update', { items: [catalogItem], trust_configured: true, catalog_fresh: true, sequence: 8 }), true)
+  assert.equal(validResult('extensions.catalog_update', { items: [catalogItem], sequence: -1 }), false)
+  assert.equal(validResult('extensions.catalog', { items: [{ ...catalogItem, revoked: 'no' }] }), false)
 })
 
 class TestTransport implements WebViewTransport {
@@ -541,4 +603,50 @@ test('busy retry timers stop on timeout and disposal', async () => {
     assert.equal(transport.messages.length, 1)
     bridge.dispose()
   }
+})
+
+test('management settings allow bounded policy changes but never caller-supplied runtime state', () => {
+  assert.equal(validParams('management.settings.get', {}), true)
+  assert.equal(validParams('management.settings.set', { auto_connect: true, auto_reconnect: false, telemetry_enabled: false, sync_interval_seconds: 15 }), true)
+  for (const value of [{}, { auto_connect: 'yes' }, { sync_interval_seconds: 14 }, { sync_interval_seconds: 3601 }, { desired_connected: true }, { manual_disconnect: false }])
+    assert.equal(validParams('management.settings.set', value), false)
+  const management = { auto_connect: true, auto_reconnect: true, telemetry_enabled: true, sync_interval_seconds: 30, manual_disconnect: false, desired_connected: true, worker_running: true, retry_attempt: 2, retry_in_seconds: 4, last_sync_at: 1234, last_report_at: 1234, last_error: null, last_error_code: null }
+  assert.equal(validResult('management.settings.get', management), true)
+  assert.equal(validResult('status.get', { ...status, management }), true)
+  assert.equal(validResult('management.settings.set', { ...management, retry_in_seconds: -1 }), false)
+})
+
+test('custom groups and diagnostics constrain native operation parameters', () => {
+  const group = { id: 'custom-work', label: '工作', domains: ['example.com'], processes: ['Code.exe'], mode: 'default' }
+  assert.equal(validParams('routing.group_save', group), true)
+  assert.equal(validParams('routing.group_save', { ...group, mode: 'node', node: 'Tokyo 1' }), true)
+  assert.equal(validParams('routing.group_save', { ...group, id: 'gpt' }), false)
+  assert.equal(validParams('routing.group_save', { ...group, domains: [], processes: [] }), false)
+  assert.equal(validParams('routing.group_save', { ...group, processes: ['Code.exe\nmalformed'] }), false)
+  assert.equal(validParams('routing.group_remove', { id: 'custom-work' }), true)
+  assert.equal(validParams('routing.group_remove', { id: 'server-group' }), false)
+  assert.equal(validParams('routing.probe', { url: 'https://example.com/ping?key=private', timeout_ms: 15000 }), true)
+  for (const url of ['file:///secret', 'http://user:pass@example.com/', 'https://example.com/\r\ninjected'])
+    assert.equal(validParams('routing.probe', { url }), false)
+  assert.equal(validParams('routing.delay', { target: 'node/a', timeout_ms: 1000 }), true)
+  assert.equal(validParams('routing.delay', { target: 'node/a', timeout_ms: 10001 }), false)
+  assert.equal(validResult('routing.probe', { url: 'https://example.com/', host: 'example.com', port: 443, success: false, http_status: 0, elapsed_ms: 10000, error_code: 'PROBE_TIMEOUT', evidence: { observed: false, dns: 'unobserved', public_exit_ip: 'unobserved', process_scope: 'diagnostic-service-request', logs: [] } }), true)
+  assert.equal(validResult('routing.delay', { target: 'node/a', url: 'https://example.com/', delay_ms: -1, success: true }), false)
+})
+
+test('independent imports constrain sources and retain subscription evidence without invented values', () => {
+  assert.equal(validParams('mode.set', { mode: 'independent' }), true)
+  assert.equal(validParams('mode.set', { mode: 'managed', token: 'x' }), false)
+  assert.equal(validParams('subscriptions.import', { name: 'Offline', body: 'http://proxy.test:80', refresh_interval_minutes: 0 }), true)
+  assert.equal(validParams('subscriptions.import', { name: 'Remote', url: 'https://subscription.test/path', refresh_interval_minutes: 15 }), true)
+  for (const input of [ { name: 'X', body: 'x', url: 'https://x.test' }, { name: 'X', body: 'x', refresh_interval_minutes: 1 }, { name: 'X', body: '' } ])
+    assert.equal(validParams('subscriptions.import', input), false)
+  const sub = { id: 'local-1', name: 'Offline', tags: ['one'], remote: false, node_count: 1, refresh_interval_minutes: 0, last_success_at: 1,
+    metadata: { available: true, header_present: true, total_bytes: 100, used_bytes: 20, remaining_bytes: 80, expires_at: 0 },
+    report: { imported: 1, skipped: 1, format: 'uri', base64: false, warnings: [{ position: 2, reason: 'unsupported_uri_or_invalid_parameters' }] } }
+  const summary = { ...candidate, subscriptions: { managed: [], local: [sub], sources_available: true } }
+  assert.equal(validResult('subscriptions.import', summary), true)
+  assert.equal(validResult('subscriptions.refresh', { ...summary, subscriptions: { ...summary.subscriptions, local: [{ ...sub, metadata: { ...sub.metadata, remaining_bytes: -1 } }] } }), false)
+  assert.equal(validResult('subscriptions.import', { ...summary, subscriptions: { ...summary.subscriptions, local: [{ ...sub, report: { ...sub.report, skipped: 'one' } }] } }), false)
+  assert.equal(connectionActions({ ...status, enrolled: false, mode: 'independent', phase: 'STOPPED', connection_available: true }, candidate).canStart, true)
 })

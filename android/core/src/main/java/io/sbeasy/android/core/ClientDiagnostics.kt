@@ -91,11 +91,12 @@ object ClientDiagnostics {
         )
     }
 
-    fun clear() = synchronized(lock) {
+    fun clear(includeAdditionalLogs: Boolean = false) = synchronized(lock) {
         mutableEntries.value = emptyList()
         libboxEntries = emptyList()
         runCatching { logFile?.writeText("") }
         runCatching { libboxLogFile?.writeText("") }
+        if (includeAdditionalLogs) additionalLogs.values.forEach { file -> runCatching { file.writeText("") } }
         if (initialized) appendLocked(listOf(newEntry(INFO, "diagnostics", "local diagnostic log cleared")))
     }
 

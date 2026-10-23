@@ -1,5 +1,6 @@
 #include "test_support.h"
 #include "../service/routing.h"
+#include "../service/health.h"
 static const char *fixture=
 "{\"outbounds\":[{\"type\":\"http\",\"tag\":\"a\"},{\"type\":\"http\",\"tag\":\"b\"}],"
 "\"route\":{\"final\":\"a\",\"rules\":[{\"domain_suffix\":[\"chatgpt.com\",\"openai.com\"],\"outbound\":\"a\"},{\"domain_suffix\":[\"claude.ai\"],\"outbound\":\"b\"},{\"domain_suffix\":[\"other.test\"],\"outbound\":\"a\"}]},"
@@ -42,6 +43,79 @@ int main(void) {
     sbj_set(source,"content",sbj_str_take(sbj_dump(cfg,-1)));sbj_free(cfg);
     CHECK(!sbw_routing_apply(source,identity,true,&error));CHECK(!strcmp(error.code,"ROUTING_UNSUPPORTED"));
     CHECK(sbj_string_is(sbj_get(before,"content"),fixture));
+    sbj_set_str(source,"content",fixture);sbj_free(identity);identity=sbj_object();
+    sbj *params=sbj_parse_cstr("{\"id\":\"custom-work\",\"label\":\"Work\",\"domains\":[\"work.example\"],\"processes\":[\"editor.exe\"],\"mode\":\"node\",\"node\":\"b\"}");
+    sbj *changed=sbw_routing_change(identity,params,false,&error);CHECK(changed && !sbj_get(identity,"windows_local_groups"));
+    sbj_free(identity);identity=changed;
+    groups=sbw_routing_groups(source,identity);CHECK(sbj_arr_len(groups)==5);
+    CHECK(sbj_get_bool(sbj_arr_at(groups,4),"local",false));sbj_free(groups);
+    runtime=sbw_routing_apply(source,identity,true,&error);CHECK(runtime);
+    cfg=sbj_parse_cstr(sbj_get_str(runtime,"content",""));
+    sbj *rr=sbj_get(sbj_get(cfg,"route"),"rules"), *dr=sbj_get(sbj_get(cfg,"dns"),"rules");
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(rr,0),"outbound"),"sb-easy-local-custom-work"));
+    CHECK(sbj_string_is(sbj_arr_at(sbj_get(sbj_arr_at(rr,1),"process_name"),0),"editor.exe"));
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(dr,0),"server"),"sb-easy-local-custom-work-dns"));
+    CHECK(sbj_string_is(sbj_arr_at(sbj_get(sbj_arr_at(dr,1),"process_name"),0),"editor.exe"));
+    sbj_free(cfg);sbj_free(runtime);
+    /* Preserve protected WireGuard management and DNS rules ahead of overrides. */
+    cfg=sbj_parse_cstr(fixture);sbj_set(cfg,"endpoints",sbj_parse_cstr("[{\"type\":\"wireguard\",\"tag\":\"management\"}]"));
+    sbj_arr_push(sbj_get(sbj_get(cfg,"route"),"rules"),sbj_parse_cstr("{\"ip_cidr\":[\"10.42.0.0/16\"],\"outbound\":\"management\"}"));
+    sbj_arr_push(sbj_get(sbj_get(cfg,"dns"),"rules"),sbj_parse_cstr("{\"domain\":[\"panel.test\"],\"server\":\"shared\"}"));
+    sbj_set(source,"content",sbj_str_take(sbj_dump(cfg,-1)));sbj_free(cfg);
+    runtime=sbw_routing_apply(source,identity,true,&error);CHECK(runtime);
+    cfg=sbj_parse_cstr(sbj_get_str(runtime,"content",""));rr=sbj_get(sbj_get(cfg,"route"),"rules");dr=sbj_get(sbj_get(cfg,"dns"),"rules");
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(rr,0),"outbound"),"management"));
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(rr,1),"outbound"),"sb-easy-local-custom-work"));
+    CHECK(sbj_string_is(sbj_arr_at(sbj_get(sbj_arr_at(dr,0),"domain"),0),"panel.test"));
+    sbj_free(cfg);sbj_free(runtime);
+    sbj_set_str(params,"id","custom-two");sbj_set_str(params,"label","Other");
+    CHECK(!sbw_routing_change(identity,params,false,&error)); /* overlaps domains/process */
+    sbj_set_str(params,"id","custom-work");sbj_set(params,"domains",sbj_parse_cstr("[\"BAD.example\"]"));
+    CHECK(!sbw_routing_change(identity,params,false,&error));
+    sbj_set(params,"domains",sbj_parse_cstr("[\"changed.example\"]"));sbj_set(params,"processes",sbj_parse_cstr("[\"C:\\\\bad.exe\"]"));
+    CHECK(!sbw_routing_change(identity,params,false,&error));
+    sbj_set(params,"processes",sbj_array());sbj_set_str(params,"mode","default");sbj_del(params,"node");
+    changed=sbw_routing_change(identity,params,false,&error);CHECK(changed);sbj_free(identity);identity=changed;
+    runtime=sbw_routing_apply(source,identity,true,&error);CHECK(runtime);sbj_free(runtime);
+    sbj_free(params);params=sbj_parse_cstr("{\"id\":\"custom-work\"}");
+    changed=sbw_routing_change(identity,params,true,&error);CHECK(changed && !sbj_arr_len(sbj_get(changed,"windows_local_groups")));
+    CHECK(!sbw_routing_change(changed,params,true,&error));sbj_free(changed);sbj_free(params);
+    /* Automatic groups restrict both traffic and DNS to explicit leaf proxies. */
+    sbj_free(identity); identity=sbj_object(); cfg=sbj_parse_cstr(fixture);
+    nodes=sbj_get(cfg,"outbounds");
+    sbj_set_str(sbj_arr_at(nodes,0),"server","a.example");
+    sbj_set_str(sbj_arr_at(nodes,1),"server","b.example");
+    sbj_arr_push(nodes,sbj_parse_cstr("{\"type\":\"direct\",\"tag\":\"direct\"}"));
+    sbj_arr_push(nodes,sbj_parse_cstr("{\"type\":\"selector\",\"tag\":\"nested\",\"outbounds\":[\"a\",\"b\"]}"));
+    sbj_set(source,"content",sbj_str_take(sbj_dump(cfg,-1))); sbj_free(cfg);
+    params=sbj_parse_cstr("{\"group\":\"default\",\"candidates\":[\"a\",\"b\"]}");
+    changed=sbw_routing_automatic(source,identity,params,&error); CHECK(changed);
+    CHECK(!sbj_get(identity,"windows_routing")); sbj_free(identity); identity=changed;
+    runtime=sbw_routing_apply(source,identity,true,&error); CHECK(runtime);
+    cfg=sbj_parse_cstr(sbj_get_str(runtime,"content","")); nodes=sbj_get(cfg,"outbounds");
+    bool selector_found=false,dns_found=false;
+    for(size_t i=0;i<sbj_arr_len(nodes);++i) if(sbj_string_is(sbj_get(sbj_arr_at(nodes,i),"tag"),SBW_DEFAULT_SELECTOR)) {
+        sbj *members=sbj_get(sbj_arr_at(nodes,i),"outbounds"); CHECK(sbj_arr_len(members)==2);
+        CHECK(sbj_string_is(sbj_arr_at(members,0),"a") && sbj_string_is(sbj_arr_at(members,1),"b")); selector_found=true;
+    }
+    servers=sbj_get(sbj_get(cfg,"dns"),"servers");
+    for(size_t i=0;i<sbj_arr_len(servers);++i) if(sbj_string_is(sbj_get(sbj_arr_at(servers,i),"tag"),"sb-easy-local-default-dns")) {
+        CHECK(sbj_string_is(sbj_get(sbj_arr_at(servers,i),"detour"),SBW_DEFAULT_SELECTOR)); dns_found=true;
+    }
+    CHECK(selector_found && dns_found); sbj_free(cfg); sbj_free(runtime);
+    const char *invalid_candidates[]={"[\"direct\"]","[\"nested\"]","[\"unknown\"]","[\"a\",\"a\"]","[]"};
+    for(size_t i=0;i<sizeof invalid_candidates/sizeof *invalid_candidates;++i) {
+        sbj_set(params,"candidates",sbj_parse_cstr(invalid_candidates[i])); CHECK(!sbw_routing_automatic(source,identity,params,&error));
+    }
+    sbj_set(params,"candidates",sbj_parse_cstr("[\"b\"]"));
+    sbj *policy=sbw_health_policy(identity); sbj_set_bool(policy,"enabled",false);
+    CHECK(!sbw_health_change(identity,policy,&error)); sbj_free(policy);
+    /* Losing every allowed node rejects the candidate; caller keeps last good. */
+    cfg=sbj_parse_cstr(sbj_get_str(source,"content",""));
+    sbj_set(cfg,"outbounds",sbj_parse_cstr("[{\"type\":\"http\",\"tag\":\"unlisted\",\"server\":\"x.example\"}]"));
+    sbj_set(source,"content",sbj_str_take(sbj_dump(cfg,-1))); sbj_free(cfg);
+    CHECK(!sbw_routing_apply(source,identity,true,&error));
+    sbj_free(params);
     free(other);sbj_free(source);sbj_free(before);sbj_free(identity);
     puts("Unified routing: default/Claude/GPT/custom groups, isolated DNS, migration and rejection passed.");return 0;
 }

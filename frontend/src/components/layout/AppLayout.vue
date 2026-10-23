@@ -11,7 +11,7 @@
       <nav class="sidebar-nav">
         <!-- Overview -->
         <div class="nav-section-label">{{ t('nav.section.overview') }}</div>
-        <router-link to="/" class="nav-item" exact-active-class="active">
+        <router-link v-if="isAdmin" to="/" class="nav-item" exact-active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <rect x="1" y="1" width="6" height="6" rx="1"/><rect x="11" y="1" width="6" height="6" rx="1"/>
             <rect x="1" y="11" width="6" height="6" rx="1"/><rect x="11" y="11" width="6" height="6" rx="1"/>
@@ -30,21 +30,21 @@
         </router-link>
 
         <!-- Proxy -->
-        <div class="nav-section-label">{{ t('nav.section.proxy') }}</div>
-        <router-link to="/proxies" class="nav-item" active-class="active">
+        <div v-if="isAdmin" class="nav-section-label">{{ t('nav.section.proxy') }}</div>
+        <router-link v-if="isAdmin" to="/proxies" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <circle cx="9" cy="9" r="7"/><circle cx="9" cy="9" r="2"/><path d="M9 2v14M2 9h14"/>
             <path d="M4 4c2 1.5 4 3 5 5 1-2 3-3.5 5-5M4 14c2-1.5 4-3 5-5 1 2 3 3.5 5 5"/>
           </svg>
           {{ t('nav.nodes') }}
         </router-link>
-        <router-link to="/subscriptions" class="nav-item" active-class="active">
+        <router-link v-if="isAdmin" to="/subscriptions" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M1 7l4-4 3 3 9-5"/><path d="M1 13l4-4 3 3 9-5"/>
           </svg>
           {{ t('nav.subscriptions') }}
         </router-link>
-        <router-link to="/profiles" class="nav-item" active-class="active">
+        <router-link v-if="isAdmin" to="/profiles" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h3"/><path d="M12 2v3h3"/>
           </svg>
@@ -52,8 +52,13 @@
         </router-link>
 
         <!-- System -->
+        <router-link v-if="isAdmin" to="/proxy-users" class="nav-item" active-class="active">{{ locale === 'zh' ? '代理用户' : 'Proxy users' }}</router-link>
         <div class="nav-section-label">{{ t('nav.section.system') }}</div>
-        <router-link to="/server-logs" class="nav-item" active-class="active">
+        <router-link v-if="isAdmin" to="/observability" class="nav-item" active-class="active">
+          <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 15V3M2 15h14M5 12V8M9 12V4M13 12V6"/></svg>
+          {{ locale === 'zh' ? '统计与告警' : 'Statistics and alerts' }}
+        </router-link>
+        <router-link v-if="isAdmin" to="/server-logs" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <path d="M3 2h9l3 3v11H3z"/><path d="M6 7h6M6 10h6M6 13h4"/>
           </svg>
@@ -72,12 +77,13 @@
           </svg>
           {{ t('nav.users') }}
         </router-link>
-        <router-link to="/settings" class="nav-item" active-class="active">
+        <router-link v-if="isAdmin" to="/settings" class="nav-item" active-class="active">
           <svg class="nav-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6">
             <circle cx="9" cy="9" r="3"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.5 3.5l1.4 1.4M13.1 13.1l1.4 1.4M3.5 14.5l1.4-1.4M13.1 4.9l1.4-1.4"/>
           </svg>
           {{ t('nav.settings') }}
         </router-link>
+        <router-link to="/security" class="nav-item" active-class="active">{{ locale === 'zh' ? '账户安全' : 'Account security' }}</router-link>
       </nav>
 
       <div class="sidebar-footer">
@@ -112,7 +118,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
 import { useTheme } from '../../composables/theme'
@@ -121,7 +127,7 @@ import { useI18n } from '../../composables/i18n'
 const auth = useAuthStore()
 const router = useRouter()
 const username = auth.username
-const isAdmin = auth.isAdmin
+const isAdmin = computed(() => auth.isAdmin)
 const { theme, toggle } = useTheme()
 const { t, locale, toggle: toggleLocale } = useI18n()
 
@@ -129,9 +135,9 @@ const sidebarOpen = ref(false)
 // Close the mobile drawer on navigation.
 watch(() => router.currentRoute.value.path, () => (sidebarOpen.value = false))
 
-function logout() {
-  auth.logout()
-  router.push('/login')
+async function logout() {
+  try { await auth.logout(); router.push('/login') }
+  catch { window.alert(locale.value === 'zh' ? '注销失败，请检查连接后重试。' : 'Sign out failed. Check the connection and retry.') }
 }
 </script>
 

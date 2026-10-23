@@ -3,6 +3,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <stdint.h>
 
 
 #include "sb/http_client.h"
@@ -135,8 +137,46 @@ char *sb_subscription_fetcher_fetch(sb_subscription_fetcher *f, const char *url_
 
 char *sb_subscription_fetcher_fetch_n(sb_subscription_fetcher *f, const char *url_in,
                                       size_t url_len, size_t *len, sb_err *err) {
+    return sb_subscription_fetcher_fetch_metadata(f, url_in, url_len, len, NULL, err);
+}
+
+sbj *sb_subscription_parse_usage(const char *header) {
+    sbj *usage = sbj_object();
+    if (!header || strlen(header) > 4096) return usage;
+    char *copy = sb_strdup(header), *save = NULL;
+    sbj *seen = sbj_object();
+    for (char *entry = strtok_r(copy, ";", &save); entry; entry = strtok_r(NULL, ";", &save)) {
+        char *equals = strchr(entry, '=');
+        if (!equals) continue;
+        *equals = '\0';
+        char *key = sb_trim_dup(entry), *value = sb_trim_dup(equals + 1);
+        for (char *p = key; *p; ++p) *p = (char)tolower((unsigned char)*p);
+        if (!strcmp(key, "upload") || !strcmp(key, "download") ||
+            !strcmp(key, "total") || !strcmp(key, "expire")) {
+            bool valid = *value && !sbj_has(seen, key);
+            int64_t number = 0;
+            for (const char *p = value; valid && *p; ++p) {
+                if (*p < '0' || *p > '9' || number > (INT64_MAX - (*p - '0')) / 10)
+                    valid = false;
+                else number = number * 10 + (*p - '0');
+            }
+            if (valid) sbj_set_int(usage, key, number);
+            else sbj_del(usage, key);
+            sbj_set_bool(seen, key, true);
+        }
+        free(key); free(value);
+    }
+    sbj_free(seen); free(copy);
+    return usage;
+}
+
+char *sb_subscription_fetcher_fetch_metadata(sb_subscription_fetcher *f, const char *url_in,
+                                             size_t url_len, size_t *len, sbj **usage,
+                                             sb_err *err) {
+    if (usage) *usage = NULL;
     static const char *const headers[] = {"Accept: text/plain, application/yaml, application/json",
                                           NULL};
+    int64_t started = sb_monotonic_ms();
     char *url = sb_strndup(url_in ? url_in : "", url_len);
     char *result = NULL;
     for (size_t redirects = 0;; ++redirects) {
@@ -148,7 +188,12 @@ char *sb_subscription_fetcher_fetch_n(sb_subscription_fetcher *f, const char *ur
         sb_http_request req = {0};
         req.url = full;
         req.headers = headers;
-        req.timeout_ms = f->options.timeout_ms;
+        req.timeout_ms = f->options.timeout_ms - (sb_monotonic_ms() - started);
+        if (req.timeout_ms <= 0) {
+            free(full); address_free(&addr);
+            sb_fail(err, SB_ERR_UPSTREAM, "subscription HTTP request failed: Timeout");
+            break;
+        }
         req.max_body_bytes = f->options.maximum_body_bytes;
         req.max_redirects = 0;
         req.user_agent = "sb-easy-cpp/" SB_EASY_VERSION;
@@ -197,6 +242,11 @@ char *sb_subscription_fetcher_fetch_n(sb_subscription_fetcher *f, const char *ur
             break;
         }
         if (len) *len = resp.body_len;
+        if (usage) {
+            char *header = sb_http_response_header(&resp, "Subscription-Userinfo");
+            *usage = sb_subscription_parse_usage(header);
+            free(header);
+        }
         result = resp.body;
         resp.body = NULL;
         sb_http_response_free(&resp);

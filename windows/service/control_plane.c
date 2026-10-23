@@ -424,7 +424,7 @@ int sbw_decode_legacy_header(const wchar_t *value, size_t size, bool advisory, c
     int wire_size = WideCharToMultiByte(codepage, flags, value, (int)size, NULL, 0, NULL, replacement);
     if ((size && wire_size <= 0) || replaced || replacement_character)
         return legacy_fallback(size, codepage, advisory, out, error);
-    if (wire_size > MAX_HEADER) return failure(error, "response_too_large");
+    if (wire_size > (int)MAX_HEADER) return failure(error, "response_too_large");
     char *result = sb_xcalloc((size_t)wire_size + 1, 1);
     if (wire_size && WideCharToMultiByte(codepage, flags, value, (int)size, result, wire_size, NULL, replacement) != wire_size) replaced = TRUE;
     if (replaced) { free(result); return legacy_fallback(size, codepage, advisory, out, error); }
@@ -494,17 +494,18 @@ static int validate_headers(pending_request *request, sbw_error *error) {
 typedef struct http_response {
     DWORD status;
     sb_buf body;
-    char *etag, *rule_source, *profile_id, *profile_name;
+    char *etag, *rule_source, *profile_id, *profile_name, *cookie;
 } http_response;
 static void response_free(http_response *response) {
+    if (response->body.p) SecureZeroMemory(response->body.p, response->body.len);
     sb_buf_free(&response->body);
-    free(response->etag); free(response->rule_source); free(response->profile_id); free(response->profile_name);
+    free(response->etag); free(response->rule_source); free(response->profile_id); free(response->profile_name); sbw_secret_free(response->cookie);
     memset(response, 0, sizeof(*response));
 }
 
-static int send_request(const server_address *server, const wchar_t *method, const wchar_t *endpoint,
+static int send_request_extended(const server_address *server, const wchar_t *method, const wchar_t *endpoint,
     const char *payload, size_t payload_length, bool binary, const char *token, const char *etag, size_t body_limit, HANDLE cancel,
-    DWORD timeout, http_response *response, sbw_error *error) {
+    DWORD timeout, http_response *response, bool panel, const char *cookie, const char *if_match, sbw_error *error) {
     memset(response, 0, sizeof(*response));
     if (!token) token = "";
     if (!etag) etag = "";
@@ -525,6 +526,8 @@ static int send_request(const server_address *server, const wchar_t *method, con
     sb_buf_puts(&headers, "Accept: application/json\r\n");
     if (*token) sb_buf_printf(&headers, "Authorization: Bearer %s\r\n", token);
     if (*etag) sb_buf_printf(&headers, "If-None-Match: %s\r\n", etag);
+    if (panel && cookie && *cookie) sb_buf_printf(&headers, "Cookie: %s\r\n", cookie);
+    if (panel && if_match && *if_match) sb_buf_printf(&headers, "If-Match: %s\r\n", if_match);
     if (payload_length) sb_buf_puts(&headers, binary ? "Content-Type: application/vnd.tcpdump.pcap\r\n" : "Content-Type: application/json; charset=utf-8\r\n");
     request.state->headers = sbw_wide(headers.p, error);
     if (!request.state->headers) { failure(error, "invalid_identity"); goto done; }
@@ -543,7 +546,7 @@ static int send_request(const server_address *server, const wchar_t *method, con
     if (response->status >= 300 && response->status < 400 && response->status != 304) {
         failure(error, "redirect_rejected"); goto done;
     }
-    if (response->status != 304 && (response->status < 200 || response->status >= 300)) {
+    if (!panel && response->status != 304 && (response->status < 200 || response->status >= 300)) {
         failure(error, "http_error"); goto done;
     }
     if (validate_headers(&request, error) < 0 || header(&request, L"ETag", false, &response->etag, error) < 0 ||
@@ -551,6 +554,7 @@ static int send_request(const server_address *server, const wchar_t *method, con
         header(&request, L"X-SB-Easy-Profile-Id", false, &response->profile_id, error) < 0 ||
         header(&request, L"X-SB-Easy-Profile-Name", true, &response->profile_name, error) < 0 ||
         header(&request, L"Content-Length", false, &content_length, error) < 0) goto done;
+    if (panel && header(&request, L"Set-Cookie", false, &response->cookie, error) < 0) goto done;
     for (const unsigned char *c = (const unsigned char *)response->etag; *c; ++c)
         if (*c >= 127) { failure(error, "invalid_response"); goto done; }
     if (*content_length) {
@@ -574,6 +578,98 @@ done:
     request_free(&request);
     if (result) response_free(response);
     return result;
+}
+static int send_request(const server_address *server, const wchar_t *method, const wchar_t *endpoint,
+    const char *payload, size_t payload_length, bool binary, const char *token, const char *etag, size_t body_limit, HANDLE cancel,
+    DWORD timeout, http_response *response, sbw_error *error) {
+    return send_request_extended(server, method, endpoint, payload, payload_length, binary, token, etag, body_limit,
+        cancel, timeout, response, false, NULL, NULL, error);
+}
+
+bool sbw_https_release_url(const char *url) {
+    server_address address = {0}; sbw_error error = {0};
+    bool valid = parse_server(url, &address, &error) == 0 && address.secure && address.prefix && *address.prefix;
+    server_free(&address); return valid;
+}
+int sbw_https_download(const char *url, uint64_t limit, DWORD timeout_ms, HANDLE cancel,
+    sbw_download_sink sink, void *context, uint64_t *received, sbw_error *error) {
+    *received = 0;
+    if (!sink || !limit || limit > 512ULL * 1024ULL * 1024ULL || timeout_ms < 100 || timeout_ms > 600000)
+        return failure(error, "invalid_response");
+    server_address address = {0};
+    if (parse_server(url, &address, error) < 0) return -1;
+    if (!address.secure || !*address.prefix) { server_free(&address); return failure(error, "invalid_server"); }
+    pending_request request;
+    int initialized = request_init(&request, &address, L"GET", L"", cancel, timeout_ms, error);
+    server_free(&address); if (initialized < 0) return -1;
+    int result = -1; char *content_length = NULL, *encoding = NULL;
+    request.state->headers = sbw_wide("Accept: application/octet-stream\r\nAccept-Encoding: identity\r\n", error);
+    if (!request.state->headers || request_prepare(&request, error) < 0 || request_await(&request,
+        WinHttpSendRequest(request.handle, request.state->headers, (DWORD)wcslen(request.state->headers),
+        WINHTTP_NO_REQUEST_DATA, 0, 0, (DWORD_PTR)request.state), WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE, NULL, error) < 0 ||
+        request_prepare(&request, error) < 0 || request_await(&request, WinHttpReceiveResponse(request.handle, NULL),
+        WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE, NULL, error) < 0) goto done;
+    DWORD status = 0, bytes = sizeof(status);
+    if (!WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &status, &bytes, WINHTTP_NO_HEADER_INDEX)) { failure(error, "invalid_response"); goto done; }
+    if (status >= 300 && status < 400) { failure(error, "redirect_rejected"); goto done; }
+    if (status != 200) { failure(error, "http_error"); goto done; }
+    if (validate_headers(&request, error) < 0 || header(&request, L"Content-Length", false, &content_length, error) < 0 ||
+        header(&request, L"Content-Encoding", false, &encoding, error) < 0) goto done;
+    uint64_t declared = 0;
+    if ((*content_length && (!decimal(content_length, &declared) || declared > limit)) ||
+        (*encoding && _stricmp(encoding, "identity"))) { failure(error, "invalid_response"); goto done; }
+    for (;;) {
+        if (request_prepare(&request, error) < 0 || request_await(&request,
+            WinHttpReadData(request.handle, request.state->buffer, sizeof(request.state->buffer), NULL),
+            WINHTTP_CALLBACK_STATUS_READ_COMPLETE, &bytes, error) < 0) goto done;
+        if (!bytes) break;
+        if (bytes > limit - *received) { failure(error, "response_too_large"); goto done; }
+        if (sink(context, request.state->buffer, bytes, error) < 0) goto done;
+        *received += bytes;
+    }
+    if (*content_length && declared != *received) { failure(error, "invalid_response"); goto done; }
+    result = 0;
+done:
+    free(content_length); free(encoding); request_free(&request); return result;
+}
+
+int sbw_panel_request(void *context, const char *address, const char *method, const char *path,
+    const char *token, const char *cookie, const char *if_match, const sbj *body, HANDLE cancel,
+    DWORD *status, sbj **output, char **flow_cookie, sbw_error *error) {
+    (void)context; *status = 0; *output = NULL; *flow_cookie = NULL;
+    bool auth = path && (!strcmp(path, "/api/auth/login") || !strcmp(path, "/api/auth/login/mfa") || !strcmp(path, "/api/auth/logout"));
+    bool preference = path && !strcmp(path, "/api/auth/preferences/windows-personal");
+    if (!method || (!auth && !preference) || (auth && strcmp(method, "POST")) ||
+        (preference && strcmp(method, "GET") && strcmp(method, "PUT") && strcmp(method, "DELETE")) ||
+        (cookie && clean_text(cookie, strlen(cookie), 256, "invalid_request", error)) ||
+        (if_match && clean_text(if_match, strlen(if_match), 32, "invalid_request", error))) return failure(error, "invalid_request");
+    if (cookie && *cookie && (strncmp(cookie, "sb_auth_flow=", 13) || strlen(cookie) != 77 || strspn(cookie + 13, "0123456789abcdef") != 64)) return failure(error, "invalid_request");
+    if (if_match && *if_match) {
+        size_t n = strlen(if_match);
+        if (n < 3 || if_match[0] != '"' || if_match[n - 1] != '"' || strspn(if_match + 1, "0123456789") != n - 2) return failure(error, "invalid_request");
+    }
+    server_address server = {0}; http_response response = {0}; int result = -1;
+    char *payload = NULL; wchar_t *wide_method = NULL, *endpoint = NULL;
+    if (parse_server(address, &server, error)) goto done;
+    if (!server.secure) { sbw_fail(error, "PREFERENCES_HTTPS_REQUIRED", "Preference synchronization requires an HTTPS panel address with a trusted certificate."); goto done; }
+    payload = body ? sbj_dump(body, -1) : NULL;
+    if (payload && strlen(payload) > 1024U * 1024U) { failure(error, "response_too_large"); goto done; }
+    wide_method = sbw_wide(method, error); endpoint = sbw_wide(path, error);
+    if (!wide_method || !endpoint || send_request_extended(&server, wide_method, endpoint, payload, payload ? strlen(payload) : 0,
+        false, token, "", 1024U * 1024U, cancel, 20000, &response, true, cookie, if_match, error)) goto done;
+    *status = response.status;
+    *output = sbw_json_parse(response.body.p ? response.body.p : "", response.body.len, 32, NULL);
+    if (!sbj_is_object(*output)) { sbj_free(*output); *output = NULL; failure(error, "invalid_response"); goto done; }
+    if (response.cookie && *response.cookie) {
+        size_t pair_size = strcspn(response.cookie, ";");
+        if (pair_size == 77 && !strncmp(response.cookie, "sb_auth_flow=", 13) && strspn(response.cookie + 13, "0123456789abcdef") == 64)
+            *flow_cookie = sb_strndup(response.cookie, pair_size);
+        else if (strncmp(response.cookie, "sb_auth_flow=;", 14)) { sbj_free(*output); *output = NULL; failure(error, "invalid_response"); goto done; }
+    }
+    result = 0;
+done:
+    sbw_secret_free(payload); free(wide_method); free(endpoint); server_free(&server); response_free(&response); return result;
 }
 
 static sbj *response_json(const sb_buf *body, sbw_error *error) {
@@ -704,12 +800,62 @@ static int upload_capture(void *context, const sbj *identity, const char *digest
     server_free(&server); response_free(&response); return result;
 }
 
+/* Management endpoints share the same TLS, redirect, bounded-response and
+ * cancellation rules as enrollment and configuration download. */
+static int management_request(void *context, const sbj *identity, const wchar_t *method,
+                              const wchar_t *endpoint, const sbj *body, bool array,
+                              HANDLE cancel, sbj **out, sbw_error *error) {
+    server_address server = {0}; http_response response = {0}; int result = -1;
+    const char *address = required_field(identity, "server", error);
+    const char *token = required_field(identity, "agent_token", error);
+    char *payload = body ? sbj_dump(body, -1) : sb_strdup("");
+    if (out) *out = NULL;
+    if (!address || !token || parse_server(address, &server, error) < 0) goto done;
+    if (send_request(&server, method, endpoint, payload, strlen(payload), false, token, "", 256U * 1024U,
+                     cancel, ((winhttp_client *)context)->timeout, &response, error) != 0) goto done;
+    if (response.status != 200) { failure(error, "http_error"); goto done; }
+    sbj *value = sbw_json_parse(response.body.p ? response.body.p : "", response.body.len, 32, NULL);
+    if ((array && (!sbj_is_array(value) || sbj_arr_len(value) > 128)) ||
+        (!array && (!sbj_is_object(value) || !sbj_get_bool(value, "ok", false)))) {
+        sbj_free(value); failure(error, "invalid_response"); goto done;
+    }
+    if (out) *out = value; else sbj_free(value);
+    result = 0;
+done:
+    sbw_secret_free(payload); server_free(&server); response_free(&response); return result;
+}
+static int report_status(void *context, const sbj *identity, const sbj *status,
+                         HANDLE cancel, sbw_error *error) {
+    return management_request(context, identity, L"POST", L"/api/agent/status", status, false, cancel, NULL, error);
+}
+static int pending_commands(void *context, const sbj *identity, HANDLE cancel,
+                            sbj **commands, sbw_error *error) {
+    return management_request(context, identity, L"GET", L"/api/agent/commands", NULL, true, cancel, commands, error);
+}
+static int acknowledge_command(void *context, const sbj *identity, const char *id,
+                               const sbj *receipt, HANDLE cancel, sbw_error *error) {
+    if (!id || !*id || strlen(id) > 128) return failure(error, "invalid_request");
+    for (const unsigned char *p = (const unsigned char *)id; *p; ++p)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '-' || *p == '_')) return failure(error, "invalid_request");
+    wchar_t endpoint[160]; wchar_t *wide = sbw_wide(id, error);
+    if (!wide) return -1;
+    swprintf_s(endpoint, 160, L"/api/agent/commands/%ls/ack", wide); free(wide);
+    return management_request(context, identity, L"POST", endpoint, receipt, false, cancel, NULL, error);
+}
+static int report_telemetry(void *context, const sbj *identity, const sbj *telemetry,
+                            HANDLE cancel, sbw_error *error) {
+    return management_request(context, identity, L"POST", L"/api/agent/telemetry", telemetry, false, cancel, NULL, error);
+}
+
 sbw_control_plane *sbw_winhttp_new(DWORD timeout, sbw_error *error) {
     if (!timeout || timeout > 60000) { failure(error, "invalid_server"); return NULL; }
     sbw_control_plane *api = sb_xcalloc(1, sizeof(*api));
     winhttp_client *client = sb_xcalloc(1, sizeof(*client));
     client->timeout = timeout;
     api->context = client; api->enroll = enroll; api->fetch_config = fetch_config; api->upload_capture = upload_capture; api->destroy = free;
+    api->report_status = report_status; api->pending_commands = pending_commands;
+    api->acknowledge_command = acknowledge_command; api->report_telemetry = report_telemetry;
     return api;
 }
 void sbw_control_plane_free(sbw_control_plane *client) {

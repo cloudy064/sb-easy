@@ -31,6 +31,8 @@ import io.nekohasekai.libbox.SystemProxyStatus
 import io.sbeasy.android.core.VpnRuntimeState
 import io.sbeasy.android.core.ClientDiagnostics
 import io.sbeasy.android.core.CoreGraph
+import io.sbeasy.android.core.LoopbackHealthApi
+import io.sbeasy.android.core.NodeHealthResult
 import io.sbeasy.android.core.ManagedConfig
 import io.sbeasy.android.core.ProxyGroupSnapshot
 import io.sbeasy.android.core.RuntimeBridge
@@ -60,6 +62,11 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     private var commandMonitor: LibboxCommandMonitor? = null
     private val restoredSelectionGroups = mutableSetOf<String>()
     private var controlLoopJob: Job? = null
+    private var proxyHealthJob: Job? = null
+    private var captureUploadJob: Job? = null
+    @Volatile private var healthApi: LoopbackHealthApi? = null
+    @Volatile private var runtimeGeneration = 0L
+    override val configurationGeneration: Long get() = runtimeGeneration
     private var networkHealthJob: Job? = null
     private val healthSignals = Channel<Unit>(Channel.CONFLATED)
     private val connectivityProbe = ConnectivityProbe()
@@ -89,6 +96,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override fun onCreate() {
         super.onCreate()
+        AndroidVpnProtection.attach(this)
         LibboxInitializer.initialize(this)
         platform = AndroidPlatformBridge(this)
         createNotificationChannel()
@@ -105,6 +113,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AndroidVpnProtection.refresh()
         if (intent?.action == ACTION_STOP) {
             runtimeWanted = false
             handover.close()
@@ -114,7 +123,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         }
 
         runtimeWanted = true
-        startForegroundNotification("正在同步受管配置")
+        startForegroundNotification("正在准备代理配置")
         ClientDiagnostics.info(TAG, "start requested")
         serviceScope.launch { startRuntime() }
         return Service.START_STICKY
@@ -129,6 +138,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     override fun onDestroy() {
+        AndroidVpnProtection.detach(this)
         runtimeWanted = false
         handover.close()
         runBlocking(Dispatchers.IO) { lifecycleMutex.withLock { closeResources() } }
@@ -145,6 +155,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     internal fun onUnderlyingNetworkChanged(network: UnderlyingNetwork?) {
         if (!runtimeWanted) return
+        CoreGraph.repository.invalidateHealth()
         rebuildRequestedFor = null
         handover.changed(network)
         healthSignals.trySend(Unit)
@@ -197,9 +208,11 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     private suspend fun startRuntime() {
         try {
-            runCatching { CoreGraph.repository.syncConfiguration() }
+            // Cached configurations start immediately, including when the subscription or center is offline.
+            // The running control loop performs refreshes after the tunnel has been established.
+            if (CoreGraph.repository.activeConfig() == null) runCatching { CoreGraph.repository.syncConfiguration() }
             val config = requireNotNull(CoreGraph.repository.activeConfig()) {
-                "尚未取得可用配置，请先在 App 中完成设备注册"
+                "尚未取得可用配置，请先导入本机订阅或完成设备注册"
             }
             lifecycleMutex.withLock {
                 if (!runtimeWanted || commandServer != null) return
@@ -212,6 +225,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 VpnRuntimeState.connected(config)
                 startForegroundNotification("${config.profileName} · 代理运行中")
                 startControlLoop()
+                startCaptureUploadLoop()
+                startProxyHealthLoop()
                 startNetworkWatchdog()
                 ClientDiagnostics.info(TAG, "libbox runtime connected profile=${config.profileName}")
             }
@@ -234,6 +249,10 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeResources() {
+        io.sbeasy.android.core.PacketCapture.endSession()
+        io.sbeasy.android.core.HttpDebug.release()
+        captureUploadJob?.cancel()
+        captureUploadJob = null
         appliedRuntimeContent = null
         runtimeWanted = false
         handover.close()
@@ -241,6 +260,10 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         networkHealthJob = null
         controlLoopJob?.cancel()
         controlLoopJob = null
+        proxyHealthJob?.cancel()
+        proxyHealthJob = null
+        healthApi = null
+        runtimeGeneration++
         if (RuntimeBridge.control === this) RuntimeBridge.control = null
         commandMonitor?.close()
         commandMonitor = null
@@ -260,6 +283,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun closeCore() {
+        healthApi = null
+        runtimeGeneration++
         appliedRuntimeContent = null
         commandMonitor?.close()
         commandMonitor = null
@@ -275,9 +300,20 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun startCore(config: ManagedConfig) {
-        val runtimeContent = config.content
-        // Packet capture is unavailable on Android, including previously saved preferences.
-        io.nekohasekai.libbox.Libbox.configureCapture("{}")
+        runtimeGeneration++
+        val probeApi = LoopbackHealthApi.create()
+        val runtimeContent = probeApi.runtimeConfig(io.sbeasy.android.core.HttpDebug.overlay(config.content))
+        io.sbeasy.android.core.PacketCapture.nativeStatus = { io.nekohasekai.libbox.Libbox.captureStatus() }
+        io.sbeasy.android.core.PacketCapture.rotate = { io.nekohasekai.libbox.Libbox.rotateCapture() }
+        io.sbeasy.android.core.PacketCapture.runtimeError = ""
+        try {
+            io.nekohasekai.libbox.Libbox.configureCapture(io.sbeasy.android.core.PacketCapture.nativeConfig(
+                CoreGraph.repository.state.value.enrollment))
+        } catch (error: Exception) {
+            io.nekohasekai.libbox.Libbox.configureCapture("{}")
+            io.sbeasy.android.core.PacketCapture.runtimeError = "采集未启动，请检查过滤条件或存储空间"
+            throw error
+        }
         io.nekohasekai.libbox.Libbox.checkConfig(runtimeContent)
         val inbounds = org.json.JSONObject(config.content).optJSONArray("inbounds")
         val stacks = (0 until (inbounds?.length() ?: 0)).mapNotNull { index ->
@@ -295,6 +331,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
             throw error
         }
         commandServer = server
+        healthApi = probeApi
         appliedRuntimeContent = runtimeContent
         commandMonitor = LibboxCommandMonitor(::restoreRememberedSelections).also { it.connect() }
     }
@@ -400,6 +437,32 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         }
     }
 
+    private fun startProxyHealthLoop() {
+        if (proxyHealthJob?.isActive == true) return
+        proxyHealthJob = serviceScope.launch {
+            while (currentCoroutineContext().isActive) {
+                runCatching { CoreGraph.repository.runHealthCycle() }
+                    .onFailure { if (it !is CancellationException) ClientDiagnostics.warn(TAG, "proxy health cycle failed: ${it.javaClass.simpleName}") }
+                delay(5000)
+            }
+        }
+    }
+
+    override suspend fun probeOutbound(tag: String, url: String, timeoutMillis: Int): NodeHealthResult =
+        requireNotNull(healthApi) { "VPN 核心尚未就绪" }.probe(tag, url, timeoutMillis)
+
+    private fun startCaptureUploadLoop() {
+        if (captureUploadJob?.isActive == true) return
+        captureUploadJob = serviceScope.launch {
+            while (currentCoroutineContext().isActive) {
+                try { CoreGraph.repository.uploadCaptures(manual = false) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) { ClientDiagnostics.error(TAG, "capture upload failed", error) }
+                delay(5_000)
+            }
+        }
+    }
+
     private fun startControlLoop() {
         if (controlLoopJob?.isActive == true) return
         controlLoopJob = serviceScope.launch {
@@ -437,7 +500,9 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override suspend fun applyConfiguration(config: ManagedConfig) {
         lifecycleMutex.withLock {
-            val runtimeContent = config.content
+            runtimeGeneration++
+            val probeApi = healthApi ?: LoopbackHealthApi.create()
+            val runtimeContent = probeApi.runtimeConfig(io.sbeasy.android.core.HttpDebug.overlay(config.content))
             io.nekohasekai.libbox.Libbox.checkConfig(runtimeContent)
             val server = requireNotNull(commandServer) { "VPN 未运行" }
             val previous = CoreGraph.repository.activeConfig()
@@ -446,6 +511,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
                 server.startOrReloadService(runtimeContent, OverrideOptions())
                 restoreLocalDefaults(config)
                 restoredSelectionGroups.clear()
+                healthApi = probeApi
                 appliedRuntimeContent = runtimeContent
             } catch (error: Throwable) {
                 if (previous != null && previousRuntime != null) {
@@ -494,6 +560,8 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     override fun setSystemProxyEnabled(enabled: Boolean) = Unit
+    override fun connectSSHAgent(): Int = error("SSH agent forwarding is not supported on Android")
+    override fun triggerNativeCrash(): Unit = error("Crash injection is disabled")
 
     override fun writeDebugMessage(message: String?) {
         Log.d(TAG, message.orEmpty())

@@ -25,22 +25,24 @@ bool sbw_extension_installed(const char *id) {
     char data[2049];DWORD n=0;LARGE_INTEGER size;FILE_ATTRIBUTE_TAG_INFO info;
     bool ok=GetFileSizeEx(f,&size)&&size.QuadPart>0&&size.QuadPart<=2048&&GetFileInformationByHandleEx(f,FileAttributeTagInfo,&info,sizeof info)&&!(info.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)&&ReadFile(f,data,2048,&n,NULL);CloseHandle(f);
     sbj *manifest=ok?sbw_json_parse(data,n,8,NULL):NULL;
-    ok=sbj_string_is(sbj_get(manifest,"id"),id)&&sbj_get_int(manifest,"api_version",0)==1&&sbj_string_is(sbj_get(manifest,"version"),"1.0.0");sbj_free(manifest);
+    ok=sbj_string_is(sbj_get(manifest,"id"),id)&&sbj_get_int(manifest,"api_version",0)==1&&sbw_json_string(sbj_get(manifest,"version"),32,false);sbj_free(manifest);
     for(size_t i=0;ok&&i<release->file_count;++i){bool ui=!wcsncmp(release->files[i],L"view",4);path=location(id,release->files[i]+(ui?4:9),ui);ok=exists(path);free(path);}
     return ok;
 }
-bool sbw_extension_is_enabled(const char *id) {wchar_t *p=location(id,L"\\enabled",false);bool ok=sbw_extension_installed(id)&&exists(p);free(p);return ok;}
+bool sbw_extension_is_enabled(const char *id) {wchar_t *p=location(id,L"\\enabled",false);bool ok=exists(p)&&sbw_extension_installed(id)&&sbw_store_allowed(id,NULL);free(p);return ok;}
 bool sbw_extension_enabled(void){return sbw_extension_is_enabled("capture");}
 sbj *sbw_extensions_snapshot(sbw_capture *capture,bool statistics_running,bool statistics_failed) {
     sbj *result=sbj_object(),*list=sbj_array();size_t count;const sbw_extension_release *releases=sbw_extension_releases(&count);
-    for(size_t i=0;i<count;++i){const char *id=releases[i].id;sbj *item=sbj_object();bool present=sbw_extension_installed(id),enabled=sbw_extension_is_enabled(id);
+    for(size_t i=0;i<count;++i){const char *id=releases[i].id;sbj *item=sbj_object(),*state=sbw_store_status(id);bool present=sbw_extension_installed(id),enabled=sbw_extension_is_enabled(id);
         bool running=sb_streq(id,"capture")?sbw_capture_worker_running(capture):sb_streq(id,"statistics")?statistics_running:false;
         bool failed=sb_streq(id,"capture")?(capture&&!running):sb_streq(id,"statistics")?statistics_failed:false;
-        sbj_set_str(item,"id",id);sbj_set_str(item,"name",releases[i].name);sbj_set_str(item,"version",present?"1.0.0":"");
+        sbj_set_str(item,"id",id);sbj_set_str(item,"name",releases[i].name);sbj_set_str(item,"version",present?sbj_get_str(state,"version",""):"");
+        const char *fields[]={"verified","revoked","build","update_available","rollback_available","pending_health"};for(size_t j=0;j<sizeof fields/sizeof *fields;++j)if(sbj_has(state,fields[j]))sbj_set(item,fields[j],sbj_clone(sbj_get(state,fields[j])));sbj_free(state);
         sbj_set_bool(item,"installed",present);sbj_set_bool(item,"enabled",enabled);sbj_set_bool(item,"running",running);sbj_set_bool(item,"failed",enabled&&failed);sbj_arr_push(list,item);
     }sbj_set(result,"extensions",list);return result;
 }
 int sbw_extension_change(const char *id,const char *action,sbw_error *error) {
+    if(sb_streq(action,"enable")&&!sbw_store_verified(id,error))return -1;
     if(!sbw_extension_installed(id))return sbw_fail(error,"EXTENSION_MISSING","Install the compatible official extension first.");
     wchar_t *marker=location(id,L"\\enabled",false);int result=0;
     if(sb_streq(action,"enable")) {HANDLE f=CreateFileW(marker,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);if(f==INVALID_HANDLE_VALUE)result=-1;else CloseHandle(f);}

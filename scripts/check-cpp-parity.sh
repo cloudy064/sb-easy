@@ -33,7 +33,7 @@ wait_ready() {
     log_file=$2
     attempt=0
     while [ "$attempt" -lt 100 ]; do
-        if curl -fsS "$base_url/api/system/status" >/dev/null 2>&1; then
+        if curl -fsS "$base_url/api/health" >/dev/null 2>&1; then
             return
         fi
         attempt=$((attempt + 1))

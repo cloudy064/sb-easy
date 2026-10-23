@@ -5,7 +5,7 @@
         <h2>{{ t('page.devices.title') }}</h2>
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.devices.desc') }}</p>
       </div>
-      <div class="flex-center gap-3">
+      <div v-if="auth.isAdmin" class="flex-center gap-3">
         <button class="btn-secondary btn-sm" @click="syncConfig">Sync Config</button>
         <button class="btn-secondary btn-sm" @click="showCreate = true">{{ t('devices.add.wireguard') }}</button>
         <button class="btn-primary" @click="openEnrollment()">{{ t('devices.add.device') }}</button>
@@ -51,7 +51,7 @@
             </h3>
             <span class="device-addr">{{ d.address || '—' }}</span>
           </div>
-          <label class="toggle">
+          <label v-if="auth.isAdmin" class="toggle">
             <input type="checkbox" :checked="d.enabled" @change="toggle(d)" />
             <span class="slider"></span>
           </label>
@@ -127,11 +127,11 @@
             <button class="btn-danger btn-sm" @click="deleteTarget = d">Delete</button>
           </template>
           <template v-else>
-            <button class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'reload')">{{ t('hosts.reload') }}</button>
-            <button class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'restart')">{{ t('hosts.restart') }}</button>
-            <button v-if="!d.is_self" class="btn-ghost btn-sm" @click="openQrCenter(d)">{{ t('devices.qr.open') }}</button>
-            <button class="btn-ghost btn-sm" @click="openManage(d)">{{ t('hosts.edit') }}</button>
-            <button class="btn-danger btn-sm" :disabled="d.is_self" @click="deleteTarget = d">Delete</button>
+            <button v-if="auth.isAdmin || d.access?.operate" class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'reload')">{{ t('hosts.reload') }}</button>
+            <button v-if="auth.isAdmin || d.access?.operate" class="btn-ghost btn-sm" :disabled="d.is_self" @click="cmd(d, 'restart')">{{ t('hosts.restart') }}</button>
+            <button v-if="auth.isAdmin && !d.is_self" class="btn-ghost btn-sm" @click="openQrCenter(d)">{{ t('devices.qr.open') }}</button>
+            <button v-if="auth.isAdmin" class="btn-ghost btn-sm" @click="openManage(d)">{{ t('hosts.edit') }}</button>
+            <button v-if="auth.isAdmin" class="btn-danger btn-sm" :disabled="d.is_self" @click="deleteTarget = d">Delete</button>
           </template>
         </div>
       </article>
@@ -366,6 +366,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useI18n } from '../composables/i18n'
+import { useAuthStore } from '../stores/auth'
 import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
 import HostManageModal from '../components/HostManageModal.vue'
@@ -375,6 +376,7 @@ import type { AgentEnrollment, Host, WireGuardPeer } from '../types'
 
 const { t } = useI18n()
 const hostsStore = useHostsStore()
+const auth = useAuthStore()
 const wgStore = useWireGuardStore()
 
 // Host create/manage modal (folds in everything the old /hosts page did).
@@ -627,7 +629,7 @@ async function load(showLoading = true) {
   refreshInFlight = true
   if (showLoading) loading.value = true
   try {
-    await Promise.all([wgStore.fetchPeers(), hostsStore.fetchHosts()])
+    await Promise.all([auth.isAdmin ? wgStore.fetchPeers() : Promise.resolve(wgStore.peers = []), hostsStore.fetchHosts()])
   } finally {
     refreshInFlight = false
     if (showLoading) loading.value = false

@@ -1,0 +1,5 @@
+SB_BUNDLE_PREFIX = io.sbeasy.client
+SB_APP_GROUP = group.io.sbeasy.client
+SB_KEYCHAIN_GROUP = io.sbeasy.client.shared
+#include? "../Signing.xcconfig"
+#include "../.build/Runtime.xcconfig"

@@ -51,17 +51,26 @@
       </div>
 
       <!-- Backup & Restore -->
+      <WgMigrationPanel />
+
       <div class="card">
         <h3 class="section-title">Backup &amp; Restore</h3>
         <p class="text-sm text-muted mb-4">
           Export all nodes, clients, subscriptions and settings as a JSON file, or restore from one.
           Restore upserts records and never deletes data the backup doesn't mention.
         </p>
+        <label class="text-sm"><input v-model="encryptedBackup" type="checkbox" style="width:auto" /> Encrypt exported backup</label>
+        <div class="form-group" style="max-width:420px;margin-top:1rem"><label>Backup passphrase (for encrypted exports and imports)</label><input v-model="backupPassphrase" type="password" autocomplete="off" /></div>
         <div class="flex-center gap-3">
-          <button class="btn-secondary btn-sm" @click="exportBackup">Export backup</button>
-          <button class="btn-secondary btn-sm" @click="fileInput?.click()">Import backup…</button>
+          <button class="btn-secondary btn-sm" :disabled="backupBusy" @click="exportBackup">Export backup</button>
+          <button class="btn-secondary btn-sm" :disabled="backupBusy" @click="fileInput?.click()">Import backup…</button>
           <input ref="fileInput" type="file" accept="application/json" style="display:none" @change="importBackup" />
-          <span v-if="restoreMsg" class="text-xs text-muted">{{ restoreMsg }}</span>
+          <span v-if="restoreMsg" class="text-xs text-muted" role="status">{{ restoreMsg }}</span>
+        </div>
+        <div v-if="pendingBackup" style="margin-top:1rem">
+          <p>Import preview: {{ pendingBackup.proxy_nodes?.length || 0 }} nodes, {{ pendingBackup.subscriptions?.length || 0 }} subscriptions, {{ pendingBackup.wireguard_peers?.length || 0 }} WireGuard peers. Matching records will be updated.</p>
+          <button class="btn-primary" :disabled="backupBusy" @click="applyBackup">Apply this backup</button>
+          <button class="btn-ghost" @click="pendingBackup = null">Cancel</button>
         </div>
       </div>
 
@@ -84,6 +93,8 @@ import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
 import { ref, onMounted } from 'vue'
 import client from '../api/client'
+import WgMigrationPanel from '../components/WgMigrationPanel.vue'
+import { ARCHIVE_LIMIT, encryptArchive, decryptArchive } from '../lib/secureArchive'
 
 const wg = ref({ interface: '—', listen_port: 0, address: '—', mtu: 0 })
 const sb = ref({ api_url: 'http://127.0.0.1:9090', secret: '' })
@@ -91,6 +102,8 @@ const general = ref({ external_hostname: '', one_time_link_expiry_minutes: 5 })
 const saved = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const restoreMsg = ref('')
+const encryptedBackup = ref(true), backupPassphrase = ref(''), backupBusy = ref(false)
+const pendingBackup = ref<any>(null)
 
 onMounted(async () => {
   try {
@@ -111,33 +124,43 @@ async function saveSettings() {
 }
 
 async function exportBackup() {
-  const { data } = await client.get('/settings/backup')
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `sb-easy-backup-${new Date().toISOString().slice(0, 10)}.json`
-  a.click()
-  URL.revokeObjectURL(url)
+  backupBusy.value = true; restoreMsg.value = ''
+  try {
+    const { data } = await client.get('/settings/backup')
+    const content = encryptedBackup.value ? await encryptArchive(data, backupPassphrase.value, 'backup') : data
+    backupPassphrase.value = ''
+    const url = URL.createObjectURL(new Blob([JSON.stringify(content, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a'); link.href = url
+    link.download = `sb-easy-backup-${new Date().toISOString().slice(0, 10)}${encryptedBackup.value ? '.encrypted' : ''}.json`
+    link.click(); URL.revokeObjectURL(url)
+  } catch (error: any) { restoreMsg.value = error.response?.data?.error || error.message }
+  finally { backupBusy.value = false }
+}
+async function importBackup(event: Event) {
+  const input = event.target as HTMLInputElement, file = input.files?.[0]
+  if (!file) return
+  backupBusy.value = true; restoreMsg.value = ''; pendingBackup.value = null
+  try {
+    if (file.size > ARCHIVE_LIMIT) throw new Error('Backup exceeds 1 MiB')
+    const value = JSON.parse(await file.text())
+    const payload: any = value?.format === 'sb-easy.backup' ? await decryptArchive(value, backupPassphrase.value, 'backup') : value
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || (!Array.isArray(payload.proxy_nodes) && !Array.isArray(payload.subscriptions) && !Array.isArray(payload.wireguard_peers) && !payload.app_settings)) throw new Error('Invalid backup file')
+    pendingBackup.value = payload; backupPassphrase.value = ''
+  } catch (error: any) { restoreMsg.value = error.response?.data?.error || error.message }
+  finally { input.value = ''; backupBusy.value = false }
+}
+async function applyBackup() {
+  if (!pendingBackup.value) return
+  backupBusy.value = true
+  try {
+    const { data } = await client.post('/settings/restore', pendingBackup.value)
+    const result = data.restored || {}
+    restoreMsg.value = `Restored ${result.proxy_nodes || 0} nodes, ${result.subscriptions || 0} subscriptions, ${result.app_settings || 0} settings.`
+    pendingBackup.value = null
+  } catch (error: any) { restoreMsg.value = error.response?.data?.error || error.message }
+  finally { backupBusy.value = false }
 }
 
-async function importBackup(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  try {
-    const text = await file.text()
-    const payload = JSON.parse(text)
-    const { data } = await client.post('/settings/restore', payload)
-    const r = data.restored || {}
-    restoreMsg.value = `Restored ${r.proxy_nodes || 0} nodes, ${r.subscriptions || 0} subscriptions, ${r.app_settings || 0} settings.`
-  } catch (err) {
-    restoreMsg.value = 'Import failed — invalid backup file.'
-  } finally {
-    input.value = ''
-    setTimeout(() => (restoreMsg.value = ''), 5000)
-  }
-}
 </script>
 
 <style scoped>

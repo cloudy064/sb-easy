@@ -17,11 +17,9 @@
 typedef struct packet_key { unsigned char local[16], remote[16]; unsigned short local_port, remote_port; unsigned char protocol; } packet_key;
 typedef struct attribution { packet_key key; char app[97], host[254]; } attribution;
 typedef struct pending_packet { unsigned char *bytes; unsigned length; ULONGLONG tick; uint64_t timestamp; packet_key key; } pending_packet;
-typedef HANDLE (*open_fn)(const char *, WINDIVERT_LAYER, INT16, UINT64);
 typedef BOOL (*recv_fn)(HANDLE, void *, UINT, UINT *, UINT64, WINDIVERT_ADDRESS *, UINT *, OVERLAPPED *);
 typedef BOOL (*close_fn)(HANDLE);
 typedef BOOL (*shutdown_fn)(HANDLE, WINDIVERT_SHUTDOWN);
-typedef BOOL (*param_fn)(HANDLE, WINDIVERT_PARAM, UINT64);
 struct sbw_capture {
     SRWLOCK lock;
     wchar_t *directory, *part;
@@ -30,6 +28,8 @@ struct sbw_capture {
     struct bpf_program bpf;
     bool has_bpf, running;
     HANDLE driver, thread, stop, file;
+    HANDLE pending_driver;
+    DWORD broker_pid,broker_index;
     HMODULE library;
     recv_fn receive; close_fn close; shutdown_fn shutdown;
     DWORD attempted_pid;
@@ -314,11 +314,13 @@ void sbw_capture_stop(sbw_capture *c) {
     if(c->thread){WaitForSingleObject(c->thread,INFINITE);CloseHandle(c->thread);c->thread=NULL;}
     if(c->stop){CloseHandle(c->stop);c->stop=NULL;}
     if(c->driver!=INVALID_HANDLE_VALUE&&c->close){c->close(c->driver);c->driver=INVALID_HANDLE_VALUE;}
+    if(c->pending_driver){CloseHandle(c->pending_driver);c->pending_driver=NULL;}
     c->running=false;if(c->has_bpf){pcap_freecode(&c->bpf);c->has_bpf=false;}
     AcquireSRWLockExclusive(&c->lock);seal(c,NULL);ReleaseSRWLockExclusive(&c->lock);
 }
 sbw_capture *sbw_capture_new(const wchar_t *work,const sbj *identity,sbw_error *error) {
     const char *server=sbj_get_str(identity,"server",""),*host=sbj_get_str(identity,"host_id","");
+    if(!*server&&!*host){server="independent-local";host="local";}
     if(!*server||!*host)return NULL;
     sb_buf scope={0};sb_buf_printf(&scope,"%s\n%s",server,host);char digest[65];
     int hashed=sbw_capture_hash(scope.p,scope.len,digest);sb_buf_free(&scope);if(hashed!=0)return NULL;
@@ -348,6 +350,10 @@ int sbw_capture_configure(sbw_capture *c,const sbj *config,sbw_error *error) {
 static void parse_address(const char *text,unsigned char out[16]) {
     if(InetPtonA(AF_INET6,text,out)==1)return;memset(out,0,16);out[10]=out[11]=255;if(InetPtonA(AF_INET,text,out+12)!=1)memset(out,0,16);
 }
+int sbw_capture_set_broker(sbw_capture *c,HANDLE driver,DWORD pid,DWORD index,sbw_error *error){
+    DWORD flags=0;if(!c||!driver||driver==INVALID_HANDLE_VALUE||!pid||!index||!GetHandleInformation(driver,&flags))return failure(error,"The capture broker handle is invalid.");
+    sbw_capture_stop(c);c->pending_driver=driver;c->broker_pid=pid;c->broker_index=index;c->attempted_pid=0;return 0;
+}
 void sbw_capture_observe(sbw_capture *c,DWORD pid,const wchar_t *interface_name,const sbj *connections) {
     if(!c)return;
     if(!pid||!interface_name){sbw_capture_stop(c);c->attempted_pid=0;return;}
@@ -364,24 +370,18 @@ void sbw_capture_observe(sbw_capture *c,DWORD pid,const wchar_t *interface_name,
     }
     bool enabled=sbj_get_bool(c->config,"enabled",false);ReleaseSRWLockExclusive(&c->lock);
     if(!enabled||c->attempted_pid==pid)return;
-    sbw_capture_stop(c);c->attempted_pid=pid;
-    NET_LUID luid;NET_IFINDEX index;
-    if(ConvertInterfaceAliasToLuid(interface_name,&luid)!=NO_ERROR||ConvertInterfaceLuidToIndex(&luid,&index)!=NO_ERROR){strcpy_s(c->issue,sizeof c->issue,"The sb-easy TUN interface is unavailable.");return;}
+    HANDLE broker=c->pending_driver;c->pending_driver=NULL;sbw_capture_stop(c);c->attempted_pid=pid;
+    if(!broker||c->broker_pid!=pid||!c->broker_index){if(broker)CloseHandle(broker);strcpy_s(c->issue,sizeof c->issue,"A read-only TUN handle from the host capture broker is required.");return;}
     if(!c->library) {
         wchar_t *base=sbw_executable_directory(NULL),*path=base?sbw_path_join(base,L"capture\\WinDivert.dll"):NULL;free(base);
         if(path)c->library=LoadLibraryExW(path,NULL,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);free(path);
     }
-    if(!c->library){strcpy_s(c->issue,sizeof c->issue,"WinDivert is missing. Install the complete sb-easy package.");return;}
-    open_fn open_driver=(open_fn)(void *)GetProcAddress(c->library,"WinDivertOpen");
+    if(!c->library){CloseHandle(broker);strcpy_s(c->issue,sizeof c->issue,"WinDivert is missing. Install the complete sb-easy package.");return;}
     c->receive=(recv_fn)(void *)GetProcAddress(c->library,"WinDivertRecvEx");c->close=(close_fn)(void *)GetProcAddress(c->library,"WinDivertClose");c->shutdown=(shutdown_fn)(void *)GetProcAddress(c->library,"WinDivertShutdown");
-    param_fn set_param=(param_fn)(void *)GetProcAddress(c->library,"WinDivertSetParam");
-    if(!open_driver||!c->receive||!c->close||!c->shutdown){strcpy_s(c->issue,sizeof c->issue,"Invalid WinDivert library.");return;}
+    if(!c->receive||!c->close||!c->shutdown){CloseHandle(broker);strcpy_s(c->issue,sizeof c->issue,"Invalid WinDivert library.");return;}
     const char *expression=sbj_get_str(c->config,"bpf","");sbw_error error={0};
-    if(*expression&&compile(expression,&c->bpf,&error)!=0){strcpy_s(c->issue,sizeof c->issue,error.message);return;}c->has_bpf=*expression!=0;
-    char filter[120];sprintf_s(filter,sizeof filter,"(tcp or udp) and ifIdx == %lu",index);
-    c->driver=open_driver(filter,WINDIVERT_LAYER_NETWORK,0,WINDIVERT_FLAG_SNIFF|WINDIVERT_FLAG_RECV_ONLY);
-    if(c->driver==INVALID_HANDLE_VALUE){sprintf_s(c->issue,sizeof c->issue,"WinDivert could not start (Windows error %lu). Capture needs an elevated service and an allowed signed driver.",GetLastError());return;}
-    if(set_param){set_param(c->driver,WINDIVERT_PARAM_QUEUE_LENGTH,1024);set_param(c->driver,WINDIVERT_PARAM_QUEUE_SIZE,8*1024*1024);}
+    if(*expression&&compile(expression,&c->bpf,&error)!=0){CloseHandle(broker);strcpy_s(c->issue,sizeof c->issue,error.message);return;}c->has_bpf=*expression!=0;
+    c->driver=broker;
     c->stop=CreateEventW(NULL,TRUE,FALSE,NULL);c->running=true;
     c->thread=c->stop?CreateThread(NULL,0,capture_thread,c,0,NULL):NULL;
     if(!c->thread){sbw_capture_stop(c);strcpy_s(c->issue,sizeof c->issue,"Capture worker could not start.");}

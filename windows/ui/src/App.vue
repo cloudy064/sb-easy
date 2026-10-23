@@ -2,8 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import SubscriptionsPanel from './components/SubscriptionsPanel.vue'
-import { parseSubscription } from './lib/subscriptions'
 import ServiceRouting from './components/ServiceRouting.vue'
+import LocalGroupEditor from './components/LocalGroupEditor.vue'
+import ManagementSettingsPanel from './components/ManagementSettings.vue'
+import UsageModePanel from './components/UsageMode.vue'
+import PreferencesPanel from './components/PreferencesPanel.vue'
+import UpdatesPanel from './components/UpdatesPanel.vue'
+import HealthSettingsPanel from './components/HealthSettings.vue'
+import RoutingDiagnostics from './components/RoutingDiagnostics.vue'
 import ExtensionView from './components/ExtensionView.vue'
 import ExtensionsPanel from './components/ExtensionsPanel.vue'
 import NetworkToolsView from './components/NetworkToolsView.vue'
@@ -15,7 +21,7 @@ import { BridgeError, findNativeTransport, NativeBridge } from './lib/bridge'
 import { previewEnrollment } from './lib/enrollment'
 import { configStage } from './lib/config'
 import { connectionActions, runtimeDetail } from './lib/connection'
-import type { ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult, ConfigInspection, RuntimeSnapshot } from './lib/protocol'
+import type { HealthPolicy, SubscriptionImport, ManagementSettings, LocalRoutingGroup, ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult, ConfigInspection, RuntimeSnapshot } from './lib/protocol'
 
 type ConnectionState = 'checking' | 'online' | 'offline' | 'host_missing'
 const bridge = new NativeBridge(findNativeTransport())
@@ -52,7 +58,10 @@ const catalogSource = ref<'active' | 'candidate'>('active')
 const search = ref('')
 const pendingRouting = ref('')
 const routingNodes = computed(() => ((config.value?.routing_live ? inspection.value?.active : inspection.value?.candidate)?.nodes ?? []).filter(node => node.type !== 'block' && !node.tag.startsWith('sb-easy-local-')).map(node => ({ ...node, label: nodeLabel(node.tag), source: sourceMap.value.get(node.tag)?.name })))
-const routingGroups = computed(() => config.value?.routing_groups ?? [])
+const routingGroups = computed(() => (config.value?.routing_groups ?? []).map(group => {
+  const current = config.value?.health?.groups.find(state => state.id === group.id)?.selected
+  return group.mode === 'automatic' && config.value?.routing_live && current ? { ...group, outbound: current } : group
+}))
 const sourceFilter = ref('')
 const subscriptionSummary = computed(() => config.value?.subscriptions)
 const sourceMap = computed(() => {
@@ -136,7 +145,7 @@ const issue = ref<BridgeError | null>(null)
 const checkedAt = ref<Date | null>(null)
 const config = ref<ConfigSummary | null>(null)
 const configIssue = ref('')
-const operation = ref<'subscription' | 'service' | 'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
+const operation = ref<'preferences' | 'health' | 'mode' | 'management' | 'probe' | 'subscription' | 'service' | 'routing' | 'enroll' | 'forget' | 'sync' | 'validate' | 'start' | 'stop' | null>(null)
 const enrollmentUri = ref('')
 const confirmForget = ref(false)
 const actionNotice = ref('')
@@ -175,12 +184,13 @@ const stateDetail = computed(() => {
   if (connection.value === 'checking') return '正在准备本地后台并读取设备状态，首次打开可能需要几秒。'
   if (connection.value === 'offline') return '本地后台暂未就绪。刷新状态会尝试自动恢复，具体原因见下方提示。'
   if (deviceStateError.value) return '本地设备资料无法读取，已有文件保持原样。请先修复存储问题；此时不能重新注册或覆盖设备状态。'
+  if (status.value?.mode === 'independent') return runtimeDetail(status.value)
   if (!enrollment.value?.enrolled) return '本机服务已就绪。请在下方粘贴管理面板生成的一次性注册链接，完成此设备的授权。'
   if (status.value?.phase === 'RUNNING') return '代理已就绪。你可以在下方直接切换出口，无需断开连接。'
   return status.value ? runtimeDetail(status.value) : '正在读取本机内核状态。'
 })
 const checkedTime = computed(() => checkedAt.value?.toLocaleTimeString('zh-CN', { hour12: false }) ?? '尚未检查')
-const deviceLabel = computed(() => deviceStateError.value ? '无法读取' : enrollment.value ? enrollment.value.enrolled ? '已注册' : '待注册' : '尚未读取')
+const deviceLabel = computed(() => deviceStateError.value ? '无法读取' : status.value?.mode === 'independent' ? '独立模式' : enrollment.value ? enrollment.value.enrolled ? '已注册' : '待注册' : '尚未读取')
 const coreLabel = computed(() => status.value ? status.value.core_running ? '运行中' : '未运行' : '尚未读取')
 const deviceMetadata = computed(() => enrollment.value ?? status.value)
 const configMetadata = computed(() => {
@@ -370,21 +380,82 @@ async function setServiceRouting(group: string, mode: 'node' | 'default' | 'serv
   }
 }
 
-async function changeSubscription(action: 'add' | 'refresh' | 'remove', id: string, name = '', url = ''): Promise<void> {
-  if (!canAct('subscriptions.save')) return
+async function changeMode(mode: 'managed' | 'independent'): Promise<void> {
+  if (!canAct('mode.set') || status.value?.core_running) return
+  operation.value = 'mode'; actionNotice.value = ''; actionFailed.value = false
+  try {
+    status.value = await bridge.request('mode.set', { mode }, { timeoutMs: 15000 })
+    actionNotice.value = mode === 'independent' ? '已切换到独立模式，可导入本机订阅。' : '已切换到受管模式。'
+    if (mode === 'managed' && !status.value.enrolled) selectPage('profiles')
+  } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { operation.value = null; if (!destroyed) await refresh() }
+}
+
+async function changeManagement(settings: Partial<ManagementSettings>): Promise<void> {
+  if (!canAct('management.settings.set')) return
+  operation.value = 'management'; actionNotice.value = ''; actionFailed.value = false
+  try {
+    const management = await bridge.request('management.settings.set', settings, { timeoutMs: 15000 })
+    if (status.value) status.value = { ...status.value, management }
+    actionNotice.value = '后台管理设置已保存。'
+  } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { operation.value = null; if (!destroyed) await refresh() }
+}
+async function saveHealthPolicy(policy: HealthPolicy): Promise<void> {
+  if (!canAct('routing.health.set')) return
+  operation.value = 'health'; actionNotice.value = ''; actionFailed.value = false
+  try { config.value = await bridge.request('routing.health.set', policy); actionNotice.value = '健康探测设置已保存。' }
+  catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { operation.value = null; if (!destroyed) await refresh() }
+}
+async function saveAutomaticGroup(group: string, candidates: string[]): Promise<void> {
+  if (!canAct('routing.automatic.set')) return
+  operation.value = 'health'; actionNotice.value = ''; actionFailed.value = false
+  try { config.value = await bridge.request('routing.automatic.set', { group, candidates }, { timeoutMs: 45000 }); actionNotice.value = '自动候选组已保存；仅在所选节点之间切换。' }
+  catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { operation.value = null; if (!destroyed) await refresh() }
+}
+async function checkHealth(): Promise<void> {
+  if (!canAct('routing.health.check')) return
+  operation.value = 'health'; actionNotice.value = ''; actionFailed.value = false
+  try { config.value = await bridge.request('routing.health.check', {}); actionNotice.value = '已安排后台健康探测，结果会在完成后更新。' }
+  catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { operation.value = null; if (!destroyed) await refresh() }
+}
+async function saveLocalGroup(group: LocalRoutingGroup): Promise<void> {
+  if (!canAct('routing.group_save')) return
+  operation.value = 'routing'; pendingRouting.value = group.id; actionNotice.value = ''; actionFailed.value = false
+  try {
+    config.value = await bridge.request('routing.group_save', group, { timeoutMs: 45000 })
+    actionNotice.value = config.value.routing_live ? '自定义分组已保存并应用。' : '自定义分组已保存，下次连接生效。'
+  } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { pendingRouting.value = ''; operation.value = null; if (!destroyed) await refresh() }
+}
+async function removeLocalGroup(id: string): Promise<void> {
+  if (!canAct('routing.group_remove')) return
+  operation.value = 'routing'; pendingRouting.value = id; actionNotice.value = ''; actionFailed.value = false
+  try {
+    config.value = await bridge.request('routing.group_remove', { id }, { timeoutMs: 45000 })
+    actionNotice.value = '自定义分组已删除，相关流量恢复其他规则。'
+  } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { pendingRouting.value = ''; operation.value = null; if (!destroyed) await refresh() }
+}
+function preferencesBusy(value: boolean) { operation.value = value ? 'preferences' : null }
+function probeBusy(value: boolean) { operation.value = value ? 'probe' : null }
+
+async function changeSubscription(action: 'add' | 'refresh' | 'remove', id: string, input?: SubscriptionImport): Promise<void> {
+  const method = action === 'add' ? 'subscriptions.import' : action === 'refresh' ? 'subscriptions.refresh' : 'subscriptions.remove'
+  if (!canAct(method)) return
   operation.value = 'subscription'; actionNotice.value = ''; actionFailed.value = false
   try {
     if (action === 'remove') config.value = await bridge.request('subscriptions.remove', { id }, { timeoutMs: 45_000 })
-    else {
-      const downloaded = await bridge.request('subscriptions.fetch', action === 'add' ? { url } : { id }, { timeoutMs: 45_000 })
-      const nodes = parseSubscription(downloaded.body)
-      downloaded.body = ''
-      config.value = await bridge.request('subscriptions.save', { name, nodes, ...(action === 'add' ? { url } : { id }) }, { timeoutMs: 45_000 })
-    }
+    else if (action === 'refresh') config.value = await bridge.request('subscriptions.refresh', { id }, { timeoutMs: 45_000 })
+    else if (input) config.value = await bridge.request('subscriptions.import', input, { timeoutMs: 45_000 })
+    else return
     actionNotice.value = action === 'remove' ? '本机订阅已删除。' : config.value.routing_live ? '订阅已保存，节点已加入当前配置，可在首页选择。' : '订阅已保存，下次连接生效。'
     sourceFilter.value = ''
   } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
-  finally { url = ''; operation.value = null; if (!destroyed) await refresh() }
+  finally { if (input) { input.body = ''; input.url = '' }; operation.value = null; if (!destroyed) await refresh() }
 }
 
 async function validateConfig(): Promise<void> {
@@ -509,19 +580,22 @@ onBeforeUnmount(() => {
       <div v-if="issue && connection !== 'host_missing'" class="error-notice" role="alert"><strong>服务通信未完成</strong><span>{{ issue.message }}</span>
         <template v-if="bridge.available && connection === 'offline'">
           <button class="connect-button" data-testid="service-authorize" :disabled="locked" @click="startService">{{ operation === 'service' ? '等待管理员授权与服务启动…' : '授权并启动服务' }}</button>
-          <small>仅启动已安装的后台；不会自动连接代理，无需重启电脑。尚未安装服务时请使用 MSI 安装包。</small>
+          <small>启动已安装的后台，并按已保存的自动连接设置运行，无需重启电脑。尚未安装服务时请使用 MSI 安装包。</small>
         </template></div>
       <div v-if="deviceStateError" class="error-notice" role="alert"><strong>设备存储需要修复</strong><span>{{ deviceStateError.message }}</span><code>{{ deviceStateError.code }}</code></div>
       <div v-if="status?.runtime_error" class="error-notice" role="alert"><strong>{{ status.runtime_error.code === 'ROLLED_BACK' ? '已恢复先前配置' : '连接操作需要检查' }}</strong><span>{{ status.runtime_error.message }}</span><code>{{ status.runtime_error.code }}</code></div>
       <div v-if="actionNotice && !(actionFailed && status?.runtime_error && actionNotice.includes(status.runtime_error.message))" class="action-notice" :class="{ failed: actionFailed }" :role="actionFailed ? 'alert' : 'status'">{{ actionNotice }}</div>
 
       <template v-if="page === 'overview'">
+        <UsageModePanel v-if="supports('mode.set')" :mode="status?.mode ?? (enrollment?.enrolled ? 'managed' : 'unconfigured')" :disabled="!canAct('mode.set')" :running="status?.core_running === true" :managed-available="status?.managed_available === true" :independent-available="status?.independent_available === true" @change="changeMode" @import="selectPage('proxies')" />
         <section class="connection-card" :class="{ 'is-running': status?.core_running }" aria-labelledby="connection-title" aria-live="polite" :aria-busy="locked" data-testid="connection-summary">
           <div class="connection-top"><div><div class="state-kicker"><span class="state-dot" :class="{ ready: status?.core_running }"></span>{{ status?.core_running ? '本机代理已就绪' : '连接状态' }}</div><h2 id="connection-title">{{ stateLabel }}</h2><p>{{ stateDetail }}</p></div><div class="connection-action"><button v-if="!status?.core_running || controls.canStart || operation === 'start'" class="connect-button" data-testid="connection-start" :disabled="!canAct('connection.start') || !controls.canStart" @click="changeConnection('start')"><AppIcon name="power" />{{ operation === 'start' ? '正在启动…' : controls.startLabel }}</button><button v-if="controls.canStop || operation === 'stop'" class="secondary-button" data-testid="connection-stop" :disabled="!canAct('connection.stop') || !controls.canStop" @click="changeConnection('stop')">{{ operation === 'stop' ? '正在断开…' : '断开连接' }}</button></div></div>
         </section>
         <ServiceRouting v-if="routingGroups.length" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.set')" :pending="pendingRouting" :live="config?.routing_live === true" @select="setServiceRouting" />
+        <HealthSettingsPanel v-if="supports('routing.health.set') && config?.health_policy && config.candidate_available" :policy="config.health_policy" :snapshot="config.health" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.health.set')" :running="status?.core_running === true" @save="saveHealthPolicy" @automatic="saveAutomaticGroup" @check="checkHealth" />
+        <LocalGroupEditor v-if="supports('routing.group_save') && config?.candidate_available" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.group_save')" :pending="pendingRouting" @save="saveLocalGroup" @remove="removeLocalGroup" />
         <div v-if="catalogIssue" class="error-notice" role="alert">{{ catalogIssue }}</div>
-        <section v-if="enrollment?.enrolled && !routingGroups.length" class="panel empty-inline"><p>{{ configIssue || '尚未读取到可用出口，请同步配置或检查服务版本。' }}</p><button class="text-button" @click="selectPage('profiles')">前往配置管理 →</button></section>
+        <section v-if="(enrollment?.enrolled || status?.mode === 'independent') && !routingGroups.length" class="panel empty-inline"><p>{{ configIssue || '尚未读取到可用出口，请同步配置或检查服务版本。' }}</p><button class="text-button" @click="selectPage('profiles')">前往配置管理 →</button></section>
         <section class="traffic-metrics" aria-label="实时流量">
           <article><span><AppIcon name="up" />上传速率</span><strong>{{ trafficReady ? bytes(speed?.up) : '—' }}<small v-if="trafficReady && speed">/s</small></strong><p>{{ trafficReady ? `累计 ${bytes(runtime?.upload_total)}` : status?.core_running ? '等待流量数据' : '连接后开始统计' }}</p></article>
           <article><span><AppIcon name="down" />下载速率</span><strong>{{ trafficReady ? bytes(speed?.down) : '—' }}<small v-if="trafficReady && speed">/s</small></strong><p>{{ trafficReady ? `累计 ${bytes(runtime?.download_total)}` : status?.core_running ? '等待流量数据' : '连接后开始统计' }}</p></article>
@@ -529,7 +603,7 @@ onBeforeUnmount(() => {
           <article><span><AppIcon name="proxies" />配置节点</span><strong>{{ runningCatalog?.node_count ?? '—' }}</strong><button class="text-button" @click="selectPage('proxies')">查看代理 <span>↗</span></button></article>
         </section>
         <div v-if="enrollment?.enrolled" class="home-config-link"><span>共享配置 · {{ profileName }}</span><button class="text-button" @click="selectPage('profiles')">管理配置 →</button><button class="text-button" @click="selectPage('rules')">查看规则 →</button></div>
-                <section v-if="!enrollment?.enrolled" class="device-card" aria-labelledby="enrollment-title">
+                <section v-if="!enrollment?.enrolled && status?.mode !== 'independent'" class="device-card" aria-labelledby="enrollment-title">
           <div class="section-heading"><h2 id="enrollment-title">注册这台设备</h2><span>一次性设备授权</span></div>
           <p class="section-description">在管理面板的“设备”页面生成注册链接，然后粘贴到这里。</p>
           <form @submit.prevent="enroll">
@@ -546,23 +620,25 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="page === 'proxies'">
+        <button class="secondary-button" @click="selectPage('diagnostics')">主动测速与网址路由测试 →</button>
+        <SubscriptionsPanel :summary="subscriptionSummary" :independent="status?.mode === 'independent'" :disabled="!canAct('subscriptions.import')" :busy="operation === 'subscription'" :filter="sourceFilter" @filter="sourceFilter = $event" @add="input => changeSubscription('add', '', input)" @refresh="id => changeSubscription('refresh', id)" @remove="id => changeSubscription('remove', id)" />
         <div class="content-toolbar"><div class="segments" aria-label="配置来源"><button :class="{ active: catalogSource === 'active' }" @click="catalogSource = 'active'">当前运行</button><button :class="{ active: catalogSource === 'candidate' }" @click="catalogSource = 'candidate'">已下载配置</button></div><label class="search-box"><AppIcon name="search" /><input v-model="search" :placeholder="page === 'proxies' ? '搜索节点或协议' : '搜索域名、规则或出口'" :aria-label="page === 'proxies' ? '搜索节点' : '搜索路由规则'" /></label></div>
         <div class="data-source-line"><span>{{ sourceLabel }} · <code>{{ shortVersion(catalog?.etag) }}</code></span><span v-if="catalog">{{ page === 'proxies' ? `${catalog.node_count} 个出站` : `${catalog.rule_count} 条规则` }}</span></div>
         <div v-if="catalogIssue" class="error-notice" role="alert">{{ catalogIssue }}</div>
-        <div v-if="!catalog" class="panel empty-state"><AppIcon :name="page" /><h2>{{ catalogSource === 'active' ? '尚无运行配置' : '还没有下载配置' }}</h2><p>{{ catalogSource === 'active' ? '启动连接后可查看实际生效的节点与规则，也可以先查看已下载配置。' : '完成设备注册并同步配置后，节点与路由规则会显示在这里。' }}</p><button class="secondary-button" @click="catalogSource === 'active' && inspection?.candidate ? catalogSource = 'candidate' : selectPage('profiles')">{{ catalogSource === 'active' && inspection?.candidate ? '查看已下载配置' : '前往配置管理' }}</button></div>
+        <div v-if="!catalog" class="panel empty-state"><AppIcon :name="page" /><h2>{{ catalogSource === 'active' ? '尚无运行配置' : '还没有下载配置' }}</h2><p>{{ catalogSource === 'active' ? '启动连接后可查看实际生效的节点与规则，也可以先查看已下载配置。' : '导入本机订阅，或注册设备并同步配置后，可在这里查看节点与路由规则。' }}</p><button class="secondary-button" @click="catalogSource === 'active' && inspection?.candidate ? catalogSource = 'candidate' : selectPage('profiles')">{{ catalogSource === 'active' && inspection?.candidate ? '查看已下载配置' : '前往配置管理' }}</button></div>
         <template v-else>
-          <SubscriptionsPanel :summary="subscriptionSummary" :disabled="!canAct('subscriptions.save')" :busy="operation === 'subscription'" :filter="sourceFilter" @filter="sourceFilter = $event" @add="(name, url) => changeSubscription('add', '', name, url)" @refresh="(id, name) => changeSubscription('refresh', id, name)" @remove="id => changeSubscription('remove', id)" />
           <section v-if="groups.length" class="proxy-groups"><article v-for="group in groups" :key="group.tag" class="panel group-card"><div class="section-heading"><span class="group-icon"><AppIcon name="proxies" /></span><span class="status-tag">{{ nodeKind(group.type) }}</span></div><h2>{{ group.tag }}</h2><p>当前出口</p><strong>{{ group.selected || '由内核自动选择' }}</strong><span class="group-count">{{ group.member_count }} 个成员 · {{ catalogSource === 'active' && runtime ? '内核实时状态' : '配置初始值' }}</span></article></section>
           <div class="section-heading node-heading"><h2>节点列表 <span>{{ filteredNodes.length }}</span></h2><div class="segments"><button :class="{ active: nodeFilter === 'all' }" @click="nodeFilter = 'all'">全部</button><button :class="{ active: nodeFilter === 'nodes' }" @click="nodeFilter = 'nodes'">节点</button><button :class="{ active: nodeFilter === 'groups' }" @click="nodeFilter = 'groups'">代理组</button></div></div>
           <div class="node-grid"><article v-for="(node, index) in filteredNodes" :key="`${node.tag}-${index}`" class="node-card" :class="{ 'default-node': node.tag === catalog.final }"><div class="node-avatar">{{ node.member_count ? '组' : node.type.toLowerCase() === 'direct' ? '直' : Array.from(nodeLabel(node.tag))[0]?.toUpperCase() || 'N' }}</div><div class="node-copy"><h3>{{ nodeLabel(node.tag) || '未命名出站' }}</h3><span>{{ nodeKind(node.type) }} · {{ sourceMap.get(node.tag)?.name ?? '其他 / 未知来源' }}<b v-if="node.tag === catalog.final">默认出口</b></span></div><span class="node-delay" :class="{ measured: node.delay }">{{ node.delay ? `${node.delay} ms` : '未测速' }}</span><details v-if="node.members.length"><summary>查看组成员</summary><ul><li v-for="member in node.members" :key="member">{{ member }}</li></ul><p v-if="node.member_count > node.members.length">另有 {{ node.member_count - node.members.length }} 个成员</p></details></article></div>
-          <div v-if="!filteredNodes.length" class="panel empty-inline"><p>没有匹配的节点</p><button class="text-button" @click="search = ''; nodeFilter = 'all'; sourceFilter = ''">清除筛选</button></div><p class="collection-note">服务出口可在“连接”页面选择。此处延迟仅显示内核已有的测速记录，尚未提供主动测速。</p><p v-if="catalog.node_count > catalog.nodes.length" class="collection-note">配置包含 {{ catalog.node_count }} 个出站，当前最多展示 1024 个。</p>
+          <div v-if="!filteredNodes.length" class="panel empty-inline"><p>没有匹配的节点</p><button class="text-button" @click="search = ''; nodeFilter = 'all'; sourceFilter = ''">清除筛选</button></div><p class="collection-note">服务出口可在“连接”页面选择。此处显示内核已有的延迟记录；可前往连接诊断发起测速。</p><p v-if="catalog.node_count > catalog.nodes.length" class="collection-note">配置包含 {{ catalog.node_count }} 个出站，当前最多展示 1024 个。</p>
         </template>
 
       </template>
 
       <template v-else-if="page === 'profiles'">
+        <UsageModePanel v-if="supports('mode.set')" :mode="status?.mode ?? (enrollment?.enrolled ? 'managed' : 'unconfigured')" :disabled="!canAct('mode.set')" :running="status?.core_running === true" :managed-available="status?.managed_available === true" :independent-available="status?.independent_available === true" @change="changeMode" @import="selectPage('proxies')" />
         <section class="config-workflow"><div :class="{ done: enrollment?.enrolled }"><span>01</span><strong>设备授权</strong><p>{{ deviceLabel }}</p></div><div :class="{ done: config?.candidate_available }"><span>02</span><strong>配置同步</strong><p>{{ config?.candidate_available ? '已有下载版本' : '等待下载' }}</p></div><div :class="{ done: stage.state === 'valid' }"><span>03</span><strong>内核校验</strong><p>{{ stage.label }}</p></div><div :class="{ done: status?.core_running }"><span>04</span><strong>启动连接</strong><p>{{ coreLabel }}</p></div></section>
-                <section v-if="!enrollment?.enrolled" class="device-card" aria-labelledby="enrollment-title">
+                <section v-if="!enrollment?.enrolled && status?.mode !== 'independent'" class="device-card" aria-labelledby="enrollment-title">
           <div class="section-heading"><h2 id="enrollment-title">注册这台设备</h2><span>一次性设备授权</span></div>
           <p class="section-description">在管理面板的“设备”页面生成注册链接，然后粘贴到这里。</p>
           <form @submit.prevent="enroll">
@@ -583,8 +659,8 @@ onBeforeUnmount(() => {
           <div v-else class="forget-confirm" role="group" aria-labelledby="forget-title"><h3 id="forget-title">清除此电脑上的注册信息？</h3><p>本地设备凭据和已下载配置将被清除。再次注册需要在管理面板生成新的注册链接。</p><div class="confirmation-actions"><button class="secondary-button" :disabled="locked" @click="confirmForget = false">保留设备</button><button class="danger-button" data-testid="enrollment-forget-confirm" :disabled="!canAct('enrollment.forget') || !controls.canForget" @click="forget">{{ operation === 'forget' ? '正在清除…' : '确认忘记设备' }}</button></div></div>
         </section>
 
-                <section v-if="enrollment?.enrolled" class="device-card" aria-labelledby="config-title" data-testid="candidate-summary">
-          <div class="section-heading"><h2 id="config-title">服务器配置</h2><button class="secondary-button" data-testid="config-refresh" :disabled="!canAct('config.refresh')" @click="downloadConfig">{{ operation === 'sync' ? '正在下载…' : '下载最新配置' }}</button></div>
+                <section v-if="enrollment?.enrolled || status?.mode === 'independent'" class="device-card" aria-labelledby="config-title" data-testid="candidate-summary">
+          <div class="section-heading"><h2 id="config-title">{{ status?.mode === 'independent' ? '独立配置' : '服务器配置' }}</h2><button v-if="enrollment?.enrolled" class="secondary-button" data-testid="config-refresh" :disabled="!canAct('config.refresh')" @click="downloadConfig">{{ operation === 'sync' ? '正在下载…' : '下载最新配置' }}</button></div>
           <div class="config-stage"><span class="status-tag" :class="{ pending: configMetadata?.candidate_available && stage.state !== 'valid' }">{{ stage.label }}</span><p>{{ stage.detail }}</p></div>
           <dl class="diagnostic-list compact"><div><dt>候选配置版本</dt><dd><code>{{ configMetadata?.downloaded_etag || '尚未下载' }}</code></dd></div><div><dt>当前激活版本</dt><dd><code>{{ configMetadata?.active_etag || '无 · 尚未激活' }}</code></dd></div><div v-if="configMetadata?.last_good_etag"><dt>上次可用版本</dt><dd><code>{{ configMetadata.last_good_etag }}</code></dd></div><div><dt>规则来源</dt><dd>{{ configMetadata?.rule_source || '尚未读取' }}</dd></div><div><dt>Profile</dt><dd>{{ profileName }}</dd></div></dl>
           <div v-if="config?.candidate_available" class="config-counts" aria-label="候选配置摘要"><span><strong>{{ config.counts.inbounds }}</strong> 入站</span><span><strong>{{ config.counts.outbounds }}</strong> 出站</span><span><strong>{{ config.counts.rules }}</strong> 路由规则</span></div>
@@ -607,6 +683,8 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="page === 'settings'">
+        <ManagementSettingsPanel :value="status?.management" :disabled="!canAct('management.settings.set')" :pending="operation === 'management'" @change="changeManagement" />
+        <UpdatesPanel v-if="supports('updates.status')" :bridge="bridge" :disabled="locked" @busy="preferencesBusy" />
         <section class="panel settings-panel"><div class="section-heading"><h2>扩展商店</h2><button class="secondary-button" @click="selectPage('extensions')">浏览扩展 →</button></div><p class="input-hint">流量采集等高级能力按需安装，基础代理不依赖扩展。</p><button v-if="captureEnabled" class="text-button" @click="selectPage('capture')">打开流量采集 →</button></section>
         <section class="panel settings-panel" aria-labelledby="ipv6-title">
           <div class="section-heading"><h2 id="ipv6-title">IPv6 支持</h2><span class="status-tag">最近检查 {{ checkedTime }}</span></div>
@@ -620,7 +698,9 @@ onBeforeUnmount(() => {
         <section class="panel settings-panel"><div class="section-heading"><h2>网络接入</h2><span class="status-tag" :class="{ pending: !status?.tun_active }">{{ status?.tun_active ? 'TUN 已启用' : '按下发配置启动' }}</span></div><div class="setting-row"><div><h3>TUN 虚拟网卡</h3><p>由服务器配置决定是否启用，需要具有管理员权限的服务。</p></div><strong>{{ status?.tun_active ? '运行中' : '未启用' }}</strong></div><div class="setting-row"><div><h3>本地代理</h3><p>将支持代理的应用设置为此端口，流量才会经过内核。</p></div><code>{{ proxyEndpoint ? `${proxyEndpoint.listen}:${proxyEndpoint.port}` : '未配置' }}</code></div><div class="setting-row"><div><h3>Windows 系统代理</h3><p>当前使用 TUN 或应用内代理设置；系统代理开关尚未接入。</p></div><span class="muted">未接管</span></div></section>
         <section class="panel settings-panel"><div class="section-heading"><h2>关于 sb-easy</h2><span class="preview-badge">Windows 开发预览</span></div><div class="environment-row"><span>本机服务</span><code>{{ hello?.service_version ?? '尚未读取' }}</code></div><div class="environment-row"><span>sing-box</span><code>{{ config?.validation?.core_version ?? '尚未读取' }}</code></div><div class="environment-row"><span>设备名称</span><strong>{{ deviceMetadata?.host_name ?? '尚未注册' }}</strong></div><div class="environment-row"><span>管理服务</span><code>{{ deviceMetadata?.server_origin ?? '尚未注册' }}</code></div><button class="text-button" @click="selectPage('diagnostics')">查看连接诊断 →</button><button class="text-button manage-device" @click="selectPage('profiles')">管理设备授权 →</button></section>
       </template>
-      <template v-else>        <section class="diagnostics-card" aria-labelledby="diagnostics-title">
+      <template v-else>
+        <RoutingDiagnostics :bridge="bridge" :connected="status?.core_running === true" :disabled="locked" :can-probe="supports('routing.probe')" :can-delay="supports('routing.delay')" :nodes="routingNodes" @busy="probeBusy" />
+        <section class="diagnostics-card" aria-labelledby="diagnostics-title">
           <div class="section-heading"><h2 id="diagnostics-title">连接状态</h2><span>最近检查 {{ checkedTime }}</span></div>
           <dl class="diagnostic-list">
             <div><dt>原生宿主</dt><dd>{{ bridge.available ? 'WebView2 通信桥已就绪' : '未检测到原生通信桥' }}</dd></div>
@@ -643,6 +723,7 @@ onBeforeUnmount(() => {
           <details v-if="hello" class="protocol-details"><summary>服务支持的操作</summary><ul><li v-for="method in hello.supported_methods" :key="method"><code>{{ method }}</code></li></ul></details>
         </section>
 </template>
+      <PreferencesPanel v-if="supports('preferences.export')" v-show="page === 'settings'" :bridge="bridge" :disabled="locked" :configured="enrollment?.enrolled === true || status?.mode === 'independent'" :running="status?.core_running === true" @busy="preferencesBusy" @applied="refresh" />
       <footer class="page-footer"><span><i :class="{ ready: connection === 'online' }"></i>{{ deviceMetadata?.host_name || 'Windows 客户端' }} · 服务 {{ serviceLabel }}</span><span>最近检查 {{ checkedTime }} · {{ autoRefresh ? '自动刷新' : '手动刷新' }}</span></footer>
     </main>
   </div>

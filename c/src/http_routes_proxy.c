@@ -9,6 +9,7 @@
 #include "sb/clash_client.h"
 #include "sb/proxy_parser.h"
 #include "sb/subscription_fetcher.h"
+#include "sb/subscription_service.h"
 
 /* ---- shared bits --------------------------------------------------------- */
 
@@ -82,6 +83,10 @@ static int resolve_clash_target(const sb_http_req *req, clash_target *out, sb_er
             free(url);
         }
         sb_host_free(&host);
+        if (req->claims && !sb_streq(req->claims->role, "admin")) {
+            free(host_id);
+            return sb_fail(err, SB_ERR_UNAVAILABLE, "Selected device has no Clash API configured");
+        }
     }
     free(host_id);
     out->base_url = sb_http_trim_trailing_slashes(srv->opts.clash_api_url ? srv->opts.clash_api_url : "");
@@ -752,29 +757,9 @@ static int subscription_from_update_request(const sbj *body, sb_subscription *su
  * ValidationError "Failed to fetch subscription: <reason>". */
 static int fetch_subscription(sb_http_server *srv, const sb_subscription *sub, sb_subscription_fetch_result *result,
                               sb_err *err) {
-    size_t len = 0;
-    sb_err fetch_err = {0};
-    char *body = sb_subscription_fetcher_fetch_n(srv->fetcher, sub->url, sub->url_len, &len, &fetch_err);
-    if (!body) return sb_fail(err, SB_ERR_VALIDATION, "Failed to fetch subscription: %s", fetch_err.msg);
-    sb_parsed_node_vec nodes;
-    int rc = sb_parse_subscription_body_ex(body, len, &nodes, err);
-    free(body);
-    if (rc != 0) return parser_failure(err);
-    sb_proxy_upsert_result upsert;
-    sb_proxy_upsert_result_init(&upsert);
-    rc = sb_store_upsert_proxy_nodes(srv->store, nodes.items, nodes.len, sub->id, &upsert, err);
-    if (rc == 0) {
-        sb_subscription_fetch_result_free(result);
-        result->added = upsert.added;
-        result->updated = upsert.updated;
-        result->skipped = 0;
-        result->found = nodes.len;
-        result->errors = upsert.errors;
-        memset(&upsert.errors, 0, sizeof upsert.errors);
-        rc = sb_store_record_subscription_fetch(srv->store, sub->id, result, err);
-    }
-    sb_proxy_upsert_result_free(&upsert);
-    sb_parsed_node_vec_free(&nodes);
+    int rc = sb_subscription_service_fetch(srv->subscriptions, sub->id, result, err);
+    if (rc != 0 && err && err->code == SB_ERR_GENERIC && sb_starts_with(err->msg, "[json.exception."))
+        return parser_failure(err);
     return rc;
 }
 
@@ -782,7 +767,11 @@ static int h_subscriptions_list(sb_http_req *req, sb_http_resp *resp, sb_err *er
     sb_subscription_vec subs = {0};
     if (sb_store_list_subscriptions(req->server->store, &subs, err) != 0) return -1;
     sbj *body = sbj_array();
-    for (size_t i = 0; i < subs.len; ++i) sbj_arr_push(body, sb_subscription_to_json(&subs.items[i]));
+    for (size_t i = 0; i < subs.len; ++i) {
+        sbj *entry = sb_subscription_to_json(&subs.items[i]);
+        sbj_set_bool(entry, "background_refresh_enabled", req->server->opts.subscription_auto_refresh);
+        sbj_arr_push(body, entry);
+    }
     sb_subscription_vec_free(&subs);
     sb_resp_json(resp, 200, body);
     return 0;

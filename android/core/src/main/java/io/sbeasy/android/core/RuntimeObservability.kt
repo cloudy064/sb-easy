@@ -66,6 +66,13 @@ object RuntimeObservability {
         mutableGroups.value = value
     }
 
+    fun recordHealthResults(results: List<NodeHealthResult>) {
+        val byTag = results.associateBy { it.tag }
+        mutableGroups.value = mutableGroups.value.map { group -> group.copy(items = group.items.map { item ->
+            byTag[item.tag]?.let { result -> item.copy(urlTestTime = result.checkedAtMillis / 1000, urlTestDelay = result.latencyMillis ?: 0) } ?: item
+        }) }
+    }
+
     fun markSelection(groupTag: String, outboundTag: String) {
         mutableGroups.value = mutableGroups.value.map { group ->
             if (group.tag == groupTag) group.copy(selected = outboundTag) else group
@@ -341,6 +348,9 @@ interface ConfigValidator {
 }
 
 interface RuntimeControl {
+    val configurationGeneration: Long get() = 0L
+    suspend fun probeOutbound(tag: String, url: String, timeoutMillis: Int): NodeHealthResult =
+        throw UnsupportedOperationException("当前运行时不支持节点探测")
     suspend fun applyConfiguration(config: ManagedConfig)
     suspend fun restart()
     suspend fun selectOutbound(groupTag: String, outboundTag: String)

@@ -17,17 +17,17 @@ The WebView2 SDK archive is SHA-256 pinned in `CMakeLists.txt`. The WebView2
 Evergreen Runtime is installed separately and receives its own updates. There is
 no separate C++ JSON library in the Windows build.
 
-The optional `scripts/prepare-core.ps1` downloads the official **sing-box 1.13.12 Windows x64**
+The optional `scripts/prepare-core.ps1` downloads the official **sing-box 1.14.3 Windows x64**
 archive directly from its upstream release and verifies the pinned SHA-256
-`e93fc531134eb1beb4efa3c74990a24e48456098a31c03b60d5ddf17f223cf98`.
+`d8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518`.
 It preserves that archive's `LICENSE` beside the extracted executable and
-`libcronet.dll`. See the [official release](https://github.com/SagerNet/sing-box/releases/tag/v1.13.12)
-and its [license](https://github.com/SagerNet/sing-box/blob/v1.13.12/LICENSE).
+`libcronet.dll`. See the [official release](https://github.com/SagerNet/sing-box/releases/tag/v1.14.3)
+and its [license](https://github.com/SagerNet/sing-box/blob/v1.14.3/LICENSE).
 Packages built with `package.ps1 -IncludeCore` contain these unmodified upstream
-binaries and `core/LICENSE`. Wintun is embedded by upstream sing-tun v0.8.9;
-its sources and notices are at <https://github.com/SagerNet/sing-tun/tree/v0.8.9>.
+binaries and `core/LICENSE`. Wintun is embedded by upstream the pinned sing-tun revision;
+its sources and notices are at <https://github.com/SagerNet/sing-tun/tree/bca4bf029237>.
 Corresponding upstream source and build instructions:
-<https://github.com/SagerNet/sing-box/tree/v1.13.12> (including its pinned `go.mod`
+<https://github.com/SagerNet/sing-box/tree/v1.14.3> (including its pinned `go.mod`
 dependencies), <https://sing-box.sagernet.org/installation/build-from-source/>.
 When publishing bundled binaries, provide their corresponding source in accordance
 with `core/LICENSE`. Local preview packages are unsigned.
@@ -59,3 +59,8 @@ Source: https://www.tcpdump.org/release/libpcap-1.10.6.tar.xz.
 The pinned win_flex_bison tools are build dependencies, not shipped runtimes.
 
 - yaml 2.x (ISC), Copyright Eemeli Aro. Used for local subscription parsing. License shipped as `licenses/yaml.txt`.
+
+- libyaml 0.2.5 (MIT), Copyright Kirill Simonov and contributors. The Windows
+  service uses its native YAML parser for unattended subscription refresh.
+  License shipped as `licenses/libyaml.txt`; source archive and SHA-256 are
+  pinned in `windows/CMakeLists.txt`.

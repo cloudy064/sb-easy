@@ -1,0 +1,4 @@
+module SBEasyCore {
+    header "include/SBEasyCore.h"
+    export *
+}

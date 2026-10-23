@@ -19,3 +19,13 @@ tmp/
 agent-data/
 backups/
 **/__pycache__/
+
+# Native client outputs are unrelated to the server/agent image.
+android/.gradle/
+android/**/build/
+android/.kotlin/
+windows/ui/node_modules/
+windows/ui/dist/
+extensions/http-debug/.venv/
+downloads/
+updates/

@@ -373,6 +373,7 @@ void sb_proxy_record_free(sb_proxy_record *r) {
     free(r->server);
     sbj_free(r->protocol_config);
     free(r->subscription_id);
+    free(r->source_tag);
     free(r->fingerprint);
     free(r->last_latency_test);
     free(r->created_at);
@@ -392,6 +393,8 @@ void sb_proxy_record_copy(sb_proxy_record *dst, const sb_proxy_record *src) {
     dst->server_port = src->server_port;
     dst->protocol_config = src->protocol_config ? sbj_clone(src->protocol_config) : sbj_object();
     dst->subscription_id = sb_strdup(src->subscription_id);
+    dst->source_tag = src->source_tag ? sb_strndup(src->source_tag, src->source_tag_len) : NULL;
+    dst->source_tag_len = src->source_tag_len;
     dst->fingerprint = sb_strdup(S(src->fingerprint));
     dst->has_latency = src->has_latency;
     dst->latency = src->latency;
@@ -409,6 +412,7 @@ sbj *sb_proxy_record_to_json(const sb_proxy_record *r) {
     sbj_set(v, "server_port", sbj_uint(r->server_port));
     sbj_set(v, "protocol_config", sbj_str_take(sbj_dump(r->protocol_config, -1)));
     sbj_set(v, "subscription_id", opt_str(r->subscription_id));
+    sbj_set(v, "source_tag", r->source_tag ? sbj_strn(r->source_tag, r->source_tag_len) : sbj_null());
     sbj_set_str(v, "fingerprint", S(r->fingerprint));
     sbj_set(v, "latency", r->has_latency ? sbj_float(r->latency) : sbj_null());
     sbj_set(v, "last_latency_test", opt_str(r->last_latency_test));
@@ -426,6 +430,7 @@ void sb_subscription_init(sb_subscription *s) {
     s->url = sb_strdup("");
     s->enabled = true;
     s->refresh_interval = 3600;
+    s->usage = sbj_object();
     s->created_at = sb_strdup("");
     s->updated_at = sb_strdup("");
 }
@@ -435,6 +440,9 @@ void sb_subscription_free(sb_subscription *s) {
     free(s->url);
     free(s->last_fetched_at);
     free(s->last_fetch_result);
+    sbj_free(s->usage);
+    free(s->last_attempt_at);
+    free(s->last_error);
     free(s->created_at);
     free(s->updated_at);
     memset(s, 0, sizeof *s);
@@ -450,6 +458,11 @@ void sb_subscription_copy(sb_subscription *dst, const sb_subscription *src) {
     dst->refresh_interval = src->refresh_interval;
     dst->last_fetched_at = sb_strdup(src->last_fetched_at);
     dst->last_fetch_result = sb_strdup(src->last_fetch_result);
+    dst->usage = src->usage ? sbj_clone(src->usage) : sbj_object();
+    dst->last_attempt_at = sb_strdup(src->last_attempt_at);
+    dst->last_error = sb_strdup(src->last_error);
+    dst->next_refresh_at = src->next_refresh_at;
+    dst->failure_count = src->failure_count;
     dst->created_at = sb_strdup(S(src->created_at));
     dst->updated_at = sb_strdup(S(src->updated_at));
 }
@@ -462,6 +475,11 @@ sbj *sb_subscription_to_json(const sb_subscription *s) {
     sbj_set_int(v, "refresh_interval", s->refresh_interval);
     sbj_set(v, "last_fetched_at", opt_str(s->last_fetched_at));
     sbj_set(v, "last_fetch_result", opt_str(s->last_fetch_result));
+    sbj_set(v, "usage", s->usage ? sbj_clone(s->usage) : sbj_object());
+    sbj_set(v, "last_attempt_at", opt_str(s->last_attempt_at));
+    sbj_set(v, "last_error", opt_str(s->last_error));
+    sbj_set_int(v, "next_refresh_at", s->next_refresh_at);
+    sbj_set_int(v, "failure_count", s->failure_count);
     sbj_set_str(v, "created_at", S(s->created_at));
     sbj_set_str(v, "updated_at", S(s->updated_at));
     return v;
@@ -489,6 +507,7 @@ sbj *sb_proxy_upsert_result_to_json(const sb_proxy_upsert_result *r) {
 void sb_subscription_fetch_result_init(sb_subscription_fetch_result *r) { memset(r, 0, sizeof *r); }
 void sb_subscription_fetch_result_free(sb_subscription_fetch_result *r) {
     sb_strvec_free(&r->errors);
+    sbj_free(r->usage);
     memset(r, 0, sizeof *r);
 }
 sbj *sb_subscription_fetch_result_to_json(const sb_subscription_fetch_result *r) {
@@ -497,6 +516,7 @@ sbj *sb_subscription_fetch_result_to_json(const sb_subscription_fetch_result *r)
     sbj_set(v, "updated", sbj_uint(r->updated));
     sbj_set(v, "skipped", sbj_uint(r->skipped));
     sbj_set(v, "found", sbj_uint(r->found));
+    sbj_set(v, "usage", r->usage ? sbj_clone(r->usage) : sbj_object());
     sbj_set(v, "errors", strvec_to_json(&r->errors));
     return v;
 }
@@ -656,6 +676,8 @@ static int read_proxy_record(sqlite3_stmt *st, sb_proxy_record *r, sb_err *err) 
     r->last_latency_test = sbq_opt_text(st, 10);
     r->created_at = sbq_text(st, 11);
     r->updated_at = sbq_text(st, 12);
+    r->source_tag = sbq_opt_text(st, 13);
+    r->source_tag_len = (size_t)sqlite3_column_bytes(st, 13);
     return 0;
 }
 
@@ -672,11 +694,18 @@ static void read_subscription(sqlite3_stmt *st, sb_subscription *s) {
     s->last_fetch_result = sbq_opt_text(st, 6);
     s->created_at = sbq_text(st, 7);
     s->updated_at = sbq_text(st, 8);
+    const char *usage = (const char *)sqlite3_column_text(st, 9);
+    s->usage = usage ? sbj_parse_cstr(usage) : NULL;
+    if (!sbj_is_object(s->usage)) { sbj_free(s->usage); s->usage = sbj_object(); }
+    s->last_attempt_at = sbq_opt_text(st, 10);
+    s->last_error = sbq_opt_text(st, 11);
+    s->next_refresh_at = sbq_int(st, 12);
+    s->failure_count = sbq_int(st, 13);
 }
 
 static bool supported_proxy_type(const char *type, size_t len) {
     static const char *const supported[] = {"shadowsocks", "vmess",     "vless", "trojan",
-                                            "hysteria2",   "tuic",      "http"};
+                                            "hysteria2",   "tuic",      "http", "socks"};
     for (size_t i = 0; i < sizeof supported / sizeof *supported; ++i)
         if (sb_strn_eq(type, len, supported[i])) return true;
     return false;
@@ -726,11 +755,12 @@ static char *new_agent_token(void) {
 #define PROXY_SELECT                                                                   \
     "SELECT id, tag, node_type, enabled, server, server_port, "                        \
     "protocol_config, subscription_id, fingerprint, latency, "                         \
-    "last_latency_test, created_at, updated_at "
+    "last_latency_test, created_at, updated_at, source_tag "
 
 #define SUBSCRIPTION_SELECT                                                            \
     "SELECT id, name, url, enabled, refresh_interval, last_fetched_at, "               \
-    "last_fetch_result, created_at, updated_at "
+    "last_fetch_result, created_at, updated_at, usage, last_attempt_at, last_error, "    \
+    "next_refresh_at, failure_count "
 
 #define COMMAND_SELECT "SELECT id, host_id, command, status, result, created_at, acked_at "
 
@@ -906,7 +936,7 @@ static char *fingerprint_of(const char *node_type, size_t type_len, const char *
     } else if (sb_strn_eq(t, type_len, "tuic")) {
         first = "uuid";
         second = "password";
-    } else if (sb_strn_eq(t, type_len, "http")) {
+    } else if (sb_strn_eq(t, type_len, "http") || sb_strn_eq(t, type_len, "socks")) {
         first = "username";
         second = "password";
     }
@@ -1041,7 +1071,7 @@ int sb_store_create_user_n(sb_store *s, const char *username, size_t username_le
                            const char *password_hash, const char *role,
                            sb_user_account *out, sb_err *err) {
     if (!username || username_len == 0 || sb_str_empty(password_hash) ||
-        (!sb_streq(role, "admin") && !sb_streq(role, "viewer")))
+        (!sb_streq(role, "admin") && !sb_streq(role, "viewer") && !sb_streq(role, "operator")))
         return sb_fail(err, SB_ERR_VALIDATION, "Invalid user");
     char *id = sb_uuid_v4();
     int rc = -1;
@@ -1529,9 +1559,10 @@ static int restore_subscription(sqlite3 *h, const sbj *value, size_t *count, sb_
     sqlite3_stmt *st = sbq_prepare(h,
                                    "INSERT OR REPLACE INTO subscriptions "
                                    "(id, name, url, enabled, refresh_interval, last_fetched_at, "
-                                   "last_fetch_result, created_at, updated_at) "
+                                   "last_fetch_result, created_at, updated_at, usage, last_attempt_at, "
+                                   "last_error, next_refresh_at, failure_count) "
                                    "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, "
-                                   "COALESCE(NULLIF(?8, ''), datetime('now')), datetime('now'))",
+                                   "COALESCE(NULLIF(?8, ''), datetime('now')), datetime('now'), ?9, ?10, ?11, ?12, ?13)",
                                    err);
     if (!st) return -1;
     sbq_bind_text(st, 1, id);
@@ -1550,6 +1581,20 @@ static int restore_subscription(sqlite3 *h, const sbj *value, size_t *count, sb_
     sbq_bind_text(st, 6, jv_opt_str(value, "last_fetched_at"));
     sbq_bind_text(st, 7, jv_opt_str(value, "last_fetch_result"));
     sbq_bind_text(st, 8, created_at);
+    const sbj *usage = sbj_get(value, "usage");
+    sbj *empty = sbj_object();
+    int usage_rc = bind_dump(st, 9, sbj_is_object(usage) ? usage : empty, err);
+    sbj_free(empty);
+    if (usage_rc != 0) { sqlite3_finalize(st); return -1; }
+    sbq_bind_text(st, 10, jv_opt_str(value, "last_attempt_at"));
+    sbq_bind_text(st, 11, jv_opt_str(value, "last_error"));
+    int64_t next_refresh = 0, failure_count = 0;
+    if (jv_int(value, "next_refresh_at", 0, &next_refresh, err) ||
+        jv_int(value, "failure_count", 0, &failure_count, err)) {
+        sqlite3_finalize(st); return -1;
+    }
+    sbq_bind_int(st, 12, next_refresh < 0 ? 0 : next_refresh);
+    sbq_bind_int(st, 13, failure_count < 0 ? 0 : (failure_count > 20 ? 20 : failure_count));
     if (exec_stmt(st, err) != 0) return -1;
     ++*count;
     return 0;
@@ -1578,9 +1623,9 @@ static int restore_node(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
                      "INSERT OR REPLACE INTO proxy_nodes "
                      "(id, tag, node_type, enabled, server, server_port, "
                      "protocol_config, subscription_id, fingerprint, latency, "
-                     "last_latency_test, created_at, updated_at) "
+                     "last_latency_test, created_at, updated_at, source_tag) "
                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
-                     "COALESCE(NULLIF(?12, ''), datetime('now')), datetime('now'))",
+                     "COALESCE(NULLIF(?12, ''), datetime('now')), datetime('now'), ?13)",
                      err);
     if (!st) goto done;
     sbq_bind_text(st, 1, id);
@@ -1609,6 +1654,16 @@ static int restore_node(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
     sbq_bind_opt_double(st, 10, sbj_is_number(latency) ? &latency_value : NULL);
     sbq_bind_text(st, 11, jv_opt_str(value, "last_latency_test"));
     sbq_bind_text(st, 12, created_at);
+    const sbj *source_tag = sbj_get(value, "source_tag");
+    if (sbj_is_string(source_tag)) {
+        if (sbq_bind_text_n(st, 13, source_tag->v.str.ptr, source_tag->v.str.len, err) != 0) {
+            sqlite3_finalize(st); goto done;
+        }
+    } else if (jv_opt_str(value, "subscription_id")) {
+        if (sbq_bind_text_n(st, 13, tag, sbj_get(value, "tag")->v.str.len, err) != 0) {
+            sqlite3_finalize(st); goto done;
+        }
+    } else sbq_bind_text(st, 13, NULL);
     rc = exec_stmt(st, err);
     if (rc == 0) ++*count;
 done:
@@ -1617,7 +1672,8 @@ done:
 }
 
 static int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err) {
-    const char *id, *address, *name, *private_key, *public_key, *dns, *allowed_ips, *created_at;
+    const char *id = NULL, *address = NULL, *name = NULL, *private_key = NULL;
+    const char *public_key = NULL, *dns = NULL, *allowed_ips = NULL, *created_at = NULL;
     bool enabled = false;
     int64_t keepalive, quota;
     if (jv_str(value, "id", "", &id, err) || jv_str(value, "address", "", &address, err)) return -1;
@@ -2008,7 +2064,7 @@ char *sb_store_save_diagnostic_report(sb_store *s, const char *host_id, const sb
         sb_fail(err, SB_ERR_VALIDATION, "Diagnostic report must be a JSON object");
         return NULL;
     }
-    const char *reason, *app_version, *core_version;
+    const char *reason = NULL, *app_version = NULL, *core_version = NULL;
     if (jv_str(report, "reason", "manual", &reason, err) ||
         jv_str(report, "app_version", "", &app_version, err) ||
         jv_str(report, "core_version", "", &core_version, err))
@@ -2591,6 +2647,12 @@ int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
                                        node->protocol_config, err);
     if (!fingerprint) return -1;
+    if (node->subscription_id) {
+        char *scoped = sb_asprintf("%s:%s", node->subscription_id, fingerprint);
+        free(fingerprint);
+        fingerprint = sb_sha256_hex(scoped, strlen(scoped));
+        free(scoped);
+    }
     char *id = sb_str_empty(node->id) ? sb_uuid_v4() : sb_strdup(node->id);
     int rc = -1;
     LOCK(s);
@@ -2658,6 +2720,12 @@ int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
                                        node->protocol_config, err);
     if (!fingerprint) return -1;
+    if (node->subscription_id) {
+        char *scoped = sb_asprintf("%s:%s", node->subscription_id, fingerprint);
+        free(fingerprint);
+        fingerprint = sb_sha256_hex(scoped, strlen(scoped));
+        free(scoped);
+    }
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
@@ -2735,6 +2803,33 @@ int sb_store_delete_proxy_node(sb_store *s, const char *id, sb_err *err) {
     return rc;
 }
 
+/* Renderer outbound tags must remain unique even when two subscriptions use
+ * the same display name. The provider name stays in source_tag for rotation. */
+static char *import_display_tag(sqlite3 *h, const sb_parsed_node *node, const char *existing_id,
+                                size_t *length, sb_err *err) {
+    char *tag = sb_strndup(node->tag, node->tag_len);
+    *length = node->tag_len;
+    for (size_t suffix = 1; ; ++suffix) {
+        sqlite3_stmt *st = sbq_prepare(h,
+            "SELECT 1 FROM proxy_nodes WHERE tag = ?1 AND (?2 IS NULL OR id != ?2) LIMIT 1", err);
+        if (!st) { free(tag); return NULL; }
+        if (sbq_bind_text_n(st, 1, tag, *length, err) != 0) {
+            sqlite3_finalize(st); free(tag); return NULL;
+        }
+        sbq_bind_text(st, 2, existing_id);
+        int found = sbq_step_row(st, err);
+        sqlite3_finalize(st);
+        if (found == 0) return tag;
+        if (found < 0) { free(tag); return NULL; }
+        sb_buf renamed = {0};
+        sb_buf_append(&renamed, node->tag, node->tag_len);
+        sb_buf_printf(&renamed, " [%zu]", suffix + 1);
+        free(tag);
+        *length = renamed.len;
+        tag = sb_buf_detach(&renamed);
+    }
+}
+
 /* One node of upsert_proxy_nodes; errors are collected by the caller. */
 static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscription_id,
                       sb_proxy_upsert_result *result, sb_err *err) {
@@ -2745,18 +2840,30 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
     char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
                                        node->protocol_config, err);
     if (!fingerprint) return -1;
+    char *legacy_fingerprint = sb_strdup(fingerprint);
+    if (subscription_id) {
+        char *scoped = sb_asprintf("%s:%s", subscription_id, fingerprint);
+        free(fingerprint);
+        fingerprint = sb_sha256_hex(scoped, strlen(scoped));
+        free(scoped);
+    }
     char *existing_id = NULL;
+    char *display_tag = NULL;
+    size_t display_tag_len = 0;
     int rc = -1;
     /* Two-level match: fingerprint first, then the same tag with a different
      * fingerprint (a provider rotating its server address). */
     sqlite3_stmt *st = sbq_prepare(h,
-                                   "SELECT id FROM proxy_nodes WHERE fingerprint = ?1 "
+                                   "SELECT id FROM proxy_nodes WHERE (fingerprint = ?1 OR fingerprint = ?4) "
+                                   "AND subscription_id IS ?3 "
                                    "UNION ALL "
-                                   "SELECT id FROM proxy_nodes WHERE tag = ?2 "
-                                   "AND fingerprint != ?1 LIMIT 1",
+                                   "SELECT id FROM proxy_nodes WHERE (tag = ?2 OR source_tag = ?2) "
+                                   "AND fingerprint != ?1 AND subscription_id IS ?3 LIMIT 1",
                                    err);
     if (!st) goto done;
     sbq_bind_text(st, 1, fingerprint);
+    sbq_bind_text(st, 3, subscription_id);
+    sbq_bind_text(st, 4, legacy_fingerprint);
     if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
         sqlite3_finalize(st);
         goto done;
@@ -2765,10 +2872,14 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
     if (r == 1) existing_id = sbq_text(st, 0);
     sqlite3_finalize(st);
     if (r < 0) goto done;
+    display_tag = import_display_tag(h, node, existing_id, &display_tag_len, err);
+    if (!display_tag) goto done;
 
     if (existing_id) {
         st = sbq_prepare(h,
-                         "UPDATE proxy_nodes SET tag = ?1, node_type = ?2, "
+                         "UPDATE proxy_nodes SET tag = CASE WHEN ?7 IS NOT NULL "
+                         "AND source_tag IS NOT NULL AND tag != source_tag THEN tag ELSE ?9 END, "
+                         "source_tag = CASE WHEN ?7 IS NOT NULL THEN ?1 ELSE NULL END, node_type = ?2, "
                          "server = ?3, server_port = ?4, protocol_config = ?5, "
                          "fingerprint = ?6, subscription_id = ?7, "
                          "updated_at = datetime('now') WHERE id = ?8",
@@ -2791,15 +2902,16 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
         sbq_bind_text(st, 6, fingerprint);
         sbq_bind_text(st, 7, subscription_id);
         sbq_bind_text(st, 8, existing_id);
+        if (bound == 0) bound = sbq_bind_text_n(st, 9, display_tag, display_tag_len, err);
         if (exec_bound(st, bound, err) != 0) goto done;
         ++result->updated;
     } else {
         st = sbq_prepare(h,
                          "INSERT INTO proxy_nodes "
                          "(id, tag, node_type, enabled, server, server_port, "
-                         "protocol_config, subscription_id, fingerprint, "
+                         "protocol_config, subscription_id, fingerprint, source_tag, "
                          "created_at, updated_at) "
-                         "VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, "
+                         "VALUES (?1, ?9, ?3, 1, ?4, ?5, ?6, ?7, ?8, CASE WHEN ?7 IS NOT NULL THEN ?2 END, "
                          "datetime('now'), datetime('now'))",
                          err);
         if (!st) goto done;
@@ -2822,13 +2934,16 @@ static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscr
         int bound = bind_dump(st, 6, node->protocol_config, err);
         sbq_bind_text(st, 7, subscription_id);
         sbq_bind_text(st, 8, fingerprint);
+        if (bound == 0) bound = sbq_bind_text_n(st, 9, display_tag, display_tag_len, err);
         if (exec_bound(st, bound, err) != 0) goto done;
         ++result->added;
     }
     rc = 0;
 done:
     free(fingerprint);
+    free(legacy_fingerprint);
     free(existing_id);
+    free(display_tag);
     return rc;
 }
 
@@ -2952,7 +3067,9 @@ int sb_store_update_subscription(sb_store *s, const sb_subscription *sub, sb_sub
     sqlite3 *h = H(s);
     sqlite3_stmt *st = sbq_prepare(h,
                                    "UPDATE subscriptions SET name = ?1, url = ?2, enabled = ?3, "
-                                   "refresh_interval = ?4, updated_at = datetime('now') WHERE id = ?5",
+                                   "next_refresh_at = CASE WHEN url != ?2 OR enabled != ?3 OR refresh_interval != ?4 "
+                                   "THEN 0 ELSE next_refresh_at END, refresh_interval = ?4, "
+                                   "updated_at = datetime('now') WHERE id = ?5",
                                    err);
     if (st) {
         int bound = sbq_bind_text_n(st, 1, sub->name, sub->name_len, err);
@@ -2994,6 +3111,97 @@ int sb_store_record_subscription_fetch(sb_store *s, const char *id,
                           "last_fetch_result = ?1 WHERE id = ?2",
                           "Subscription not found", err, 2, binds);
     free(text);
+    return rc;
+}
+
+/* Keep the source check, node writes and success marker in one transaction.
+ * A slow response from an edited/deleted source must never replace its nodes. */
+static int subscription_unchanged(sqlite3 *h, const sb_subscription *expected,
+                                  sb_subscription *current, sb_err *err) {
+    int r = find_subscription_locked(h, expected->id, current, err);
+    if (r == 0) return sb_fail(err, SB_ERR_NOT_FOUND, "Subscription not found");
+    if (r < 0) return -1;
+    if (current->url_len != expected->url_len ||
+        memcmp(current->url, expected->url, current->url_len) != 0 ||
+        current->enabled != expected->enabled)
+        return sb_fail(err, SB_ERR_CONFLICT, "Subscription changed during refresh; response discarded");
+    return 0;
+}
+
+int sb_store_apply_subscription_fetch(sb_store *s, const sb_subscription *expected,
+                                      const sb_parsed_node *nodes, size_t count,
+                                      sb_subscription_fetch_result *result, int64_t now,
+                                      sb_err *err) {
+    sb_subscription current;
+    sb_subscription_init(&current);
+    sb_proxy_upsert_result upsert;
+    sb_proxy_upsert_result_init(&upsert);
+    LOCK(s);
+    sqlite3 *h = H(s);
+    int rc = sbq_begin(h, err);
+    if (rc == 0) rc = subscription_unchanged(h, expected, &current, err);
+    for (size_t i = 0; rc == 0 && i < count; ++i)
+        rc = upsert_one(h, &nodes[i], expected->id, &upsert, err);
+    if (rc == 0) {
+        result->added = upsert.added;
+        result->updated = upsert.updated;
+        result->found = count;
+        sbj *metadata = sbj_object();
+        sbj_set(metadata, "added", sbj_uint(result->added));
+        sbj_set(metadata, "updated", sbj_uint(result->updated));
+        sbj_set(metadata, "skipped", sbj_uint(result->skipped));
+        sbj_set(metadata, "total", sbj_uint(result->found));
+        sbj_set(metadata, "errors", strvec_to_json(&result->errors));
+        sqlite3_stmt *st = sbq_prepare(h,
+            "UPDATE subscriptions SET last_fetched_at = datetime(?1, 'unixepoch'), "
+            "last_attempt_at = datetime(?1, 'unixepoch'), last_fetch_result = ?2, "
+            "usage = ?3, last_error = NULL, failure_count = 0, next_refresh_at = ?4 "
+            "WHERE id = ?5", err);
+        rc = st ? 0 : -1;
+        if (st) {
+            sbq_bind_int(st, 1, now);
+            int bound = bind_dump(st, 2, metadata, err);
+            if (bound == 0) bound = bind_dump(st, 3, result->usage, err);
+            int64_t interval = current.refresh_interval < 60 ? 60 : current.refresh_interval;
+            sbq_bind_int(st, 4, interval > INT64_MAX - now ? INT64_MAX : now + interval);
+            sbq_bind_text(st, 5, expected->id);
+            rc = exec_bound(st, bound, err);
+        }
+        sbj_free(metadata);
+    }
+    if (rc == 0) rc = sbq_commit(h, err);
+    if (rc != 0) sbq_rollback(h);
+    UNLOCK(s);
+    sb_proxy_upsert_result_free(&upsert);
+    sb_subscription_free(&current);
+    return rc;
+}
+
+int sb_store_record_subscription_failure(sb_store *s, const sb_subscription *expected,
+                                         const char *message, int64_t now, sb_err *err) {
+    sb_subscription current;
+    sb_subscription_init(&current);
+    LOCK(s);
+    sqlite3 *h = H(s);
+    int rc = subscription_unchanged(h, expected, &current, err);
+    if (rc == 0) {
+        int64_t attempts = current.failure_count < 20 ? current.failure_count + 1 : 20;
+        int64_t delay = attempts > 6 ? 3600 : (60LL << (attempts - 1));
+        sqlite3_stmt *st = sbq_prepare(h,
+            "UPDATE subscriptions SET last_attempt_at = datetime(?1, 'unixepoch'), "
+            "last_error = ?2, failure_count = ?3, next_refresh_at = ?4 WHERE id = ?5", err);
+        rc = st ? 0 : -1;
+        if (st) {
+            sbq_bind_int(st, 1, now);
+            sbq_bind_text(st, 2, message);
+            sbq_bind_int(st, 3, attempts);
+            sbq_bind_int(st, 4, now > INT64_MAX - delay ? INT64_MAX : now + delay);
+            sbq_bind_text(st, 5, expected->id);
+            rc = exec_stmt(st, err);
+        }
+    }
+    UNLOCK(s);
+    sb_subscription_free(&current);
     return rc;
 }
 
@@ -3172,5 +3380,247 @@ int sb_store_delete_capture(sb_store *s, const char *host_id, const char *digest
     int rc = -1;
     if (st) { sbq_bind_text(st, 1, host_id); sbq_bind_text(st, 2, digest); rc = exec_stmt(st, err); }
     UNLOCK(s);
+    return rc;
+}
+
+/* ---- wg-easy migration: preview, guarded apply and rollback ------------ */
+sbj *sb_store_list_wg_imports(sb_store *s, sb_err *err) {
+    sbj *rows = sbj_array();
+    LOCK(s);
+    sqlite3_stmt *st = sbq_prepare(H(s),
+        "SELECT id, created_at, status, inserted_ids FROM wireguard_imports ORDER BY created_at DESC, rowid DESC LIMIT 20", err);
+    int r = st ? 0 : -1;
+    while (st && (r = sbq_step_row(st, err)) == 1) {
+        sbj *row = sbj_object();
+        sbj_set(row, "id", sbj_str_take(sbq_text(st, 0)));
+        sbj_set(row, "created_at", sbj_str_take(sbq_text(st, 1)));
+        sbj_set(row, "status", sbj_str_take(sbq_text(st, 2)));
+        sbj *ids = sbj_parse((const char *)sqlite3_column_text(st, 3), (size_t)sqlite3_column_bytes(st, 3), NULL, 0);
+        sbj_set(row, "added", sbj_uint(sbj_arr_len(ids))); sbj_free(ids);
+        sbj_arr_push(rows, row);
+    }
+    sqlite3_finalize(st); UNLOCK(s);
+    if (r < 0) { sbj_free(rows); return NULL; }
+    return rows;
+}
+
+static sbj *wg_snapshot_locked(sqlite3 *h, sb_err *err) {
+    sbj *snapshot = sbj_object(), *settings = sbj_object(), *peers = sbj_array();
+    sbj_set(snapshot, "app_settings", settings);
+    sbj_set(snapshot, "wireguard_peers", peers);
+    sqlite3_stmt *st = sbq_prepare(h,
+        "SELECT key, value FROM app_settings WHERE key IN ('wg_server_key', 'wireguard_interface') ORDER BY key", err);
+    if (!st) goto fail;
+    int r;
+    while ((r = sbq_step_row(st, err)) == 1) {
+        sbj *value = parse_object_col(st, 1, "WireGuard settings", err);
+        if (!value) { sqlite3_finalize(st); goto fail; }
+        sbj_set(settings, (const char *)sqlite3_column_text(st, 0), value);
+    }
+    sqlite3_finalize(st);
+    if (r < 0) goto fail;
+    st = sbq_prepare(h, WIREGUARD_PEER_SELECT " ORDER BY id", err);
+    if (!st) goto fail;
+    while ((r = sbq_step_row(st, err)) == 1) {
+        sb_wireguard_peer peer; sb_wireguard_peer_init(&peer);
+        read_wireguard_peer(st, &peer);
+        sbj_arr_push(peers, sb_wireguard_peer_to_json(&peer));
+        sb_wireguard_peer_free(&peer);
+    }
+    sqlite3_finalize(st);
+    if (r < 0) goto fail;
+    return snapshot;
+fail:
+    sbj_free(snapshot); return NULL;
+}
+
+static int wg_settings_locked(sqlite3 *h, const sbj *settings, sb_err *err) {
+    const char *keys[] = {"wg_server_key", "wireguard_interface"};
+    for (size_t i = 0; i < 2; ++i) {
+        const sbj *value = sbj_get(settings, keys[i]);
+        sqlite3_stmt *st = sbq_prepare(h, value ? settings_upsert_sql :
+            "DELETE FROM app_settings WHERE key = ?1", err);
+        if (!st) return -1;
+        sbq_bind_text(st, 1, keys[i]);
+        int bound = value ? bind_dump(st, 2, value, err) : 0;
+        if (exec_bound(st, bound, err) != 0) return -1;
+    }
+    return 0;
+}
+
+static int wg_import_audit(sqlite3 *h, const char *actor, size_t actor_len,
+                            const char *action, const char *id, sb_err *err) {
+    sqlite3_stmt *st = sbq_prepare(h, "INSERT INTO audit_log(actor, action, target) VALUES(?1, ?2, ?3)", err);
+    if (!st) return -1;
+    int bound = sbq_bind_text_n(st, 1, S(actor), actor ? actor_len : 0, err);
+    sbq_bind_text(st, 2, action); sbq_bind_text(st, 3, id);
+    return exec_bound(st, bound, err);
+}
+
+static bool wg_import_same_ip(const char *left, const char *right) {
+    size_t left_len = strcspn(left, "/"), right_len = strcspn(right, "/");
+    return left_len == right_len && memcmp(left, right, left_len) == 0;
+}
+
+int sb_store_wg_import(sb_store *s, const sbj *batch, bool apply, const char *preview_digest,
+                       const char *actor, size_t actor_len, sbj **out, sb_err *err) {
+    const sbj *incoming = sbj_get(batch, "wireguard_peers");
+    const sbj *incoming_settings = sbj_get(batch, "app_settings");
+    if (!sbj_is_array(incoming) || !sbj_is_object(incoming_settings))
+        return sb_fail(err, SB_ERR_VALIDATION, "Validated WireGuard migration batch is required");
+    sbj *before = NULL, *after = NULL, *report = sbj_object(), *additions = sbj_array();
+    sbj *ids = sbj_array(), *settings = NULL;
+    char *digest = NULL, *migration_id = NULL;
+    LOCK(s);
+    sqlite3 *h = H(s);
+    int rc = sbq_begin(h, err);
+    if (rc != 0) goto done;
+    before = wg_snapshot_locked(h, err);
+    if (!before) { rc = -1; goto done; }
+    sbj *material = sbj_object(); sbj_set(material, "before", sbj_clone(before));
+    sbj_set(material, "incoming", sbj_clone(batch));
+    char *serialized = dump_checked(material, err); sbj_free(material);
+    if (!serialized) { rc = -1; goto done; }
+    digest = sb_sha256_hex(serialized, strlen(serialized)); free(serialized);
+    const sbj *existing = sbj_get(before, "wireguard_peers");
+    const sbj *old_settings = sbj_get(before, "app_settings");
+    const sbj *new_keys = sbj_get(incoming_settings, "wg_server_key");
+    const sbj *new_interface = sbj_get(incoming_settings, "wireguard_interface");
+    sbj *conflicts = sbj_array(), *rows = sbj_array();
+    sbj_set(report, "conflicts", conflicts); sbj_set(report, "clients", rows);
+    if (sbj_arr_len(existing)) {
+        if (strcmp(sbj_get_str(sbj_get(old_settings, "wg_server_key"), "public_key", ""),
+                   sbj_get_str(new_keys, "public_key", "")) != 0)
+            sbj_arr_push(conflicts, sbj_str("Existing WireGuard peers use a different or unknown server identity"));
+        if (strcmp(sbj_get_str(sbj_get(old_settings, "wireguard_interface"), "address", ""),
+                   sbj_get_str(new_interface, "address", "")) != 0)
+            sbj_arr_push(conflicts, sbj_str("Existing WireGuard peers use a different server subnet"));
+    }
+    size_t skipped = 0;
+    const sbj *peer;
+    SBJ_ARR_FOREACH(incoming, index, peer) {
+        const char *id = sbj_get_str(peer, "id", ""), *pub = sbj_get_str(peer, "public_key", "");
+        const char *address = sbj_get_str(peer, "address", "");
+        bool same = false, collision = false;
+        const sbj *old;
+        SBJ_ARR_FOREACH(existing, previous, old) {
+            bool same_key = strcmp(pub, sbj_get_str(old, "public_key", "")) == 0;
+            bool same_address = wg_import_same_ip(address, sbj_get_str(old, "address", ""));
+            bool same_id = strcmp(id, sbj_get_str(old, "id", "")) == 0;
+            if (same_key && same_address) same = true;
+            else if (same_key || same_address || same_id) collision = true;
+        }
+        sbj *row = sbj_object(); sbj_set_str(row, "id", id);
+        sbj_set_str(row, "name", sbj_get_str(peer, "name", "")); sbj_set_str(row, "address", address);
+        sbj_set_bool(row, "enabled", sbj_get_bool(peer, "enabled", false));
+        sbj_set_bool(row, "has_private_key", *sbj_get_str(peer, "private_key", "") != '\0');
+        sbj_set_str(row, "action", collision ? "conflict" : same ? "already_present" : "add");
+        sbj_arr_push(rows, row);
+        if (collision) sbj_arr_push(conflicts, sbj_str_take(sb_asprintf("Client %zu conflicts with an existing identifier, address or public key", index + 1)));
+        else if (same) ++skipped;
+        else { sbj_arr_push(additions, sbj_clone(peer)); sbj_arr_push(ids, sbj_str(id)); }
+    }
+    sbj_set_str(report, "format", "wg-easy-v14"); sbj_set_str(report, "status", apply ? "imported" : "preview");
+    sbj_set_str(report, "preview_digest", digest); sbj_set_bool(report, "can_import", sbj_arr_len(conflicts) == 0);
+    sbj_set(report, "added", sbj_uint(sbj_arr_len(additions))); sbj_set(report, "skipped", sbj_uint(skipped));
+    sbj_set_str(report, "server_address", sbj_get_str(new_interface, "address", ""));
+    sbj_set_str(report, "server_public_key", sbj_get_str(new_keys, "public_key", ""));
+    if (!apply) { sbq_rollback(h); goto success; }
+    if (sbj_arr_len(conflicts)) { rc = sb_fail(err, SB_ERR_CONFLICT, "Migration has conflicts; no changes applied"); goto done; }
+    if (!preview_digest || strcmp(preview_digest, digest) != 0) {
+        rc = sb_fail(err, SB_ERR_CONFLICT, "Migration input or WireGuard state changed; preview again before importing"); goto done;
+    }
+    settings = sbj_clone(old_settings);
+    sbj_set(settings, "wg_server_key", sbj_clone(new_keys));
+    sbj *merged_interface = sbj_get(old_settings, "wireguard_interface") ?
+        sbj_clone(sbj_get(old_settings, "wireguard_interface")) : sbj_object();
+    sbj_set_str(merged_interface, "address", sbj_get_str(new_interface, "address", ""));
+    sbj_set(settings, "wireguard_interface", merged_interface);
+    rc = wg_settings_locked(h, settings, err);
+    size_t inserted = 0;
+    SBJ_ARR_FOREACH(additions, index, peer) {
+        if (rc == 0) rc = restore_peer(h, peer, &inserted, err);
+    }
+    if (rc != 0) goto done;
+    after = wg_snapshot_locked(h, err);
+    if (!after) { rc = -1; goto done; }
+    migration_id = sb_uuid_v4();
+    sqlite3_stmt *st = sbq_prepare(h,
+        "INSERT INTO wireguard_imports(id, before_snapshot, after_snapshot, inserted_ids) VALUES(?1, ?2, ?3, ?4)", err);
+    if (!st) { rc = -1; goto done; }
+    sbq_bind_text(st, 1, migration_id);
+    int bound = bind_dump(st, 2, before, err);
+    if (bound == 0) bound = bind_dump(st, 3, after, err);
+    if (bound == 0) bound = bind_dump(st, 4, ids, err);
+    rc = exec_bound(st, bound, err);
+    if (rc == 0) rc = wg_import_audit(h, actor, actor_len, "wireguard.import", migration_id, err);
+    if (rc == 0) rc = sbq_commit(h, err);
+    if (rc != 0) goto done;
+    sbj_set_str(report, "migration_id", migration_id);
+    sbj_set_bool(report, "restart_required", true);
+success:
+    *out = report; report = NULL;
+done:
+    if (rc != 0) sbq_rollback(h);
+    UNLOCK(s);
+    sbj_free(before); sbj_free(after); sbj_free(report); sbj_free(additions); sbj_free(ids); sbj_free(settings);
+    free(digest); free(migration_id);
+    return rc;
+}
+
+int sb_store_wg_import_rollback(sb_store *s, const char *id, const char *actor,
+                                size_t actor_len, sbj **out, sb_err *err) {
+    sbj *before = NULL, *after = NULL, *ids = NULL, *current = NULL;
+    LOCK(s);
+    sqlite3 *h = H(s);
+    int rc = sbq_begin(h, err);
+    if (rc != 0) goto done;
+    sqlite3_stmt *st = sbq_prepare(h,
+        "SELECT before_snapshot, after_snapshot, inserted_ids, status FROM wireguard_imports WHERE id = ?1", err);
+    if (!st) { rc = -1; goto done; }
+    sbq_bind_text(st, 1, S(id));
+    int found = sbq_step_row(st, err);
+    if (found != 1) {
+        sqlite3_finalize(st);
+        rc = found < 0 ? -1 : sb_fail(err, SB_ERR_NOT_FOUND, "Migration record not found"); goto done;
+    }
+    if (strcmp((const char *)sqlite3_column_text(st, 3), "applied") != 0) {
+        sqlite3_finalize(st); rc = sb_fail(err, SB_ERR_CONFLICT, "Migration was already rolled back"); goto done;
+    }
+    before = parse_object_col(st, 0, "migration before snapshot", err);
+    after = parse_object_col(st, 1, "migration after snapshot", err);
+    ids = sbj_parse((const char *)sqlite3_column_text(st, 2), (size_t)sqlite3_column_bytes(st, 2), NULL, 0);
+    sqlite3_finalize(st);
+    if (!before || !after || !sbj_is_array(ids)) { rc = sb_fail(err, SB_ERR_GENERIC, "Invalid migration rollback record"); goto done; }
+    current = wg_snapshot_locked(h, err);
+    if (!current) { rc = -1; goto done; }
+    if (!sbj_equal(current, after)) {
+        rc = sb_fail(err, SB_ERR_CONFLICT, "WireGuard state changed after import; automatic rollback would overwrite those changes"); goto done;
+    }
+    const sbj *peer_id;
+    SBJ_ARR_FOREACH(ids, index, peer_id) {
+        const char *queries[] = {"DELETE FROM one_time_links WHERE peer_id = ?1", "DELETE FROM wireguard_peers WHERE id = ?1"};
+        for (size_t i = 0; i < 2 && rc == 0; ++i) {
+            st = sbq_prepare(h, queries[i], err);
+            if (!st) { rc = -1; break; }
+            sbq_bind_text(st, 1, sbj_as_str(peer_id, "")); rc = exec_stmt(st, err);
+        }
+    }
+    if (rc == 0) rc = wg_settings_locked(h, sbj_get(before, "app_settings"), err);
+    if (rc == 0) {
+        st = sbq_prepare(h, "UPDATE wireguard_imports SET status = 'rolled_back' WHERE id = ?1", err);
+        if (!st) rc = -1;
+        else { sbq_bind_text(st, 1, id); rc = exec_stmt(st, err); }
+    }
+    if (rc == 0) rc = wg_import_audit(h, actor, actor_len, "wireguard.import.rollback", id, err);
+    if (rc == 0) rc = sbq_commit(h, err);
+    if (rc == 0) {
+        *out = sbj_object(); sbj_set_str(*out, "status", "rolled_back");
+        sbj_set_str(*out, "migration_id", id); sbj_set_bool(*out, "restart_required", true);
+    }
+done:
+    if (rc != 0) sbq_rollback(h);
+    UNLOCK(s);
+    sbj_free(before); sbj_free(after); sbj_free(ids); sbj_free(current);
     return rc;
 }

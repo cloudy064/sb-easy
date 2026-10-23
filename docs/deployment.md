@@ -10,7 +10,7 @@
                 ┌──────────────────────────────────────────┐
                 │  服务器 (公网, 例: 39.108.98.208)           │
                 │  sb-easy 容器:                              │
-                │   - 面板 / 配置同步 (:51821)                 │
+                │   - HTTPS / 配置同步 (:443 → loopback)     │
                 │   - WireGuard hub (:51820, 10.59.32.1/24)   │
                 │   - SINGBOX_MANAGED=false (服务器不跑代理)    │
                 └───────────────┬──────────────────────────┘
@@ -41,43 +41,34 @@ docker save sb-easy:latest | gzip -1 | ssh root@SERVER 'gunzip | docker load'
 
 服务器上 `/root/workspace/sb-easy/`：
 
-`.env`（密钥，勿入库）：
-```
-JWT_SECRET=<openssl rand -hex 32>
-ADMIN_PASSWORD=<强密码>
-```
+使用仓库的 `docker-compose.yml`，将 `panel.example.com` 的 DNS 指向服务器，
+开放 TCP 80/443 和 WireGuard UDP 51820。生成初始 `.env`（权限 0600，不入库）：
 
-`docker-compose.yml`（面板 + WG hub，**不跑 sing-box**）：
-```yaml
-services:
-  sb-easy:
-    image: sb-easy:latest
-    container_name: sb-easy
-    restart: unless-stopped
-    cap_add: [NET_ADMIN, SYS_MODULE]
-    ports:
-      - "51821:51821/tcp"   # 面板
-      - "51820:51820/udp"   # WireGuard
-    volumes:
-      - ./data:/app/data
-    env_file: [ .env ]
-    environment:
-      - SINGBOX_MANAGED=false        # 服务器只做面板 + WG hub
-      - SELF_SINGBOX_CONFIG_PATH=    # 关掉自管 sing-box
-      - WG_ENABLED=true
-      - WG_PORT=51820
-      - WG_ADDRESS=10.59.32.1/24
-      - EXTERNAL_HOSTNAME=SERVER_PUBLIC_IP
-```
 ```sh
-cd /root/workspace/sb-easy && docker compose up -d
+python3 scripts/configure-https.py --domain panel.example.com
 ```
-面板：`http://SERVER:51821`（admin / 你设的密码）。
 
-Android APK 不由管理服务器托管。请将 APK 与校验值发布到项目的 GitHub
-Releases；管理端“Android 客户端”页面会引导用户前往：
+如果服务器只负责面板和 WG hub，在 `.env` 中添加 `SINGBOX_MANAGED=false`。
+首次配置后运行 `docker compose up -d`；面板为 `https://panel.example.com`，
+用户名 `admin`，初始密码在 `.env` 的 `ADMIN_PASSWORD` 中。已有 `.env` 时保留
+原 `JWT_SECRET`，补齐 `PANEL_DOMAIN`、强密码和 `BIND_ADDR=127.0.0.1:51821`；
+生成脚本会拒绝覆盖现有文件。
 
-`https://github.com/cloudy064/sb-easy/releases`
+默认 Caddy 使用公网 CA 自动签发/续期证书，HTTP 请求重定向到 HTTPS；
+它通过 loopback 访问面板并转发 WebSocket。`caddy_data` 卷保存证书和账号状态，
+应随部署备份。配置参见 [deploy/Caddyfile](../deploy/Caddyfile) 和
+[Caddy 自动 HTTPS 文档](https://caddyserver.com/docs/automatic-https)。
+没有域名或 80/443 不可达时，不能完成公网自动签发。
+
+已有 HTTPS 反向代理时，只启动 `docker compose up -d sb-easy`，将该代理指向
+`127.0.0.1:51821` 并开启 WebSocket 转发。`PUBLIC_SERVER` 与 `CORS_ORIGINS`
+保持公网 HTTPS 来源，勿将 51821 暴露公网。本机开发可直接以 C 二进制绑定
+loopback 临时端口运行；开发环境的明文入口不用于远程设备或 OIDC。
+
+客户端安装包不由管理服务器托管。“客户端下载”页面根据
+`config/client-releases.json` 提供已发布的 APK、MSI、ZIP、对应源码和校验值，
+同时单独显示尚未发布的源码版本。发布新包后运行
+`python3 scripts/client-release.py verify-published` 校验资产，再更新下载清单。
 > 若服务器在跑 wg-easy，先停掉（占用 51820/51821）：`docker stop wg-easy && docker update --restart=no wg-easy`。
 
 ## 二、加一个 agent 端点
@@ -89,7 +80,7 @@ Releases；管理端“Android 客户端”页面会引导用户前往：
    AGENT_UI_PASSWORD=$(openssl rand -hex 24)
    docker run -d --name sb-easy-agent --restart unless-stopped \
      --network host --cap-add NET_ADMIN --device /dev/net/tun \
-     -e SB_EASY_SERVER=http://SERVER:51821 \
+     -e SB_EASY_SERVER=https://panel.example.com \
      -e AGENT_ENROLLMENT_CODE=<一次性设备授权码> \
      -e AGENT_UI_PASSWORD="$AGENT_UI_PASSWORD" \
      -v "$PWD/agent-data:/app/data" \
@@ -143,6 +134,21 @@ Agent 本地管理页默认监听 `0.0.0.0:51822`，访问
 ## 四、中心化配置同步
 agent 每 ~10s 用 ETag 轮询 `/api/agent/config`；改了服务器的 Profile，agent 自动拉取并
 reload sing-box。改一处 → 全端点生效，无需逐个登录。
+
+### 代理用户与多节点额度
+
+默认镜像的中心和 Agent 均嵌入 sing-box 1.14.3。管理员在“代理用户”中先配置
+节点的对外地址和独立 SS2022 监听端口，再创建用户、设置总额度/期限/设备上限并分配
+节点；发出的领取链接用于用户自助创建设备订阅。该端口需要按部署环境开放 TCP 和 UDP，
+不能与已有入站端口重叠。WireGuard Peer 与代理用户分别管理。
+
+仅实际启动租约执行器并上报能力的 Linux 嵌入 Agent 可以承载这些用户。
+中心若也作为代理节点，需要 `SINGBOX_MANAGED=true`；仅面板模式不提供自身入站。
+普通桌面/移动客户端与外部核心构建不承载服务端配额。
+用户授权独立于配置同步，每 10 秒续租；失联后已有连接也在短租约到期时关闭。
+崩溃后未用完的已分配额度不会自动退回，避免多节点重复花费；中心重启、时钟变化
+和重置周期会先等待旧授权失效。面板分别展示实际已报告流量与已分配额度，详见
+[代理用户租约协议](proxy-user-leases-v1.md)。
 
 ## 五、运维
 - **凭据**：服务器 `/root/workspace/sb-easy/.env`（JWT_SECRET / ADMIN_PASSWORD）。首次登录后在

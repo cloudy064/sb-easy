@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(sb_easy_c VERSION 1.0.0 LANGUAGES C)
+file(READ "${CMAKE_CURRENT_LIST_DIR}/../config/client-releases.json" sb_application_releases)
+string(JSON sb_service_build_version GET "${sb_application_releases}" development service version)
+project(sb_easy_c VERSION "${sb_service_build_version}" LANGUAGES C)
 
 include(FetchContent)
 include(CTest)
@@ -15,6 +17,7 @@ option(SB_EASY_EMBED_SINGBOX "Link the sing-box engine into the service" OFF)
 set(SB_EASY_EXCLUDE_SOURCES "" CACHE STRING "Regexes of core sources to exclude")
 set(SB_EASY_SINGBOX_BRIDGE_LIBRARY "" CACHE FILEPATH "Path to the sing-box Go c-archive")
 set(SB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR "" CACHE PATH "Directory containing libsb_easy_singbox.h")
+set(SB_EASY_PROXY_TEST_CLIENT "" CACHE FILEPATH "Upstream sing-box executable for isolated proxy runtime end-to-end tests")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -131,6 +134,23 @@ target_link_libraries(sb_core PUBLIC
 if(SB_EASY_EMBED_SINGBOX)
     target_link_libraries(sb_core PUBLIC sb_singbox_bridge)
     target_compile_definitions(sb_core PUBLIC SB_EASY_EMBED_SINGBOX=1)
+    # Older embedded archives remain usable, but cannot advertise a data-plane
+    # lease gate they do not implement. Require the complete bridge surface.
+    set(sb_proxy_bridge_header "${SB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR}/libsb_easy_singbox.h")
+    # Lease authorization relies on the suspend-inclusive Linux boot clock.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "${sb_proxy_bridge_header}")
+        file(READ "${sb_proxy_bridge_header}" sb_proxy_bridge_contents)
+        set(sb_proxy_bridge_complete TRUE)
+        foreach(symbol SBEasyProxyRequestBegin SBEasyProxyApplyPolicy SBEasyProxyStats
+                       SBEasyProxyAcknowledgeReports SBEasyProxyStop SBEasyProxyReset)
+            if(NOT sb_proxy_bridge_contents MATCHES "${symbol}\\(")
+                set(sb_proxy_bridge_complete FALSE)
+            endif()
+        endforeach()
+        if(sb_proxy_bridge_complete)
+            target_compile_definitions(sb_core PUBLIC SB_EASY_PROXY_USERS_V1=1)
+        endif()
+    endif()
 endif()
 
 # ---- programs ----
@@ -175,7 +195,19 @@ if(BUILD_TESTING)
     add_test(NAME control_plane_e2e
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/control_plane_e2e.py
             --server $<TARGET_FILE:sb-easy-c-server> --agent $<TARGET_FILE:sb-easy-c-agent>)
-    set_tests_properties(control_plane_e2e PROPERTIES TIMEOUT 90)
+    # This HTTP fixture exercises the production 50 ms QuickJS deadline.
+    # Keep sanitizer overhead from concurrent CTests out of that wall-clock budget.
+    set_tests_properties(control_plane_e2e PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    if(SB_EASY_EMBED_SINGBOX AND sb_proxy_bridge_complete AND SB_EASY_PROXY_TEST_CLIENT)
+        if(NOT EXISTS "${SB_EASY_PROXY_TEST_CLIENT}")
+            message(FATAL_ERROR "SB_EASY_PROXY_TEST_CLIENT does not exist")
+        endif()
+        add_test(NAME proxy_runtime_e2e
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/proxy_runtime_e2e.py
+                --server $<TARGET_FILE:sb-easy-c-server> --agent $<TARGET_FILE:sb-easy-c-agent>
+                --client "${SB_EASY_PROXY_TEST_CLIENT}")
+        set_tests_properties(proxy_runtime_e2e PROPERTIES TIMEOUT 180)
+    endif()
 endif()
 
 # Starts, reloads and stops the in-process engine; run by the unified image

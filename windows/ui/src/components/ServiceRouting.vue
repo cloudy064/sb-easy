@@ -13,7 +13,7 @@ const defaultExit = computed(() => props.groups.find(g => g.id === 'default')?.o
     <div class="routing-home-grid">
       <article v-for="group in ordered" :key="group.id" class="panel routing-home-card" :class="{ 'routing-default': group.id === 'default' }" :aria-busy="pending === group.id">
         <div class="routing-card-heading"><span class="routing-monogram">{{ group.id === 'default' ? '↗' : group.label.slice(0, 1) }}</span><div><h3>{{ group.label }}</h3><p>{{ group.id === 'default' ? '未单独分流的流量使用此出口' : '匹配此服务规则的流量使用此出口' }}</p></div><span v-if="group.mode !== 'server'" class="routing-local-badge">本机设置</span></div>
-        <NodePicker :id="`routing-${group.id}`" :current="group.outbound" :mode="group.mode" :server="group.server_outbound" :default-exit="defaultExit" :allow-default="group.id !== 'default'" :editable="group.editable" :nodes="nodes" :disabled="disabled || (!group.editable && group.mode === 'server')" :loading="pending === group.id" @select="(mode, node) => emit('select', group.id, mode, node)" />
+        <NodePicker :id="`routing-${group.id}`" :current="group.outbound" :mode="group.mode" :server="group.server_outbound" :default-exit="defaultExit" :allow-default="group.id !== 'default'" :allow-server="!group.local" :editable="group.editable" :nodes="nodes" :disabled="disabled || (!group.editable && group.mode === 'server')" :loading="pending === group.id" @select="(mode, node) => emit('select', group.id, mode, node)" />
         <p v-if="!group.editable" class="routing-reason">{{ group.reason }}</p>
       </article>
     </div>

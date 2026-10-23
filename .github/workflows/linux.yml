@@ -1,0 +1,35 @@
+name: Linux native desktop
+on:
+  pull_request:
+    paths: ['linux/**', 'apple/Core/**', 'c/**', 'singbox-bridge/**', 'config/**', 'scripts/runtime-manifest.py', 'assets/branding/**', '.github/workflows/linux.yml']
+  push:
+    branches: [master]
+    paths: ['linux/**', 'apple/Core/**', 'c/**', 'singbox-bridge/**', 'config/**', 'scripts/runtime-manifest.py', 'assets/branding/**', '.github/workflows/linux.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  debian-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test the native Debian package
+        run: linux/scripts/package.sh build/linux-package
+      - name: Verify the installed package and isolated kernel TUN
+        run: |
+          docker build -f linux/packaging/Dockerfile --target build -t sb-easy-linux-tested:0.1.0 .
+          docker build -f linux/tests/Package.Dockerfile -t sb-easy-linux-package-test:0.1.0 .
+          docker run --rm --network none --user root --cap-add NET_ADMIN --device /dev/net/tun -e SBL_TUN_FIXTURE=disposable-container sb-easy-linux-tested:0.1.0 python3 /src/linux/tests/tun_fixture.py /src/build/linux-desktop/linux_tun_test
+      - name: Isolated signed APT upgrade and rollback
+        run: |
+          docker build -f linux/packaging/Dockerfile --target dependencies -t sb-easy-linux-deps:0.1.0 .
+          docker run --rm --network none -e SBL_APT_FIXTURE=disposable-container -v "$PWD:/src:ro" sb-easy-linux-deps:0.1.0 python3 /src/linux/tests/apt_fixture.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-development-deb
+          path: build/linux-package/*
+          if-no-files-found: error

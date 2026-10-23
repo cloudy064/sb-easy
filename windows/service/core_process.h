@@ -40,6 +40,9 @@ int sbw_core_signal_helper(int argc, wchar_t **argv);
  * is MAXDWORD until an actual process exit has been observed. */
 int sbw_core_config_check(sbw_core *core, const char *json, size_t length, HANDLE cancel,
                           DWORD *exit_code, sbw_error *error);
+/* Bounded execution of this pinned binary's `version` command. Used before an
+ * installer commits the app/core compatibility pair. */
+int sbw_core_version_check(sbw_core *core, const char *expected, HANDLE cancel, sbw_error *error);
 /* Checks these exact bytes first, reusing a successful config_check only for
  * identical bytes. The cached check is consumed by this attempt. No shell,
  * PATH search, or extra args. */
@@ -50,6 +53,8 @@ int sbw_core_poll(sbw_core *core, sbw_core_status *status, sbw_error *error);
 void sbw_core_event(sbw_core *core, const char *event, const char *result);
 
 const wchar_t *sbw_core_work_directory(sbw_core *core);
+/* Borrowed immutable path, already pinned against replacement/reparse points. */
+const wchar_t *sbw_core_executable(sbw_core *core);
 sbj *sbw_core_logs(sbw_core *core);
 int sbw_core_traffic_load(sbw_core *core, sbj **out, sbw_error *error);
 int sbw_core_traffic_save(sbw_core *core, const sbj *data, sbw_error *error);

@@ -120,29 +120,28 @@ static void adapt_dialers(sbj *value) {
 }
 
 static char *server_host(const char *server) {
-    wchar_t *wide = sbw_wide(server, NULL);
-    if (!wide) return NULL;
-    URL_COMPONENTS parts = {0};
-    parts.dwStructSize = sizeof(parts);
-    parts.dwHostNameLength = (DWORD)-1;
-    parts.dwUserNameLength = (DWORD)-1;
-    parts.dwPasswordLength = (DWORD)-1;
-    bool valid = WinHttpCrackUrl(wide, 0, 0, &parts) && parts.dwHostNameLength > 0 &&
-        parts.dwHostNameLength <= 253 && !parts.dwUserNameLength && !parts.dwPasswordLength &&
-        (parts.nScheme == INTERNET_SCHEME_HTTP || parts.nScheme == INTERNET_SCHEME_HTTPS);
-    char *host = NULL;
-    if (valid) {
-        wchar_t *name = sb_xcalloc((size_t)parts.dwHostNameLength + 1, sizeof(*name));
-        memcpy(name, parts.lpszHostName, parts.dwHostNameLength * sizeof(*name));
-        host = sbw_utf8(name, NULL);
-        free(name);
+    if(!server)return NULL;
+    const char *authority=!strncmp(server,"https://",8)?server+8:!strncmp(server,"http://",7)?server+7:NULL;
+    if(!authority)return NULL;
+    const char *end=authority+strcspn(authority,"/?#"),*host_end=end,*port=NULL,*host=authority;
+    if(host==end)return NULL;
+    for(const unsigned char *p=(const unsigned char *)authority;p<(const unsigned char *)end;++p)
+        if(*p<=32 || *p==127 || *p=='@' || *p=='\\' || *p=='%')return NULL;
+    if(*host=='[') {
+        ++host;host_end=memchr(host,']',(size_t)(end-host));if(!host_end || host_end==host)return NULL;
+        if(host_end+1<end){if(host_end[1]!=':')return NULL;port=host_end+2;}
+        char *literal=sb_strndup(host,(size_t)(host_end-host));BYTE ip[16];
+        bool valid=InetPtonA(AF_INET6,literal,ip)==1;free(literal);if(!valid)return NULL;
+    } else {
+        const char *colon=memchr(host,':',(size_t)(end-host));if(colon){host_end=colon;port=colon+1;}
     }
-    free(wide);
-    if (host && host[0] == '[') {
-        size_t size = strlen(host);
-        if (size > 2 && host[size - 1] == ']') { memmove(host, host + 1, size - 2); host[size - 2] = '\0'; }
+    if(port) {
+        unsigned value=0;if(port==end)return NULL;
+        for(const char *p=port;p<end;++p){if(*p<'0' || *p>'9')return NULL;value=value*10U+(unsigned)(*p-'0');if(value>65535)return NULL;}
+        if(!value)return NULL;
     }
-    return host;
+    size_t length=(size_t)(host_end-host);
+    return length && length<=253?sb_strndup(host,length):NULL;
 }
 
 static int choose_local_api(sbw_runtime_config *out, sbw_error *error) {
@@ -260,14 +259,43 @@ static int adapt_routes(sbj *candidate, const char *host, sbw_error *error) {
     sbj_set_str(process_rule, "action", "route"); sbj_set_str(process_rule, "outbound", direct_tag);
     sbj *control_rule = sbj_object(), *hosts = sbj_array();
     BYTE ip[16];
-    if (InetPtonA(AF_INET, host, ip) == 1 || InetPtonA(AF_INET6, host, ip) == 1) {
+    if (host && (InetPtonA(AF_INET, host, ip) == 1 || InetPtonA(AF_INET6, host, ip) == 1)) {
         char cidr[300];
         (void)sprintf_s(cidr, sizeof(cidr), "%s/%d", host, strchr(host, ':') ? 128 : 32);
         sbj_arr_push(hosts, sbj_str(cidr)); sbj_set(control_rule, "ip_cidr", hosts);
-    } else { sbj_arr_push(hosts, sbj_str(host)); sbj_set(control_rule, "domain", hosts); }
+    } else { if(host)sbj_arr_push(hosts, sbj_str(host)); sbj_set(control_rule, "domain", hosts); }
     sbj_set_str(control_rule, "action", "route"); sbj_set_str(control_rule, "outbound", direct_tag);
-    sbj_arr_insert(rules, 0, control_rule); sbj_arr_insert(rules, 0, process_rule);
+    /* Requests entering the authenticated diagnostic listener must exercise
+     * normal destination policy, even though the caller is this service. */
+    sbj *gate=sbj_object(), *conditions=sbj_array(), *ingress=sbj_object();
+    sbj_set_str(ingress,"inbound",SBW_PROBE_INBOUND);sbj_set_bool(ingress,"invert",true);
+    sbj_del(process_rule,"action");sbj_del(process_rule,"outbound");
+    sbj_arr_push(conditions,process_rule);sbj_arr_push(conditions,ingress);
+    sbj_set_str(gate,"type","logical");sbj_set_str(gate,"mode","and");sbj_set(gate,"rules",conditions);
+    sbj_set_str(gate,"action","route");sbj_set_str(gate,"outbound",direct_tag);
+    if(host)sbj_arr_insert(rules, 0, control_rule);else sbj_free(control_rule);
+    sbj_arr_insert(rules, 0, gate);
     return 0;
+}
+
+static int diagnostic_inbound(sbj *candidate,sbw_runtime_config *out,sbw_error *error) {
+    sbj *inbounds=sbj_get(candidate,"inbounds");
+    if(!inbounds){inbounds=sbj_array();sbj_set(candidate,"inbounds",inbounds);}
+    for(size_t i=0;i<sbj_arr_len(inbounds);++i)
+        if(sbj_string_is(sbj_get(sbj_arr_at(inbounds,i),"tag"),SBW_PROBE_INBOUND))return fail(error,"RUNTIME_CONFIG_UNSUPPORTED");
+    sbw_runtime_config private_proxy={0};
+    for(int i=0;i<8;++i) {
+        if(choose_local_api(&private_proxy,error))return -1;
+        if(private_proxy.port!=out->port)break;
+        sbw_runtime_config_free(&private_proxy);
+    }
+    if(!private_proxy.port)return fail(error,"RUNTIME_RESOURCE_ERROR");
+    out->probe_port=private_proxy.port;out->probe_secret=private_proxy.secret;
+    sbj *in=sbj_object(),*users=sbj_array(),*user=sbj_object();
+    sbj_set_str(in,"type","http");sbj_set_str(in,"tag",SBW_PROBE_INBOUND);
+    sbj_set_str(in,"listen","127.0.0.1");sbj_set_int(in,"listen_port",out->probe_port);
+    sbj_set_str(user,"username","sb-easy-probe");sbj_set_str(user,"password",out->probe_secret);
+    sbj_arr_push(users,user);sbj_set(in,"users",users);sbj_arr_push(inbounds,in);return 0;
 }
 
 int sbw_runtime_config_prepare(const char *json, size_t length, const char *server,
@@ -277,7 +305,7 @@ int sbw_runtime_config_prepare(const char *json, size_t length, const char *serv
     sbj *candidate = sbw_json_parse(json, length, 40, NULL);
     char *host = server_host(server);
     int result = -1;
-    if (!sbj_is_object(candidate) || !safe_strings(candidate) || !host) { fail(error, "RUNTIME_CONFIG_INVALID"); goto done; }
+    if (!sbj_is_object(candidate) || !safe_strings(candidate) || (*server && !host)) { fail(error, "RUNTIME_CONFIG_INVALID"); goto done; }
     if (unsafe_files(candidate) || sbj_size(sbj_get(candidate, "services")) ||
         sbj_has(candidate, "certificate")) { fail(error, "RUNTIME_CONFIG_UNSUPPORTED"); goto done; }
     sbj *dns_servers = sbj_get(sbj_get(candidate, "dns"), "servers");
@@ -293,7 +321,7 @@ int sbw_runtime_config_prepare(const char *json, size_t length, const char *serv
     /* Capture stderr through the service's bounded, redacting collector. */
     sbj *log = sbj_object(); sbj_set_str(log, "level", "debug"); sbj_set_bool(log, "timestamp", true); sbj_set(candidate, "log", log);
     if (adapt_endpoints(candidate, error) != 0 || adapt_inbounds(candidate, out, error) != 0 || adapt_routes(candidate, host, error) != 0 ||
-        choose_local_api(out, error) != 0) goto done;
+        choose_local_api(out, error) != 0 || diagnostic_inbound(candidate,out,error) != 0) goto done;
     char controller[32];
     (void)sprintf_s(controller, sizeof(controller), "127.0.0.1:%u", out->port);
     sbj *experimental = sbj_object(), *clash = sbj_object(), *origins = sbj_array();
@@ -324,7 +352,7 @@ done:
 
 void sbw_runtime_config_free(sbw_runtime_config *config) {
     if (!config) return;
-    sbw_secret_free(config->json); sbw_secret_free(config->secret); free(config->interface_name);
+    sbw_secret_free(config->json); sbw_secret_free(config->secret); sbw_secret_free(config->probe_secret); free(config->interface_name);
     memset(config, 0, sizeof(*config));
 }
 
@@ -520,4 +548,47 @@ int sbw_runtime_select_group(const sbw_runtime_config *config, DWORD pid, HANDLE
 
 int sbw_runtime_select_gpt(const sbw_runtime_config *config, DWORD pid, HANDLE cancel, const char *target, sbw_error *error) {
     return sbw_runtime_select_group(config, pid, cancel, SBW_GPT_SELECTOR, target, error);
+}
+
+int sbw_runtime_probe_owner(const sbw_runtime_config *config,DWORD pid,sbw_error *error) {
+    if(!config || !config->probe_port || !config->probe_secret || strlen(config->probe_secret)!=64 || !pid)
+        return sbw_fail(error,"PROBE_UNAVAILABLE","Apply the configuration to enable its diagnostic listener.");
+    return listener_owner(config->probe_port,pid)==1?0:fail(error,"CORE_HEALTH_IDENTITY");
+}
+static char *url_escape(const char *value) {
+    sb_buf buffer={0};
+    for(const unsigned char *p=(const unsigned char *)value;*p;++p) {
+        if((*p>='a' && *p<='z') || (*p>='A' && *p<='Z') || (*p>='0' && *p<='9') || strchr("-._~",*p))
+            sb_buf_append(&buffer,p,1);
+        else sb_buf_printf(&buffer,"%%%02X",(unsigned)*p);
+    }
+    return sb_buf_detach(&buffer);
+}
+int sbw_runtime_delay(const sbw_runtime_config *config,DWORD pid,HANDLE cancel,
+                     const char *target,const char *url,DWORD timeout_ms,sbj **out,sbw_error *error) {
+    if(out)*out=NULL;
+    if(!out || !target || !*target || strlen(target)>512 || !url || strlen(url)>2048 || timeout_ms<500 || timeout_ms>30000 ||
+       !config || !config->port || !pid || !config->secret || strlen(config->secret)!=64)
+        return fail(error,"RUNTIME_CONFIG_INVALID");
+    for(const char *p=config->secret;*p;++p)
+        if(!((*p>='0' && *p<='9') || (*p>='a' && *p<='f')))return fail(error,"RUNTIME_CONFIG_INVALID");
+    ULONGLONG deadline=GetTickCount64()+timeout_ms;
+    char *node=url_escape(target),*address=url_escape(url);
+    char *path=sb_asprintf("/proxies/%s/delay?url=%s&timeout=%lu",node,address,(unsigned long)timeout_ms);
+    free(node);free(address);
+    HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,pid);
+    if(!process){free(path);return fail(error,"CORE_HEALTH_EXITED");}
+    WSADATA startup;
+    if(WSAStartup(MAKEWORD(2,2),&startup)){free(path);CloseHandle(process);return fail(error,"CORE_HEALTH_FAILED");}
+    sbj *proxies=NULL;
+    int result=listener_owner(config->port,pid)==1?
+        probe(config,pid,cancel,process,deadline,"/proxies",NULL,256U*1024U,&proxies,error):fail(error,"CORE_HEALTH_IDENTITY");
+    if(!result && !sbj_is_object(sbj_get(sbj_get(proxies,"proxies"),target)))
+        result=sbw_fail(error,"ROUTING_NODE_UNAVAILABLE","This node is not present in the running configuration.");
+    sbj_free(proxies);
+    if(!result)result=probe(config,pid,cancel,process,deadline,path,NULL,16384,out,error);
+    if(!result && (!sbj_is_integer(sbj_get(*out,"delay")) || sbj_get_int(*out,"delay",-1)<=0 || sbj_get_int(*out,"delay",-1)>timeout_ms)) {
+        sbj_free(*out);*out=NULL;result=sbw_fail(error,"PROBE_INVALID_RESPONSE","The core returned an invalid delay result.");
+    }
+    free(path);WSACleanup();CloseHandle(process);return result;
 }

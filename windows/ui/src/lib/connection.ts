@@ -5,7 +5,7 @@ export function connectionActions(status: StatusResult | null, config: ConfigMet
   const changed = Boolean(config?.candidate_available && config.downloaded_etag && config.downloaded_etag !== config.active_etag)
   return {
     startLabel: running ? '应用新配置' : '启动连接',
-    canStart: status?.enrolled === true && status.connection_available && config?.candidate_available === true &&
+    canStart: (status?.enrolled === true || status?.mode === 'independent') && status.connection_available && config?.candidate_available === true &&
       ['STOPPED', 'DEGRADED', 'RUNNING'].includes(status.phase) && (!running || changed),
     canStop: Boolean(status && (status.core_running || ['RUNNING', 'DEGRADED'].includes(status.phase))),
     canForget: status?.phase === 'STOPPED' && !status.core_running,
@@ -22,6 +22,7 @@ export function runtimeDetail(status: StatusResult): string {
     return '本机服务报告内核运行中，TUN 状态尚未提供。尚未验证互联网连通性。'
   }
   if (status.phase === 'DEGRADED') return '内核未正常运行。可查看错误后重新启动，或断开并清理残余连接。'
+  if (!status.connection_available && status.mode === 'independent') return '独立模式已就绪。导入至少一个可用节点后即可连接；本机仍需安装可用内核。'
   if (!status.connection_available) return '设备已注册。需要可用的本机内核和候选配置才能启动；下载和校验不会自动建立连接。'
   return '本地内核未运行。启动会校验并应用已下载的候选配置；含 TUN 的配置可能改变本机网络。'
 }

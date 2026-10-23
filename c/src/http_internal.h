@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include "sb/auth.h"
+#include "sb/auth_security.h"
 #include "sb/http_server.h"
 #include "sb/store.h"
 #include "sb/json.h"
@@ -153,6 +154,9 @@ struct sb_http_server {
     sb_store *store;                  /* borrowed */
     sb_wireguard *wireguard;          /* owned */
     sb_clash_client *clash;           /* owned; shared ClashClient */
+    struct sb_subscription_service *subscriptions; /* owned */
+    sb_auth_security *security; /* owned, shared store database */
+    struct sb_observability *observability; /* owned history/alert worker */
     sb_subscription_fetcher *fetcher; /* owned; shared SubscriptionFetcher */
     char *enrollment_server;     /* normalised public URL (see register_http_routes) */
     char *legacy_agent_token;    /* trimmed AGENT_TOKEN */
@@ -176,6 +180,7 @@ struct sb_http_server {
 
     struct mg_context *mg;
     pthread_t self_singbox_thread;
+    struct sb_proxy_runtime *self_proxy;
     bool self_singbox_running;
     volatile int stopping;
 
@@ -196,8 +201,15 @@ sbj *sb_http_log_lines(sb_http_server *srv); /* JSON array of strings (clone) */
 
 /* Route group registration (each implemented in its own file). */
 void sb_http_register_admin_routes(sb_http_server *srv);
+void sb_http_register_security_routes(sb_http_server *srv);
+void sb_http_register_preferences_routes(sb_http_server *srv);
+void sb_http_register_observability_routes(sb_http_server *srv);
+int sb_http_security_authorize(const sb_http_req *req, sb_err *err);
+int sb_http_security_login(sb_http_req *req, sb_http_resp *resp, const char *user_id,
+                           const char *method, sb_err *err);
 void sb_http_register_hosts_routes(sb_http_server *srv);
 void sb_http_register_proxy_routes(sb_http_server *srv);
+void sb_http_register_proxy_user_routes(sb_http_server *srv);
 /* WebSocket bridge: registered on the civetweb context by the core after
  * mg_start (needs srv->mg). */
 void sb_http_register_clash_websocket(sb_http_server *srv);

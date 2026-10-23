@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "sb/http_client.h"
+#include "sb/proxy_runtime.h"
 
 #ifndef SB_EASY_VERSION
 #define SB_EASY_VERSION "1.0.0"
@@ -12,13 +13,16 @@
 #define AGENT_USER_AGENT "sb-easy-cpp-agent/" SB_EASY_VERSION
 #define JSON_CONTENT_TYPE "Content-Type: application/json; charset=utf-8"
 /* Drogon's client imposes no response size limit; keep a generous cap. */
+#ifndef AGENT_MAX_BODY
 #define AGENT_MAX_BODY ((size_t)256u * 1024u * 1024u)
+#endif
 
 struct sb_agent_client {
     char *token;
     int64_t timeout_ms;
     char *origin;
     char *path_prefix;
+    bool proxy_capability;
 };
 
 void sb_agent_config_response_free(sb_agent_config_response *r) {
@@ -228,7 +232,13 @@ sb_agent_client *sb_agent_client_new(const sb_agent_client_options *options, sb_
     client->timeout_ms = options->timeout_ms;
     client->origin = origin;
     client->path_prefix = prefix;
+    /* A reusable control-plane client does not own a lease worker. The real
+     * runtime owner must opt in after successful construction. */
+    client->proxy_capability = false;
     return client;
+}
+void sb_agent_client_proxy_capability(sb_agent_client *client, bool enabled) {
+    if (client) client->proxy_capability = enabled && sb_proxy_runtime_available();
 }
 
 void sb_agent_client_free(sb_agent_client *client) {
@@ -388,9 +398,28 @@ int sb_agent_client_report_status(sb_agent_client *client, const char *version,
     sbj_set_str(body, "singbox_version", version);
     sbj_set(body, "singbox_running", running ? sbj_bool(*running) : sbj_null());
     sbj_set(body, "config_etag", sbj_str(etag));
+    sbj_set(body, "capabilities", client->proxy_capability ? sb_proxy_runtime_capabilities() : sbj_array());
     int rc = post_expect_success(client, "/api/agent/status", body, err);
     sbj_free(body);
     return rc;
+}
+
+int sb_agent_client_proxy_exchange(sb_agent_client *client, const char *request, size_t length,
+    char **response, size_t *response_length, sb_err *err) {
+    *response = NULL; *response_length = 0;
+    if (!client || !request || !length || length > SB_PROXY_REQUEST_LIMIT || strlen(request) != length)
+        return sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy lease request");
+    char *url = sb_asprintf("%s%s/api/agent/proxy-leases", client->origin, client->path_prefix);
+    char *authorization = sb_asprintf("Authorization: Bearer %s", client->token);
+    const char *headers[] = {authorization, JSON_CONTENT_TYPE, NULL};
+    sb_http_request req = {0}; req.method = "POST"; req.url = url; req.headers = headers;
+    req.body = request; req.body_len = length; req.max_body_bytes = SB_PROXY_POLICY_LIMIT;
+    req.timeout_ms = client->timeout_ms < 5000 ? client->timeout_ms : 5000; req.user_agent = AGENT_USER_AGENT;
+    sb_http_response resp = {0}; sb_err ignored = {0};
+    int rc = sb_http_perform(&req, &resp, &ignored);
+    if (rc || resp.status != 200) rc = sb_fail(err, SB_ERR_UPSTREAM, "Proxy lease endpoint is unavailable");
+    else { *response = resp.body; *response_length = resp.body_len; resp.body = NULL; }
+    free(url); free(authorization); sb_http_response_free(&resp); return rc;
 }
 
 int sb_agent_client_report_telemetry(sb_agent_client *client, const sbj *telemetry,

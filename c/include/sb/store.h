@@ -175,6 +175,8 @@ typedef struct {
     uint16_t server_port;
     sbj *protocol_config; /* object */
     char *subscription_id; /* nullable */
+    char *source_tag; /* provider name, nullable; separate from user's rename */
+    size_t source_tag_len;
     char *fingerprint;
     bool has_latency; /* std::optional<double> latency */
     double latency;
@@ -195,6 +197,9 @@ typedef struct {
     bool enabled;             /* default true */
     int64_t refresh_interval; /* default 3600 */
     char *last_fetched_at, *last_fetch_result; /* nullable */
+    sbj *usage; /* Subscription-Userinfo, object; missing fields are unknown */
+    char *last_attempt_at, *last_error; /* nullable; failures preserve successful metadata */
+    int64_t next_refresh_at, failure_count;
     char *created_at, *updated_at;
 } sb_subscription;
 void sb_subscription_init(sb_subscription *s);
@@ -217,6 +222,7 @@ sbj *sb_proxy_upsert_result_to_json(const sb_proxy_upsert_result *r);
 typedef struct {
     size_t added, updated, skipped, found;
     sb_strvec errors;
+    sbj *usage;
 } sb_subscription_fetch_result;
 void sb_subscription_fetch_result_init(sb_subscription_fetch_result *r);
 void sb_subscription_fetch_result_free(sb_subscription_fetch_result *r);
@@ -350,6 +356,25 @@ int sb_store_update_subscription(sb_store *s, const sb_subscription *sub, sb_sub
 int sb_store_delete_subscription(sb_store *s, const char *id, sb_err *err);
 int sb_store_record_subscription_fetch(sb_store *s, const char *id,
                                        const sb_subscription_fetch_result *result, sb_err *err);
+/* Atomic refresh, guarded by the URL snapshot that was actually fetched.
+ * Returns conflict if the source changed/deleted while the request was in flight.
+ * Caller owns result; its parse diagnostics/usage are retained. */
+int sb_store_apply_subscription_fetch(sb_store *s, const sb_subscription *expected,
+                                      const sb_parsed_node *nodes, size_t count,
+                                      sb_subscription_fetch_result *result,
+                                      int64_t now, sb_err *err);
+int sb_store_record_subscription_failure(sb_store *s, const sb_subscription *expected,
+                                         const char *message, int64_t now, sb_err *err);
+
+/* Validated wg_migration batch: preview is read-only; apply requires the exact
+ * preview digest and commits peer/key/settings changes plus rollback together.
+ * Preview/result never includes private keys. Rollback refuses intervening
+ * changes to any WireGuard peer or imported settings. */
+int sb_store_wg_import(sb_store *s, const sbj *batch, bool apply, const char *preview_digest,
+                       const char *actor, size_t actor_len, sbj **out, sb_err *err);
+int sb_store_wg_import_rollback(sb_store *s, const char *id, const char *actor,
+                                size_t actor_len, sbj **out, sb_err *err);
+sbj *sb_store_list_wg_imports(sb_store *s, sb_err *err);
 
 /* Fills *out (initialised by the caller with sb_render_request_init). */
 int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render_request *out,

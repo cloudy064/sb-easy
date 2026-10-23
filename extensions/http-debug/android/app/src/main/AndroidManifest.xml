@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:label="sb-easy HTTP(S) 抓包" android:allowBackup="false" android:usesCleartextTraffic="true">
+        <meta-data android:name="io.sbeasy.host_api" android:value="2" />
+        <meta-data android:name="io.sbeasy.min_host" android:value="1.3.4" />
+        <meta-data android:name="io.sbeasy.max_host" android:value="2.0.0" />
+        <meta-data android:name="io.sbeasy.min_core" android:value="1.14.0" />
+        <meta-data android:name="io.sbeasy.max_core" android:value="1.15.0" />
+        <service android:name=".EngineService" android:exported="true"
+            android:permission="io.sbeasy.android.permission.HTTP_DEBUG" android:stopWithTask="false" />
+    </application>
+</manifest>

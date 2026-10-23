@@ -821,6 +821,10 @@ char *sb_wireguard_client_config(sb_wireguard *wg, const sb_wireguard_peer *peer
 
 char *sb_wireguard_client_config_n(sb_wireguard *wg, const sb_wireguard_peer *peer, size_t *len, sb_err *err) {
     if (len) *len = 0;
+    if (!peer || sb_str_empty(peer->private_key)) {
+        sb_fail(err, SB_ERR_VALIDATION, "Client private key is unavailable; use the client's existing WireGuard configuration");
+        return NULL;
+    }
     sb_wireguard_options runtime;
     if (sb_wireguard_runtime_options(wg, &runtime, err) != 0) return NULL;
     char *server_public = sb_wireguard_server_public_key(wg, err);

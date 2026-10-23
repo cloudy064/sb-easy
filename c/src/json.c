@@ -617,6 +617,7 @@ typedef struct {
     char *err;
     size_t err_size;
     int depth;
+    bool reject_duplicate_keys;
 } parser_t;
 
 #define SBJ_MAX_DEPTH 512
@@ -855,6 +856,9 @@ static sbj *parse_value(parser_t *p) {
             size_t klen;
             char *key = parse_string_raw(p, &klen);
             if (!key) goto obj_fail;
+            if (p->reject_duplicate_keys && sbj_getn(o, key, klen)) {
+                free(key); perr(p, "duplicate object key"); goto obj_fail;
+            }
             skip_ws(p);
             if (p->pos >= p->len || p->s[p->pos] != ':') {
                 free(key);
@@ -937,13 +941,13 @@ static sbj *parse_value(parser_t *p) {
     return NULL;
 }
 
-sbj *sbj_parse(const char *text, size_t len, char *error, size_t error_size) {
+static sbj *parse_document(const char *text, size_t len, char *error, size_t error_size, bool strict) {
     if (error && error_size) error[0] = '\0';
     if (!text) {
         if (error && error_size) snprintf(error, error_size, "null input");
         return NULL;
     }
-    parser_t p = {text, len, 0, error, error_size, 0};
+    parser_t p = {text, len, 0, error, error_size, 0, strict};
     sbj *v = parse_value(&p);
     if (!v) return NULL;
     skip_ws(&p);
@@ -953,6 +957,19 @@ sbj *sbj_parse(const char *text, size_t len, char *error, size_t error_size) {
         return NULL;
     }
     return v;
+}
+
+sbj *sbj_parse(const char *text, size_t len, char *error, size_t error_size) {
+    return parse_document(text, len, error, error_size, false);
+}
+sbj *sbj_parse_strict(const char *text, size_t len, char *error, size_t error_size) {
+    sbj *value = parse_document(text, len, error, error_size, true);
+    sb_err validation = {0};
+    if (value && sbj_validate_utf8(value, &validation) != 0) {
+        if (error && error_size) snprintf(error, error_size, "%s", validation.msg);
+        sbj_free(value); return NULL;
+    }
+    return value;
 }
 
 sbj *sbj_parse_cstr(const char *text) {

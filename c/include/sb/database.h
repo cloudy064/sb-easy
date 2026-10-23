@@ -13,6 +13,7 @@ extern "C" {
 
 typedef struct sb_database sb_database;
 struct sqlite3;
+struct sb_proxy_clock;
 
 /* Opens (creating if needed) the database with a 5 s busy timeout,
  * foreign_keys = ON and journal_mode = WAL. NULL on failure. */
@@ -31,6 +32,8 @@ int64_t sb_database_applied_migration_count(sb_database *db, sb_err *err);
 /* Low-level access for the store: the raw handle (borrowed) and the mutex
  * that serialises every statement on it. */
 struct sqlite3 *sb_database_handle(sb_database *db);
+/* Internal proxy lease fence state, shared by file identity in this process. */
+struct sb_proxy_clock *sb_database_proxy_clock(sb_database *db);
 void sb_database_lock(sb_database *db);
 void sb_database_unlock(sb_database *db);
 

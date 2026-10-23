@@ -375,11 +375,16 @@ sbj *sb_config_generate_outbound(const sb_proxy_node *node, sb_err *err) {
         sbj_set(outbound, "congestion_control", string_or(config, "congestion_control", "bbr"));
         sbj_set(outbound, "udp_relay_mode", string_or(config, "udp_relay_mode", "native"));
         copy_if_present(outbound, config, "tls");
-    } else if (sb_strn_eq(type, node->type_len, "http")) {
-        outbound = outbound_base("http", node);
+    } else if (sb_strn_eq(type, node->type_len, "http") || sb_strn_eq(type, node->type_len, "socks")) {
+        bool socks = sb_strn_eq(type, node->type_len, "socks");
+        outbound = outbound_base(socks ? "socks" : "http", node);
         copy_if_present(outbound, config, "username");
         copy_if_present(outbound, config, "password");
-        copy_if_present(outbound, config, "tls");
+        if (socks) {
+            copy_if_present(outbound, config, "version");
+            copy_if_present(outbound, config, "network");
+            copy_if_present(outbound, config, "udp_over_tcp");
+        } else copy_if_present(outbound, config, "tls");
     } else {
         outbound = sbj_object();
         sbj_set_str(outbound, "type", "direct");

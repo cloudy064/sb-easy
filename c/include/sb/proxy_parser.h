@@ -47,6 +47,12 @@ sb_parsed_node_vec sb_parse_subscription_body(const char *body, size_t len);
 int sb_parse_subscription_body_ex(const char *body, size_t len, sb_parsed_node_vec *out,
                                   sb_err *err);
 
+/* Tolerant import with a diagnostic for each incompatible entry. Supports
+ * Clash YAML, sing-box JSON and plain/base64 URI lists. Diagnostics contain
+ * positions and reasons, never source URIs or credentials. */
+int sb_parse_subscription_report(const char *body, size_t len, sb_proxy_import *out,
+                                 sb_err *err);
+
 /* Parse proxy outbounds from a complete sing-box config or a bare outbounds
  * array. Selector/urltest and built-in outbounds are ignored. Returns 0, or -1
  * with err set (nlohmann type_error messages for mistyped "type"/"tag"). *out

@@ -1,0 +1,99 @@
+name: Windows trusted release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-trusted-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/master'
+    runs-on: windows-2022
+    environment: windows-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify native fixture signing dependency
+        shell: pwsh
+        run: |
+          openssl version
+          if ($LASTEXITCODE -ne 0) { throw 'OpenSSL CLI is required for native plugin fixtures.' }
+      - name: Read application version
+        id: app_version
+        shell: pwsh
+        run: |
+          $version = (Get-Content config/client-releases.json -Raw | ConvertFrom-Json).development.windows.version
+          "windows=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: windows/ui/package-lock.json
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Validate release credentials are configured
+        shell: pwsh
+        env:
+          RELEASE_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          RELEASE_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          RELEASE_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_THUMBPRINT }}
+          RELEASE_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:RELEASE_PFX_BASE64 -or -not $env:RELEASE_PFX_PASSWORD -or $env:RELEASE_CERT_THUMBPRINT -notmatch '^[A-Fa-f0-9]{40}$' -or -not $env:RELEASE_TIMESTAMP_URL) { throw 'Configure the protected windows-release environment with publisher credentials and timestamp URL before releasing.' }
+      - name: Build and test release sources
+        shell: pwsh
+        env:
+          RELEASE_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_THUMBPRINT }}
+        run: |
+          ./windows/scripts/build.ps1 -PublisherThumbprint $env:RELEASE_CERT_THUMBPRINT
+          ./windows/tests/release_signing_test.ps1
+      - name: Install pinned MSI tooling
+        shell: pwsh
+        env:
+          DOTNET_ROLL_FORWARD: Major
+        run: |
+          dotnet tool install wix --version 5.0.2 --tool-path build/wix
+          if ($LASTEXITCODE -ne 0) { throw 'WiX install failed' }
+          ./build/wix/wix.exe extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX UI install failed' }
+      - name: Import temporary publisher key, sign and verify packages
+        shell: pwsh
+        env:
+          DOTNET_ROLL_FORWARD: Major
+          RELEASE_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          RELEASE_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          RELEASE_CERT_THUMBPRINT: ${{ vars.WINDOWS_SIGNING_THUMBPRINT }}
+          RELEASE_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP ('sb-easy-release-' + [guid]::NewGuid().ToString('N') + '.pfx')
+          $imported = @()
+          try {
+            if (Test-Path -LiteralPath "Cert:\CurrentUser\My\$env:RELEASE_CERT_THUMBPRINT") { throw 'The ephemeral runner already contains this publisher identity; refusing to replace it.' }
+            [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String($env:RELEASE_PFX_BASE64))
+            $password = ConvertTo-SecureString $env:RELEASE_PFX_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate -FilePath $keyPath -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+            if (-not ($imported | Where-Object { $_.Thumbprint -eq $env:RELEASE_CERT_THUMBPRINT -and $_.HasPrivateKey })) { throw 'The imported key does not match the configured publisher.' }
+            Remove-Item -LiteralPath $keyPath -Force
+            ./windows/scripts/package.ps1 -Msi -IncludeCore -TrustedRelease -CertificateThumbprint $env:RELEASE_CERT_THUMBPRINT -TimestampUrl $env:RELEASE_TIMESTAMP_URL -WixPath ./build/wix/wix.exe
+            ./windows/scripts/verify-release.ps1 -Manifest build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64-release.json -CertificateThumbprint $env:RELEASE_CERT_THUMBPRINT
+          } finally {
+            if (Test-Path -LiteralPath $keyPath) { Remove-Item -LiteralPath $keyPath -Force }
+            foreach ($certificate in $imported) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -Force -ErrorAction Continue }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sb-easy-windows-verified-release
+          if-no-files-found: error
+          path: |
+            build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64-portable.zip
+            build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64.msi
+            build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64-release.json
+            build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64-release.json.p7s

@@ -6,8 +6,8 @@
 # namespace, exactly like a bare-metal install.
 #
 # Quick start:
-#   JWT_SECRET=$(openssl rand -hex 32) EXTERNAL_HOSTNAME=your.host \
-#     docker compose up -d --build
+#   python3 scripts/configure-https.py --domain panel.example.com
+#   docker compose up -d --build
 #
 # NOTE: do not run this on a box that already runs sing-box on :9090 / a tun —
 # the managed instance would conflict. Stop the old one first.
@@ -30,12 +30,13 @@ services:
     volumes:
       - ./data:/app/data            # DB + generated sing-box config persist here
     environment:
-      - BIND_ADDR=${BIND_ADDR:-0.0.0.0:51821}
+      - BIND_ADDR=${BIND_ADDR:-127.0.0.1:51821}
       - DATABASE_URL=${DATABASE_URL:-sqlite:/app/data/sb-easy.db?mode=rwc}
       - JWT_SECRET=${JWT_SECRET:?set JWT_SECRET}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set a strong ADMIN_PASSWORD}
       - AGENT_TOKEN=${AGENT_TOKEN:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://${PANEL_DOMAIN:?set PANEL_DOMAIN}}
+      - PUBLIC_SERVER=https://${PANEL_DOMAIN:?set PANEL_DOMAIN}
       - CONFIG_HASH_SEED=${CONFIG_HASH_SEED:-}
       - EXTERNAL_HOSTNAME=${EXTERNAL_HOSTNAME:-127.0.0.1}
       - SINGBOX_API_URL=${SINGBOX_API_URL:-http://127.0.0.1:9090}
@@ -52,8 +53,27 @@ services:
       - WG_EGRESS=${WG_EGRESS:-eth0}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${BIND_ADDR##*:}/api/system/status\""]
+      test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${BIND_ADDR##*:}/api/health\""]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  https:
+    image: ${CADDY_IMAGE:-caddy:2.11.7-alpine}
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      sb-easy:
+        condition: service_healthy
+    environment:
+      PANEL_DOMAIN: ${PANEL_DOMAIN:?set PANEL_DOMAIN}
+      PANEL_UPSTREAM: ${BIND_ADDR:-127.0.0.1:51821}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

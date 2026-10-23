@@ -7,6 +7,17 @@
     <SummaryInformation Description="sb-easy Windows desktop and background service" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of sb-easy is already installed."
                   Schedule="afterInstallInitialize" />
+    <CustomAction Id="RemoveLeakProtection" FileRef="ServiceExe" ExeCommand="--disable-kill-switch"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <Property Id="SB_EASY_UPDATE" Secure="yes" />
+    <CustomAction Id="VerifyUpgradeHealth" FileRef="ServiceExe" ExeCommand="--upgrade-health-check"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveLeakProtection" Before="DeleteServices"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="VerifyUpgradeHealth" After="StartServices"
+              Condition="SB_EASY_UPDATE=&quot;1&quot; AND NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="SbEasyIcon" SourceFile="$(Payload)\sb-easy.ico" />
     <Property Id="ARPPRODUCTICON" Value="SbEasyIcon" />

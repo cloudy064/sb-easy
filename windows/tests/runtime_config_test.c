@@ -163,7 +163,14 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(!sbj_has(tun, "auto_redirect") && !sbj_has(tun, "include_uid"));
     sbj *route = sbj_get(value, "route"), *rules = sbj_get(route, "rules");
     CHECK(sbj_get_bool(route, "auto_detect_interface", false) && !sbj_has(route, "default_interface"));
-    CHECK(sbj_arr_len(rules) == 3 && sbj_has(sbj_arr_at(rules, 0), "process_name"));
+    CHECK(sbj_arr_len(rules) == 3 && sbj_string_is(sbj_get(sbj_arr_at(rules,0),"type"),"logical"));
+    const sbj *guard=sbj_get(sbj_arr_at(rules,0),"rules");
+    CHECK(sbj_has(sbj_arr_at(guard,0),"process_name"));
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(guard,1),"inbound"),SBW_PROBE_INBOUND) && sbj_get_bool(sbj_arr_at(guard,1),"invert",false));
+    CHECK(config.probe_port && config.probe_port!=config.port && strlen(config.probe_secret)==64 && strcmp(config.secret,config.probe_secret));
+    const sbj *diagnostic=sbj_arr_at(sbj_get(value,"inbounds"),1);
+    CHECK(sbj_string_is(sbj_get(diagnostic,"listen"),"127.0.0.1") && sbj_string_is(sbj_get(diagnostic,"tag"),SBW_PROBE_INBOUND));
+    CHECK(sbj_string_is(sbj_get(sbj_arr_at(sbj_get(diagnostic,"users"),0),"password"),config.probe_secret));
     CHECK(sbj_string_is(sbj_arr_at(sbj_get(sbj_arr_at(rules, 1), "domain"), 0), "control.example"));
     CHECK(sbj_string_is(sbj_get(sbj_get(value, "log"), "level"), "debug") && !sbj_has(sbj_get(value, "log"), "output") && !sbj_has(value, "ntp"));
     sbj_free(value); value = NULL;
@@ -179,6 +186,7 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(sbw_runtime_config_prepare(isolated, strlen(isolated), "https://192.0.2.1/", &other, &error) == 0);
     CHECK(other.has_tun && other.auto_route && !wcscmp(other.interface_name, L"sb-easy-test_42") && strstr(other.json, "192.0.2.1/32"));
     sbw_runtime_config_free(&other);
+    CHECK(rejected("{\"inbounds\":[{\"type\":\"http\",\"tag\":\"sb-easy-diagnostic\"}]}", "RUNTIME_CONFIG_UNSUPPORTED"));
     CHECK(rejected("{\"inbounds\":[{\"type\":\"tun\"},{\"type\":\"tun\"}]}", "RUNTIME_CONFIG_UNSUPPORTED"));
     CHECK(rejected("{\"inbounds\":[{\"type\":\"tun\",\"platform\":{}}]}", "RUNTIME_CONFIG_UNSUPPORTED"));
     CHECK(rejected("{\"inbounds\":[{\"type\":\"tun\",\"interface_name\":\"bad/name\"}]}", "RUNTIME_CONFIG_UNSUPPORTED"));

@@ -357,11 +357,10 @@ TEST(auth_advice) {
     CHECK_ERROR(&r, 401, "Invalid or expired token");
     sb_test_response_free(&r);
 
-    /* Viewers are read-only: GET/HEAD fine, unsafe methods 403. */
+    /* Non-admin access is limited to explicit device and own-account routes. */
     char *viewer = sb_test_token(&t, "viewer-id", "viewer1", "viewer");
     sb_test_request_ex(&t, "GET", "/api/test/echo", NULL, viewer, NULL, &r);
-    CHECK_EQ_INT(r.status, 200);
-    CHECK_STR(jstr(r.json, "user"), "viewer1");
+    CHECK_ERROR(&r, 403, "Admin role required");
     sb_test_response_free(&r);
     static const char *const unsafe[] = {"POST", "PUT", "DELETE", "PATCH"};
     for (size_t i = 0; i < 4; ++i) {
@@ -964,6 +963,7 @@ TEST(enrollment_server_and_log_level) {
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
         sb_http_server_options o;
         sb_http_server_options_init(&o);
+        sb_str_set(&o.jwt_secret, "contract-jwt-secret");
         sb_str_set(&o.public_server, cases[i].public_server);
         sb_str_set(&o.legacy_agent_token, "  legacy \n");
         sb_str_set(&o.log_level, "WARNING");
@@ -1008,6 +1008,7 @@ TEST(ephemeral_port_and_restart) {
     REQUIRE(store != NULL);
     sb_http_server_options o;
     sb_http_server_options_init(&o);
+    sb_str_set(&o.jwt_secret, "contract-jwt-secret");
     o.port = first.port;
     sb_str_set(&o.log_level, "warn");
     sb_http_server *second = sb_http_server_new(store, &o, &err);
@@ -1252,5 +1253,21 @@ TEST(telemetry_store) {
     sbj *got = sb_http_telemetry_get(t.server, "h1");
     CHECK_EQ_INT(sbj_get_int(got, "up", -1), 9);
     sbj_free(got);
+    sb_test_server_stop(&t);
+}
+
+TEST(public_branding_assets_are_svg) {
+    sb_test_server t; REQUIRE(start(&t) == 0);
+    const char *svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><path d=\"M0 0h1v1z\"/></svg>";
+    const char *files[] = {"sb-easy-mark.svg", "favicon.svg"};
+    for (size_t i = 0; i < 2; ++i) {
+        char *file = sb_path_join(t.env.static_dir, files[i]);
+        CHECK_EQ_INT(sb_write_file(file, svg, strlen(svg)), 0); free(file);
+        char *path = sb_asprintf("/%s", files[i]); sb_test_response r = {0};
+        sb_test_request_ex(&t, "GET", path, NULL, "", NULL, &r);
+        CHECK_EQ_INT(r.status, 200); CHECK_CONTAINS(r.content_type, "image/svg+xml");
+        CHECK_STR(r.body, svg); CHECK_STR(r.cache_control, "no-cache");
+        sb_test_response_free(&r); free(path);
+    }
     sb_test_server_stop(&t);
 }

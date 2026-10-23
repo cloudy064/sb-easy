@@ -31,6 +31,7 @@
 #include "sb/http_client.h"
 #include "sb/json.h"
 #include "sb/singbox_supervisor.h"
+#include "sb/proxy_runtime.h"
 #include "sb/util.h"
 
 #ifndef SB_EASY_VERSION
@@ -746,6 +747,9 @@ typedef struct {
     bool validate_config;
     sb_singbox_supervisor *supervisor;
     sb_agent_client *client;
+    sb_agent_client *proxy_client;
+    sb_proxy_runtime *proxy_runtime;
+    int64_t proxy_capability_due_ms;
     sb_agent_clash *clash;
 
     pthread_mutex_t state_mutex;
@@ -762,6 +766,8 @@ typedef struct {
 } agent_runtime;
 
 static void runtime_free(agent_runtime *rt) {
+    sb_proxy_runtime_free(rt->proxy_runtime);
+    sb_agent_client_free(rt->proxy_client);
     sb_agent_clash_free(rt->clash);
     sb_agent_client_free(rt->client);
     sb_singbox_supervisor_free(rt->supervisor); /* stops a managed child */
@@ -782,6 +788,9 @@ static void runtime_free(agent_runtime *rt) {
     pthread_mutex_destroy(&rt->state_mutex);
     memset(rt, 0, sizeof *rt);
 }
+
+static int agent_proxy_exchange(void *context, const char *request, size_t length,
+    char **response, size_t *response_length, sb_err *err);
 
 static sbj *default_telemetry(void) {
     sbj *telemetry = sbj_object();
@@ -847,6 +856,20 @@ static int runtime_init(agent_runtime *rt, sb_err *err) {
         };
         rt->client = sb_agent_client_new(&options, err);
         if (!rt->client) goto fail;
+        if (rt->singbox_managed && sb_proxy_runtime_available()) {
+            options.timeout_ms = 5000;
+            rt->proxy_client = sb_agent_client_new(&options, err);
+            if (!rt->proxy_client) goto fail;
+            const char *pin = environment("AGENT_HOST_ID", "");
+            if (*pin && *rt->identity.host_id && strcmp(pin, rt->identity.host_id)) {
+                sb_fail(err, SB_ERR_VALIDATION, "AGENT_HOST_ID does not match the enrolled device"); goto fail;
+            }
+            const char *host = *rt->identity.host_id ? rt->identity.host_id : pin;
+            rt->proxy_runtime = sb_proxy_runtime_new(host, NULL, agent_proxy_exchange, rt, err);
+            if (!rt->proxy_runtime) goto fail;
+            sb_agent_client_proxy_capability(rt->client, true);
+            sb_agent_client_proxy_capability(rt->proxy_client, true);
+        }
     }
     rt->clash = sb_agent_clash_new(rt->config_path);
     return 0;
@@ -891,6 +914,19 @@ static void record_error(sb_strvec *errors, const char *operation, const char *m
     char *line = sb_asprintf("%s: %s", operation, message);
     fprintf(stderr, "%s\n", line);
     sb_strvec_push_take(errors, line);
+}
+
+static int agent_proxy_exchange(void *context, const char *request, size_t length,
+    char **response, size_t *response_length, sb_err *err) {
+    agent_runtime *rt = context;
+    int64_t now = sb_monotonic_ms();
+    if (now >= rt->proxy_capability_due_ms) {
+        int state = get_running(rt); bool running = state > 0; char *etag = copy_etag(rt); sb_err ignored = {0};
+        if (!sb_agent_client_report_status(rt->proxy_client, AGENT_VERSION, state < 0 ? NULL : &running, etag, &ignored))
+            rt->proxy_capability_due_ms = sb_monotonic_ms() + 60000;
+        free(etag);
+    }
+    return sb_agent_client_proxy_exchange(rt->proxy_client, request, length, response, response_length, err);
 }
 
 typedef struct {
@@ -1200,6 +1236,7 @@ static sbj *ui_status(void *user, sb_err *err) {
     sbj_set_bool(pending, "restart", rt->restart_requested);
     sbj_set(status, "pending", pending);
     sbj_set(status, "telemetry", sbj_clone(rt->last_telemetry));
+    sbj_set(status, "proxy_users", sb_proxy_runtime_status(rt->proxy_runtime));
     pthread_mutex_unlock(&rt->state_mutex);
     return status;
 }
@@ -1367,6 +1404,9 @@ int sb_agent_main(int argc, char **argv) {
     }
     if (once) {
         bool ok = run_cycle(&runtime);
+        if (runtime.proxy_runtime && sb_proxy_runtime_step(runtime.proxy_runtime, &err) < 0) {
+            fprintf(stderr, "proxy lease exchange failed: %s\n", err.msg); ok = false;
+        }
         runtime_free(&runtime);
         return ok ? 0 : 1;
     }
@@ -1409,6 +1449,7 @@ int sb_agent_main(int argc, char **argv) {
     }
     int64_t interval = 0;
     if (poll_interval(&interval, &err) != 0) goto fail;
+    if (runtime.proxy_runtime && sb_proxy_runtime_start(runtime.proxy_runtime, &err)) goto fail;
     for (;;) {
         (void)run_cycle(&runtime);
         wait_for_work(&runtime, interval);

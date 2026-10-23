@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=sb-easy
+Name[zh_CN]=sb-easy 网络连接
+Comment=Independent and managed network connections
+Comment[zh_CN]=独立订阅、托管连接与本地路由
+Exec=sb-easy-desktop %u
+Icon=io.sbeasy.Desktop
+Terminal=false
+Categories=Network;Utility;
+MimeType=x-scheme-handler/sbeasy;
+StartupNotify=true
+StartupWMClass=io.sbeasy.Desktop

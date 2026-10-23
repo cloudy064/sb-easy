@@ -13,5 +13,5 @@ if [ "${1:-}" = "sb-easy" ] && [ "${2:-}" = "agent" ]; then
 fi
 
 # The server reads DATABASE_URL/MIGRATIONS_DIR itself and runs migrations before
-# listening. Managed mode supervises the bundled sing-box process.
+# listening. Managed mode hosts the linked sing-box engine in process.
 exec "$@"

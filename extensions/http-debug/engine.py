@@ -4,6 +4,8 @@ No CA private key or captured body crosses the host/plugin control channel.
 The authenticated mitmweb interface provides viewing, editing, replay and HAR.
 """
 import asyncio
+import json
+import shutil
 from pathlib import Path
 import secrets
 import threading
@@ -41,8 +43,9 @@ class Engine:
         self.proxy_port = 17990
         self.web_port = 17991
         self.upstream_port = 17992
+        self.authenticated_upstream = False
 
-    def start(self, directory, proxy_port=17990, web_port=17991, upstream_port=17992):
+    def start(self, directory, proxy_port=17990, web_port=17991, upstream_port=17992, authenticated_upstream=False):
         with self.lock:
             if self.thread and self.thread.is_alive():
                 raise ValueError("A capture session is already running")
@@ -51,6 +54,9 @@ class Engine:
                     raise ValueError("Invalid loopback port")
             if len({proxy_port, web_port, upstream_port}) != 3:
                 raise ValueError("Ports must differ")
+            if not isinstance(authenticated_upstream, bool):
+                raise ValueError("Invalid upstream authentication option")
+            self.authenticated_upstream = authenticated_upstream
             self.directory = Path(directory).resolve()
             self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.proxy_port, self.web_port, self.upstream_port = proxy_port, web_port, upstream_port
@@ -124,6 +130,8 @@ class Engine:
                     web_open_browser=False, web_password=self.token,
                     proxyauth=f"sbeasy:{self.password}",
                     stream_large_bodies="2m", body_size_limit="32m")
+        if self.authenticated_upstream:
+            opts.update(upstream_auth=f"sbeasy:{self.password}")
         master.addons.add(SessionLimit(master), Ready())
         with self.lock:
             self.loop, self.master = asyncio.get_running_loop(), master
@@ -170,3 +178,22 @@ def dispatch(method, params):
     if method == "certificate":
         return engine.certificate()
     raise ValueError("Unknown engine operation")
+
+
+def android_call(method, params_json):
+    """The signature-protected Android service owns the CA directory, never the host."""
+    params = json.loads(params_json)
+    if method == "start":
+        params["authenticated_upstream"] = True
+    if method in ("clear", "stop"):
+        engine.stop()
+        if engine.thread and engine.thread.is_alive():
+            raise ValueError("Stop is still in progress; retry cleanup")
+        directory = Path(params.get("directory") or engine.directory).resolve()
+        if directory.exists():
+            shutil.rmtree(directory)
+        result = dict(phase="stopped")
+    else:
+        result = dispatch(method, params)
+    result["protocol_version"] = 2
+    return json.dumps(result)

@@ -17,6 +17,7 @@
 #include "sb/agent_client.h"
 #include "sb/agent_config.h"
 #include "sb/clash_client.h"
+#include "sb/proxy_runtime.h"
 
 /* ---- tiny HTTP fixture ------------------------------------------------ */
 
@@ -318,9 +319,13 @@ static void control_plane(const fixture_request *req, sb_buf *out) {
         bool ok = json_body && sb_streq(req->body, "{\"result\":\"restarted\",\"status\":\"done\"}");
         respond(out, ok ? "200 OK" : "400 Bad Request", NULL, "{\"ok\":true}");
     } else if (!strcmp(req->method, "POST") && !strcmp(req->target, "/prefix/api/agent/status")) {
-        bool ok = json_body && sb_streq(req->body, "{\"config_etag\":\"\\\"etag-1\\\"\","
-                                                   "\"singbox_running\":true,"
-                                                   "\"singbox_version\":\"sb-easy-cpp-agent/test\"}");
+        sbj *expected = sbj_parse_cstr("{\"config_etag\":\"\\\"etag-1\\\"\",\"singbox_running\":true,\"singbox_version\":\"sb-easy-cpp-agent/test\"}");
+        sbj *status = sbj_parse_cstr(req->body);
+        bool disabled = sbj_string_is(sbj_get(status, "singbox_version"), "sb-easy-cpp-agent/disabled");
+        if (disabled) sbj_set_str(expected, "singbox_version", "sb-easy-cpp-agent/disabled");
+        sbj_set(expected, "capabilities", disabled ? sbj_array() : sb_proxy_runtime_capabilities());
+        bool ok = json_body && sbj_equal(status, expected);
+        sbj_free(expected); sbj_free(status);
         respond(out, ok ? "200 OK" : "400 Bad Request", NULL, "{\"ok\":true}");
     } else if (!strcmp(req->method, "POST") && !strcmp(req->target, "/prefix/api/agent/telemetry")) {
         bool ok = json_body && sb_streq(req->body, "{\"down\":2,\"up\":1}");
@@ -401,6 +406,15 @@ TEST(agent_client_contract) {
 
     CHECK(sb_agent_client_acknowledge_command(client, "cmd-1", true, "restarted", &err) == 0);
     bool running = true;
+    CHECK(sb_agent_client_report_status(client, "sb-easy-cpp-agent/disabled", &running, config.etag,
+                                        &err) == 0);
+    sb_agent_client_proxy_capability(client, true);
+    CHECK(sb_agent_client_report_status(client, "sb-easy-cpp-agent/test", &running, config.etag,
+                                        &err) == 0);
+    sb_agent_client_proxy_capability(client, false);
+    CHECK(sb_agent_client_report_status(client, "sb-easy-cpp-agent/disabled", &running, config.etag,
+                                        &err) == 0);
+    sb_agent_client_proxy_capability(client, true);
     CHECK(sb_agent_client_report_status(client, "sb-easy-cpp-agent/test", &running, config.etag,
                                         &err) == 0);
     sbj *telemetry = sbj_parse_cstr("{\"up\":1,\"down\":2}");

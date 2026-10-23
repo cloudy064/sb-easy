@@ -218,6 +218,9 @@ int wmain(int argc, wchar_t **argv) {
 
     sbw_core_status status = {0};
     DWORD exit_code = MAXDWORD;
+    CHECK(sbw_core_version_check(core, "1.14.3", NULL, &error) == 0);
+    memset(&error, 0, sizeof(error));
+    CHECK(sbw_core_version_check(core, "1.14.4", NULL, &error) != 0 && !strcmp(error.code, "CORE_VERSION_MISMATCH"));
     CHECK(sbw_core_config_check(core, "{}", 2, NULL, &exit_code, &error) == 0 && exit_code == 0);
     CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.process_running && !status.has_exit_code);
     CHECK(config_count(directory, NULL) == 0);

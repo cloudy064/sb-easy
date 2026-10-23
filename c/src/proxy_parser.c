@@ -7,7 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <wincrypt.h>
+#elif !defined(__APPLE__)
 #include <openssl/evp.h>
+#endif
 #include <yaml.h>
 
 /* ---- string helpers ---------------------------------------------------- */
@@ -115,14 +120,38 @@ static bool decode_base64(sv enc, str *out) {
         return false;
     }
     while (norm.len % 4 != 0) sb_buf_putc(&norm, '=');
+    size_t padding = norm.len && norm.p[norm.len - 1] == '=' ? 1 : 0;
+    if (padding && norm.len > 1 && norm.p[norm.len - 2] == '=') ++padding;
     for (size_t i = 0; i < norm.len; ++i) {
         unsigned char c = (unsigned char)norm.p[i];
-        if (!(is_alnum(c) || c == '+' || c == '/' || c == '=')) {
+        if (!(is_alnum(c) || c == '+' || c == '/') && !(c == '=' && i >= norm.len - padding)) {
             sb_buf_free(&norm);
             return false;
         }
     }
     unsigned char *buf = sb_xmalloc((norm.len / 4) * 3 + 1);
+#ifdef _WIN32
+    DWORD decoded = (DWORD)((norm.len / 4) * 3);
+    /* The grammar above enforces padding placement independently of the
+     * platform API; Wine does not implement CRYPT_STRING_STRICT. */
+    if (!CryptStringToBinaryA(norm.p, (DWORD)norm.len, CRYPT_STRING_BASE64,
+                              buf, &decoded, NULL, NULL)) {
+        free(buf);
+        sb_buf_free(&norm);
+        return false;
+    }
+    size_t size = (size_t)decoded;
+#elif defined(__APPLE__)
+    size_t size = 0;
+    unsigned char *decoded = sb_base64_decode_strict(norm.p, norm.len, &size);
+    if (!decoded) {
+        free(buf);
+        sb_buf_free(&norm);
+        return false;
+    }
+    memcpy(buf, decoded, size);
+    free(decoded);
+#else
     int decoded = EVP_DecodeBlock(buf, (const unsigned char *)norm.p, (int)norm.len);
     if (decoded < 0) {
         free(buf);
@@ -134,6 +163,7 @@ static bool decode_base64(sv enc, str *out) {
         size -= 2;
     else if (norm.p[norm.len - 1] == '=')
         size -= 1;
+#endif
     buf[size] = '\0';
     out->p = (char *)buf;
     out->n = size;
@@ -322,7 +352,7 @@ static bool has_required_secret(const char *type, const sbj *pc) {
         return has_nonempty_string(pc, "password");
     if (!strcmp(type, "tuic"))
         return has_nonempty_string(pc, "uuid") && has_nonempty_string(pc, "password");
-    if (!strcmp(type, "http")) return true;
+    if (!strcmp(type, "http") || !strcmp(type, "socks")) return true;
     return false;
 }
 
@@ -350,6 +380,7 @@ static void vec_push_move(sb_parsed_node_vec *v, sb_parsed_node *node) {
     sb_parsed_node *slot = sb_parsed_node_vec_push(v);
     sb_parsed_node_free(slot);
     *slot = *node;
+    memset(node, 0, sizeof *node);
 }
 
 /* ---- nlohmann value()/get() emulation ---------------------------------- */
@@ -688,6 +719,7 @@ typedef struct {
     bool parser_live;
     ynode **all;
     size_t nall, capall;
+    size_t parsed_nodes; /* optional platform resource limit, across retries */
     char **anchor_names;
     ynode **anchor_nodes;
     size_t nanchors;
@@ -1048,7 +1080,12 @@ static size_t yaml_unsanitize(char *s, size_t n) {
 /* -- events -> tree ------------------------------------------------------- */
 
 /* yaml-cpp's DepthGuard<500> throws when the node depth reaches 500. */
+#ifndef YAML_MAX_NODES
+#define YAML_MAX_NODES SIZE_MAX
+#endif
+#ifndef YAML_MAX_DEPTH
 #define YAML_MAX_DEPTH 500
+#endif
 
 static bool scalar_has_nul(const ynode *n) { return memchr(n->s, '\0', n->slen) != NULL; }
 
@@ -1080,10 +1117,11 @@ static size_t block_column(yload *L, const yaml_event_t *ev, bool is_seq) {
  * Returns NULL on error. */
 static ynode *yparse_node(yload *L, yaml_event_t *ev, int depth) {
     ynode *node = NULL;
-    if (depth >= YAML_MAX_DEPTH) {
+    if (depth >= YAML_MAX_DEPTH || L->parsed_nodes >= YAML_MAX_NODES) {
         yaml_event_delete(ev);
         return NULL;
     }
+    ++L->parsed_nodes;
     switch (ev->type) {
     case YAML_ALIAS_EVENT: {
         const char *name = (const char *)ev->data.alias.anchor;
@@ -1623,8 +1661,12 @@ static char *anchor_fix(const yaml_parser_t *p, const char *t, size_t n, bool bu
 
 /* Bounds on rewrite-and-retry rounds (each fixes one construct libyaml
  * rejects but yaml-cpp accepts) and on the total bytes re-parsed. */
+#ifndef YAML_MAX_FIX_ROUNDS
 #define YAML_MAX_FIX_ROUNDS 1024
+#endif
+#ifndef YAML_MAX_FIX_BYTES
 #define YAML_MAX_FIX_BYTES ((size_t)256 * 1024 * 1024)
+#endif
 
 /* Runs parse rounds on text, applying the rewrites above on failure. */
 static ynode *yload_rounds(yload *L, const char *text, size_t len, bool bulk_anchors, bool *ok,
@@ -1700,18 +1742,43 @@ static ynode *yload_first(yload *L, const char *text, size_t len, bool *ok) {
 /* Conversion limits: yaml-cpp's yaml_to_json recursed through alias cycles
  * (crashing) and expanded shared aliases exponentially; the C loader instead
  * yields null for a cycle and stops expanding past these bounds. */
+#ifndef YAML_CONVERT_BUDGET
 #define YAML_CONVERT_BUDGET 2000000
+#endif
+#ifndef YAML_CONVERT_DEPTH
 #define YAML_CONVERT_DEPTH 1000
+#endif
 
-static sbj *yaml_to_json(ynode *n, size_t *budget, int depth) {
-    if (*budget == 0 || n->visiting || depth > YAML_CONVERT_DEPTH) return sbj_null();
-    --*budget;
+#ifndef YAML_CONVERT_STRING_BUDGET
+#define YAML_CONVERT_STRING_BUDGET SIZE_MAX
+#endif
+#ifndef YAML_REJECT_LIMIT_EXHAUSTION
+#define YAML_REJECT_LIMIT_EXHAUSTION 0
+#endif
+
+typedef struct {
+    size_t nodes, bytes;
+    bool exhausted;
+} yaml_convert_limits;
+
+static sbj *yaml_to_json(ynode *n, yaml_convert_limits *budget, int depth) {
+    if (budget->nodes == 0 || n->visiting || depth > YAML_CONVERT_DEPTH) {
+        budget->exhausted = true;
+        return sbj_null();
+    }
+    --budget->nodes;
     switch (n->kind) {
-    case Y_SCALAR: return sbj_strn(n->s, n->slen);
+    case Y_SCALAR:
+        if (n->slen > budget->bytes) { budget->exhausted = true; return sbj_null(); }
+        budget->bytes -= n->slen;
+        return sbj_strn(n->s, n->slen);
     case Y_SEQ: {
         n->visiting = true;
         sbj *a = sbj_array();
-        for (size_t i = 0; i < n->n; ++i) sbj_arr_push(a, yaml_to_json(n->items[i], budget, depth + 1));
+        for (size_t i = 0; i < n->n; ++i) {
+            if (YAML_REJECT_LIMIT_EXHAUSTION && budget->exhausted) break;
+            sbj_arr_push(a, yaml_to_json(n->items[i], budget, depth + 1));
+        }
         n->visiting = false;
         return a;
     }
@@ -1719,10 +1786,14 @@ static sbj *yaml_to_json(ynode *n, size_t *budget, int depth) {
         n->visiting = true;
         sbj *o = sbj_object();
         for (size_t i = 0; i + 1 < n->n; i += 2) {
+            if (YAML_REJECT_LIMIT_EXHAUSTION && budget->exhausted) break;
             const ynode *k = n->items[i];
             /* sbj keys are C strings: a key containing NUL cannot be kept. */
-            if (k->kind == Y_SCALAR && !memchr(k->s, '\0', k->slen))
+            if (k->kind == Y_SCALAR && !memchr(k->s, '\0', k->slen)) {
+                if (k->slen > budget->bytes) { budget->exhausted = true; break; }
+                budget->bytes -= k->slen;
                 sbj_setn(o, k->s, k->slen, yaml_to_json(n->items[i + 1], budget, depth + 1));
+            }
         }
         n->visiting = false;
         return o;
@@ -1923,6 +1994,7 @@ static int clash_proxy(const sbj *proxy, sb_parsed_node *out) {
     else if (sv_eq(t, "trojan")) type = "trojan";
     else if (sv_eq(t, "tuic")) type = "tuic";
     else if (sv_eq(t, "http")) type = "http";
+    else if (sv_eq(t, "socks5") || sv_eq(t, "socks")) type = "socks";
     str server = string_value_or(proxy, "server", "");
     int64_t raw_port = 0;
     if (!integer_value(proxy, "port", &raw_port)) raw_port = 0;
@@ -1995,7 +2067,7 @@ static int clash_proxy(const sbj *proxy, sb_parsed_node *out) {
         set_str(config, "congestion_control", string_value_or(proxy, "congestion-controller", "bbr"));
         set_str(config, "udp_relay_mode", string_value_or(proxy, "udp-relay-mode", "native"));
         sbj_set(config, "tls", clash_tls(proxy, true));
-    } else { /* http */
+    } else { /* http / socks */
         str user, pw;
         if (string_value(proxy, "username", &user)) {
             if (user.n) sbj_set(config, "username", sbj_take_str(&user));
@@ -2005,7 +2077,10 @@ static int clash_proxy(const sbj *proxy, sb_parsed_node *out) {
             if (pw.n) sbj_set(config, "password", sbj_take_str(&pw));
             else str_free(&pw);
         }
-        set_opt(config, "tls", clash_tls(proxy, boolean_value(proxy, "tls")));
+        if (!strcmp(type, "socks")) {
+            if (boolean_value(proxy, "tls")) goto done; /* SOCKS outbound has no TLS field. */
+            sbj_set_str(config, "version", "5");
+        } else set_opt(config, "tls", clash_tls(proxy, boolean_value(proxy, "tls")));
     }
     result = finish_node(out, type, sv_str(&tag), sv_str(&server), port, config, true);
     config = NULL;
@@ -2022,13 +2097,13 @@ static bool likely_base64(sv body) {
     if (v.n <= 20) return false;
     for (size_t i = 0; i < v.n; ++i) {
         unsigned char c = (unsigned char)v.p[i];
-        if (!(is_alnum(c) || c == '+' || c == '/' || c == '-' || c == '_' || c == '=')) return false;
+        if (!(is_alnum(c) || c == '+' || c == '/' || c == '-' || c == '_' || c == '=' || is_space(c))) return false;
     }
     return true;
 }
 
 /* Returns 1 when the YAML branch produced the result, 0 to fall through. */
-static int parse_clash_yaml(sv text, sb_parsed_node_vec *out) {
+static int parse_clash_yaml(sv text, sb_parsed_node_vec *out, sb_strvec *skipped) {
     yload L;
     bool ok;
     ynode *root = yload_first(&L, text.p, text.n, &ok);
@@ -2044,14 +2119,25 @@ static int parse_clash_yaml(sv text, sb_parsed_node_vec *out) {
         }
         if (proxies && proxies->kind == Y_SEQ && proxies->n > 0) {
             handled = 1;
-            size_t budget = YAML_CONVERT_BUDGET;
+            yaml_convert_limits budget = {YAML_CONVERT_BUDGET, YAML_CONVERT_STRING_BUDGET, false};
             proxies->visiting = true;
             for (size_t i = 0; i < proxies->n; ++i) {
                 sbj *proxy = yaml_to_json(proxies->items[i], &budget, 1);
                 sb_parsed_node node;
                 sb_parsed_node_init(&node);
-                if (clash_proxy(proxy, &node)) vec_push_move(out, &node);
-                else sb_parsed_node_free(&node);
+                const sbj *network = sbj_get(proxy, "network");
+                bool unsupported = (YAML_REJECT_LIMIT_EXHAUSTION && budget.exhausted) ||
+                    (skipped && (sbj_has(proxy, "plugin") || sbj_has(proxy, "plugin-opts") ||
+                    (sbj_is_string(network) && network->v.str.len && !sbj_string_is(network, "tcp") &&
+                     !sbj_string_is(network, "ws") && !sbj_string_is(network, "grpc") &&
+                     !sbj_string_is(network, "h2") && !sbj_string_is(network, "http"))));
+                if (!unsupported && clash_proxy(proxy, &node)) vec_push_move(out, &node);
+                else {
+                    sb_parsed_node_free(&node);
+                    if (skipped) sb_strvec_push_take(skipped,
+                        sb_asprintf("Clash entry %zu: %s", i + 1, unsupported ?
+                            "unsupported plugin or transport" : "unsupported protocol or invalid required fields"));
+                }
                 sbj_free(proxy);
             }
             proxies->visiting = false;
@@ -2069,7 +2155,7 @@ int sb_parse_subscription_body_ex(const char *body, size_t len, sb_parsed_node_v
     sv text = input;
     if (likely_base64(input) && decode_base64(sv_trim(input), &decoded)) text = sv_str(&decoded);
 
-    if (parse_clash_yaml(text, out)) {
+    if (parse_clash_yaml(text, out, NULL)) {
         str_free(&decoded);
         return 0;
     }
@@ -2102,6 +2188,204 @@ sb_parsed_node_vec sb_parse_subscription_body(const char *body, size_t len) {
     sb_parsed_node_vec v;
     sb_parse_subscription_body_ex(body, len, &v, NULL);
     return v;
+}
+
+static bool subscription_local_reference(const sbj *value, size_t depth) {
+    if (depth > 32) return true;
+    if (sbj_is_object(value)) {
+        static const char *const forbidden[] = {"certificate_path", "client_certificate_path",
+            "client_key_path", "key_path", "config_path", "certificate_provider", "acme"};
+        for (size_t i = 0; i < sizeof forbidden / sizeof forbidden[0]; ++i)
+            if (sbj_has(value, forbidden[i])) return true;
+        const char *key; const sbj *child;
+        SBJ_OBJ_FOREACH(value, i, key, child) {
+            (void)key;
+            if (subscription_local_reference(child, depth + 1)) return true;
+        }
+    } else if (sbj_is_array(value)) {
+        const sbj *child;
+        SBJ_ARR_FOREACH(value, i, child)
+            if (subscription_local_reference(child, depth + 1)) return true;
+    }
+    return false;
+}
+
+static bool subscription_node_valid(const sb_parsed_node *node) {
+    if (!node->server_len || !node->server_port ||
+        memchr(node->server, '\0', node->server_len) || memchr(node->tag, '\0', node->tag_len) ||
+        subscription_local_reference(node->protocol_config, 0)) return false;
+    const char *type = node->node_type;
+    if (!strcmp(type, "socks") && sbj_has(node->protocol_config, "tls")) return false;
+    const char *required[2] = {NULL, NULL};
+    if (!strcmp(type, "shadowsocks")) { required[0] = "method"; required[1] = "password"; }
+    else if (!strcmp(type, "vmess") || !strcmp(type, "vless")) required[0] = "uuid";
+    else if (!strcmp(type, "tuic")) { required[0] = "uuid"; required[1] = "password"; }
+    else if (!strcmp(type, "trojan") || !strcmp(type, "hysteria2")) required[0] = "password";
+    for (size_t i = 0; i < 2; ++i) {
+        if (!required[i]) continue;
+        const sbj *field = sbj_get(node->protocol_config, required[i]);
+        if (!sbj_is_string(field) || !field->v.str.len) return false;
+    }
+    return true;
+}
+
+/* Basic proxy URLs are intentionally added to the subscription-report API;
+ * the older URI-only API keeps its published config-only HTTP contract. */
+static int subscription_basic_uri(sv line, sb_parsed_node *out) {
+    static const char *const schemes[] = {"https", "http", "socks5", "socks4a", "socks4", "socks"};
+    const char *scheme = NULL;
+    for (size_t i = 0; i < sizeof schemes / sizeof schemes[0]; ++i) {
+        char prefix[16];
+        snprintf(prefix, sizeof prefix, "%s://", schemes[i]);
+        if (sv_starts(line, prefix)) { scheme = schemes[i]; line = sv_from(line, strlen(prefix)); break; }
+    }
+    if (!scheme) return 0;
+    size_t hash = sv_find(line, '#');
+    str tag = hash == NPOS ? str_empty() : percent_decode(sv_from(line, hash + 1), false);
+    line = sv_sub(line, 0, hash);
+    size_t end = line.n;
+    for (size_t i = 0; i < line.n; ++i) if (line.p[i] == '/' || line.p[i] == '?') { end = i; break; }
+    line = sv_sub(line, 0, end);
+    bool socks = !strncmp(scheme, "socks", 5);
+    size_t at = sv_rfind(line, '@');
+    sv address = at == NPOS ? line : sv_from(line, at + 1);
+    str host = {0}; uint16_t port = 0;
+    int rc = 0;
+    sbj *config = sbj_object();
+    if (!parse_host_port(address, socks ? 1080 : (!strcmp(scheme, "https") ? 443 : 80), &host, &port)) goto done;
+    if (!tag.n) {
+        str_free(&tag);
+        tag.p = sb_asprintf("%s:%u", host.p, (unsigned)port);
+        tag.n = strlen(tag.p);
+    }
+    if (at != NPOS) {
+        sv auth = sv_sub(line, 0, at);
+        str decoded = {0};
+        if (socks && sv_find(auth, ':') == NPOS && decode_base64(auth, &decoded)) auth = sv_str(&decoded);
+        size_t colon = sv_find(auth, ':');
+        str user = percent_decode(sv_sub(auth, 0, colon), false);
+        str password = colon == NPOS ? str_empty() : percent_decode(sv_from(auth, colon + 1), false);
+        set_str(config, "username", user);
+        set_str(config, "password", password);
+        str_free(&decoded);
+    }
+    if (socks) sbj_set_str(config, "version", !strcmp(scheme, "socks4a") ? "4a" : !strcmp(scheme, "socks4") ? "4" : "5");
+    else if (!strcmp(scheme, "https")) {
+        sbj *tls = sbj_object(); sbj_set_bool(tls, "enabled", true); sbj_set(config, "tls", tls);
+    }
+    rc = finish_node(out, socks ? "socks" : "http", sv_str(&tag), sv_str(&host), port, config, true);
+    config = NULL;
+done:
+    sbj_free(config); str_free(&tag); str_free(&host);
+    return rc;
+}
+
+int sb_parse_subscription_report(const char *body, size_t len, sb_proxy_import *out,
+                                 sb_err *err) {
+    sb_proxy_import_init(out);
+    sv input = {body ? body : "", body ? len : 0};
+    str decoded = {0};
+    sv text = sv_trim(input);
+    if (likely_base64(input) && decode_base64(sv_trim(input), &decoded)) text = sv_trim(sv_str(&decoded));
+    int rc = 0;
+    sb_err first_error = {0};
+    /* JSON is also YAML, so handle native sing-box before the Clash branch. */
+    if (text.n && (text.p[0] == '{' || text.p[0] == '[')) {
+        sbj *json = sbj_parse(text.p, text.n, NULL, 0);
+        const sbj *entries = sbj_is_array(json) ? json : sbj_get(json, "outbounds");
+        if (sbj_is_array(entries)) {
+            const sbj *entry;
+            SBJ_ARR_FOREACH(entries, i, entry) {
+                const sbj *type = sbj_get(entry, "type");
+                if (sbj_string_is(type, "selector") || sbj_string_is(type, "urltest") ||
+                    sbj_string_is(type, "direct") || sbj_string_is(type, "block") ||
+                    sbj_string_is(type, "dns")) continue;
+                sbj *one = sbj_array();
+                sbj_arr_push(one, sbj_clone(entry));
+                sb_proxy_import parsed;
+                sb_err ignored = {0};
+                int parsed_rc = sb_parse_outbound_config(one, &parsed, &ignored);
+                sbj_free(one);
+                if (parsed_rc == 0 && parsed.nodes.len == 1) {
+                    /* The legacy config-import API preserves old array-default
+                     * quirks. Subscription refresh must emit runnable scalars. */
+                    sbj *config = parsed.nodes.items[0].protocol_config;
+                    if (sbj_string_is(type, "vmess")) {
+                        if (!sbj_has(entry, "alter_id")) sbj_set_int(config, "alter_id", 0);
+                        if (!sbj_has(entry, "security")) sbj_set_str(config, "security", "auto");
+                    } else if (sbj_string_is(type, "vless")) {
+                        if (!sbj_has(entry, "flow")) sbj_del(config, "flow");
+                        if (!sbj_has(entry, "packet_encoding")) sbj_set_str(config, "packet_encoding", "xudp");
+                    }
+                    vec_push_move(&out->nodes, &parsed.nodes.items[0]);
+                } else {
+                    sb_strvec_push_take(&out->skipped,
+                        sb_asprintf("JSON outbound %zu: unsupported protocol or invalid required fields", i + 1));
+                }
+                sb_proxy_import_free(&parsed);
+            }
+            sbj_free(json);
+            goto done;
+        }
+        sbj_free(json);
+    }
+    if (parse_clash_yaml(text, &out->nodes, &out->skipped)) goto done;
+    size_t line_number = 0;
+    while (text.n) {
+        ++line_number;
+        size_t nl = sv_find(text, '\n');
+        sv line = sv_trim(sv_sub(text, 0, nl));
+        text = nl == NPOS ? (sv){"", 0} : sv_from(text, nl + 1);
+        if (!line.n || line.p[0] == '#' || sv_starts(line, "//")) continue;
+        if (sv_starts(line, "ss://")) {
+            size_t query_at = sv_find(line, '?');
+            bool plugin = false;
+            if (query_at != NPOS) {
+                sv query = sv_from(line, query_at + 1);
+                query = sv_sub(query, 0, sv_find(query, '#'));
+                while (query.n) {
+                    size_t amp = sv_find(query, '&');
+                    sv field = sv_sub(query, 0, amp);
+                    str name = percent_decode(sv_sub(field, 0, sv_find(field, '=')), true);
+                    if (sv_eq(sv_str(&name), "plugin")) plugin = true;
+                    str_free(&name);
+                    query = amp == NPOS ? (sv){"", 0} : sv_from(query, amp + 1);
+                }
+            }
+            if (plugin) {
+                sb_strvec_push_take(&out->skipped, sb_asprintf("Line %zu: unsupported Shadowsocks plugin", line_number));
+                continue;
+            }
+        }
+        sb_parsed_node node;
+        sb_err ignored = {0};
+        int r = sb_parse_proxy_uri_ex(line.p, line.n, &node, &ignored);
+        if (r == 0) r = subscription_basic_uri(line, &node);
+        if (r == 1) vec_push_move(&out->nodes, &node);
+        else {
+            sb_parsed_node_free(&node);
+            if (r < 0 && !first_error.code) first_error = ignored;
+            sb_strvec_push_take(&out->skipped,
+                sb_asprintf("Line %zu: unsupported URI or invalid required fields", line_number));
+        }
+    }
+done:
+    str_free(&decoded);
+    for (size_t i = 0; i < out->nodes.len;) {
+        if (subscription_node_valid(&out->nodes.items[i])) { ++i; continue; }
+        sb_parsed_node_free(&out->nodes.items[i]);
+        memmove(&out->nodes.items[i], &out->nodes.items[i + 1],
+            (out->nodes.len - i - 1) * sizeof out->nodes.items[0]);
+        --out->nodes.len;
+        sb_strvec_push(&out->skipped, "Proxy entry: missing credentials, invalid text, or local-file TLS settings");
+    }
+    if (out->nodes.len == 0) {
+        if (first_error.code) {
+            if (err) *err = first_error;
+            rc = -1;
+        } else rc = sb_fail(err, SB_ERR_VALIDATION, "Subscription contains no compatible proxy nodes");
+    }
+    return rc;
 }
 
 /* ---- sing-box outbound import ------------------------------------------ */
@@ -2145,7 +2429,7 @@ static int parse_outbound(const sbj *outbound, sb_parsed_node *out, sb_err *err)
     sv server = {s->v.str.ptr, s->v.str.len};
     uint16_t port;
     if (!outbound_port(outbound, &port) || server.n == 0) return 0;
-    sv tag;
+    sv tag = server;
     if (value_string(outbound, "tag", server, &tag, err)) return -1;
     sbj *config = sbj_object();
     if (sbj_string_is(t, "shadowsocks")) {
@@ -2170,9 +2454,14 @@ static int parse_outbound(const sbj *outbound, sb_parsed_node *out, sb_err *err)
         sbj_set(config, "password", value_or_wrapped(outbound, "password", sbj_null()));
         copy_if(config, outbound, "congestion_control");
         copy_if(config, outbound, "udp_relay_mode");
-    } else if (sbj_string_is(t, "http")) {
+    } else if (sbj_string_is(t, "http") || sbj_string_is(t, "socks")) {
         copy_if(config, outbound, "username");
         copy_if(config, outbound, "password");
+        if (sbj_string_is(t, "socks")) {
+            copy_if(config, outbound, "version");
+            copy_if(config, outbound, "network");
+            copy_if(config, outbound, "udp_over_tcp");
+        }
     } else {
         sbj_free(config);
         return 0;
@@ -2202,7 +2491,7 @@ int sb_parse_outbound_config(const sbj *config, sb_proxy_import *out, sb_err *er
     if (!outbounds) return 0;
 
     static const char *const supported[] = {"shadowsocks", "vmess", "vless", "trojan",
-                                            "hysteria2",   "tuic",  "http"};
+                                            "hysteria2",   "tuic",  "http", "socks"};
     const sbj *outbound;
     SBJ_ARR_FOREACH(outbounds, i, outbound) {
         sv type = {"", 0};

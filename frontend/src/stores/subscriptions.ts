@@ -7,8 +7,8 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
   const subs = ref<Subscription[]>([])
   const loading = ref(false)
 
-  async function fetchAll() {
-    loading.value = true
+  async function fetchAll(quiet = false) {
+    if (!quiet) loading.value = true
     try {
       const { data } = await client.get('/subscriptions')
       subs.value = data
@@ -28,10 +28,17 @@ export const useSubscriptionsStore = defineStore('subscriptions', () => {
     subs.value = subs.value.filter(s => s.id !== id)
   }
 
+  async function update(id: string, req: Partial<Pick<Subscription, 'name' | 'url' | 'enabled' | 'refresh_interval'>>) {
+    const { data } = await client.put<Subscription>(`/subscriptions/${id}`, req)
+    const index = subs.value.findIndex(s => s.id === id)
+    if (index >= 0) subs.value[index] = { ...subs.value[index], ...data }
+    return data
+  }
+
   async function fetchOne(id: string): Promise<FetchResult> {
     const { data } = await client.post(`/subscriptions/${id}/fetch`)
     return data
   }
 
-  return { subs, loading, fetchAll, create, remove, fetchOne }
+  return { subs, loading, fetchAll, create, update, remove, fetchOne }
 })

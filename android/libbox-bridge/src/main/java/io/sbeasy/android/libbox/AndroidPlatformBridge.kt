@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Platform integration follows the public PlatformInterface contract and the
- * sing-box for Android implementation at release 1.13.12.
+ * sing-box for Android implementation at release 1.14.3.
  */
 package io.sbeasy.android.libbox
 
@@ -16,7 +16,6 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.system.OsConstants
-import android.util.Base64
 import android.util.Log
 import androidx.annotation.RequiresApi
 import io.nekohasekai.libbox.ConnectionOwner
@@ -37,7 +36,6 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.InterfaceAddress
 import java.net.NetworkInterface
-import java.security.KeyStore
 import io.nekohasekai.libbox.NetworkInterface as LibboxNetworkInterface
 
 internal class AndroidPlatformBridge(
@@ -67,7 +65,7 @@ internal class AndroidPlatformBridge(
         ClientDiagnostics.info(TAG, "opening Android TUN mtu=${options.mtu} autoRoute=${options.autoRoute}")
 
         val builder = service.Builder()
-            .setSession("sb-easy managed proxy")
+            .setSession("sb-easy proxy")
             .setMtu(options.mtu)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -80,7 +78,7 @@ internal class AndroidPlatformBridge(
         }
 
         if (options.autoRoute) {
-            builder.addDnsServer(options.dnsServerAddress.value)
+            options.dnsServerAddress.drainStrings().forEach(builder::addDnsServer)
             addRoutes(builder, options, inet4Addresses.isNotEmpty(), inet6Addresses.isNotEmpty())
             addApplicationFilters(builder, options)
         }
@@ -179,6 +177,8 @@ internal class AndroidPlatformBridge(
                 mtu = runCatching { javaInterface.mtu }.getOrDefault(1_500)
                 addresses = StringArray(javaInterface.interfaceAddresses.map { it.toPrefix() })
                 dnsServer = StringArray(properties.dnsServers.mapNotNull { it.hostAddress })
+                gateway = StringArray(properties.routes.filter { it.destination.prefixLength == 0 }
+                    .mapNotNull { it.gateway?.takeUnless { address -> address.isAnyLocalAddress }?.hostAddress })
                 type = when {
                     capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> Libbox.InterfaceTypeWIFI
                     capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> Libbox.InterfaceTypeCellular
@@ -200,18 +200,26 @@ internal class AndroidPlatformBridge(
 
     override fun localDNSTransport(): LocalDNSTransport? = null
 
-    override fun systemCertificates(): StringIterator {
-        val keyStore = KeyStore.getInstance("AndroidCAStore")
-        keyStore.load(null, null)
-        val values = buildList {
-            val aliases = keyStore.aliases()
-            while (aliases.hasMoreElements()) {
-                val certificate = keyStore.getCertificate(aliases.nextElement()) ?: continue
-                val encoded = Base64.encodeToString(certificate.encoded, Base64.NO_WRAP)
-                add("-----BEGIN CERTIFICATE-----\n$encoded\n-----END CERTIFICATE-----")
-            }
-        }
-        return StringArray(values)
+    // Root-only platform facilities are not offered by this VpnService client.
+    override fun usePlatformShell(): Boolean = false
+    override fun checkPlatformShell(): Unit = error("Android root shell is not supported")
+    override fun lookupUser(name: String?): io.nekohasekai.libbox.PlatformUser = error("Android root shell is not supported")
+    override fun openShellSession(user: io.nekohasekai.libbox.PlatformUser?, command: String?,
+        environment: StringIterator?, term: String?, rows: Int, columns: Int): io.nekohasekai.libbox.ShellSession =
+        error("Android root shell is not supported")
+    override fun readSystemSSHHostKey(): String = error("System SSH hosting is not supported")
+    override fun lookupSFTPServer(): String = error("System SFTP hosting is not supported")
+    override fun usePlatformBridge(): Boolean = false
+    override fun createBridge(options: io.nekohasekai.libbox.BridgeOptions?): io.nekohasekai.libbox.BridgeSession =
+        error("Layer-2 bridge requires root and is not supported")
+    override fun startNeighborMonitor(listener: io.nekohasekai.libbox.NeighborUpdateListener?): Unit =
+        error("Neighbor-table monitoring requires root on Android")
+    override fun closeNeighborMonitor(listener: io.nekohasekai.libbox.NeighborUpdateListener?) = Unit
+    // Both the native monitor and our NOT_VPN network request already exclude the VPN interface.
+    override fun registerMyInterface(name: String?) = Unit
+    override fun tailscaleHostname(): String = "${Build.MANUFACTURER} ${Build.MODEL}"
+    override fun cancelNotification(identifier: String?, id: Int) {
+        service.getSystemService(android.app.NotificationManager::class.java).cancel(identifier, id)
     }
 
     override fun clearDNSCache() = Unit

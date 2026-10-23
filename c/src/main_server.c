@@ -130,6 +130,7 @@ static int configure(int argc, char **argv, sb_http_server_options *options, cha
     uint64_t interval = 0;
     if (environment_integer("SELF_SINGBOX_INTERVAL", 10, &interval, err) != 0) return -1;
     options->self_singbox_interval_seconds = interval < 2 ? 2 : interval;
+    options->subscription_auto_refresh = environment_flag("SUBSCRIPTION_AUTO_REFRESH", true);
     options->singbox_validate_config = environment_flag("SINGBOX_VALIDATE_CONFIG", true);
     options->wireguard_enabled = environment_flag("WG_ENABLED", true);
     sb_str_set(&options->wireguard_interface, environment("WG_INTERFACE", "wg0"));

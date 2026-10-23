@@ -67,7 +67,7 @@ def run(args, root):
                DATABASE_URL="sqlite:" + str(root / "panel.db"),
                MIGRATIONS_DIR=str(args.repo / "migrations"),
                JWT_SECRET="isolated-e2e-secret", ADMIN_PASSWORD="isolated-e2e-password",
-               WG_ENABLED="false", SINGBOX_MANAGED="false", STATIC_DIR=str(root / "static"),
+               WG_ENABLED="false", SINGBOX_MANAGED="false", SUBSCRIPTION_AUTO_REFRESH="false", STATIC_DIR=str(root / "static"),
                PUBLIC_SERVER=base, LOG_LEVEL="warn")
     processes, logs = [], []
 

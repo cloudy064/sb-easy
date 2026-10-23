@@ -27,8 +27,11 @@ s = route.read_text()
 if 'sbcapture.Classify' not in s:
     s = s.replace('"github.com/sagernet/sing-box/adapter"', '"github.com/sagernet/sing-box/adapter"\n "github.com/sagernet/sing-box/experimental/sbcapture"')
     for variable, tail in [('buffers, _', 'conn, nil'), ('_, packetBuffers', 'nil, conn')]:
-        marker = f'\tselectedRule, _, {variable}, err := r.matchRule(ctx, &metadata, false, false, {tail})'
-        assert s.count(marker)==1, marker
+        markers = [f'\tselectedRule, _, {variable}, err := r.matchRule(ctx, &metadata, {prefix}{tail})'
+                   for prefix in ['', 'false, false, ']]
+        matches = [marker for marker in markers if s.count(marker) == 1]
+        assert len(matches) == 1, f'Unsupported route hook for {tail}'
+        marker = matches[0]
         s = s.replace(marker, '\toriginalCaptureMetadata := metadata\n\tcaptureGeneration := sbcapture.Generation()\n'+marker+'\n\tsbcapture.Classify(captureGeneration, originalCaptureMetadata, metadata)')
     route.write_text(s)
 

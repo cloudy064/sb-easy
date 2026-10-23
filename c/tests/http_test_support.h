@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "sb/auth.h"
+#include "sb/auth_security.h"
 #include "sb/http_client.h"
 #include "sb/http_server.h"
 #include "sb/json.h"
@@ -107,6 +108,7 @@ SB_TEST_UNUSED static int sb_test_server_start_ex(sb_test_server *t, sb_test_pre
     sb_http_server_options_init(&options);
     sb_str_set(&options.address, "127.0.0.1");
     options.port = 0;
+    options.subscription_auto_refresh = false; /* deterministic manual-refresh contracts */
     sb_str_set(&options.public_server, "https://panel.example.com");
     sb_str_set(&options.config_hash_seed, "contract-seed");
     sb_str_set(&options.legacy_agent_token, "legacy-self-token");
@@ -135,8 +137,10 @@ SB_TEST_UNUSED static int sb_test_server_start_ex(sb_test_server *t, sb_test_pre
     t->base_url = sb_asprintf("http://127.0.0.1:%u", (unsigned)t->port);
     sb_user_account admin;
     sb_user_account_init(&admin);
-    if (sb_store_find_user_by_username(t->store, "admin", &admin, &err) == 1)
-        t->token = sb_auth_create_token(t->jwt_secret, admin.id, admin.username, admin.role);
+    sb_auth_security *security = sb_auth_security_new(sb_store_database(t->store), t->jwt_secret, false, &err);
+    if (security && sb_store_find_user_by_username(t->store, "admin", &admin, &err) == 1)
+        t->token = sb_auth_security_issue(security, admin.id, "test", "contract", &err);
+    sb_auth_security_free(security);
     sb_user_account_free(&admin);
     return t->token ? 0 : -1;
 }
@@ -161,7 +165,23 @@ SB_TEST_UNUSED static void sb_test_server_stop(sb_test_server *t) {
 /* Mints a token for an arbitrary identity (e.g. a viewer). malloc'd. */
 SB_TEST_UNUSED static char *sb_test_token(sb_test_server *t, const char *user_id, const char *username,
                                           const char *role) {
-    return sb_auth_create_token(t->jwt_secret, user_id, username, role);
+    (void)user_id;
+    sb_err err = {0}; sb_user_account user; sb_user_account_init(&user);
+    sb_auth_security *security = sb_auth_security_new(sb_store_database(t->store), t->jwt_secret, false, &err);
+    int found = sb_store_find_user_by_username(t->store, username, &user, &err);
+    if (found == 0) {
+        char *hash = sb_hash_password("test-password", &err);
+        found = sb_store_create_user(t->store, username, hash, role, &user, &err) == 0 ? 1 : -1;
+        free(hash);
+    }
+    char *token = NULL;
+    if (security && found == 1) {
+        sbj *scope = sbj_object(); sbj_set_str(scope, "scope", "all"); sbj_set(scope, "grants", sbj_array());
+        if (sb_auth_user_scope_set(security, user.id, scope, &err) == 0)
+            token = sb_auth_security_issue(security, user.id, "test", "contract", &err);
+        sbj_free(scope);
+    }
+    sb_auth_security_free(security); sb_user_account_free(&user); return token;
 }
 
 /* ---- requests ----------------------------------------------------------- */

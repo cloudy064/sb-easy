@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "sing_box": {
+    "version": "1.14.3",
+    "source_revision": "7054cac5124465ffdb145870d7c01885566711b1",
+    "source_url": "https://github.com/SagerNet/sing-box.git",
+    "release_url": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.3",
+    "go_minimum": "1.25.5",
+    "artifacts": {
+      "linux-amd64": {
+        "filename": "sing-box-1.14.3-linux-amd64.tar.gz",
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz",
+        "sha256": "e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee"
+      },
+      "linux-arm64": {
+        "filename": "sing-box-1.14.3-linux-arm64.tar.gz",
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-arm64.tar.gz",
+        "sha256": "29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e"
+      },
+      "linux-armv7": {
+        "filename": "sing-box-1.14.3-linux-armv7.tar.gz",
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-armv7.tar.gz",
+        "sha256": "8e81ee6bc1db6fec6e0342360e1de7bfabecec8d2e9c480a3563d129f84fb034"
+      },
+      "windows-amd64": {
+        "filename": "sing-box-1.14.3-windows-amd64.zip",
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-amd64.zip",
+        "sha256": "d8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518"
+      },
+      "windows-arm64": {
+        "filename": "sing-box-1.14.3-windows-arm64.zip",
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-arm64.zip",
+        "sha256": "195b35424c6e3f5913954c7f08c5d8ba2d2199f6d18eb27a3972a5a29cdaa78c"
+      }
+    }
+  },
+  "android": {
+    "gomobile_version": "v0.1.12",
+    "ndk_version": "28.0.13004108"
+  }
+}

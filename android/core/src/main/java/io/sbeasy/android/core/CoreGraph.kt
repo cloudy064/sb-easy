@@ -22,6 +22,7 @@ object CoreGraph {
             RuntimeObservability.initialize(application)
             AppTrafficStore.initialize(application)
             PacketCapture.initialize(application)
+            HttpDebug.initialize(application)
             val plainPreferences = application.getSharedPreferences("sb_easy_local", Context.MODE_PRIVATE)
             val installId = plainPreferences.getString("install_id", null) ?: UUID.randomUUID().toString().also {
                 plainPreferences.edit().putString("install_id", it).apply()
@@ -33,6 +34,9 @@ object CoreGraph {
                 ControlPlaneClient(application),
                 installId,
                 LocalRoutingStore(application),
+                AtomicConfigStore(application, "standalone-config"),
+                LocalRoutingStore(application, "standalone-routing.json"),
+                LocalSubscriptionStore(application),
             )
             initialized = true
         }

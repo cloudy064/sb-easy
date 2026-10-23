@@ -1,0 +1,42 @@
+[Unit]
+Description=sb-easy desktop authorized network tunnel
+After=dbus.service network.target
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=io.sbeasy.Desktop.Tunnel
+ExecStart=/usr/libexec/sb-easy-tunnel
+User=root
+Group=root
+RuntimeDirectory=sb-easy-desktop
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+UMask=0077
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+ReadWritePaths=/run/sb-easy-desktop /proc/sys/net/ipv4/conf
+LimitCORE=0
+MemoryMax=1G
+Environment=GOMEMLIMIT=768MiB
+
+[Install]
+WantedBy=multi-user.target

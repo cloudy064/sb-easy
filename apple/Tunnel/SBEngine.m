@@ -232,10 +232,14 @@ static BOOL fail(NSError **error, NSString *message) {
     LibboxCommandServer *server=self.server;
     if(server) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{ [server closeService:nil]; });
 }
-- (void)stop { if(self.server) { [self.server closeService:nil]; [self.server close:nil]; self.server=nil; } [self.platform closeDefaultInterfaceMonitor:nil error:nil]; }
+- (void)stop { if(self.server) { [self.server closeService:nil]; [self.server close]; self.server=nil; } [self.platform closeDefaultInterfaceMonitor:nil error:nil]; }
 - (void)pause { [self.server pause]; }
 - (void)wake { [self.server wake]; [self.server resetNetwork]; }
-- (NSString *)snapshot:(NSError **)error { return self.server ? [self.server appleSnapshot:error] : (fail(error,@"Core unavailable"),nil); }
+- (NSString *)snapshot:(NSError **)error {
+    if(self.server) return [self.server appleSnapshot:error];
+    fail(error,@"Core unavailable");
+    return nil;
+}
 - (BOOL)select:(NSString *)group target:(NSString *)target error:(NSError **)error { return self.server && [self.server appleSelectOutbound:group outboundTag:target error:error]; }
 - (BOOL)probe:(NSString *)target error:(NSError **)error { return self.server && [self.server appleURLTest:target error:error]; }
 @end

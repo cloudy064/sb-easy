@@ -12,6 +12,21 @@ static bool environment_write(const wchar_t *key,DWORD *error){
     wchar_t *directory=sb_xcalloc(32768,sizeof *directory);DWORD size=GetEnvironmentVariableW(key,directory,32768);
     if(!size||size>=32768)directory[0]=0;bool wrote=private_write(directory,L"sandbox-temporary-write-test.tmp",error);free(directory);return wrote;
 }
+static bool probe_file_identity(HANDLE file,BY_HANDLE_FILE_INFORMATION *identity,bool *invalid_exception){
+    *invalid_exception=false;
+#ifdef _MSC_VER
+    /* This negative probe deliberately uses a handle that must not have been
+     * inherited. Native strict-handle checking raises instead of returning
+     * ERROR_INVALID_HANDLE. Catch exactly that expected denial locally. */
+    __try {
+#endif
+        return GetFileInformationByHandle(file,identity)!=FALSE;
+#ifdef _MSC_VER
+    } __except(GetExceptionCode()==STATUS_INVALID_HANDLE?EXCEPTION_EXECUTE_HANDLER:EXCEPTION_CONTINUE_SEARCH){
+        *invalid_exception=true;return false;
+    }
+#endif
+}
 int main(int argc,char **argv){
     if(argc>1)return 7;(void)argv;HANDLE input=GetStdHandle(STD_INPUT_HANDLE),output=GetStdHandle(STD_OUTPUT_HANDLE);sbj *request;
     while((request=extension_read(input))!=NULL){
@@ -53,8 +68,10 @@ int main(int argc,char **argv){
         /* Handle values are process-local slots and can be reused by the
          * worker. Only the same underlying host secret file is a leak. */
         HANDLE leaked=(HANDLE)(uintptr_t)sbj_get_int(params,"inheritable_handle",0);BY_HANDLE_FILE_INFORMATION identity={0};
-        bool inherited_secret=GetFileInformationByHandle(leaked,&identity)&&identity.dwVolumeSerialNumber==(DWORD)sbj_get_int(params,"secret_volume",0)&&identity.nFileIndexHigh==(DWORD)sbj_get_int(params,"secret_index_high",0)&&identity.nFileIndexLow==(DWORD)sbj_get_int(params,"secret_index_low",0);
+        bool invalid_exception=false;
+        bool inherited_secret=probe_file_identity(leaked,&identity,&invalid_exception)&&identity.dwVolumeSerialNumber==(DWORD)sbj_get_int(params,"secret_volume",0)&&identity.nFileIndexHigh==(DWORD)sbj_get_int(params,"secret_index_high",0)&&identity.nFileIndexLow==(DWORD)sbj_get_int(params,"secret_index_low",0);
         sbj_set_bool(result,"handle_not_inherited",!inherited_secret);
+        sbj_set_bool(result,"invalid_handle_exception",invalid_exception);
         wchar_t command[32768];swprintf_s(command,32768,L"\"%s\" child",exe);STARTUPINFOW startup={0};startup.cb=sizeof startup;PROCESS_INFORMATION child={0};bool spawned=CreateProcessW(exe,command,NULL,NULL,FALSE,CREATE_SUSPENDED,NULL,NULL,&startup,&child)!=FALSE;
         sbj_set_bool(result,"child_process_denied",!spawned);if(spawned){TerminateProcess(child.hProcess,1);CloseHandle(child.hThread);CloseHandle(child.hProcess);}
         sbj *reply=sbj_object();sbj_set_bool(reply,"ok",true);sbj_set(reply,"result",result);bool ok=extension_write(output,reply);sbj_free(reply);sbj_free(request);if(!ok)break;

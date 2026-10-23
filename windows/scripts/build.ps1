@@ -56,6 +56,8 @@ if ($CaptureExtension) { & (Join-Path $PSScriptRoot 'prepare-capture.ps1') }
 if ($LASTEXITCODE -ne 0) { throw 'Windows configuration failed' }
 $buildArguments = @('--build', $buildDir, '--parallel', '4')
 if ($Clean) { $buildArguments += '--clean-first' }
+# Report failures from all independent Ninja targets before returning failure.
+$buildArguments += @('--', '-k', '0')
 & $cmake @buildArguments
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
 & $ctest --test-dir $buildDir --output-on-failure --timeout 30

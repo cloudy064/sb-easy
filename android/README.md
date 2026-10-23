@@ -71,9 +71,12 @@ a public trust configuration; remote installs then remain unavailable. Explicit
 local-file installation still requires the actual APK signer to match the host,
 and applies the same package/manifest/compatibility/revocation checks. Shared
 external signing parameters for host and plugin are in `signing.gradle`; neither
-keys nor passwords are committed. The current build environment's default debug
-identity changed from `5d7a2a82…` to `14a2ddad…`; both newly built APKs match each
-other, but they are not an accepted upgrade of the older signing identity.
+keys nor passwords are committed. Current APKs use the test/debug identity
+`14a2ddad…`, which also matches the published Android 1.3.4 APK (its published
+ARM64 SHA-256 is `7786f8f06381ea06a01a4e0037183cfb90c58ea0021a4730d452fb0202415513`).
+Some earlier local development builds used `5d7a2a82…`; those different-signature
+installations cannot accept these APKs as an in-place upgrade. Do not uninstall
+an official 1.3.4 installation merely because of the preview version label.
 Use an explicitly chosen keystore for consistent upgrade identity and perform
 real installation/recovery/UID acceptance before publication.
 

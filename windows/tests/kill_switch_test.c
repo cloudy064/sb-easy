@@ -142,7 +142,7 @@ int main(void) {
             CHECK(set.count == start + 11);
         }
         CHECK(!sbw_kill_switch_build(&service, &core, &dhcp, connected ? 777 : 0, observe, &set));
-        CHECK(set.filters == (connected ? 40 : 36));
+        CHECK(set.filters == (connected ? 40u : 36u));
         for (unsigned layer = 0; layer < 4; ++layer) {
             for (unsigned i = 0; i < 5; ++i)
                 CHECK(!set.cases[layer * 11 + i].permitted);
@@ -164,9 +164,9 @@ int main(void) {
         }
         add(&ndp, layer, "browser", 88, IPPROTO_ICMPV6, 128, 0)->remote[0] = 0x20;
         add(&ndp, layer, "browser", 88, IPPROTO_ICMPV6, 135, 0)->remote[0] = 0x20;
-        flow *invalid = add(&ndp, layer, "browser", 88, IPPROTO_ICMPV6, 135, 1);
-        invalid->remote[0] = 0xfe;
-        invalid->remote[1] = 0x80;
+        flow *invalid_flow = add(&ndp, layer, "browser", 88, IPPROTO_ICMPV6, 135, 1);
+        invalid_flow->remote[0] = 0xfe;
+        invalid_flow->remote[1] = 0x80;
     }
     CHECK(!sbw_kill_switch_build(&service, &core, &dhcp, 0, observe, &ndp));
     for (unsigned layer = 0; layer < 2; ++layer) {

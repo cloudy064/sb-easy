@@ -15,15 +15,17 @@ static void close_worker(sbw_extension_process *c) {
 bool sbw_extension_process_running(sbw_extension_process *c) { return c&&c->process&&!c->failed&&WaitForSingleObject(c->process,0)==WAIT_TIMEOUT; }
 const wchar_t *sbw_extension_process_work_directory(sbw_extension_process *c){return c?sbw_extension_sandbox_directory(c->sandbox):NULL;}
 bool sbw_extension_process_duplicate(sbw_extension_process *c,HANDLE source,HANDLE *remote){return c&&sbw_extension_process_running(c)&&DuplicateHandle(GetCurrentProcess(),source,c->process,remote,0,FALSE,DUPLICATE_SAME_ACCESS);}
-typedef struct exchange {sbw_extension_process *capture;sbj *request,*response;} exchange;
+typedef struct exchange {sbw_extension_process *capture;sbj *request,*response;const char *stage;DWORD io_error;} exchange;
 static DWORD WINAPI exchange_main(void *context) {
-    exchange *x=context;if(extension_write(x->capture->input,x->request))x->response=extension_read(x->capture->output);return 0;
+    exchange *x=context;x->stage="request.write";SetLastError(ERROR_SUCCESS);
+    if(extension_write(x->capture->input,x->request)){x->stage="response.read";SetLastError(ERROR_SUCCESS);x->response=extension_read(x->capture->output);}
+    if(!x->response)x->io_error=GetLastError();return 0;
 }
 sbj *sbw_extension_process_call(sbw_extension_process *c,const char *method,const sbj *params,sbw_error *error) {
     if(!c){sbw_fail(error,"EXTENSION_MISSING","Extension is not enabled.");return NULL;}
     AcquireSRWLockExclusive(&c->lock);sbj *result=NULL;
     if(!sbw_extension_process_running(c)){sbw_fail(error,"EXTENSION_FAILED","Extension stopped. Re-enable it in Extensions.");goto done;}
-    exchange x={c,sbj_object(),NULL};sbj_set_str(x.request,"method",method);sbj_set(x.request,"params",params?sbj_clone(params):sbj_object());
+    exchange x={c,sbj_object(),NULL,"thread.start",ERROR_SUCCESS};sbj_set_str(x.request,"method",method);sbj_set(x.request,"params",params?sbj_clone(params):sbj_object());
     HANDLE thread=CreateThread(NULL,0,exchange_main,&x,0,NULL);
     if(!thread||WaitForSingleObject(thread,sb_streq(method,"start")?20000:3000)!=WAIT_OBJECT_0) {
         c->failed=true;
@@ -34,7 +36,15 @@ sbj *sbw_extension_process_call(sbw_extension_process *c,const char *method,cons
         if(thread)WaitForSingleObject(thread,INFINITE);
     }
     if(thread)CloseHandle(thread);
-    if(!x.response){c->failed=true;close_worker(c);sbw_fail(error,"EXTENSION_FAILED","Extension did not respond. Proxy remains connected.");}
+    if(!x.response){
+        /* Observe the process before cleanup terminates it. A fixed exit-code
+         * diagnostic distinguishes worker crashes from protocol/pipe failures
+         * without recording the request, environment or private data. */
+        DWORD exit_code=0;bool exit_known=c->process&&GetExitCodeProcess(c->process,&exit_code);char message[256];
+        if(exit_known)snprintf(message,sizeof message,"Extension did not respond (stage=%s, I/O=0x%08lx, worker exit=0x%08lx). Proxy remains connected.",x.stage,(unsigned long)x.io_error,(unsigned long)exit_code);
+        else snprintf(message,sizeof message,"Extension did not respond (stage=%s, I/O=0x%08lx, worker exit unavailable). Proxy remains connected.",x.stage,(unsigned long)x.io_error);
+        c->failed=true;close_worker(c);sbw_fail(error,"EXTENSION_FAILED",message);
+    }
     else if(!sbj_get_bool(x.response,"ok",false))sbw_fail(error,sbj_get_str(x.response,"code","EXTENSION_FAILED"),sbj_get_str(x.response,"message","Extension operation failed."));
     else result=sbj_clone(sbj_get(x.response,"result"));
     sbj_free(x.request);sbj_free(x.response);

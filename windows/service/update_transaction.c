@@ -68,10 +68,11 @@ static int service_state(bool start, sbw_error *error) {
     SC_HANDLE service = manager ? OpenServiceW(manager, L"sb-easy", SERVICE_QUERY_STATUS | (start ? SERVICE_START : SERVICE_STOP)) : NULL;
     if (!service) { if (manager) CloseServiceHandle(manager); return fail(error, "UPDATE_SERVICE_CONTROL"); }
     SERVICE_STATUS_PROCESS state = {0}; DWORD size = 0; bool requested = false, success = false;
+    const DWORD target_state = start ? (DWORD)SERVICE_RUNNING : (DWORD)SERVICE_STOPPED;
     ULONGLONG deadline = GetTickCount64() + 45000;
     while (GetTickCount64() < deadline) {
         if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&state, sizeof(state), &size)) break;
-        if (state.dwCurrentState == (start ? SERVICE_RUNNING : SERVICE_STOPPED)) { success = true; break; }
+        if (state.dwCurrentState == target_state) { success = true; break; }
         if (!requested) {
             if (start && state.dwCurrentState == SERVICE_STOPPED) {
                 if (!StartServiceW(service, 0, NULL) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) break;

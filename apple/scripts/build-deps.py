@@ -75,8 +75,10 @@ def main():
     environment['GOMODCACHE'] = subprocess.check_output(['go','env','GOMODCACHE'], text=True).strip()
     environment['GOPATH'] = str(BUILD / 'go')
     environment['GOBIN'] = str(BUILD / 'go/bin')
+    environment['PATH'] = environment['GOBIN'] + os.pathsep + environment.get('PATH', '')
     run(['go','install',f'github.com/sagernet/gomobile/cmd/gomobile@{mobile}'], env=environment)
     run(['go','install',f'github.com/sagernet/gomobile/cmd/gobind@{mobile}'], env=environment)
+    run([str(BUILD / 'go/bin/gomobile'), 'init'], env=environment)
     run(['go','test','-ldflags=-checklinkname=0','./experimental/libbox','-run','TestApple','-count=1'], cwd=checkout, env=environment)
     command = ['go','run','./cmd/internal/build_libbox','-target','apple']
     if args.platform: command += ['-platform',args.platform]

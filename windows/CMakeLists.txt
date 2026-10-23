@@ -69,6 +69,10 @@ function(sb_windows_target target)
         _WIN32_WINNT=0x0A00 _CRT_SECURE_NO_WARNINGS SB_EASY_VERSION="${sb_windows_version}" SB_EASY_CORE_VERSION="${SB_EASY_CORE_VERSION}"
         SB_EASY_PUBLISHER_THUMBPRINT="${SB_EASY_PUBLISHER_THUMBPRINT}")
     target_compile_options(${target} PRIVATE /W4 /utf-8)
+    if(target MATCHES "^windows_.*_test$")
+        # Release builds define NDEBUG; test assertions must still execute.
+        target_compile_options(${target} PRIVATE /UNDEBUG)
+    endif()
     if(SB_EASY_WARNINGS_AS_ERRORS)
         target_compile_options(${target} PRIVATE /WX)
     endif()

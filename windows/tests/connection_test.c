@@ -153,9 +153,17 @@ int wmain(int argc, wchar_t **argv) {
     process = core_status(core); CHECK(process.process_running && process.process_id != original_pid);
 
     download(controller, &data, "good-2", "{\"mode\":\"good\"}"); saved = sbj_clone(data.saved);
+    original_pid = core_status(core).process_id;
+    /* Intent must be durable before changing the running core. */
     data.fail_write = true;
+    error_call(controller, "connection.start", true, "STORAGE_ERROR");
+    CHECK(core_status(core).process_id == original_pid && sbj_equal(saved, data.saved));
+    data.fail_write = false;
+    /* Fail the healthy candidate's activation commit, after intent was saved. */
+    data.fail_activation_etag = "good-2";
     error_call(controller, "connection.start", true, "ROLLED_BACK");
-    CHECK(sbj_equal(saved, data.saved)); sbj_free(saved); data.fail_write = false;
+    CHECK(data.activation_write_failures == 1 && sbj_equal(saved, data.saved));
+    sbj_free(saved); data.fail_activation_etag = NULL;
     result = call(controller, "status.get", false); expect_state(result, "RUNNING", "good-1", "good-1"); sbj_free(result);
     expect_last_good(&data, "good-1");
     result = call(controller, "connection.start", true); expect_state(result, "RUNNING", "good-2", "good-2");
@@ -175,8 +183,11 @@ int wmain(int argc, wchar_t **argv) {
     /* Without a previous good version, a failed durable activation must leave
      * neither a running child nor an invented active/last-good revision. */
     enroll(controller); download(controller, &data, "first-unsaved", "{}"); saved = sbj_clone(data.saved);
-    data.fail_write = true; error_call(controller, "connection.start", true, "STORAGE_ERROR");
-    CHECK(sbj_equal(saved, data.saved)); sbj_free(saved); data.fail_write = false;
+    sbj_set_bool(sbj_get(saved, "management"), "manual_disconnect", false);
+    data.fail_activation_etag = "first-unsaved";
+    error_call(controller, "connection.start", true, "STORAGE_ERROR");
+    CHECK(data.activation_write_failures == 2 && sbj_equal(saved, data.saved));
+    sbj_free(saved); data.fail_activation_etag = NULL;
     result = call(controller, "status.get", false); expect_state(result, "DEGRADED", NULL, NULL); sbj_free(result);
     CHECK(!core_status(core).process_running);
     result = call(controller, "connection.stop", true); expect_state(result, "STOPPED", NULL, NULL); sbj_free(result);

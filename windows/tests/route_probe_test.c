@@ -11,7 +11,7 @@ typedef struct fixture {
     unsigned short port;
     HANDLE stop,thread;
     bool api,hang,tls_fail,invalid_delay;
-    volatile LONG proxy_port,requests,authenticated,delay_seen;
+    volatile LONG proxy_port,requests,authenticated,delay_seen,ipv6_seen;
     struct fixture *proxy;
 } fixture;
 static const char secret[]="1111111111111111111111111111111111111111111111111111111111111111";
@@ -49,6 +49,8 @@ static DWORD WINAPI server_thread(void *context) {
             send_all(peer,"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"fixture\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         } else {
             InterlockedIncrement(&f->authenticated);InterlockedExchange(&f->proxy_port,ntohs(address.sin_port));
+            if(strstr(request,"GET http://[2001:db8::1]:8080/ping HTTP/") &&
+               strstr(request,"Host: [2001:db8::1]:8080\r\n"))InterlockedIncrement(&f->ipv6_seen);
             if(f->hang)(void)WaitForSingleObject(f->stop,4000);
             else if(f->tls_fail) {send_all(peer,"HTTP/1.1 200 Connection Established\r\n\r\n");send_all(peer,"this is not TLS");}
             else {
@@ -80,6 +82,7 @@ int main(void) {
     CHECK(!sbw_route_probe(&config,NULL,GetCurrentProcessId()+100000,NULL,params,&error));CHECK(!strcmp(error.code,"CORE_HEALTH_IDENTITY"));
     HANDLE cancel=CreateEventW(NULL,TRUE,TRUE,NULL);CHECK(cancel);
     CHECK(!sbw_route_probe(&config,NULL,GetCurrentProcessId(),cancel,params,&error));CHECK(!strcmp(error.code,"CORE_CANCELLED"));CloseHandle(cancel);
+    memset(&error,0,sizeof(error));
     CHECK(proxy.requests==0);
     sbj *result=sbw_route_probe(&config,NULL,GetCurrentProcessId(),NULL,params,&error);CHECK(result);
     CHECK(sbj_get_bool(result,"success",false) && sbj_get_int(result,"http_status",0)==204 && proxy.authenticated>0);
@@ -88,7 +91,9 @@ int main(void) {
     CHECK(sbj_string_is(sbj_get(sbj_get(result,"evidence"),"public_exit_ip"),"unobserved"));
     char *serialized=sbj_dump(result,-1);CHECK(!strstr(serialized,secret) && !strstr(serialized,"never-return"));free(serialized);sbj_free(result);
     sbj_set_str(params,"url","http://[2001:db8::1]:8080/ping");
-    result=sbw_route_probe(&config,NULL,GetCurrentProcessId(),NULL,params,&error);CHECK(result && sbj_get_bool(result,"success",false));
+    result=sbw_route_probe(&config,NULL,GetCurrentProcessId(),NULL,params,&error);
+    if(result && !sbj_get_bool(result,"success",false))fprintf(stderr,"IPv6 probe: %s, HTTP %lld\n",sbj_get_str(result,"error_code",""),(long long)sbj_get_int(result,"http_status",0));
+    CHECK(result && sbj_get_bool(result,"success",false) && proxy.ipv6_seen==1);
     CHECK(sbj_string_is(sbj_get(result,"host"),"2001:db8::1") && sbj_get_int(result,"port",0)==8080);
     CHECK(!sbj_get_bool(sbj_get(result,"evidence"),"observed",true));sbj_free(result);
     proxy.tls_fail=true;sbj_set_str(params,"url","https://probe.invalid/");

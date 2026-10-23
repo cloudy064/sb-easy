@@ -1,5 +1,6 @@
 #include "../service/plugin_storage.h"
 #include "../service/extension_process.h"
+#include "../service/extension_sandbox.h"
 #include "../service/secure_store.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,11 @@ wchar_t *sbw_extension_path(const wchar_t *relative){wchar_t *root=sbw_executabl
 static unsigned char *read(const char *folder,const char *name,size_t *length){char p[4096];snprintf(p,sizeof p,"%s/%s",folder,name);FILE *f=fopen(p,"rb");CHECK(f);fseek(f,0,SEEK_END);long n=ftell(f);CHECK(n>0&&n<16*1024*1024);rewind(f);unsigned char *v=sb_xmalloc((size_t)n+1);*length=fread(v,1,(size_t)n,f);fclose(f);CHECK(*length==(size_t)n);v[n]=0;return v;}
 int main(int argc,char **argv){
     CHECK(argc==2||argc==3);
+    /* Failure diagnostics survive cleanup and contain no caller-selected path. */
+    CHECK(!sbw_extension_sandbox_new("network-tools",L"C:\\private-path-must-not-be-logged",&error));
+    CHECK(!strcmp(error.code,"EXTENSION_SANDBOX"));CHECK(strstr(error.message,"stage request")!=NULL);
+    CHECK(strstr(error.message,"0x00000057")!=NULL);CHECK(strstr(error.message,"private-path")==NULL);
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER);memset(&error,0,sizeof error);
     if(argc==2){
         wchar_t temp[MAX_PATH],directory[MAX_PATH],self[32768];CHECK(GetTempPathW(MAX_PATH,temp));CHECK(GetTempFileNameW(temp,L"psb",0,directory));CHECK(DeleteFileW(directory));CHECK(CreateDirectoryW(directory,NULL));CHECK(GetModuleFileNameW(NULL,self,32768));
         wchar_t *copy=sbw_path_join(directory,L"sandbox-test.exe"),*fixtures=sbw_wide(argv[1],NULL);CHECK(CopyFileW(self,copy,TRUE));wchar_t command[32768];swprintf_s(command,32768,L"\"%s\" \"%s\" child",copy,fixtures);STARTUPINFOW si={0};si.cb=sizeof si;PROCESS_INFORMATION pi={0};CHECK(CreateProcessW(copy,command,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi));CHECK(WaitForSingleObject(pi.hProcess,60000)==WAIT_OBJECT_0);DWORD code=1;CHECK(GetExitCodeProcess(pi.hProcess,&code));CloseHandle(pi.hThread);CloseHandle(pi.hProcess);free(copy);free(fixtures);return (int)code;

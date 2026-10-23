@@ -83,7 +83,12 @@ static bool parse_url(const sbj *value, probe_url *url, sbw_error *error) {
         url->port = (INTERNET_PORT)number;
     }
     url->host_utf8 = sb_strndup(host, (size_t)(host_end - host));
-    url->host = sbw_wide(url->host_utf8, error);
+    /* WinHTTP requires brackets around an IPv6 server name. Keep the bare
+     * address separately for results and connection-evidence matching. */
+    char *connect_host = *authority == '[' ? sb_asprintf("[%s]", url->host_utf8)
+                                          : sb_strdup(url->host_utf8);
+    url->host = sbw_wide(connect_host, error);
+    free(connect_host);
     if (!url->host)
         goto invalid;
     const char *fragment = strchr(end, '#'), *path_end = fragment ? fragment : text + strlen(text);

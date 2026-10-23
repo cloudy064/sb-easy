@@ -9,6 +9,8 @@
 typedef struct test_data {
     sbj *saved, *download;
     bool fail_write, fail_fetch;
+    const char *fail_activation_etag;
+    unsigned activation_write_failures;
     unsigned enrollments, downloads;
     char *last_etag;
     HANDLE entered, release, cancel_after_enroll;
@@ -25,7 +27,10 @@ static inline int test_load(void *context, sbj **out, sbw_error *error) {
 }
 static inline int test_save(void *context, const sbj *state, sbw_error *error) {
     test_data *data = context;
-    if (data->fail_write) return sbw_fail(error, "STORAGE_ERROR", "Device state could not be securely saved.");
+    bool activation_failure = data->fail_activation_etag &&
+        sbj_string_is(sbj_get(sbj_get(state, "last_good"), "etag"), data->fail_activation_etag);
+    if (activation_failure) ++data->activation_write_failures;
+    if (data->fail_write || activation_failure) return sbw_fail(error, "STORAGE_ERROR", "Device state could not be securely saved.");
     sbj_free(data->saved); data->saved = sbj_clone(state); return 0;
 }
 static inline int test_clear(void *context, sbw_error *error) {

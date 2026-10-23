@@ -97,7 +97,10 @@ sbw_extension_sandbox *sbw_extension_sandbox_new(const char *id,const wchar_t *r
     wchar_t name[65];swprintf_s(name,65,L"sb-easy.%S.%02x%02x%02x%02x%02x%02x",id,hash[0],hash[1],hash[2],hash[3],hash[4],hash[5]);
     bool network=sb_streq(id,"http-debug");
     if(network){WELL_KNOWN_SID_TYPE kinds[]={WinCapabilityInternetClientSid,WinCapabilityPrivateNetworkClientServerSid};for(size_t i=0;i<2;++i){DWORD n=SECURITY_MAX_SID_SIZE;if(!CreateWellKnownSid(kinds[i],NULL,s->network_sids[i],&n)){sandbox_win32(error,"capability.sid",GetLastError());goto fail;}s->capabilities[i].Sid=s->network_sids[i];s->capabilities[i].Attributes=SE_GROUP_ENABLED;}s->security.Capabilities=s->capabilities;s->security.CapabilityCount=2;}
-    HRESULT created=CreateAppContainerProfile(name,L"sb-easy optional plugin",L"Isolated optional plugin worker",s->capabilities,s->security.CapabilityCount,&s->security.AppContainerSid);
+    /* Keep the pointer/count pair identical to the process attributes below.
+     * Statistics/capture request no capabilities: pass NULL, not the unused
+     * backing array with zero entries, to the native profile API. */
+    HRESULT created=CreateAppContainerProfile(name,L"sb-easy optional plugin",L"Isolated optional plugin worker",s->security.Capabilities,s->security.CapabilityCount,&s->security.AppContainerSid);
     if(created==HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)){created=DeriveAppContainerSidFromAppContainerName(name,&s->security.AppContainerSid);if(FAILED(created)){sandbox_failure(error,"profile.derive","HRESULT",(DWORD)created);goto fail;}}
     else if(FAILED(created)){sandbox_failure(error,"profile.create","HRESULT",(DWORD)created);goto fail;}
     LPWSTR sid=NULL,folder=NULL;if(!ConvertSidToStringSidW(s->security.AppContainerSid,&sid)){sandbox_win32(error,"profile.sid",GetLastError());goto fail;}

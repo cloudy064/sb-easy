@@ -6,7 +6,13 @@ int main(int argc,char **argv){
     if(argc>1)return 7;(void)argv;HANDLE input=GetStdHandle(STD_INPUT_HANDLE),output=GetStdHandle(STD_OUTPUT_HANDLE);sbj *request;
     while((request=extension_read(input))!=NULL){
         const sbj *params=sbj_get(request,"params");sbj *result=sbj_object();HANDLE token=NULL;DWORD is=0,n=sizeof is;
-        bool app=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)&&GetTokenInformation(token,TokenIsAppContainer,&is,sizeof is,&n)&&is;sbj_set_bool(result,"appcontainer",app);if(token)CloseHandle(token);
+        bool app=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)&&GetTokenInformation(token,TokenIsAppContainer,&is,sizeof is,&n)&&is;sbj_set_bool(result,"appcontainer",app);
+        /* A zero-capability plugin must not gain network/device access just to
+         * make AppContainer profile creation succeed. Query the actual token. */
+        DWORD needed=0;if(token)GetTokenInformation(token,TokenCapabilities,NULL,0,&needed);
+        TOKEN_GROUPS *capabilities=needed&&needed<=65536?sb_xmalloc(needed):NULL;
+        bool no_capabilities=capabilities&&GetTokenInformation(token,TokenCapabilities,capabilities,needed,&needed)&&capabilities->GroupCount==0;
+        sbj_set_bool(result,"capabilities_empty",no_capabilities);free(capabilities);if(token)CloseHandle(token);
         wchar_t *secret=sbw_wide(sbj_get_str(params,"secret",""),NULL);HANDLE f=secret?CreateFileW(secret,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL):INVALID_HANDLE_VALUE;sbj_set_bool(result,"secret_denied",f==INVALID_HANDLE_VALUE&&GetLastError()==ERROR_ACCESS_DENIED);if(f!=INVALID_HANDLE_VALUE)CloseHandle(f);free(secret);
         wchar_t exe[32768];GetModuleFileNameW(NULL,exe,32768);f=CreateFileW(exe,GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);sbj_set_bool(result,"code_write_denied",f==INVALID_HANDLE_VALUE);if(f!=INVALID_HANDLE_VALUE)CloseHandle(f);
         wchar_t local[32768];DWORD size=GetEnvironmentVariableW(L"LOCALAPPDATA",local,32768);wchar_t *path=size&&size<32768?sbw_path_join(local,L"sandbox-write-test.tmp"):NULL;

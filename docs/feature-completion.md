@@ -19,11 +19,11 @@
 | F12 | 加密导入导出、本地偏好漫游与冲突处理 | 中心/Web/Android/Windows 跨语言、原生模型与真实界面冲突回归完成，待实机 | 跨设备往返、错误密钥/篡改拒绝、凭据和设备专属策略隔离 |
 | F13 | 插件签名目录、升级/回滚/撤销、worker 权限隔离 | 签名规范/发布工具/Android 已实现并回归；Windows 签名事务/撤销/控制器/界面回归通过，AppContainer/受控抓包代码已接入，待原生边界验收 | 安装包信任链、兼容性检查、替换失败回滚、沙箱边界 |
 | F14 | 历史统计、设备/节点告警、Prometheus | 中心代码与真实界面回归通过，Release 25/25 与相关 ASan 测试通过 | 指标/告警鉴权、保留策略、离线/漂移/失败事件与界面 |
-| F15 | Apple 与普通 Linux 桌面平台覆盖 | Apple C/Go/SwiftUI/NE 代码和可运行子集回归完成，待 Xcode；Linux GTK/密钥环/DBus 7/7、Debian 12 包及隔离双栈 TUN 测试通过，待桌面授权/休眠验收 | 实际可安装/连接的产品交付与平台验收；兼容导出单独记录 |
+| F15 | Apple 与普通 Linux 桌面平台覆盖 | Apple C/Go/SwiftUI/NE 代码和可运行子集回归完成，原生 libbox/Shared Swift 构建通过，完整应用编译及设备验收待完成；Linux GTK/密钥环/DBus 7/7、Debian 12 包及隔离双栈 TUN 测试通过，待桌面授权/休眠验收 | 实际可安装/连接的产品交付与平台验收；兼容导出单独记录 |
 | F16 | 代理用户、多节点配额/到期/设备限制、自助订阅 | 中心/自助界面、Go TCP/UDP 硬配额与期限、C 双节点续租闭环已通过实际流量回归；默认完整 Docker 镜像实际 SS2022 转发及 28/28 集成测试通过 | 与 WG Peer 分开建模，真实用户生命周期和节点执行验证 |
 | F17 | wg-easy 迁移入口 | v14 JSON 代码/UI/Release/ASan 回归完成 | 支持版本明确、导入预览/冲突/回滚、密钥和地址验证 |
-| F18 | Android 可选抓包/HTTPS 调试恢复 | 显式启用/路由/本地鉴权/CA 清理代码及主机 fixture 回归完成，设备验收驱动和测试包已构建，待真机 | 显式启用、权限/CA 退出清理、真机验收后方可重新发布 |
-| F19 | 下载页、文档、版本与发布包一致 | C 服务与四平台统一版本清单、发布物校验、双语/移动端下载页、Windows 版本预检及当前构建元数据校验通过；新版本未发布 | 生成式版本元数据与发布校验、无陈旧入口 |
+| F18 | Android 可选抓包/HTTPS 调试恢复 | 显式启用/路由/本地鉴权/CA 清理代码及主机 fixture 回归完成，设备验收驱动和测试包已构建，待真机 | 显式启用、权限/CA 退出清理、真机验收后方可发布稳定版 |
+| F19 | 下载页、文档、版本与发布包一致 | C 服务与四平台统一版本清单、发布物校验、双语/移动端下载页、Windows 版本预检及构建元数据校验通过；1.1.0 开发预览已提供 Android/Windows/Linux 资产、对应源码与 SHA-256 | 生成式版本元数据与发布校验、无陈旧入口 |
 
 ## 实施约束
 
@@ -51,15 +51,23 @@
 - Android F11 最新回归：core 123/123、bridge 26/26，五个 APK、androidTest 与 lint 构建完成；应用目录发布器对实际 APK 的包身份、签名、版本/ABI、内核及 AAR 来源校验通过，错误声明拒绝。可信目录公钥默认空且拒绝未配置信任的更新；测试签名包不表示正式发布。系统确认安装、取消及卸载恢复仍需设备执行。
 
 - F16 完整集成：Go SS2022 TCP/UDP 与取消生命周期 race 测试通过；C 嵌入集成 5/5 通过，包含真实双节点竞争额度、重启不回收旧授权、设备期限和撤销、中心自托管停止，以及断网后既有连接在租约期限关闭。租约使用包含系统休眠时间的 Linux `CLOCK_BOOTTIME`；中心按数据库身份共享时钟防护，重启/回拨/重置后先等待旧授权失效。纯外部核心和普通桌面客户端不宣告服务端配额能力。
-- F19 当前源版本为 C 服务/Agent 1.1.0、Android 1.4.0/29、Windows 0.7.0、Linux/Apple 0.1.0，核心统一 1.14.3。`client-releases.json` 与实际 GitHub Android 1.3.4、Windows 0.6.9 发布资产的 URL、大小和 SHA-256 已比对通过；对应源码/校验文件均存在。新源码版本尚未发布。
+- 发布前的 F19 验证：源版本为 C 服务/Agent 1.1.0、Android 1.4.0/29、Windows 0.7.0、Linux/Apple 0.1.0，核心统一 1.14.3。`client-releases.json` 与实际 GitHub Android 1.3.4、Windows 0.6.9 发布资产的 URL、大小和 SHA-256 已比对通过；对应源码/校验文件均存在。这是发布前的库存快照；最新开发预览见下方发布记录。
 
 - 默认 Docker 镜像现已链接 Go 核心，中心和 Agent 均能执行真实代理租约。构建通过，隔离网络内的 28/28 C 测试、Go race 测试及最终镜像的真实 SS2022 HTTP 转发通过；验证了自托管能力、静态下载页和兼容 Agent 入口。部署与生产数据未改动。
 - 最新 C ASan/UBSan 全套的 26 项直接通过；控制面 E2E 在并行压力下触发生产 QuickJS 50ms 时限，单独复跑通过，无 sanitizer 报告。CTest 已将该时限敏感 E2E 标为串行，保留生产执行时限。
 - Linux 0.1.0 的 Debian 12 amd64 包已构建，容器内 7/7 原生测试通过；GPG/APT 签名链、错误指纹、元数据/安装包篡改拒绝、版本固定、安装失败恢复与离线回退通过。独立网络命名空间中的 IPv4/IPv6 TUN 实际转发、冲突规则/路由表保留、停止清理通过；这些证据不覆盖真实桌面 Polkit、systemd-resolved、切网或休眠。
-- 下载页在实际 C 服务与 Vue 构建上通过英文、中文和 390px 手机尺寸检查，四平台已发布链接/校验值与清单一致；未发布平台没有伪造安装包入口。版本清单允许已发布版本与当前源码一致，且 Android 版本码必须匹配；新开发版本必须递增版本码。
+- 下载页在实际 C 服务与 Vue 构建上通过英文、中文和 390px 手机尺寸检查，四个平台下载页均已核对，已有发布包的链接/校验值与清单一致；Apple 仅源码，没有安装包入口。版本清单允许已发布版本与当前源码一致，且 Android 版本码必须匹配；新开发版本必须递增版本码。
 
-- Android 最终本机验证：core 130/130、bridge 26/26，零跳过；五 ABI APK、androidTest 与独立 UID probe APK 构建成功；lint 0 错误、25 条提示。实际 APK 的 1.4.0/29、签名、ABI 和核心 1.14.3 精确来源校验通过。新注册默认 HTTPS，HTTP 例外必须显式选择内网字面地址；真实 TLS 回归拒绝无效 CA 和所有控制面重定向。更新安装前必须将旧 APK、回执与加密偏好写入应用外恢复 ZIP、读回校验，安装入口还会复查当前/目标 APK 和偏好身份。Android 系统安装、卸载恢复、Always-on/lockdown、跨 UID 与真实 VPN/CA 用例尚未执行。
+- Android 最终本机验证：core 130/130、bridge 26/26，零跳过；四种 ABI 及 universal 共五个 APK、androidTest 与独立 UID probe APK 构建成功；lint 0 错误、25 条提示。实际 APK 的 1.4.0/29、签名、ABI 和核心 1.14.3 精确来源校验通过。新注册默认 HTTPS，HTTP 例外必须显式选择内网字面地址；真实 TLS 回归拒绝无效 CA 和所有控制面重定向。更新安装前必须将旧 APK、回执与加密偏好写入应用外恢复 ZIP、读回校验，安装入口还会复查当前/目标 APK 和偏好身份。Android 系统安装、卸载恢复、Always-on/lockdown、跨 UID 与真实 VPN/CA 用例尚未执行。
 - Android 的[设备验收驱动](android-device-acceptance.md)已配套真实 C 中心与 HTTP/UDP echo。主机自检验证一次性注册、PCAP API/校验/权限/幂等性；缺少 adb 时明确报告 `NOT RUN`，不会将合成 PCAP 的传输测试算成 Android TUN 验收。
-- Windows 原生桌面宿主也已使用固定摘要的 WebView2 SDK 完成严格 C11 MinGW 编译与链接，PE 版本为 0.7.0.0；服务/更新器版本一致。此项不代表 WebView2、SCM、MSI、WFP 或 AppContainer 已在真实 Windows 上执行。
+- 发布前的 Windows 交叉编译验证：使用固定摘要的 WebView2 SDK 完成严格 C11 MinGW 编译与链接，PE 版本为 0.7.0.0；服务/更新器版本一致。该项只验证编译；后续原生 Windows 结果见下方发布记录。
 - C 服务/Agent 版本纳入同一清单并递增为 1.1.0，避免与旧 1.0.0 构建无法区分。重链后受影响的 HTTP/Agent/租约三项测试通过；实际中心 API 与 Agent 注册分别报告 `1.1.0` 和 `sb-easy-cpp-agent/1.1.0`。最终 Docker 镜像再次通过真实转发验证。
 - 下载页的签名渠道提示来自清单，`stable` 有完整中英文文案；移除某个平台的已发布项不会破坏前端类型。Android 已发布版本的抓包限制由该版本的功能字段控制，不会固定套用到未来正式版本。
+
+## GitHub 开发预览发布
+
+[1.1.0 Preview](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) 提供 Android 1.4.0 五种 APK、Windows 0.7.0 ZIP/MSI、Linux Desktop 0.1.0 amd64 DEB、匹配源码、第三方许可证和 SHA-256。Android 使用与官方 1.3.4 相同的测试证书，Windows/Linux 未提供正式发布者签名；Apple 仅提供源码。APK/DEB 保留最终本地验证产物，Windows 包来自通过原生测试和安装验收的 GitHub CI。具体构建提交、验证范围和仍未执行的设备验收记录在 Release 附件中。
+
+Windows 原生 [CI](https://github.com/cloudy064/sb-easy/actions/runs/39955786558/job/120421161533) 已通过 UI 57/57、CTest 36/36、签名/篡改拒绝与 ZIP/MSI 打包；实际 MSI 安装、从合成 0.3.99 基线升级、修复、降级拒绝、卸载及数据保留通过。生产启动器中的 statistics 测试插件验证 AppContainer、私有工作/临时目录、环境过滤、文件/进程/句柄及子进程限制。交互式 WebView、真实 WFP/WinDivert/TUN 和完整 HTTP/capture 插件集成仍待验收。
+
+此次发布未部署生产服务，也未配置生产应用/插件信任根、APT 仓库或签名证书；预览发布不表示全部 F01–F19 验收完成。

@@ -18,20 +18,18 @@ they receive no new features and are excluded from primary CI and release builds
 The current source targets the C server/agent **1.1.0**, Android **1.4.0 (29)**,
 Windows **0.7.0**, Linux Desktop **0.1.0**, and macOS/iOS/tvOS **0.1.0 (1)**,
 using sing-box **1.14.3**.
-These versions have not been published. Build identities and the reviewed
-download inventory are maintained in
-[config/client-releases.json](config/client-releases.json); the core revision,
+The [1.1.0 development preview](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) provides Android 1.4.0 test-signed APKs,
+Windows 0.7.0 unsigned ZIP/MSI packages and a Linux Desktop 0.1.0 unsigned Debian 12 amd64 DEB,
+with corresponding source, third-party notices and SHA-256 checksums.
+Apple clients are supplied as source only. Native device, desktop-session and
+production-signing acceptance is still incomplete; this is not a stable release.
+
+Build identities and the verified download inventory are maintained in
+[config/client-releases.json](config/client-releases.json); core revisions,
 archive digests and compatibility policy are in
 [config/runtime-versions.json](config/runtime-versions.json).
-
-The latest published packages remain
-[Android 1.3.4](https://github.com/cloudy064/sb-easy/releases/tag/android-v1.3.4)
-(test signature; capture/HTTP debugging withdrawn) and
-[Windows Preview 0.6.9](https://github.com/cloudy064/sb-easy/releases/tag/windows-v0.6.9-preview.1)
-(unsigned). Both contain sing-box 1.13.12. The panel's Downloads page displays
-those actual artifacts, matching source and SHA-256 values separately from
-current source versions. Linux and Apple installation packages are not yet
-published. Platform build and acceptance instructions:
+The panel's Downloads page uses the published artifact URLs, sizes and hashes.
+Platform build and acceptance instructions:
 [Android](android/README.md), [Windows](windows/README.md),
 [Linux desktop](linux/README.md), [macOS/iOS/tvOS](apple/README.md).
 

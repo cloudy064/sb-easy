@@ -17,6 +17,8 @@ class ReleaseInventoryTest(unittest.TestCase):
 
     def test_published_and_development_are_separate(self):
         release.validate(self.data)
+        major, minor, patch = release.version(self.data["published"]["android"]["version"])
+        self.data["development"]["android"]["version"] = f"{major}.{minor}.{patch + 1}"
         self.data["development"]["android"]["version_code"] = self.data["published"]["android"]["version_code"]
         with self.assertRaises(ValueError):
             release.validate(self.data)

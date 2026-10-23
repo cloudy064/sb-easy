@@ -1,14 +1,14 @@
 # sb-easy Android
 
-## 未发布：Android 1.4.0（版本码 29）/ sing-box 1.14.3
+## 开发预览：Android 1.4.0（版本码 29）/ sing-box 1.14.3
 
-当前应用版本从统一的 [`client-releases.json`](../config/client-releases.json) 读取，为 `1.4.0` / `29`；内核从 [`runtime-versions.json`](../config/runtime-versions.json) 读取，锁定 `1.14.3` / `7054cac5124465ffdb145870d7c01885566711b1`。已重建包含采集扩展的四 ABI libbox AAR，并适配 DNS 服务器迭代器、原生 JNI 证书存储、CrashReport 路径及新增平台回调；普通 VPN 不提供 root shell、二层桥接或 SSH 托管能力。1.4.0 当前仅为本地构建，尚未发布。已发布的 Android 1.3.4 下载与升级身份仍对应旧核心，不代表新版已发布或真机验收完成。
+当前应用版本从统一的 [`client-releases.json`](../config/client-releases.json) 读取，为 `1.4.0` / `29`；内核从 [`runtime-versions.json`](../config/runtime-versions.json) 读取，锁定 `1.14.3` / `7054cac5124465ffdb145870d7c01885566711b1`。已重建包含采集扩展的四 ABI libbox AAR，并适配 DNS 服务器迭代器、原生 JNI 证书存储、CrashReport 路径及新增平台回调；普通 VPN 不提供 root shell、二层桥接或 SSH 托管能力。1.4.0 已随 [1.1.0 开发预览](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) 提供五种测试签名 APK、对应源码和校验值；未经真机/模拟器验收。公开发布的 1.3.4 与本次签名相同，但实际系统覆盖安装仍待验证。
 
 新版原生验证覆盖本地健康 API 的鉴权/TLS/截止时间，以及 Claude/GPT/自定义/默认分流和 DNS 出口、FakeIP/IPv6、HTTPS/SVCB 地址提示、核心重启映射和直连切换。IPv4-only TUN 通过显式 A 查询与 AAAA 空答案保留原行为，不再使用 `strategy` DNS 规则字段；1.14 已按服务器隔离 DNS 缓存，因此移除旧 `independent_cache`。
 
 受管注册、配置、命令、状态与诊断请求默认要求 HTTPS，并拒绝 HTTP 重定向和注册响应更换服务器地址。开发/局域网测试可在注册页明确允许当前内网或回环 IP 的 HTTP 中心；不接受域名、公共 IP 或链路本地地址作为例外。该授权和设备令牌一起加密保存，不随偏好导出；已有 HTTP 注册默认不授权，可在停止 VPN 后到“设置 → 设备与中心”明确启用合格的局域网地址，或使用 HTTPS 重新注册。使用反向代理时应把中心公开地址配置为二维码所用的最终 HTTPS 地址。
 
-## 未发布：应用分组与健康策略
+## 开发预览：应用分组与健康策略
 
 “代理 → 编辑规则”支持搜索已安装应用或填写包名，分组允许只匹配应用、只匹配域名或两者任选。域名与应用按 **OR** 匹配，同一包名不能落入多个组；Android 官方 Claude/ChatGPT 开关兼容旧配置。数据连接和 DNS 都跟随同一组，中心地址与受管 WireGuard 网络/DNS 保持优先，之后应用规则优先于普通目的域名。中心更新不会清除包名列表。
 
@@ -18,7 +18,7 @@
 
 实现依据：[官方 URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/)、[路由规则](https://sing-box.sagernet.org/configuration/route/rule/)、[DNS 规则](https://sing-box.sagernet.org/configuration/dns/rule/) 与 sing-box 1.13.12/1.14.3 Clash API 源码。两版 URLTest JSON 都没有探测 timeout 字段，因此本机通过原生逐节点 API 执行完整健康策略。可设置 `SB_EASY_SINGBOX=/path/to/sing-box` 运行 `:core:testDebugUnitTest --tests '*NativeHealthApiTest' --rerun-tasks`，验证本机隔离核心的鉴权、TLS 探测、超时及选择组边界；未配置路径时该用例明确跳过。尚需真机验证应用归属、VPN 退出后任务及实际 DNS/IPv6 路径。
 
-## 未发布：独立模式与本机订阅
+## 开发预览：独立模式与本机订阅
 
 当前工作区新增独立模式：新装页面选择“无需中心，使用本机订阅”，在“订阅”页添加订阅 URL 或粘贴内容，导入通过核心校验后即可连接。支持 sing-box JSON、Clash YAML、普通分享链接和 Base64 订阅，节点协议为 Shadowsocks、VMess、VLESS、Trojan、Hysteria2、TUIC、HTTP、SOCKS。只提取代理节点；源路由、DNS、选择组和脚本不迁移。插件、文件路径和跨节点引用会被拒绝，并展示按输入序号说明的跳过原因。核心不支持的参数仍会导致校验失败并保留原配置。
 
@@ -28,9 +28,9 @@
 - 更新先解析、校验和应用，再提交缓存。下载/校验/应用/磁盘失败保留旧节点和配置；已选固定出口从更新内容消失时拒绝替换，须先改选出口。订阅更新保留本机分组与选择。已缓存配置优先启动，刷新在 VPN 建立后进行。
 - 订阅原文、URL 和节点集合使用 Android Keystore AES-GCM 加密，运行配置保存在禁止备份的应用私有目录。独立/受管模式拥有独立缓存和路由偏好，须断开 VPN 才可切换；切换清除会话日志和连接统计，避免独立流量元数据进入中心。独立模式不发送心跳、遥测、测速或诊断，既有受管注册凭据保留在 Keystore 中以供切回。
 
-本机验证：`ANDROID_HOME=/path/to/sdk ./gradlew :core:testDebugUnitTest :libbox-bridge:testDebugUnitTest :app:assembleDebug`。新增解析/下载和仓储测试覆盖模式/凭据隔离、缓存重建、固定出口消失、刷新失败及磁盘提交失败回滚。生成配置另通过 sing-box 1.13.12 `check`。这些是 JVM/构建与配置检查，尚不等同真机 VPN/休眠/切网与 DNS/IPv6 泄漏验收。
+本机验证：`ANDROID_HOME=/path/to/sdk ./gradlew :core:testDebugUnitTest :libbox-bridge:testDebugUnitTest :app:assembleDebug`。新增解析/下载和仓储测试覆盖模式/凭据隔离、缓存重建、固定出口消失、刷新失败及磁盘提交失败回滚。首轮生成配置检查通过 sing-box 1.13.12 `check`；当前 1.14.3 原生回归见本文开头。这些是 JVM/构建与配置检查，尚不等同真机 VPN/休眠/切网与 DNS/IPv6 泄漏验收。
 
-## 未发布：可选 PCAP 与 HTTP(S) 调试
+## 开发预览：可选 PCAP 与 HTTP(S) 调试
 
 “诊断 → 可选流量采集”恢复实验入口，默认关闭，每次必须明确启用本次会话；进程重启、VPN 停止或切换模式后清除授权。旧设置不会自动恢复采集。PCAP 保留在本机，独立模式禁止上传；受管模式仍须单独选择自动上传或手动上传。会话停止保留已有 PCAP 文件。
 
@@ -38,9 +38,9 @@ HTTPS 调试需要另外构建并安装 1.0.1 或更新的同签名插件。入�
 
 停止调试先撤销拦截，再释放插件；插件异常断开撤销拦截并保留错误。正常退出删除插件本地 CA 私钥与会话，崩溃遗留文件在下一次插件启动前删除。已导出的 CA/HAR/PCAP 文件由用户管理。Android 普通应用不能卸载用户已安装的系统 CA：界面保留所有已导出证书的指纹与系统安全设置入口，实际读取信任存储确认这些 CA 都不存在后才能清除提醒。重新开始生成新 CA，旧 CA 需在系统设置移除。参考 [Android KeyChain](https://developer.android.com/reference/android/security/KeyChain) 与 [DevicePolicyManager](https://developer.android.com/reference/android/app/admin/DevicePolicyManager)。
 
-JVM 测试覆盖会话授权、回程鉴权、路由优先级与退出配置；原生 1.14.3 测试验证未鉴权回程被拒绝、鉴权 CONNECT 与恢复原配置；Python 测试实际执行 HTTPS 截获、编辑重放、鉴权及 CA 清理。[Android 隔离验收说明](../docs/android-device-acceptance.md) 提供可运行的临时 C 中心、HTTP/UDP echo、PCAP 上传校验和显式 adb 驱动。已编译设备用例覆盖原始 TUN 采集、插件引擎、真实 VPN 调试 overlay/HAR/停止恢复/CA 轮换，以及同签名不同 UID 的私有文件与 IPC 拒绝；不安装系统 CA。当前无在线测试设备，**这些 instrumentation 尚未执行，也没有重新发布此前撤回的移动抓包功能**。
+JVM 测试覆盖会话授权、回程鉴权、路由优先级与退出配置；原生 1.14.3 测试验证未鉴权回程被拒绝、鉴权 CONNECT 与恢复原配置；Python 测试实际执行 HTTPS 截获、编辑重放、鉴权及 CA 清理。[Android 隔离验收说明](../docs/android-device-acceptance.md) 提供可运行的临时 C 中心、HTTP/UDP echo、PCAP 上传校验和显式 adb 驱动。已编译设备用例覆盖原始 TUN 采集、插件引擎、真实 VPN 调试 overlay/HAR/停止恢复/CA 轮换，以及同签名不同 UID 的私有文件与 IPC 拒绝；不安装系统 CA。当前无在线测试设备，**这些 instrumentation 尚未执行；本次开发预览仅提供实验入口，尚不构成移动抓包/HTTPS 调试的稳定恢复**。
 
-## 未发布：加密偏好与中心漫游
+## 开发预览：加密偏好与中心漫游
 
 “设置 → 加密偏好备份与中心漫游”支持系统文件选择器导出/导入、Android 设备之间迁移以及中心私有槽位同步。文件采用共同 `sb-easy.preferences` v1 格式：PBKDF2-HMAC-SHA256（600000 次、16 字节随机盐、32 字节密钥）与 AES-256-GCM（12 字节随机 nonce、16 字节 tag、固定用途 AAD）。口令按 UTF-8 编码、不做 Unicode 归一化，至少 12 字节，不保存或上传；加密文件限制 1 MiB。丢失口令无法由中心恢复。
 
@@ -51,9 +51,9 @@ JVM 测试覆盖会话授权、回程鉴权、路由优先级与退出配置；�
 JVM 验证使用共享 [`testdata/preferences-v1.json`](../testdata/preferences-v1.json) Unicode 向量，WebCrypto 密文解密与重新加密逐字节一致；覆盖错误口令、篡改、参数/大小拒绝、白名单和设备规则隔离、预览冲突与磁盘回滚。真实 loopback HTTPS 测试覆盖 MFA cookie 绑定、账户 token、If-Match、409、删除版本及退出会话。尚未执行实际 Android SAF、系统键盘、中心账户登录和跨设备 UI 验收。
 
 
-## 未发布：插件签名目录、更新与恢复
+## 开发预览：插件签名目录、更新与恢复
 
-Current unreleased plugin lifecycle work is documented in the
+Preview plugin lifecycle implementation is documented in the
 [signed catalog specification](../docs/plugin-catalog-v1.md). In “HTTP(S) 调试 →
 插件目录、更新与恢复”, signed catalogs authorize HTTPS downloads, exact artifact
 hash/size, ABI, host/core/API compatibility and cumulative build revocations.
@@ -78,9 +78,9 @@ Some earlier local development builds used `5d7a2a82…`; those different-signat
 installations cannot accept these APKs as an in-place upgrade. Do not uninstall
 an official 1.3.4 installation merely because of the preview version label.
 Use an explicitly chosen keystore for consistent upgrade identity and perform
-real installation/recovery/UID acceptance before publication.
+real installation/recovery/UID acceptance before a stable release.
 
-## 未发布：主应用更新与旧版恢复
+## 开发预览：主应用更新与旧版恢复
 
 “设置 → 应用与内核更新、旧版恢复”使用独立应用签名目录。目录公钥默认空，正式发布者尚未配置时更新关闭；通过 `-PsbAppCatalogKeys=/absolute/public-keys.json` 注入外部公钥。下载同时检查实际 APK 的版本、单一当前签名证书、ABI/min SDK，以及由实际 AAR 构建生成的内核版本、源码 revision、overlay 和逐架构原生库摘要；内核跟随应用整体更新。目录序号防重放、累计撤销、HTTPS/长度/摘要验证和原子缓存提交均在本机执行。
 
@@ -157,7 +157,7 @@ DNS interception still run first. Non-matching apps retain these exceptions and
 the established domain/default policy. All application DNS rules now precede
 all group-domain and management DNS rules, so a ChatGPT-owned lookup for a Claude
 hostname uses GPT's DNS/FakeIP policy, regardless of group ordering. Bootstrap
-DNS for proxy nodes remains explicitly direct to avoid resolver loops. The unreleased custom-application work above restores management/WireGuard exceptions ahead of app matching.
+DNS for proxy nodes remains explicitly direct to avoid resolver loops. The preview custom-application implementation above restores management/WireGuard exceptions ahead of app matching.
 
 Browser traffic continues to match service domains. External browser login
 belongs to the browser, not the originating app; unidentified owners fall back
@@ -483,7 +483,7 @@ The embedded sing-box/libbox core is GPL-3.0-or-later. See
 [`NOTICE.md`](NOTICE.md) and the corresponding source/build instructions before
 redistributing the APK outside controlled testing. GitHub releases include the
 exact corresponding-source archive alongside the APKs. New 1.14.3 builds must ship
-`sing-box-1.14.3-source.tar.gz`, including the capture overlay and build scripts;
+`sing-box-1.14.3-sb-capture-source.tar.gz`, including the capture overlay and build scripts;
 previous 1.3.4 artifacts retain their matching 1.13.12 source archive.
 
 ## Network handover recovery

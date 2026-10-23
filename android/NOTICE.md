@@ -6,7 +6,7 @@ The sb-easy Android client links the sing-box `libbox` library into the APK.
 - Copyright: 2022–2026 nekohasekai and contributors
 - License: GNU General Public License, version 3 or later
 - Upstream source: <https://github.com/SagerNet/sing-box>
-- Embedded version in the unreleased working tree: 1.14.3
+- Embedded version in the development preview: 1.14.3
 - Embedded revision: `7054cac5124465ffdb145870d7c01885566711b1`
 
 The libbox build is reproducible through [`scripts/build-libbox.sh`](scripts/build-libbox.sh).
@@ -37,8 +37,9 @@ An Android release must also carry the corresponding
 source plus the capture extension and routing hooks used in the embedded build, so
 APK recipients can obtain the corresponding source without relying on a moving
 branch or tag. The previously published Android 1.3.4 uses 1.13.12 and its
-matching `sing-box-1.13.12-sb-capture-source.tar.gz`; this working-tree update
-does not indicate that a new APK or source archive has been published.
+matching `sing-box-1.13.12-sb-capture-source.tar.gz`. The 1.4.0 development preview
+provides the matching 1.14.3 source archive with its test-signed APKs; this does not
+represent native-device acceptance or a stable release.
 
 The GPL grants recipients the right to obtain, study, modify, and redistribute
 the corresponding source under its terms. The full license text is available

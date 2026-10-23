@@ -1,6 +1,6 @@
 # Linux 原生桌面端
 
-当前开发版 **0.1.0**，版本来自 [`config/client-releases.json`](../config/client-releases.json)。本目录提供 C11 / GTK 3 原生窗口，复用 C agent 客户端、订阅解析和内嵌 sing-box；无浏览器窗口或外部核心可执行文件。尚未发布 Linux 下载项、正式 APT 地址或发行签名密钥。开发构建产物不能作为已发布版本填写到下载清单。
+当前开发版 **0.1.0**，版本来自 [`config/client-releases.json`](../config/client-releases.json)。本目录提供 C11 / GTK 3 原生窗口，复用 C agent 客户端、订阅解析和内嵌 sing-box；无浏览器窗口或外部核心可执行文件。[1.1.0 开发预览](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) 已提供 Debian 12 amd64 未签名 DEB、对应源码、许可证和校验值；真实桌面授权/休眠/切网仍待验收。当前没有正式 APT 地址或发行签名密钥。
 
 ## 使用
 

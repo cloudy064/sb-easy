@@ -1,6 +1,6 @@
 # sb-easy Windows development preview
 
-## 0.7.0 source development build (unpublished)
+## 0.7.0 unsigned development preview
 
 The application version comes from `development.windows.version` in
 [`config/client-releases.json`](../config/client-releases.json); the core version
@@ -11,9 +11,10 @@ their numeric PE version is `0.7.0.0`. Packaging rejects stale or mixed identiti
 The private UI package's npm metadata is not the application version: the UI
 displays the version reported by its connected service.
 
-The published download inventory still points to the **0.6.9 unsigned preview**
-with sing-box **1.13.12**. The changes documented below describe this source tree;
-they do not imply that a 0.7.0 installer or a publisher-signed release has shipped.
+The [1.1.0 development preview](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) provides **0.7.0 unsigned ZIP/MSI**
+packages with sing-box **1.14.3**, built and tested on the native GitHub Windows
+runner. Publisher signing and full desktop/network/driver acceptance remain
+pending; the preview is not a production-trusted updater release.
 The signed updater and signed extension catalog require 0.7.0 or later; install
 the first trusted updater-capable build manually when it becomes available.
 

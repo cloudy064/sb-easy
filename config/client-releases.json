@@ -22,91 +22,109 @@
   },
   "published": {
     "android": {
-      "version": "1.3.4",
-      "version_code": 28,
-      "core_version": "1.13.12",
+      "version": "1.4.0",
+      "core_version": "1.14.3",
       "channel": "test-signed",
-      "tag": "android-v1.3.4",
-      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/android-v1.3.4",
-      "published_at": "2026-10-13T02:17:20Z",
+      "tag": "v1.1.0-preview.1",
+      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1",
       "verified_at": "2026-10-23",
       "artifacts": [
         {
-          "name": "sb-easy-android-v1.3.4-arm64-v8a.apk",
+          "name": "sb-easy-android-1.4.0-preview.1-arm64-v8a.apk",
           "format": "apk",
           "architecture": "arm64-v8a",
-          "size": 37094818,
-          "sha256": "7786f8f06381ea06a01a4e0037183cfb90c58ea0021a4730d452fb0202415513",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/sb-easy-android-v1.3.4-arm64-v8a.apk"
+          "size": 44708084,
+          "sha256": "a80f1d2daafaa571c09d79668649d7009aa7e0de94c50f20cc68ea74f826d42f",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-arm64-v8a.apk"
         },
         {
-          "name": "sb-easy-android-v1.3.4-armeabi-v7a.apk",
+          "name": "sb-easy-android-1.4.0-preview.1-armeabi-v7a.apk",
           "format": "apk",
           "architecture": "armeabi-v7a",
-          "size": 36834326,
-          "sha256": "4d2323e24c91856b993792bfa3747829e4520784ea3cc5fd0a3cf4ff9b52aba9",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/sb-easy-android-v1.3.4-armeabi-v7a.apk"
+          "size": 44592864,
+          "sha256": "da552b54808fdb67366de305d37ba76d1a41a2bcc887f4222eb33425c99cfe96",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-armeabi-v7a.apk"
         },
         {
-          "name": "sb-easy-android-v1.3.4-universal.apk",
+          "name": "sb-easy-android-1.4.0-preview.1-universal.apk",
           "format": "apk",
           "architecture": "universal",
-          "size": 112847275,
-          "sha256": "39fd5ba4c7b8875a6903e79a6e52a7a031c806a3d8f8fb126341fee91e0fed9b",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/sb-easy-android-v1.3.4-universal.apk"
+          "size": 140950993,
+          "sha256": "1192fbe51ce597136c1973f1d54fe17154c708043af6a79a5c682459b19c6408",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-universal.apk"
         },
         {
-          "name": "sb-easy-android-v1.3.4-x86.apk",
+          "name": "sb-easy-android-1.4.0-preview.1-x86.apk",
           "format": "apk",
           "architecture": "x86",
-          "size": 39601038,
-          "sha256": "a7622feae85ce0fae50b38dd99314f78f219e3ecd7b711a92337ddbaf46b69b6",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/sb-easy-android-v1.3.4-x86.apk"
+          "size": 47883576,
+          "sha256": "56ddcc1db5567b79a7b2e4c8adb7a35b5d92237c5b61d42b1b9d77d30e31eaf7",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-x86.apk"
         },
         {
-          "name": "sb-easy-android-v1.3.4-x86_64.apk",
+          "name": "sb-easy-android-1.4.0-preview.1-x86_64.apk",
           "format": "apk",
           "architecture": "x86_64",
-          "size": 38856876,
-          "sha256": "b3c10fb0969a90210ccf5927a6c3dfd6049ec63d231c1e0fdbe97f8cef5f164e",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/sb-easy-android-v1.3.4-x86_64.apk"
+          "size": 47043878,
+          "sha256": "92f96ae55747844b26c161a9214ac415e8b1c70b01716481c24d5c1230a7252e",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-x86_64.apk"
         }
       ],
-      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/SHA256SUMS.txt",
-      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.3.4/sb-easy-android-v1.3.4-source.tar.gz",
+      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/SHA256SUMS.txt",
+      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-672c912-source.tar.gz",
+      "version_code": 29,
       "features": {
-        "packet_capture": false,
-        "http_debug": false
+        "packet_capture": true,
+        "http_debug": true
       }
     },
     "windows": {
-      "version": "0.6.9",
-      "core_version": "1.13.12",
+      "version": "0.7.0",
+      "core_version": "1.14.3",
       "channel": "unsigned-preview",
-      "tag": "windows-v0.6.9-preview.1",
-      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/windows-v0.6.9-preview.1",
-      "published_at": "2026-10-12T11:35:42Z",
+      "tag": "v1.1.0-preview.1",
+      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1",
       "verified_at": "2026-10-23",
       "artifacts": [
         {
-          "name": "sb-easy-0.6.9-windows-x64-portable.zip",
+          "name": "sb-easy-0.7.0-windows-x64-portable.zip",
           "format": "zip",
           "architecture": "x64",
-          "size": 21524714,
-          "sha256": "90a4a0141f8fce67d4d2234d85e41458c87a9d64bee662f98d668535758446e4",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/windows-v0.6.9-preview.1/sb-easy-0.6.9-windows-x64-portable.zip"
+          "size": 33859112,
+          "sha256": "82bbba42f77734d7b487a57422f82baa16b478663baab491bb64dcf13f5c457a",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-0.7.0-windows-x64-portable.zip"
         },
         {
-          "name": "sb-easy-0.6.9-windows-x64.msi",
+          "name": "sb-easy-0.7.0-windows-x64.msi",
           "format": "msi",
           "architecture": "x64",
-          "size": 16404480,
-          "sha256": "07820ea6b2ebbf3bbbdd744ad43886ec7cbcaf72aa42e3fba3e1f569373e973a",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/windows-v0.6.9-preview.1/sb-easy-0.6.9-windows-x64.msi"
+          "size": 25190400,
+          "sha256": "d960d76d07ef93b76d02c5d7e5ed1d638712b4b66335c57a97fb5d93ce05d0d9",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-0.7.0-windows-x64.msi"
         }
       ],
-      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/windows-v0.6.9-preview.1/SHA256SUMS.txt",
-      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/windows-v0.6.9-preview.1/sb-easy-0.6.9-source.tar.gz"
+      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/SHA256SUMS.txt",
+      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-v1.1.0-preview.1-source.tar.gz"
+    },
+    "linux": {
+      "version": "0.1.0",
+      "core_version": "1.14.3",
+      "channel": "unsigned-preview",
+      "tag": "v1.1.0-preview.1",
+      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1",
+      "verified_at": "2026-10-23",
+      "artifacts": [
+        {
+          "name": "sb-easy-desktop_0.1.0_amd64.deb",
+          "format": "deb",
+          "architecture": "amd64",
+          "size": 25353500,
+          "sha256": "c3c4b8756b8cb2bb0f487d738a6ae3b0d7c97a8543bcfa798acb2c0995f05f6f",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-desktop_0.1.0_amd64.deb"
+        }
+      ],
+      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/SHA256SUMS.txt",
+      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-672c912-source.tar.gz"
     }
   }
 }

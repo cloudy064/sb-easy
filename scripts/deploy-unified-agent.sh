@@ -153,7 +153,7 @@ if [[ "$candidate_healthy" != true ]]; then
   exit 6
 fi
 
-test_status="$(curl -sS --max-time 15 -x http://127.0.0.1:7890 \
+test_status="$(curl -sS --noproxy '' --max-time 15 -x http://127.0.0.1:7890 \
   -o /dev/null -w '%{http_code}' "$test_url" || true)"
 if [[ "$test_status" != "204" ]]; then
   echo "Proxy test failed: $test_url returned $test_status" >&2

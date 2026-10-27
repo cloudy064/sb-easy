@@ -36,6 +36,7 @@ data/
 
 # Cutover backups (local safety net, not for VCS)
 cutover-backup-*/
+/backups/
 
 # Local agent runtime data
 /agent-data/

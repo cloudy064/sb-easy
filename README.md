@@ -10,6 +10,8 @@ install.
 - **Frontend**: Vue 3 + TS + Pinia.
 
 Build and compatibility notes for the C implementation: [c/README.md](c/README.md).
+For this machine's Docker Agent, proxy ports, TUN routing and read-only
+diagnostics, see [local runtime notes](docs/local-runtime.md).
 The default `master` branch contains the C11 server and Linux agent.
 The server, Linux agent and Windows native application are maintained in C11.
 The old `cpp/` and Rust `backend/` directories are historical references only;

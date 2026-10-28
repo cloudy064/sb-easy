@@ -1438,33 +1438,29 @@ int sb_store_update_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
-    sqlite3_stmt *st = sbq_prepare(h,
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
                                    "UPDATE wireguard_peers SET name = ?1, enabled = ?2, dns = ?3, "
                                    "persistent_keepalive = ?4, allowed_ips = ?5, expire_at = ?6, "
                                    "quota_bytes = ?7, updated_at = datetime('now'), notes = ?8, "
                                    "host_id = ?9 WHERE id = ?10",
                                    err);
-    if (!st) goto done;
-    if (sbq_bind_text_n(st, 1, peer->name, peer->name_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_bool(st, 2, peer->enabled);
-    sbq_bind_text(st, 3, S(peer->dns));
-    sbq_bind_int(st, 4, peer->persistent_keepalive);
-    sbq_bind_text(st, 5, S(peer->allowed_ips));
-    sbq_bind_text(st, 6, peer->expire_at);
-    sbq_bind_int(st, 7, peer->quota_bytes);
-    if (sbq_bind_text_n(st, 8, peer->notes, peer->notes_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_text(st, 9, peer->host_id);
-    sbq_bind_text(st, 10, peer->id);
-    if (exec_stmt(st, err) != 0) goto done;
-    if (sqlite3_changes(h) == 0) {
-        sb_fail(err, SB_ERR_NOT_FOUND, "Peer not found");
-        goto done;
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, peer->name, peer->name_len, err);
+        sbq_bind_bool(q.st, 2, peer->enabled);
+        sbq_bind_text(q.st, 3, S(peer->dns));
+        sbq_bind_int(q.st, 4, peer->persistent_keepalive);
+        sbq_bind_text(q.st, 5, S(peer->allowed_ips));
+        sbq_bind_text(q.st, 6, peer->expire_at);
+        sbq_bind_int(q.st, 7, peer->quota_bytes);
+        sbq_stmt_bind_text_n(&q, 8, peer->notes, peer->notes_len, err);
+        sbq_bind_text(q.st, 9, peer->host_id);
+        sbq_bind_text(q.st, 10, peer->id);
+        if (q.rc != 0 || sbq_step_done(q.st, err) != 0) goto done;
+        if (sqlite3_changes(h) == 0) {
+            sb_fail(err, SB_ERR_NOT_FOUND, "Peer not found");
+            goto done;
+        }
     }
     rc = reload_peer(h, peer->id, out, err);
 done:

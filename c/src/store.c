@@ -1056,10 +1056,13 @@ static int find_user_locked(sqlite3 *h, const char *username, size_t username_le
 
 int sb_store_ensure_default_admin(sb_store *s, const char *password, sb_err *err) {
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), "SELECT COUNT(*) FROM users", err);
-    int r = st ? sbq_step_row(st, err) : -1;
-    int64_t count = r == 1 ? sbq_int(st, 0) : 0;
-    sqlite3_finalize(st);
+    int r = -1;
+    int64_t count = 0;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), "SELECT COUNT(*) FROM users", err);
+        r = sbq_stmt_step_row(&q, err);
+        if (r == 1) count = sbq_int(q.st, 0);
+    }
     UNLOCK(s);
     if (r < 0) return -1;
     if (r == 1 && count != 0) return 0;

@@ -152,7 +152,7 @@ static int exchange(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     sb_host_init(&host);
     int found = sb_store_find_enabled_host_by_token(req->server->store, token, &host, err);
     if (found == 0 && !sb_str_empty(req->server->legacy_agent_token) &&
-        sb_streq(token, req->server->legacy_agent_token))
+        sb_consttime_streq(token, req->server->legacy_agent_token))
         found = sb_store_find_host(req->server->store, "self", &host, err);
     if (found != 1 || !host.enabled) {
         sb_host_free(&host);

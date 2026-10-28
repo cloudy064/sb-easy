@@ -983,6 +983,9 @@ static char *fingerprint_of(const char *node_type, size_t type_len, const char *
  * store: lifecycle, users, audit, settings
  * ====================================================================== */
 
+static int exec_changes(sb_store *s, const char *sql, const char *not_found, sb_err *err,
+                        int nbinds, const char *const *binds);
+
 /* Fills agent_token_hash for rows created before migration 019 (SQLite has no
  * SHA-256). Best effort: rows that fail stay on the plaintext lookup fallback. */
 static void backfill_agent_token_hashes(sb_store *s) {

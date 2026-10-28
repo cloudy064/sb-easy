@@ -2657,12 +2657,12 @@ int sb_store_update_proxy_latency(sb_store *s, const char *id, const double *lat
  * ====================================================================== */
 
 static int find_proxy_locked(sqlite3 *h, const char *id, sb_proxy_record *out, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(h, PROXY_SELECT "FROM proxy_nodes WHERE id = ?1", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, S(id));
-    int r = sbq_step_row(st, err);
-    if (r == 1 && read_proxy_record(st, out, err) != 0) r = -1;
-    sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(h, PROXY_SELECT "FROM proxy_nodes WHERE id = ?1", err);
+    if (q.rc != 0) return -1;
+    const char *pid = S(id);
+    sbq_stmt_bind_text_n(&q, 1, pid, strlen(pid), err);
+    int r = sbq_stmt_step_row(&q, err);
+    if (r == 1 && read_proxy_record(q.st, out, err) != 0) r = -1;
     return r;
 }
 
@@ -2675,21 +2675,23 @@ static int reload_proxy(sqlite3 *h, const char *id, sb_proxy_record *out, sb_err
 int sb_store_list_proxy_nodes(sb_store *s, sb_proxy_record_vec *out, sb_err *err) {
     sb_proxy_record_vec rows = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), PROXY_SELECT "FROM proxy_nodes ORDER BY node_type, tag", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) {
-        sb_proxy_record rec;
-        sb_proxy_record_init(&rec);
-        if (read_proxy_record(st, &rec, err) != 0) {
-            sb_proxy_record_free(&rec);
-            r = -1;
-            break;
+    int r;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), PROXY_SELECT "FROM proxy_nodes ORDER BY node_type, tag", err);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1) {
+            sb_proxy_record rec;
+            sb_proxy_record_init(&rec);
+            if (read_proxy_record(q.st, &rec, err) != 0) {
+                sb_proxy_record_free(&rec);
+                r = -1;
+                break;
+            }
+            sb_proxy_record *slot = sb_proxy_record_vec_push(&rows);
+            sb_proxy_record_free(slot);
+            *slot = rec;
         }
-        sb_proxy_record *slot = sb_proxy_record_vec_push(&rows);
-        sb_proxy_record_free(slot);
-        *slot = rec;
     }
-    sqlite3_finalize(st);
     UNLOCK(s);
     FINISH_LIST(sb_proxy_record_vec_free, out, rows, r);
 }

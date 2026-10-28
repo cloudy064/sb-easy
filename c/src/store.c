@@ -1079,13 +1079,16 @@ int sb_store_ensure_default_admin(sb_store *s, const char *password, sb_err *err
 int sb_store_list_users(sb_store *s, sb_user_account_vec *out, sb_err *err) {
     sb_user_account_vec rows = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s),
+    int r = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s),
                                    "SELECT id, username, password_hash, role, created_at "
                                    "FROM users ORDER BY created_at",
                                    err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) read_user(st, sb_user_account_vec_push(&rows));
-    sqlite3_finalize(st);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1)
+            read_user(q.st, sb_user_account_vec_push(&rows));
+    }
     UNLOCK(s);
     FINISH_LIST(sb_user_account_vec_free, out, rows, r);
 }
@@ -1351,11 +1354,13 @@ static int find_peer_locked(sqlite3 *h, const char *id, sb_wireguard_peer *out, 
 int sb_store_list_wireguard_peers(sb_store *s, sb_wireguard_peer_vec *out, sb_err *err) {
     sb_wireguard_peer_vec rows = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), WIREGUARD_PEER_SELECT " ORDER BY address", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1)
-        read_wireguard_peer(st, sb_wireguard_peer_vec_push(&rows));
-    sqlite3_finalize(st);
+    int r = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), WIREGUARD_PEER_SELECT " ORDER BY address", err);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1)
+            read_wireguard_peer(q.st, sb_wireguard_peer_vec_push(&rows));
+    }
     UNLOCK(s);
     FINISH_LIST(sb_wireguard_peer_vec_free, out, rows, r);
 }

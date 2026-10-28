@@ -325,11 +325,27 @@ char *sb_hex_encode(const unsigned char *d, size_t n) {
     return s;
 }
 
-static int hexval(char c) {
+int sb_hex_value(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
+}
+
+static int hexval(char c) { return sb_hex_value(c); }
+
+/* Strict decimal parse: every byte must be a digit, no sign or spaces, and the
+ * value must lie in [min, max]. Returns 0 and sets *out, or -1. */
+int sb_parse_int_range(const char *s, size_t len, long min, long max, long *out) {
+    if (!s || len == 0 || len > 18) return -1;
+    long value = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        value = value * 10 + (s[i] - '0');
+    }
+    if (value < min || value > max) return -1;
+    *out = value;
+    return 0;
 }
 
 char *sb_url_decode(const char *s, bool plus_as_space) {

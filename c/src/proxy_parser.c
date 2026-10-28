@@ -83,12 +83,7 @@ static void str_free(str *s) {
 }
 static sbj *sbj_sv(sv v) { return sbj_strn(v.p, v.n); }
 
-static int hex_value(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
-    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
-    return -1;
-}
+static int hex_value(char c) { return sb_hex_value(c); }
 
 static str percent_decode(sv v, bool plus_as_space) {
     sb_buf b = {0};

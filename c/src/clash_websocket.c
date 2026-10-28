@@ -212,8 +212,8 @@ static int upstream_endpoint_init(upstream_endpoint *e, const clash_target *targ
     if (close) {
         e->host = sb_strndup(authority + 1, (size_t)(close - authority - 1));
         if (close[1] == ':') {
-            int port = atoi(close + 2);
-            e->port = port > 0 && port < 65536 ? port : 0;
+            long port = 0;
+            e->port = sb_parse_int_range(close + 2, strlen(close + 2), 1, 65535, &port) == 0 ? (int)port : 0;
         } else {
             e->port = default_port;
         }
@@ -221,8 +221,8 @@ static int upstream_endpoint_init(upstream_endpoint *e, const clash_target *targ
         char *colon = strchr(authority, ':');
         if (colon) {
             e->host = sb_strndup(authority, (size_t)(colon - authority));
-            int port = atoi(colon + 1);
-            e->port = port > 0 && port < 65536 ? port : 0;
+            long port = 0;
+            e->port = sb_parse_int_range(colon + 1, strlen(colon + 1), 1, 65535, &port) == 0 ? (int)port : 0;
         } else {
             e->host = sb_strdup(authority);
             e->port = default_port;
@@ -571,7 +571,7 @@ static upstream_result upstream_handshake(upstream_io *io, const upstream_endpoi
         size_t head_len = (size_t)(head_end - in->p) + 4;
         char *head = sb_strndup(in->p, head_len - 2);
         int status = 0;
-        if (sb_starts_with(head, "HTTP/1.") && strlen(head) > 12 && head[8] == ' ') status = atoi(head + 9);
+        if (sb_starts_with(head, "HTTP/1.") && strlen(head) > 12 && head[8] == ' ') { long parsed_status = 0; if (sb_parse_int_range(head + 9, 3, 100, 599, &parsed_status) == 0) status = (int)parsed_status; }
         char *accept = NULL;
         for (char *line = strstr(head, "\r\n"); line && line[2]; line = strstr(line + 2, "\r\n")) {
             char *name = line + 2;

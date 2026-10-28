@@ -113,6 +113,10 @@ unsigned char *sb_base64url_decode_strict(const char *text, size_t text_len, siz
 char *sb_hex_encode(const unsigned char *data, size_t len); /* lowercase */
 char *sb_url_decode(const char *s, bool plus_as_space);
 char *sb_url_encode(const char *s); /* RFC 3986 unreserved kept */
+int sb_hex_value(char c); /* 0-15 for a hex digit, -1 otherwise */
+/* Strict decimal parse: all bytes must be digits (no sign/space), value in
+ * [min, max]. Returns 0 and sets *out, or -1. */
+int sb_parse_int_range(const char *s, size_t len, long min, long max, long *out);
 
 /* ---- hashing / randomness (OpenSSL) ---------------------------------- */
 void sb_sha256(const void *data, size_t len, unsigned char out[32]);

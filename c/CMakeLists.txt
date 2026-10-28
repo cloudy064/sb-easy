@@ -195,6 +195,12 @@ if(BUILD_TESTING)
     add_test(NAME control_plane_e2e
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/control_plane_e2e.py
             --server $<TARGET_FILE:sb-easy-c-server> --agent $<TARGET_FILE:sb-easy-c-agent>)
+    if(NOT SB_EASY_EMBED_SINGBOX)
+        add_test(NAME agent_sigterm_e2e
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/agent_sigterm_e2e.py
+                --agent $<TARGET_FILE:sb-easy-c-agent>)
+        set_tests_properties(agent_sigterm_e2e PROPERTIES TIMEOUT 90)
+    endif()
     # This HTTP fixture exercises the production 50 ms QuickJS deadline.
     # Keep sanitizer overhead from concurrent CTests out of that wall-clock budget.
     set_tests_properties(control_plane_e2e PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)

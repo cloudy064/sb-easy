@@ -1043,15 +1043,14 @@ void sb_store_free(sb_store *s) {
 sb_database *sb_store_database(sb_store *s) { return s->db; }
 
 static int find_user_locked(sqlite3 *h, const char *username, size_t username_len, sb_user_account *out, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(h,
-                                   "SELECT id, username, password_hash, role, created_at "
-                                   "FROM users WHERE username = ?1 LIMIT 1",
-                                   err);
-    if (!st) return -1;
-    int r = sbq_bind_text_n(st, 1, S(username), username_len, err);
-    if (r == 0) r = sbq_step_row(st, err);
-    if (r == 1) read_user(st, out);
-    sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(h,
+                               "SELECT id, username, password_hash, role, created_at "
+                               "FROM users WHERE username = ?1 LIMIT 1",
+                               err);
+    if (q.rc != 0) return -1;
+    sbq_stmt_bind_text_n(&q, 1, S(username), username_len, err);
+    int r = sbq_stmt_step_row(&q, err);
+    if (r == 1) read_user(q.st, out);
     return r;
 }
 
@@ -1338,12 +1337,11 @@ int sb_store_set_app_setting(sb_store *s, const char *key, const sbj *value, sb_
  * ====================================================================== */
 
 static int find_peer_locked(sqlite3 *h, const char *id, sb_wireguard_peer *out, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(h, WIREGUARD_PEER_SELECT " WHERE id = ?1", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, S(id));
-    int r = sbq_step_row(st, err);
-    if (r == 1) read_wireguard_peer(st, out);
-    sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(h, WIREGUARD_PEER_SELECT " WHERE id = ?1", err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, S(id));
+    int r = sbq_stmt_step_row(&q, err);
+    if (r == 1) read_wireguard_peer(q.st, out);
     return r;
 }
 

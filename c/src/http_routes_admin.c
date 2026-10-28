@@ -93,12 +93,6 @@ static int json_value_string(const sbj *body, const char *field, const char *fal
     return 0;
 }
 
-/* std::string == literal, honouring embedded NUL bytes. */
-static bool json_string_is(const sbj *value, const char *literal) {
-    size_t n = strlen(literal);
-    return sbj_is_string(value) && value->v.str.len == n && memcmp(value->v.str.ptr, literal, n) == 0;
-}
-
 /* utc_after(): "%Y-%m-%dT%H:%M:%SZ" for now + `minutes`. NULL on failure. */
 static char *utc_after_minutes(int64_t minutes) {
     time_t when = time(NULL) + (time_t)(minutes * 60);
@@ -417,7 +411,7 @@ static int handle_users_create(sb_http_req *req, sb_http_resp *resp, sb_err *err
         sb_fail(err, SB_ERR_VALIDATION, "Username required, password must be at least 4 characters");
         goto done;
     }
-    if (role_value && !json_string_is(role_value, "admin") && !json_string_is(role_value, "viewer") && !json_string_is(role_value, "operator")) {
+    if (role_value && !sb_json_string_is(role_value, "admin") && !sb_json_string_is(role_value, "viewer") && !sb_json_string_is(role_value, "operator")) {
         sb_fail(err, SB_ERR_VALIDATION, "Role must be admin, operator or viewer");
         goto done;
     }

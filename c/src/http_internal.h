@@ -138,6 +138,12 @@ char *sb_http_trim_trailing_slashes(const char *s);
 char *sb_http_clash_controller_address(const char *url);
 char *sb_http_encode_component(const char *s);
 char *sb_http_encode_component_n(const char *s, size_t len);
+
+/* std::string == literal, honouring embedded NUL bytes. */
+static inline bool sb_json_string_is(const sbj *value, const char *literal) {
+    size_t n = strlen(literal);
+    return sbj_is_string(value) && value->v.str.len == n && memcmp(value->v.str.ptr, literal, n) == 0;
+}
 char *sb_http_secure_token(size_t bytes);
 char *sb_http_utc_now(void); /* "%Y-%m-%dT%H:%M:%SZ" */
 char *sb_http_truncate_utf8(const char *s, size_t max_bytes);

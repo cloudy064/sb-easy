@@ -75,12 +75,6 @@ static int json_value_string(const sbj *object, const char *key, const char *fal
     return 0;
 }
 
-/* std::string == literal, honouring embedded NUL bytes. */
-static bool json_string_is(const sbj *value, const char *literal) {
-    size_t n = strlen(literal);
-    return sbj_is_string(value) && value->v.str.len == n && memcmp(value->v.str.ptr, literal, n) == 0;
-}
-
 /* True when a JSON string holds an embedded NUL (C++ keeps the full bytes). */
 static bool json_string_has_nul(const sbj *value) {
     return sbj_is_string(value) && strlen(value->v.str.ptr) != value->v.str.len;
@@ -118,7 +112,7 @@ static int profile_mode(const sbj *body, sb_profile_mode *out, sb_err *err) {
     const sbj *found = NULL;
     const char *mode = NULL;
     if (json_value_string(body, "mode", "managed", &found, &mode, err) != 0) return -1;
-    *out = found && json_string_is(found, "full") ? SB_PROFILE_FULL : SB_PROFILE_MANAGED;
+    *out = found && sb_json_string_is(found, "full") ? SB_PROFILE_FULL : SB_PROFILE_MANAGED;
     return 0;
 }
 
@@ -498,8 +492,8 @@ static int uses_embedded_managed_network(const sb_host *host, bool *out, sb_err 
     const sbj *found = NULL;
     const char *platform = NULL;
     if (json_value_string(host->capabilities, "platform", "", &found, &platform, err) != 0) return -1;
-    *out = found && (json_string_is(found, "android") || json_string_is(found, "ios") ||
-                     json_string_is(found, "macos") || json_string_is(found, "tvos"));
+    *out = found && (sb_json_string_is(found, "android") || sb_json_string_is(found, "ios") ||
+                     sb_json_string_is(found, "macos") || sb_json_string_is(found, "tvos"));
     return 0;
 }
 
@@ -514,7 +508,7 @@ static int endpoint_tag_in_use(const sbj *endpoints, const sb_render_request *re
         if (!sbj_is_object(value)) continue;
         const sbj *tag = sbj_get(value, "tag");
         if (tag && !sbj_is_string(tag)) return type_error_302(err, "string", tag);
-        if ((tag ? json_string_is(tag, candidate) : *candidate == '\0')) {
+        if ((tag ? sb_json_string_is(tag, candidate) : *candidate == '\0')) {
             in_endpoints = true;
             break;
         }
@@ -1109,7 +1103,7 @@ static int handle_agent_command_ack(sb_http_req *req, sb_http_resp *resp, sb_err
     const sbj *status_value = NULL;
     const char *ignored = NULL;
     if (json_value_string(body, "status", "", &status_value, &ignored, err) != 0) goto done;
-    const char *status = status_value && json_string_is(status_value, "done") ? "done" : "failed";
+    const char *status = status_value && sb_json_string_is(status_value, "done") ? "done" : "failed";
     /* optional_result(): "result must be a string or null". */
     const sbj *result = sbj_get(body, "result");
     if (result && !sbj_is_null(result) && !sbj_is_string(result)) {

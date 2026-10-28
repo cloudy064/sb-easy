@@ -2324,15 +2324,16 @@ int sb_store_create_agent_enrollment(sb_store *s, const char *host_id, sb_agent_
         }
     }
     if (rc == 0) {
-        sqlite3_stmt *st = sbq_prepare(h, "SELECT expires_at FROM agent_enrollments WHERE id = ?1", err);
         int r = -1;
-        if (st) {
-            sbq_bind_text(st, 1, id);
-            r = sbq_step_row(st, err);
-            if (r == 1) expires_at = sbq_text(st, 0);
-            if (r == 0) sb_fail(err, SB_ERR_GENERIC, "Created enrollment could not be read");
+        {
+            SBQ_AUTO q = sbq_stmt_open(h, "SELECT expires_at FROM agent_enrollments WHERE id = ?1", err);
+            if (q.rc == 0) {
+                sbq_stmt_bind_text_n(&q, 1, id, strlen(id), err);
+                r = sbq_stmt_step_row(&q, err);
+                if (r == 1) expires_at = sbq_text(q.st, 0);
+                if (r == 0) sb_fail(err, SB_ERR_GENERIC, "Created enrollment could not be read");
+            }
         }
-        sqlite3_finalize(st);
         rc = r == 1 ? 0 : -1;
     }
     if (rc == 0) rc = sbq_commit(h, err);
@@ -2376,7 +2377,9 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
     sqlite3 *h = H(s);
     int rc = sbq_begin(h, err);
     if (rc == 0) {
-        sqlite3_stmt *st = sbq_prepare(h,
+        int r = -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(h,
                                        "SELECT e.id, h.id, h.name, h.agent_token, "
                                        "COALESCE(h.profile_id, 'default'), p.name, h.capabilities "
                                        "FROM agent_enrollments e "
@@ -2385,27 +2388,26 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
                                        "WHERE e.code_hash = ?1 AND e.redeemed_at IS NULL "
                                        "AND e.expires_at > datetime('now') AND h.enabled = 1",
                                        err);
-        int r = -1;
-        if (st) {
-            sbq_bind_text(st, 1, code_hash);
-            r = sbq_step_row(st, err);
-            if (r == 0) sb_fail(err, SB_ERR_VALIDATION, "Enrollment code is invalid or expired");
-            if (r == 1) {
-                sb_agent_enrollment_result_free(&result);
-                enrollment_id = sbq_text(st, 0);
-                result.host_id = sbq_text(st, 1);
-                result.host_name = sbq_text(st, 2);
-                result.host_name_len = (size_t)sqlite3_column_bytes(st, 2);
-                result.agent_token = sbq_text(st, 3);
-                result.profile_id = sbq_text(st, 4);
-                result.profile_name = sbq_text(st, 5);
-                result.profile_name_len = (size_t)sqlite3_column_bytes(st, 5);
-                char *caps = sbq_text(st, 6);
-                capabilities = parse_object_or_empty(caps);
-                free(caps);
+            if (q.rc == 0) {
+                sbq_stmt_bind_text_n(&q, 1, code_hash, strlen(code_hash), err);
+                r = sbq_stmt_step_row(&q, err);
+                if (r == 0) sb_fail(err, SB_ERR_VALIDATION, "Enrollment code is invalid or expired");
+                if (r == 1) {
+                    sb_agent_enrollment_result_free(&result);
+                    enrollment_id = sbq_text(q.st, 0);
+                    result.host_id = sbq_text(q.st, 1);
+                    result.host_name = sbq_text(q.st, 2);
+                    result.host_name_len = (size_t)sqlite3_column_bytes(q.st, 2);
+                    result.agent_token = sbq_text(q.st, 3);
+                    result.profile_id = sbq_text(q.st, 4);
+                    result.profile_name = sbq_text(q.st, 5);
+                    result.profile_name_len = (size_t)sqlite3_column_bytes(q.st, 5);
+                    char *caps = sbq_text(q.st, 6);
+                    capabilities = parse_object_or_empty(caps);
+                    free(caps);
+                }
             }
         }
-        sqlite3_finalize(st);
         rc = r == 1 ? 0 : -1;
     }
     if (rc == 0) {

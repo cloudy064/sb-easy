@@ -59,7 +59,9 @@ static bool at_json(const sbj *v, const char *path, const char *expected) {
 
 static sbj *render(const sb_render_request *r, sb_err *err) {
     sb_config_renderer renderer;
-    if (sb_config_renderer_init(&renderer, NULL, err) != 0) return NULL;
+    sb_script_limits limits = sb_script_limits_default();
+    limits.timeout_ms = 5000; /* slack for parallel sanitizer runs; production default stays 50 ms */
+    if (sb_config_renderer_init(&renderer, &limits, err) != 0) return NULL;
     return sb_config_renderer_render(&renderer, r, err);
 }
 

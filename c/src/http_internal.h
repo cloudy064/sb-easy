@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "sb/auth.h"
 #include "sb/auth_security.h"

@@ -1194,6 +1194,16 @@ static bool run_cycle(agent_runtime *rt) {
     return ok;
 }
 
+/* Set by SIGTERM/SIGINT. The handler only stores the flag (async-signal-safe);
+ * wait_for_work() polls it in 1s slices, and sb_agent_main() then runs the normal
+ * teardown so the managed sing-box child is stopped instead of orphaned. */
+static volatile sig_atomic_t g_stop_requested = 0;
+
+static void on_agent_stop_signal(int signo) {
+    (void)signo;
+    g_stop_requested = 1;
+}
+
 static void wait_for_work(agent_runtime *rt, int64_t seconds) {
     /* Cap absurd intervals at ~100 years so the deadline cannot overflow. */
     const int64_t maximum = (int64_t)100 * 365 * 24 * 60 * 60;
@@ -1202,7 +1212,15 @@ static void wait_for_work(agent_runtime *rt, int64_t seconds) {
     deadline.tv_sec += (time_t)(seconds > maximum ? maximum : seconds);
     pthread_mutex_lock(&rt->state_mutex);
     while (!(rt->refresh_requested || rt->reload_requested || rt->restart_requested)) {
-        if (pthread_cond_timedwait(&rt->wakeup, &rt->state_mutex, &deadline) == ETIMEDOUT) break;
+        if (g_stop_requested) break;
+        struct timespec slice;
+        clock_gettime(CLOCK_MONOTONIC, &slice);
+        slice.tv_sec += 1;
+        bool final_slice = slice.tv_sec > deadline.tv_sec ||
+                           (slice.tv_sec == deadline.tv_sec && slice.tv_nsec >= deadline.tv_nsec);
+        if (final_slice) slice = deadline;
+        if (pthread_cond_timedwait(&rt->wakeup, &rt->state_mutex, &slice) == ETIMEDOUT && final_slice)
+            break;
     }
     pthread_mutex_unlock(&rt->state_mutex);
 }
@@ -1442,6 +1460,11 @@ int sb_agent_main(int argc, char **argv) {
                 free(options.address);
                 goto fail;
             }
+            if (strcmp(options.address, "127.0.0.1") != 0 && strcmp(options.address, "::1") != 0 &&
+                strcmp(options.address, "localhost") != 0)
+                fprintf(stderr, "warning: Agent UI serves plain HTTP on %s; restrict the port to a "
+                                "trusted network or set AGENT_UI_BIND=127.0.0.1:%u\n",
+                        options.address, (unsigned)sb_agent_ui_port(local_ui));
             printf("Agent UI listening on %s:%u\n", options.address,
                    (unsigned)sb_agent_ui_port(local_ui));
         }
@@ -1449,10 +1472,23 @@ int sb_agent_main(int argc, char **argv) {
     }
     int64_t interval = 0;
     if (poll_interval(&interval, &err) != 0) goto fail;
+    struct sigaction stop_action;
+    memset(&stop_action, 0, sizeof stop_action);
+    stop_action.sa_handler = on_agent_stop_signal;
+    stop_action.sa_flags = SA_RESTART;
+    sigemptyset(&stop_action.sa_mask);
+    sigaction(SIGINT, &stop_action, NULL);
+    sigaction(SIGTERM, &stop_action, NULL);
     if (runtime.proxy_runtime && sb_proxy_runtime_start(runtime.proxy_runtime, &err)) goto fail;
     for (;;) {
         (void)run_cycle(&runtime);
         wait_for_work(&runtime, interval);
+        if (g_stop_requested) {
+            fprintf(stderr, "Agent stopping on signal\n");
+            sb_agent_ui_free(local_ui);
+            runtime_free(&runtime);
+            return 0;
+        }
     }
 
 fail:

@@ -31,6 +31,14 @@
 #define MAXIMUM_SMALL_BODY_SIZE ((size_t)8u * 1024u)
 #define SESSION_COOKIE_NAME "sb_easy_agent_session"
 #define SESSION_DURATION_MS ((int64_t)12 * 60 * 60 * 1000)
+/* Live sessions are capped; the session closest to expiry is evicted first. */
+#define MAX_SESSIONS ((size_t)64)
+/* Failed logins beyond LOGIN_FREE_FAILURES back off 1s, 2s, 4s ... capped at 60s.
+ * Tracked globally (handlers are serial, and the UI is a single-admin surface). */
+#define LOGIN_FREE_FAILURES 10
+#define LOGIN_BACKOFF_BASE_MS ((int64_t)1000)
+#define LOGIN_BACKOFF_MAX_MS ((int64_t)60000)
+#define LOGIN_BACKOFF_MAX_SHIFT 6
 #define JSON_CONTENT_TYPE "application/json; charset=utf-8"
 #define CONTENT_SECURITY_POLICY                                                    \
     "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; " \
@@ -54,6 +62,8 @@ struct sb_agent_ui {
     pthread_mutex_t handler_mutex;
     session *sessions;
     size_t session_len, session_cap;
+    int login_failures;        /* consecutive failed logins; guarded by mutex */
+    int64_t login_locked_until_ms; /* monotonic; login refused until then */
 };
 
 void sb_agent_ui_options_init(sb_agent_ui_options *options) {
@@ -95,6 +105,13 @@ static char *session_login(sb_agent_ui *ui, const char *username, const char *pa
         }
     }
     if (!replaced) {
+        if (ui->session_len >= MAX_SESSIONS) {
+            size_t oldest = 0;
+            for (size_t i = 1; i < ui->session_len; ++i)
+                if (ui->sessions[i].expires_ms < ui->sessions[oldest].expires_ms) oldest = i;
+            free(ui->sessions[oldest].token);
+            ui->sessions[oldest] = ui->sessions[--ui->session_len];
+        }
         if (ui->session_len == ui->session_cap) {
             ui->session_cap = ui->session_cap ? ui->session_cap * 2 : 8;
             ui->sessions = sb_xrealloc(ui->sessions, ui->session_cap * sizeof *ui->sessions);
@@ -105,6 +122,34 @@ static char *session_login(sb_agent_ui *ui, const char *username, const char *pa
     }
     pthread_mutex_unlock(&ui->mutex);
     return token;
+}
+
+/* Milliseconds until another login attempt is allowed; 0 when allowed. Uses
+ * timestamps, never sleeps: handler_mutex serialises every handler, so a
+ * sleep here would stall the whole local UI. */
+static int64_t login_retry_after_ms(sb_agent_ui *ui) {
+    pthread_mutex_lock(&ui->mutex);
+    int64_t left = ui->login_locked_until_ms - sb_monotonic_ms();
+    pthread_mutex_unlock(&ui->mutex);
+    return left > 0 ? left : 0;
+}
+
+static void login_record(sb_agent_ui *ui, bool success) {
+    pthread_mutex_lock(&ui->mutex);
+    if (success) {
+        ui->login_failures = 0;
+        ui->login_locked_until_ms = 0;
+    } else {
+        if (ui->login_failures < 1000) ++ui->login_failures;
+        if (ui->login_failures > LOGIN_FREE_FAILURES) {
+            int shift = ui->login_failures - LOGIN_FREE_FAILURES - 1;
+            if (shift > LOGIN_BACKOFF_MAX_SHIFT) shift = LOGIN_BACKOFF_MAX_SHIFT;
+            int64_t delay = LOGIN_BACKOFF_BASE_MS << shift;
+            if (delay > LOGIN_BACKOFF_MAX_MS) delay = LOGIN_BACKOFF_MAX_MS;
+            ui->login_locked_until_ms = sb_monotonic_ms() + delay;
+        }
+    }
+    pthread_mutex_unlock(&ui->mutex);
 }
 
 static bool session_authenticated(sb_agent_ui *ui, const char *token) {
@@ -194,6 +239,7 @@ static const char *status_text(int status) {
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 413: return "Request Entity Too Large";
+    case 429: return "Too Many Requests";
     case 500: return "Internal Server Error";
     default: return "Unknown";
     }
@@ -439,6 +485,10 @@ static void handle_health(response *resp) {
 }
 
 static void handle_login(sb_agent_ui *ui, const request *req, response *resp) {
+    if (login_retry_after_ms(ui) > 0) {
+        response_error(resp, 429, "登录尝试过于频繁，请稍后再试");
+        return;
+    }
     if (!ui_header_present(req)) {
         response_error(resp, 403, "缺少本地管理界面请求标记");
         return;
@@ -461,6 +511,7 @@ static void handle_login(sb_agent_ui *ui, const request *req, response *resp) {
         bool exact = (!sbj_is_string(user_value) || user_value->v.str.len == strlen(username)) &&
                      (!sbj_is_string(password_value) || password_value->v.str.len == strlen(password));
         char *token = exact ? session_login(ui, username, password) : NULL;
+        login_record(ui, token != NULL);
         if (!token) {
             response_error(resp, 401, "用户名或密码错误");
         } else {

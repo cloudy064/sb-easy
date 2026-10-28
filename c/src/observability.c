@@ -354,14 +354,14 @@ static void *monitor_loop(void *arg) {
         pthread_mutex_unlock(&monitor->mutex);
         sb_observability_evaluate(monitor->database, sb_unix_now(), NULL);
         pthread_mutex_lock(&monitor->mutex);
-        struct timespec wake; clock_gettime(CLOCK_REALTIME, &wake); wake.tv_sec += 30;
+        struct timespec wake; clock_gettime(CLOCK_MONOTONIC, &wake); wake.tv_sec += 30;
         if (!monitor->stopping) pthread_cond_timedwait(&monitor->wakeup, &monitor->mutex, &wake);
     }
     pthread_mutex_unlock(&monitor->mutex); return NULL;
 }
 sb_observability *sb_observability_new(sb_database *database) {
     sb_observability *monitor = sb_xcalloc(1, sizeof *monitor); monitor->database = database;
-    pthread_mutex_init(&monitor->mutex, NULL); pthread_cond_init(&monitor->wakeup, NULL); return monitor;
+    pthread_mutex_init(&monitor->mutex, NULL); pthread_condattr_t attributes; pthread_condattr_init(&attributes); pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC); pthread_cond_init(&monitor->wakeup, &attributes); pthread_condattr_destroy(&attributes); return monitor;
 }
 int sb_observability_start(sb_observability *monitor, sb_err *err) {
     pthread_mutex_lock(&monitor->mutex);

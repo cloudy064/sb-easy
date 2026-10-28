@@ -889,7 +889,7 @@ static int resolve_agent_host(const sb_http_req *req, sb_host *out, sb_err *err)
     char *token = agent_token(req, err);
     if (!token) return -1;
     int found = sb_store_find_enabled_host_by_token(srv->store, token, out, err);
-    if (found == 0 && !sb_str_empty(srv->legacy_agent_token) && strcmp(token, srv->legacy_agent_token) == 0)
+    if (found == 0 && !sb_str_empty(srv->legacy_agent_token) && sb_consttime_streq(token, srv->legacy_agent_token))
         found = sb_store_find_host(srv->store, "self", out, err);
     free(token);
     if (found < 0) return -1;

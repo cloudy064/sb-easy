@@ -764,6 +764,97 @@ TEST(agent_ui_without_static_directory) {
     fixture_state_free(&state);
 }
 
+/* Repeated failed logins back off (429) instead of allowing unlimited guessing;
+ * a successful login after the window clears the counter. */
+TEST(agent_ui_login_backoff) {
+    fixture_state state;
+    fixture_state_init(&state);
+    sb_agent_ui_callbacks callbacks = fixture_callbacks(&state);
+    sb_agent_ui_options options;
+    sb_agent_ui_options_init(&options);
+    options.address = "127.0.0.1";
+    options.port = 0;
+    options.password = "pw";
+    sb_err err = {0};
+    sb_agent_ui *ui = sb_agent_ui_new(&options, &callbacks, &err);
+    REQUIRE(ui != NULL);
+    client c = {.port = sb_agent_ui_port(ui), .cookie = sb_strdup("")};
+
+    /* The first 11 failures are still answered 401 (10 free + the one that arms the lock). */
+    for (int i = 0; i < 11; ++i) {
+        ui_response bad =
+            request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"nope\"}");
+        CHECK_EQ_INT(bad.status, 401);
+        ui_response_free(&bad);
+    }
+    /* Inside the backoff window even the correct password is refused. */
+    ui_response locked =
+        request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"pw\"}");
+    CHECK_EQ_INT(locked.status, 429);
+    CHECK(locked.set_cookie == NULL);
+    ui_response_free(&locked);
+
+    /* After the 1s window a correct login succeeds and resets the counter. */
+    usleep(1300000);
+    ui_response ok =
+        request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"pw\"}");
+    CHECK_EQ_INT(ok.status, 200);
+    ui_response_free(&ok);
+    ui_response bad_again =
+        request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"nope\"}");
+    CHECK_EQ_INT(bad_again.status, 401);
+    ui_response_free(&bad_again);
+    ui_response still_open =
+        request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"pw\"}");
+    CHECK_EQ_INT(still_open.status, 200);
+    ui_response_free(&still_open);
+
+    free(c.cookie);
+    sb_agent_ui_free(ui);
+    fixture_state_free(&state);
+}
+
+/* The live session table is bounded: the oldest session is evicted at the cap. */
+TEST(agent_ui_session_cap) {
+    fixture_state state;
+    fixture_state_init(&state);
+    sb_agent_ui_callbacks callbacks = fixture_callbacks(&state);
+    sb_agent_ui_options options;
+    sb_agent_ui_options_init(&options);
+    options.address = "127.0.0.1";
+    options.port = 0;
+    options.password = "pw";
+    sb_err err = {0};
+    sb_agent_ui *ui = sb_agent_ui_new(&options, &callbacks, &err);
+    REQUIRE(ui != NULL);
+    client c = {.port = sb_agent_ui_port(ui), .cookie = sb_strdup("")};
+
+    ui_response first =
+        request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"pw\"}");
+    CHECK_EQ_INT(first.status, 200);
+    ui_response_free(&first);
+    char *first_cookie = sb_strdup(c.cookie);
+    for (int i = 0; i < 64; ++i) {
+        ui_response more =
+            request(&c, "POST", "/api/login", "{\"username\":\"admin\",\"password\":\"pw\"}");
+        CHECK_EQ_INT(more.status, 200);
+        ui_response_free(&more);
+    }
+    /* 65 logins with a cap of 64: the first session is gone, the newest still works. */
+    client old_client = {.port = c.port, .cookie = first_cookie};
+    ui_response evicted = request(&old_client, "GET", "/api/status", NULL);
+    CHECK_EQ_INT(evicted.status, 401);
+    ui_response_free(&evicted);
+    ui_response current = request(&c, "GET", "/api/status", NULL);
+    CHECK_EQ_INT(current.status, 200);
+    ui_response_free(&current);
+
+    free(first_cookie);
+    free(c.cookie);
+    sb_agent_ui_free(ui);
+    fixture_state_free(&state);
+}
+
 TEST(agent_ui_option_validation) {
     fixture_state state;
     fixture_state_init(&state);

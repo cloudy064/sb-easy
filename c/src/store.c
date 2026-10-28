@@ -1116,29 +1116,30 @@ int sb_store_create_user_n(sb_store *s, const char *username, size_t username_le
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
-    sqlite3_stmt *st = sbq_prepare(h, "SELECT 1 FROM users WHERE username = ?1", err);
-    if (!st) goto done;
-    int r = sbq_bind_text_n(st, 1, username, username_len, err);
-    if (r == 0) r = sbq_step_row(st, err);
-    sqlite3_finalize(st);
-    if (r < 0) goto done;
-    if (r == 1) {
-        sb_fail(err, SB_ERR_CONFLICT, "Username already exists");
-        goto done;
+    int r = 0;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, "SELECT 1 FROM users WHERE username = ?1", err);
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, username, username_len, err);
+        r = sbq_stmt_step_row(&q, err);
+        if (r < 0) goto done;
+        if (r == 1) {
+            sb_fail(err, SB_ERR_CONFLICT, "Username already exists");
+            goto done;
+        }
     }
-    st = sbq_prepare(h,
-                     "INSERT INTO users (id, username, password_hash, role) "
-                     "VALUES (?1, ?2, ?3, ?4)",
-                     err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, id);
-    if (sbq_bind_text_n(st, 2, username, username_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+                                   "INSERT INTO users (id, username, password_hash, role) "
+                                   "VALUES (?1, ?2, ?3, ?4)",
+                                   err);
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, id);
+        sbq_stmt_bind_text_n(&q, 2, username, username_len, err);
+        sbq_bind_text(q.st, 3, password_hash);
+        sbq_bind_text(q.st, 4, role);
+        if (q.rc != 0 || sbq_step_done(q.st, err) != 0) goto done;
     }
-    sbq_bind_text(st, 3, password_hash);
-    sbq_bind_text(st, 4, role);
-    if (exec_stmt(st, err) != 0) goto done;
     r = find_user_locked(h, username, username_len, out, err);
     if (r == 0) sb_fail(err, SB_ERR_GENERIC, "created user could not be reloaded");
     rc = r == 1 ? 0 : -1;

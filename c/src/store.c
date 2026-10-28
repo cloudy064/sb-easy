@@ -3377,33 +3377,38 @@ int sb_store_save_capture(sb_store *s, const char *host_id, const char *digest,
     LOCK(s);
     sqlite3 *h = H(s);
     int rc = sbq_begin(h, err);
-    sqlite3_stmt *st = NULL;
     if (rc == 0) {
-        st = sbq_prepare(h, "SELECT 1 FROM packet_captures WHERE host_id=?1 AND digest=?2", err);
-        if (!st) rc = -1;
-        else {
-            sbq_bind_text(st, 1, host_id); sbq_bind_text(st, 2, digest);
-            int found = sbq_step_row(st, err);
-            sqlite3_finalize(st);
-            if (found == 1) { rc = sbq_commit(h, err); if (rc != 0) sbq_rollback(h); UNLOCK(s); return rc; }
-            if (found < 0) rc = -1;
+        int found = -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(h, "SELECT 1 FROM packet_captures WHERE host_id=?1 AND digest=?2", err);
+            if (q.rc == 0) {
+                sbq_bind_text(q.st, 1, host_id);
+                sbq_bind_text(q.st, 2, digest);
+                found = sbq_step_row(q.st, err);
+            }
         }
+        if (found == 1) { rc = sbq_commit(h, err); if (rc != 0) sbq_rollback(h); UNLOCK(s); return rc; }
+        if (found < 0) rc = -1;
     }
     if (rc == 0) {
-        st = sbq_prepare(h, "SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM packet_captures WHERE host_id=?1", err);
-        if (!st) rc = -1;
+        SBQ_AUTO q = sbq_stmt_open(h, "SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM packet_captures WHERE host_id=?1", err);
+        if (q.rc != 0) rc = -1;
         else {
-            sbq_bind_text(st, 1, host_id);
-            if (sbq_step_row(st, err) != 1) rc = -1;
-            else if (sqlite3_column_int64(st, 0) >= 1000 || sqlite3_column_int64(st, 1) + (int64_t)len > 128*1024*1024)
+            sbq_bind_text(q.st, 1, host_id);
+            if (sbq_step_row(q.st, err) != 1) rc = -1;
+            else if (sqlite3_column_int64(q.st, 0) >= 1000 || sqlite3_column_int64(q.st, 1) + (int64_t)len > 128*1024*1024)
                 rc = sb_fail(err, SB_ERR_CONFLICT, "Capture storage full (128 MiB or 1000 files); delete captures first");
-            sqlite3_finalize(st);
         }
     }
     if (rc == 0) {
-        st = sbq_prepare(h, "INSERT INTO packet_captures(host_id,digest,payload) VALUES(?1,?2,?3)", err);
-        if (!st) rc = -1;
-        else { sbq_bind_text(st, 1, host_id); sbq_bind_text(st, 2, digest); sbq_bind_blob(st, 3, data, len); rc = exec_stmt(st, err); }
+        SBQ_AUTO q = sbq_stmt_open(h, "INSERT INTO packet_captures(host_id,digest,payload) VALUES(?1,?2,?3)", err);
+        if (q.rc != 0) rc = -1;
+        else {
+            sbq_bind_text(q.st, 1, host_id);
+            sbq_bind_text(q.st, 2, digest);
+            sbq_bind_blob(q.st, 3, data, len);
+            rc = sbq_step_done(q.st, err);
+        }
     }
     if (rc == 0) rc = sbq_commit(h, err);
     if (rc != 0) sbq_rollback(h);
@@ -3413,18 +3418,20 @@ int sb_store_save_capture(sb_store *s, const char *host_id, const char *digest,
 sbj *sb_store_list_captures(sb_store *s, const char *host_id, sb_err *err) {
     LOCK(s);
     sbj *out = sbj_array();
-    sqlite3_stmt *st = sbq_prepare(H(s), "SELECT digest,length(payload),created_at FROM packet_captures WHERE host_id=?1 ORDER BY created_at DESC,digest LIMIT 1000", err);
-    int rc = st ? 0 : -1;
-    if (st) {
-        sbq_bind_text(st, 1, host_id);
-        while ((rc = sbq_step_row(st, err)) == 1) {
-            sbj *item = sbj_object();
-            sbj_set_str(item, "digest", (const char *)sqlite3_column_text(st, 0));
-            sbj_set_int(item, "size", sqlite3_column_int64(st, 1));
-            sbj_set_str(item, "created_at", (const char *)sqlite3_column_text(st, 2));
-            sbj_arr_push(out, item);
+    int rc;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), "SELECT digest,length(payload),created_at FROM packet_captures WHERE host_id=?1 ORDER BY created_at DESC,digest LIMIT 1000", err);
+        rc = q.rc;
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, host_id);
+            while ((rc = sbq_step_row(q.st, err)) == 1) {
+                sbj *item = sbj_object();
+                sbj_set_str(item, "digest", (const char *)sqlite3_column_text(q.st, 0));
+                sbj_set_int(item, "size", sqlite3_column_int64(q.st, 1));
+                sbj_set_str(item, "created_at", (const char *)sqlite3_column_text(q.st, 2));
+                sbj_arr_push(out, item);
+            }
         }
-        sqlite3_finalize(st);
     }
     UNLOCK(s);
     if (rc < 0) { sbj_free(out); return NULL; }
@@ -3433,13 +3440,15 @@ sbj *sb_store_list_captures(sb_store *s, const char *host_id, sb_err *err) {
 char *sb_store_get_capture(sb_store *s, const char *host_id, const char *digest, size_t *len, sb_err *err) {
     LOCK(s);
     char *out = NULL;
-    sqlite3_stmt *st = sbq_prepare(H(s), "SELECT payload FROM packet_captures WHERE host_id=?1 AND digest=?2", err);
-    if (st) {
-        sbq_bind_text(st, 1, host_id); sbq_bind_text(st, 2, digest);
-        int rc = sbq_step_row(st, err);
-        if (rc == 1) { *len = (size_t)sqlite3_column_bytes(st, 0); out = sb_xmalloc(*len); memcpy(out, sqlite3_column_blob(st, 0), *len); }
-        else if (rc == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Capture not found");
-        sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), "SELECT payload FROM packet_captures WHERE host_id=?1 AND digest=?2", err);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, host_id);
+            sbq_bind_text(q.st, 2, digest);
+            int rc = sbq_step_row(q.st, err);
+            if (rc == 1) { *len = (size_t)sqlite3_column_bytes(q.st, 0); out = sb_xmalloc(*len); memcpy(out, sqlite3_column_blob(q.st, 0), *len); }
+            else if (rc == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Capture not found");
+        }
     }
     UNLOCK(s);
     return out;
@@ -3457,19 +3466,22 @@ int sb_store_delete_capture(sb_store *s, const char *host_id, const char *digest
 sbj *sb_store_list_wg_imports(sb_store *s, sb_err *err) {
     sbj *rows = sbj_array();
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s),
-        "SELECT id, created_at, status, inserted_ids FROM wireguard_imports ORDER BY created_at DESC, rowid DESC LIMIT 20", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) {
-        sbj *row = sbj_object();
-        sbj_set(row, "id", sbj_str_take(sbq_text(st, 0)));
-        sbj_set(row, "created_at", sbj_str_take(sbq_text(st, 1)));
-        sbj_set(row, "status", sbj_str_take(sbq_text(st, 2)));
-        sbj *ids = sbj_parse((const char *)sqlite3_column_text(st, 3), (size_t)sqlite3_column_bytes(st, 3), NULL, 0);
-        sbj_set(row, "added", sbj_uint(sbj_arr_len(ids))); sbj_free(ids);
-        sbj_arr_push(rows, row);
+    int r;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s),
+            "SELECT id, created_at, status, inserted_ids FROM wireguard_imports ORDER BY created_at DESC, rowid DESC LIMIT 20", err);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1) {
+            sbj *row = sbj_object();
+            sbj_set(row, "id", sbj_str_take(sbq_text(q.st, 0)));
+            sbj_set(row, "created_at", sbj_str_take(sbq_text(q.st, 1)));
+            sbj_set(row, "status", sbj_str_take(sbq_text(q.st, 2)));
+            sbj *ids = sbj_parse((const char *)sqlite3_column_text(q.st, 3), (size_t)sqlite3_column_bytes(q.st, 3), NULL, 0);
+            sbj_set(row, "added", sbj_uint(sbj_arr_len(ids))); sbj_free(ids);
+            sbj_arr_push(rows, row);
+        }
     }
-    sqlite3_finalize(st); UNLOCK(s);
+    UNLOCK(s);
     if (r < 0) { sbj_free(rows); return NULL; }
     return rows;
 }

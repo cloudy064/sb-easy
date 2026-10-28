@@ -1383,46 +1383,43 @@ int sb_store_create_wireguard_peer(sb_store *s, const sb_wireguard_peer *peer,
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
-    sqlite3_stmt *st = sbq_prepare(h, "SELECT 1 FROM wireguard_peers WHERE address = ?1", err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, peer->address);
-    int r = sbq_step_row(st, err);
-    sqlite3_finalize(st);
-    if (r < 0) goto done;
-    if (r == 1) {
-        sb_fail(err, SB_ERR_CONFLICT, "WireGuard address already exists");
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, "SELECT 1 FROM wireguard_peers WHERE address = ?1", err);
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, peer->address);
+        int r = sbq_stmt_step_row(&q, err);
+        if (r < 0) goto done;
+        if (r == 1) {
+            sb_fail(err, SB_ERR_CONFLICT, "WireGuard address already exists");
+            goto done;
+        }
     }
-    st = sbq_prepare(h,
-                     "INSERT INTO wireguard_peers "
-                     "(id, name, private_key, public_key, preshared_key, address, dns, "
-                     "enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes, "
-                     "created_at, updated_at, notes, host_id) "
-                     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
-                     "datetime('now'), datetime('now'), ?13, ?14)",
-                     err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, id);
-    if (sbq_bind_text_n(st, 2, peer->name, peer->name_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+                                   "INSERT INTO wireguard_peers "
+                                   "(id, name, private_key, public_key, preshared_key, address, dns, "
+                                   "enabled, persistent_keepalive, allowed_ips, expire_at, quota_bytes, "
+                                   "created_at, updated_at, notes, host_id) "
+                                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
+                                   "datetime('now'), datetime('now'), ?13, ?14)",
+                                   err);
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, id);
+        sbq_stmt_bind_text_n(&q, 2, peer->name, peer->name_len, err);
+        sbq_bind_text(q.st, 3, peer->private_key);
+        sbq_bind_text(q.st, 4, peer->public_key);
+        sbq_bind_text(q.st, 5, peer->preshared_key);
+        sbq_bind_text(q.st, 6, peer->address);
+        sbq_bind_text(q.st, 7, S(peer->dns));
+        sbq_bind_bool(q.st, 8, peer->enabled);
+        sbq_bind_int(q.st, 9, peer->persistent_keepalive);
+        sbq_bind_text(q.st, 10, S(peer->allowed_ips));
+        sbq_bind_text(q.st, 11, peer->expire_at);
+        sbq_bind_int(q.st, 12, peer->quota_bytes);
+        sbq_stmt_bind_text_n(&q, 13, peer->notes, peer->notes_len, err);
+        sbq_bind_text(q.st, 14, peer->host_id);
+        if (q.rc != 0 || sbq_step_done(q.st, err) != 0) goto done;
     }
-    sbq_bind_text(st, 3, peer->private_key);
-    sbq_bind_text(st, 4, peer->public_key);
-    sbq_bind_text(st, 5, peer->preshared_key);
-    sbq_bind_text(st, 6, peer->address);
-    sbq_bind_text(st, 7, S(peer->dns));
-    sbq_bind_bool(st, 8, peer->enabled);
-    sbq_bind_int(st, 9, peer->persistent_keepalive);
-    sbq_bind_text(st, 10, S(peer->allowed_ips));
-    sbq_bind_text(st, 11, peer->expire_at);
-    sbq_bind_int(st, 12, peer->quota_bytes);
-    if (sbq_bind_text_n(st, 13, peer->notes, peer->notes_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_text(st, 14, peer->host_id);
-    if (exec_stmt(st, err) != 0) goto done;
     rc = reload_peer(h, id, out, err);
 done:
     UNLOCK(s);

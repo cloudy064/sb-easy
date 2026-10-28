@@ -1242,39 +1242,43 @@ int sb_store_list_audit(sb_store *s, size_t limit, sb_audit_entry_vec *out, sb_e
     sb_audit_entry_vec rows = {0};
     size_t bounded = limit < 1 ? 1 : limit > 1000 ? 1000 : limit;
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s),
+    int r = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s),
                                    "SELECT id, ts, actor, action, target FROM audit_log "
                                    "ORDER BY id DESC LIMIT ?1",
                                    err);
-    int r = st ? 0 : -1;
-    if (st) sbq_bind_int(st, 1, (int64_t)bounded);
-    while (st && (r = sbq_step_row(st, err)) == 1) {
-        sb_audit_entry *e = sb_audit_entry_vec_push(&rows);
-        sb_audit_entry_free(e);
-        e->id = sbq_int(st, 0);
-        e->timestamp = sbq_text(st, 1);
-        e->actor = sbq_text(st, 2);
-        e->actor_len = (size_t)sqlite3_column_bytes(st, 2);
-        e->action = sbq_text(st, 3);
-        e->target = sbq_opt_text(st, 4);
+        r = q.rc;
+        if (q.rc == 0) sbq_bind_int(q.st, 1, (int64_t)bounded);
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1) {
+            sb_audit_entry *e = sb_audit_entry_vec_push(&rows);
+            sb_audit_entry_free(e);
+            e->id = sbq_int(q.st, 0);
+            e->timestamp = sbq_text(q.st, 1);
+            e->actor = sbq_text(q.st, 2);
+            e->actor_len = (size_t)sqlite3_column_bytes(q.st, 2);
+            e->action = sbq_text(q.st, 3);
+            e->target = sbq_opt_text(q.st, 4);
+        }
     }
-    sqlite3_finalize(st);
     UNLOCK(s);
     FINISH_LIST(sb_audit_entry_vec_free, out, rows, r);
 }
 
 sbj *sb_store_app_settings(sb_store *s, sb_err *err) {
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), "SELECT key, value FROM app_settings", err);
-    sbj *settings = st ? sbj_object() : NULL;
+    sbj *settings = NULL;
     int r = 0;
-    while (st && (r = sbq_step_row(st, err)) == 1) {
-        const char *text = (const char *)sqlite3_column_text(st, 1);
-        sbj *value = text ? sbj_parse(text, (size_t)sqlite3_column_bytes(st, 1), NULL, 0) : NULL;
-        const char *key = (const char *)sqlite3_column_text(st, 0);
-        if (value) sbj_set(settings, key ? key : "", value);
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), "SELECT key, value FROM app_settings", err);
+        if (q.rc == 0) settings = sbj_object();
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1) {
+            const char *text = (const char *)sqlite3_column_text(q.st, 1);
+            sbj *value = text ? sbj_parse(text, (size_t)sqlite3_column_bytes(q.st, 1), NULL, 0) : NULL;
+            const char *key = (const char *)sqlite3_column_text(q.st, 0);
+            if (value) sbj_set(settings, key ? key : "", value);
+        }
     }
-    sqlite3_finalize(st);
     UNLOCK(s);
     if (r < 0) {
         sbj_free(settings);

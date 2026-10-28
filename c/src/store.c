@@ -1645,59 +1645,48 @@ static int restore_node(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
                                                     : dump_checked(protocol, err);
     if (!protocol_text) return -1;
     int rc = -1;
-    sqlite3_stmt *st = NULL;
     if (jv_str(value, "node_type", "", &node_type, err) ||
         jv_bool(value, "enabled", true, &enabled, err) ||
         jv_str(value, "server", "", &server, err) || jv_int(value, "server_port", 0, &port, err) ||
         jv_str(value, "fingerprint", "", &fingerprint, err) ||
         jv_str(value, "created_at", "", &created_at, err))
         goto done;
-    st = sbq_prepare(h,
-                     "INSERT OR REPLACE INTO proxy_nodes "
-                     "(id, tag, node_type, enabled, server, server_port, "
-                     "protocol_config, subscription_id, fingerprint, latency, "
-                     "last_latency_test, created_at, updated_at, source_tag) "
-                     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
-                     "COALESCE(NULLIF(?12, ''), datetime('now')), datetime('now'), ?13)",
-                     err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, id);
-    if (sbq_bind_text_n(st, 2, tag,
-                        sbj_has(value, "tag") ? sbj_get(value, "tag")->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+                                   "INSERT OR REPLACE INTO proxy_nodes "
+                                   "(id, tag, node_type, enabled, server, server_port, "
+                                   "protocol_config, subscription_id, fingerprint, latency, "
+                                   "last_latency_test, created_at, updated_at, source_tag) "
+                                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
+                                   "COALESCE(NULLIF(?12, ''), datetime('now')), datetime('now'), ?13)",
+                                   err);
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, id);
+        sbq_stmt_bind_text_n(&q, 2, tag,
+                             sbj_has(value, "tag") ? sbj_get(value, "tag")->v.str.len : 0, err);
+        sbq_stmt_bind_text_n(&q, 3, node_type,
+                             sbj_has(value, "node_type") ? sbj_get(value, "node_type")->v.str.len : 0, err);
+        sbq_bind_bool(q.st, 4, enabled);
+        sbq_stmt_bind_text_n(&q, 5, server,
+                             sbj_has(value, "server") ? sbj_get(value, "server")->v.str.len : 0, err);
+        sbq_bind_int(q.st, 6, port);
+        sbq_bind_text(q.st, 7, protocol_text);
+        sbq_bind_text(q.st, 8, jv_opt_str(value, "subscription_id"));
+        sbq_bind_text(q.st, 9, fingerprint);
+        const sbj *latency = sbj_get(value, "latency");
+        double latency_value = sbj_as_double(latency, 0.0);
+        sbq_bind_opt_double(q.st, 10, sbj_is_number(latency) ? &latency_value : NULL);
+        sbq_bind_text(q.st, 11, jv_opt_str(value, "last_latency_test"));
+        sbq_bind_text(q.st, 12, created_at);
+        const sbj *source_tag = sbj_get(value, "source_tag");
+        if (sbj_is_string(source_tag))
+            sbq_stmt_bind_text_n(&q, 13, source_tag->v.str.ptr, source_tag->v.str.len, err);
+        else if (jv_opt_str(value, "subscription_id"))
+            sbq_stmt_bind_text_n(&q, 13, tag, sbj_get(value, "tag")->v.str.len, err);
+        else
+            sbq_bind_text(q.st, 13, NULL);
+        if (q.rc == 0) rc = sbq_step_done(q.st, err);
     }
-    if (sbq_bind_text_n(st, 3, node_type,
-                        sbj_has(value, "node_type") ? sbj_get(value, "node_type")->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_bool(st, 4, enabled);
-    if (sbq_bind_text_n(st, 5, server,
-                        sbj_has(value, "server") ? sbj_get(value, "server")->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_int(st, 6, port);
-    sbq_bind_text(st, 7, protocol_text);
-    sbq_bind_text(st, 8, jv_opt_str(value, "subscription_id"));
-    sbq_bind_text(st, 9, fingerprint);
-    const sbj *latency = sbj_get(value, "latency");
-    double latency_value = sbj_as_double(latency, 0.0);
-    sbq_bind_opt_double(st, 10, sbj_is_number(latency) ? &latency_value : NULL);
-    sbq_bind_text(st, 11, jv_opt_str(value, "last_latency_test"));
-    sbq_bind_text(st, 12, created_at);
-    const sbj *source_tag = sbj_get(value, "source_tag");
-    if (sbj_is_string(source_tag)) {
-        if (sbq_bind_text_n(st, 13, source_tag->v.str.ptr, source_tag->v.str.len, err) != 0) {
-            sqlite3_finalize(st); goto done;
-        }
-    } else if (jv_opt_str(value, "subscription_id")) {
-        if (sbq_bind_text_n(st, 13, tag, sbj_get(value, "tag")->v.str.len, err) != 0) {
-            sqlite3_finalize(st); goto done;
-        }
-    } else sbq_bind_text(st, 13, NULL);
-    rc = exec_stmt(st, err);
     if (rc == 0) ++*count;
 done:
     free(protocol_text);

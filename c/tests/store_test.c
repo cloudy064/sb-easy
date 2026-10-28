@@ -225,7 +225,9 @@ TEST(profile_scripts_persist_and_render_through_the_host_repository) {
     CHECK_STR(req.clash_controller, "0.0.0.0:9090");
 
     sb_config_renderer renderer;
-    REQUIRE(sb_config_renderer_init(&renderer, NULL, &err) == 0);
+    sb_script_limits limits = sb_script_limits_default();
+    limits.timeout_ms = 5000; /* slack for parallel sanitizer runs */
+    REQUIRE(sb_config_renderer_init(&renderer, &limits, &err) == 0);
     sbj *rendered = sb_config_renderer_render(&renderer, &req, &err);
     if (!rendered) fprintf(stderr, "render: %s\n", err.msg);
     REQUIRE(rendered);

@@ -104,4 +104,34 @@ static inline int sbq_begin(sqlite3 *db, sb_err *err) { return sbq_exec(db, "BEG
 static inline int sbq_commit(sqlite3 *db, sb_err *err) { return sbq_exec(db, "COMMIT", err); }
 static inline void sbq_rollback(sqlite3 *db) { sbq_exec(db, "ROLLBACK", NULL); }
 
+/* ---- scoped statement with sticky error --------------------------------
+ * A bind failure is remembered in rc and surfaces at the next step, so callers
+ * need no per-bind check and no manual finalize on the error path. Declare with
+ * SBQ_AUTO so the statement is finalized on every return path (GNU cleanup
+ * attribute; c/ only, MSVC code in windows/ must use an explicit close). */
+typedef struct {
+    sqlite3_stmt *st;
+    int rc; /* 0 ok, -1 prepare or bind failed */
+} sbq_stmt;
+
+static inline void sbq_stmt_done(sbq_stmt *q) {
+    if (q->st) sqlite3_finalize(q->st);
+    q->st = NULL;
+}
+#define SBQ_AUTO __attribute__((cleanup(sbq_stmt_done))) sbq_stmt
+
+static inline sbq_stmt sbq_stmt_open(sqlite3 *db, const char *sql, sb_err *err) {
+    sbq_stmt q = {sbq_prepare(db, sql, err), 0};
+    if (!q.st) q.rc = -1;
+    return q;
+}
+static inline void sbq_stmt_bind_text_n(sbq_stmt *q, int i, const char *value, size_t len,
+                                        sb_err *err) {
+    if (q->rc == 0 && sbq_bind_text_n(q->st, i, value, len, err) != 0) q->rc = -1;
+}
+/* 1 = row, 0 = done, -1 = earlier prepare/bind failure or step error. */
+static inline int sbq_stmt_step_row(sbq_stmt *q, sb_err *err) {
+    return q->rc != 0 ? -1 : sbq_step_row(q->st, err);
+}
+
 #endif

@@ -983,6 +983,41 @@ static char *fingerprint_of(const char *node_type, size_t type_len, const char *
  * store: lifecycle, users, audit, settings
  * ====================================================================== */
 
+/* Fills agent_token_hash for rows created before migration 019 (SQLite has no
+ * SHA-256). Best effort: rows that fail stay on the plaintext lookup fallback. */
+static void backfill_agent_token_hashes(sb_store *s) {
+    sb_strvec ids = {0}, tokens = {0};
+    LOCK(s);
+    sqlite3_stmt *st = sbq_prepare(H(s),
+                                   "SELECT id, agent_token FROM hosts "
+                                   "WHERE agent_token != '' AND agent_token_hash = ''",
+                                   NULL);
+    if (st) {
+        while (sbq_step_row(st, NULL) == 1) {
+            char *id = sbq_text(st, 0);
+            char *token = sbq_text(st, 1);
+            sb_strvec_push(&ids, id);
+            sb_strvec_push(&tokens, token);
+            free(id);
+            free(token);
+        }
+        sqlite3_finalize(st);
+    }
+    UNLOCK(s);
+    size_t done = 0;
+    for (size_t i = 0; i < ids.len; ++i) {
+        char *hash = sb_sha256_hex(tokens.items[i], strlen(tokens.items[i]));
+        const char *binds[] = {hash, ids.items[i]};
+        if (exec_changes(s, "UPDATE hosts SET agent_token_hash = ?1 WHERE id = ?2",
+                         "Host not found", NULL, 2, binds) == 0)
+            ++done;
+        free(hash);
+    }
+    if (ids.len) SB_INFO("agent token hash backfill: %zu of %zu hosts", done, ids.len);
+    sb_strvec_free(&ids);
+    sb_strvec_free(&tokens);
+}
+
 sb_store *sb_store_open(const char *db_path, const char *migrations_dir, sb_err *err) {
     sb_database *db = sb_database_open(db_path, err);
     if (!db) return NULL;
@@ -992,6 +1027,7 @@ sb_store *sb_store_open(const char *db_path, const char *migrations_dir, sb_err 
     }
     sb_store *s = sb_xcalloc(1, sizeof *s);
     s->db = db;
+    backfill_agent_token_hashes(s);
     return s;
 }
 
@@ -1969,6 +2005,7 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         return sb_fail(err, SB_ERR_VALIDATION, "Host name and object capabilities are required");
     char *id = sb_str_empty(host->id) ? sb_uuid_v4() : sb_strdup(host->id);
     char *token = sb_str_empty(host->agent_token) ? new_agent_token() : sb_strdup(host->agent_token);
+    char *token_hash = sb_sha256_hex(token, strlen(token));
     const char *profile_id = host->profile_id ? host->profile_id : "default";
     int rc = -1;
     LOCK(s);
@@ -1977,9 +2014,9 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
                                    "INSERT INTO hosts "
                                    "(id, name, agent_token, capabilities, profile_id, wg_address, "
                                    "wg_public_key, wg_endpoint, clash_api, clash_secret, last_seen, "
-                                   "singbox_state, enabled, created_at, updated_at) "
+                                   "singbox_state, enabled, created_at, updated_at, agent_token_hash) "
                                    "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
-                                   "?13, datetime('now'), datetime('now'))",
+                                   "?13, datetime('now'), datetime('now'), ?14)",
                                    err);
     if (st) {
         sbq_bind_text(st, 1, id);
@@ -1996,10 +2033,12 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         sbq_bind_text(st, 11, host->last_seen);
         sbq_bind_text(st, 12, host->singbox_state);
         sbq_bind_bool(st, 13, host->enabled);
+        sbq_bind_text(st, 14, token_hash);
         if (exec_bound(st, bound, err) == 0) rc = reload_host(h, id, out, err);
     }
     UNLOCK(s);
     free(id);
+    free(token_hash);
     free(token);
     return rc;
 }
@@ -2218,11 +2257,14 @@ done:
 
 char *sb_store_rotate_agent_token(sb_store *s, const char *host_id, sb_err *err) {
     char *token = new_agent_token();
-    const char *binds[] = {token, S(host_id)};
-    if (exec_changes(s,
-                     "UPDATE hosts SET agent_token = ?1, updated_at = datetime('now') "
-                     "WHERE id = ?2",
-                     "Host not found", err, 2, binds) != 0) {
+    char *token_hash = sb_sha256_hex(token, strlen(token));
+    const char *binds[] = {token, S(host_id), token_hash};
+    int changed = exec_changes(s,
+                     "UPDATE hosts SET agent_token = ?1, agent_token_hash = ?3, "
+                     "updated_at = datetime('now') WHERE id = ?2",
+                     "Host not found", err, 3, binds);
+    free(token_hash);
+    if (changed != 0) {
         free(token);
         return NULL;
     }
@@ -2408,19 +2450,24 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
 
 int sb_store_find_enabled_host_by_token(sb_store *s, const char *token, sb_host *out, sb_err *err) {
     if (sb_str_empty(token)) return 0;
+    /* Hash first; plaintext remains a fallback until startup backfill completes. */
+    char *token_hash = sb_sha256_hex(token, strlen(token));
     LOCK(s);
     sqlite3_stmt *st = sbq_prepare(H(s),
-                                   HOST_SELECT " WHERE h.agent_token = ?1 "
-                                               "AND h.agent_token != '' AND h.enabled = 1",
+                                   HOST_SELECT " WHERE ((h.agent_token_hash = ?1 AND h.agent_token_hash != '') "
+                                               "OR (h.agent_token = ?2 AND h.agent_token != '')) "
+                                               "AND h.enabled = 1",
                                    err);
     int r = -1;
     if (st) {
-        sbq_bind_text(st, 1, token);
+        sbq_bind_text(st, 1, token_hash);
+        sbq_bind_text(st, 2, token);
         r = sbq_step_row(st, err);
         if (r == 1) read_host(st, out);
     }
     sqlite3_finalize(st);
     UNLOCK(s);
+    free(token_hash);
     return r;
 }
 

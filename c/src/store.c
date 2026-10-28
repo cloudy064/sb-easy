@@ -2176,35 +2176,37 @@ sbj *sb_store_list_diagnostic_reports(sb_store *s, const char *host_id, size_t l
     int r = host_exists(h, host_id, err);
     if (r == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Host not found");
     if (r != 1) goto done;
-    sqlite3_stmt *st = sbq_prepare(h,
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
                                    "SELECT id, reason, app_version, core_version, payload, created_at "
                                    "FROM diagnostic_reports WHERE host_id = ?1 "
                                    "ORDER BY created_at DESC, rowid DESC LIMIT ?2",
                                    err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, S(host_id));
-    sbq_bind_int(st, 2, (int64_t)(limit < 20U ? limit : 20U));
-    reports = sbj_array();
-    while ((r = sbq_step_row(st, err)) == 1) {
-        char *payload = sbq_text(st, 4);
-        sbj *report = sbj_parse(payload, strlen(payload), NULL, 0);
-        free(payload);
-        if (!sbj_is_object(report)) {
-            sbj_free(report);
-            report = sbj_object();
-            sbj_set(report, "logs", sbj_array());
+        if (q.rc != 0) goto done;
+        const char *hid = S(host_id);
+        sbq_stmt_bind_text_n(&q, 1, hid, strlen(hid), err);
+        if (q.rc == 0) sbq_bind_int(q.st, 2, (int64_t)(limit < 20U ? limit : 20U));
+        reports = sbj_array();
+        while ((r = sbq_stmt_step_row(&q, err)) == 1) {
+            char *payload = sbq_text(q.st, 4);
+            sbj *report = sbj_parse(payload, strlen(payload), NULL, 0);
+            free(payload);
+            if (!sbj_is_object(report)) {
+                sbj_free(report);
+                report = sbj_object();
+                sbj_set(report, "logs", sbj_array());
+            }
+            sbj_set(report, "report_id", sbj_str_take(sbq_text(q.st, 0)));
+            sbj_set(report, "reason", sbj_strn((const char *)sqlite3_column_text(q.st, 1),
+                                                        (size_t)sqlite3_column_bytes(q.st, 1)));
+            sbj_set(report, "app_version", sbj_strn((const char *)sqlite3_column_text(q.st, 2),
+                                                        (size_t)sqlite3_column_bytes(q.st, 2)));
+            sbj_set(report, "core_version", sbj_strn((const char *)sqlite3_column_text(q.st, 3),
+                                                        (size_t)sqlite3_column_bytes(q.st, 3)));
+            sbj_set(report, "created_at", sbj_str_take(sbq_text(q.st, 5)));
+            sbj_arr_push(reports, report);
         }
-        sbj_set(report, "report_id", sbj_str_take(sbq_text(st, 0)));
-        sbj_set(report, "reason", sbj_strn((const char *)sqlite3_column_text(st, 1),
-                                                    (size_t)sqlite3_column_bytes(st, 1)));
-        sbj_set(report, "app_version", sbj_strn((const char *)sqlite3_column_text(st, 2),
-                                                    (size_t)sqlite3_column_bytes(st, 2)));
-        sbj_set(report, "core_version", sbj_strn((const char *)sqlite3_column_text(st, 3),
-                                                    (size_t)sqlite3_column_bytes(st, 3)));
-        sbj_set(report, "created_at", sbj_str_take(sbq_text(st, 5)));
-        sbj_arr_push(reports, report);
     }
-    sqlite3_finalize(st);
     if (r < 0) {
         sbj_free(reports);
         reports = NULL;

@@ -6,7 +6,7 @@
 
 TEST(quickjs_builds_json_route_rules) {
     sb_rule_script_engine engine;
-    REQUIRE(sb_rule_script_engine_init(&engine, NULL, NULL) == 0);
+    sb_script_limits slack = sb_script_limits_default(); slack.timeout_ms = 5000; REQUIRE(sb_rule_script_engine_init(&engine, &slack, NULL) == 0);
     sbj *context = sbj_parse_cstr("{\"outboundTags\":[\"hk\",\"direct\"],\"currentRules\":[]}");
     sb_err err = {0};
     sbj *rules = sb_rule_script_engine_build_rules(
@@ -62,7 +62,7 @@ TEST(quickjs_interrupts_infinite_loops) {
 
 TEST(quickjs_disables_nondeterministic_globals) {
     sb_rule_script_engine engine;
-    REQUIRE(sb_rule_script_engine_init(&engine, NULL, NULL) == 0);
+    sb_script_limits slack = sb_script_limits_default(); slack.timeout_ms = 5000; REQUIRE(sb_rule_script_engine_init(&engine, &slack, NULL) == 0);
     sbj *context = sbj_object();
     sb_err err = {0};
     sbj *rules = sb_rule_script_engine_build_rules(

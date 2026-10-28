@@ -2726,51 +2726,43 @@ int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
-    sqlite3_stmt *st = sbq_prepare(h, "SELECT 1 FROM proxy_nodes WHERE tag = ?1 OR fingerprint = ?2 LIMIT 1",
+    int r = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, "SELECT 1 FROM proxy_nodes WHERE tag = ?1 OR fingerprint = ?2 LIMIT 1",
                                    err);
-    if (!st) goto done;
-    if (sbq_bind_text_n(st, 1, node->tag, node->tag_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, node->tag, node->tag_len, err);
+        sbq_stmt_bind_text_n(&q, 2, fingerprint, strlen(fingerprint), err);
+        r = sbq_stmt_step_row(&q, err);
     }
-    sbq_bind_text(st, 2, fingerprint);
-    int r = sbq_step_row(st, err);
-    sqlite3_finalize(st);
     if (r < 0) goto done;
     if (r == 1) {
         sb_fail(err, SB_ERR_VALIDATION, "A proxy with the same tag or fingerprint already exists");
         goto done;
     }
-    st = sbq_prepare(h,
-                     "INSERT INTO proxy_nodes "
-                     "(id, tag, node_type, enabled, server, server_port, protocol_config, "
-                     "subscription_id, fingerprint, latency, last_latency_test, "
-                     "created_at, updated_at) "
-                     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
-                     "datetime('now'), datetime('now'))",
-                     err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, id);
-    if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+                                   "INSERT INTO proxy_nodes "
+                                   "(id, tag, node_type, enabled, server, server_port, protocol_config, "
+                                   "subscription_id, fingerprint, latency, last_latency_test, "
+                                   "created_at, updated_at) "
+                                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, "
+                                   "datetime('now'), datetime('now'))",
+                                   err);
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, id);
+        sbq_stmt_bind_text_n(&q, 2, node->tag, node->tag_len, err);
+        sbq_stmt_bind_text_n(&q, 3, node->node_type, node->node_type_len, err);
+        sbq_bind_bool(q.st, 4, node->enabled);
+        sbq_stmt_bind_text_n(&q, 5, node->server, node->server_len, err);
+        sbq_bind_int(q.st, 6, node->server_port);
+        int bound = bind_dump(q.st, 7, node->protocol_config, err);
+        sbq_bind_text(q.st, 8, node->subscription_id);
+        sbq_bind_text(q.st, 9, fingerprint);
+        sbq_bind_opt_double(q.st, 10, node->has_latency ? &node->latency : NULL);
+        sbq_bind_text(q.st, 11, node->last_latency_test);
+        if (q.rc != 0 || bound != 0 || sbq_step_done(q.st, err) != 0) goto done;
     }
-    if (sbq_bind_text_n(st, 3, node->node_type, node->node_type_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_bool(st, 4, node->enabled);
-    if (sbq_bind_text_n(st, 5, node->server, node->server_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_int(st, 6, node->server_port);
-    int bound = bind_dump(st, 7, node->protocol_config, err);
-    sbq_bind_text(st, 8, node->subscription_id);
-    sbq_bind_text(st, 9, fingerprint);
-    sbq_bind_opt_double(st, 10, node->has_latency ? &node->latency : NULL);
-    sbq_bind_text(st, 11, node->last_latency_test);
-    if (exec_bound(st, bound, err) != 0) goto done;
     rc = reload_proxy(h, id, out, err);
 done:
     UNLOCK(s);
@@ -2798,50 +2790,42 @@ int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_prox
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
-    sqlite3_stmt *st = sbq_prepare(h,
+    int r = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
                                    "SELECT 1 FROM proxy_nodes WHERE id != ?1 "
                                    "AND (tag = ?2 OR fingerprint = ?3) LIMIT 1",
                                    err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, node->id);
-    if (sbq_bind_text_n(st, 2, node->tag, node->tag_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, node->id);
+        sbq_stmt_bind_text_n(&q, 2, node->tag, node->tag_len, err);
+        sbq_stmt_bind_text_n(&q, 3, fingerprint, strlen(fingerprint), err);
+        r = sbq_stmt_step_row(&q, err);
     }
-    sbq_bind_text(st, 3, fingerprint);
-    int r = sbq_step_row(st, err);
-    sqlite3_finalize(st);
     if (r < 0) goto done;
     if (r == 1) {
         sb_fail(err, SB_ERR_VALIDATION, "A proxy with the same tag or fingerprint already exists");
         goto done;
     }
-    st = sbq_prepare(h,
-                     "UPDATE proxy_nodes SET tag = ?1, node_type = ?2, enabled = ?3, "
-                     "server = ?4, server_port = ?5, protocol_config = ?6, "
-                     "subscription_id = ?7, fingerprint = ?8, updated_at = datetime('now') "
-                     "WHERE id = ?9",
-                     err);
-    if (!st) goto done;
-    if (sbq_bind_text_n(st, 1, node->tag, node->tag_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+                                   "UPDATE proxy_nodes SET tag = ?1, node_type = ?2, enabled = ?3, "
+                                   "server = ?4, server_port = ?5, protocol_config = ?6, "
+                                   "subscription_id = ?7, fingerprint = ?8, updated_at = datetime('now') "
+                                   "WHERE id = ?9",
+                                   err);
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, node->tag, node->tag_len, err);
+        sbq_stmt_bind_text_n(&q, 2, node->node_type, node->node_type_len, err);
+        sbq_bind_bool(q.st, 3, node->enabled);
+        sbq_stmt_bind_text_n(&q, 4, node->server, node->server_len, err);
+        sbq_bind_int(q.st, 5, node->server_port);
+        int bound = bind_dump(q.st, 6, node->protocol_config, err);
+        sbq_bind_text(q.st, 7, node->subscription_id);
+        sbq_bind_text(q.st, 8, fingerprint);
+        sbq_bind_text(q.st, 9, node->id);
+        if (q.rc != 0 || bound != 0 || sbq_step_done(q.st, err) != 0) goto done;
     }
-    if (sbq_bind_text_n(st, 2, node->node_type, node->node_type_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_bool(st, 3, node->enabled);
-    if (sbq_bind_text_n(st, 4, node->server, node->server_len, err) != 0) {
-        sqlite3_finalize(st);
-        goto done;
-    }
-    sbq_bind_int(st, 5, node->server_port);
-    int bound = bind_dump(st, 6, node->protocol_config, err);
-    sbq_bind_text(st, 7, node->subscription_id);
-    sbq_bind_text(st, 8, fingerprint);
-    sbq_bind_text(st, 9, node->id);
-    if (exec_bound(st, bound, err) != 0) goto done;
     if (sqlite3_changes(h) == 0) {
         sb_fail(err, SB_ERR_NOT_FOUND, "Node not found");
         goto done;

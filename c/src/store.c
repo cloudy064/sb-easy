@@ -2221,14 +2221,14 @@ int sb_store_host_outbounds(sb_store *s, const char *host_id, sb_strvec *out, sb
     int r = host_exists(h, host_id, err);
     if (r == 0) r = sb_fail(err, SB_ERR_NOT_FOUND, "Host not found");
     if (r == 1) {
-        sqlite3_stmt *st = sbq_prepare(h,
-                                       "SELECT node_id FROM host_outbounds WHERE host_id = ?1 "
-                                       "ORDER BY node_id",
-                                       err);
-        r = st ? 0 : -1;
-        if (st) sbq_bind_text(st, 1, S(host_id));
-        while (st && (r = sbq_step_row(st, err)) == 1) sb_strvec_push_take(&rows, sbq_text(st, 0));
-        sqlite3_finalize(st);
+        SBQ_AUTO q = sbq_stmt_open(h,
+                                   "SELECT node_id FROM host_outbounds WHERE host_id = ?1 "
+                                   "ORDER BY node_id",
+                                   err);
+        const char *hid = S(host_id);
+        sbq_stmt_bind_text_n(&q, 1, hid, strlen(hid), err);
+        while ((r = sbq_stmt_step_row(&q, err)) == 1)
+            sb_strvec_push_take(&rows, sbq_text(q.st, 0));
     }
     UNLOCK(s);
     FINISH_LIST(sb_strvec_free, out, rows, r);
@@ -2516,24 +2516,28 @@ int sb_store_enqueue_host_command(sb_store *s, const char *host_id, const char *
     int r = host_exists(h, host_id, err);
     if (r == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Host not found");
     if (r != 1) goto done;
-    sqlite3_stmt *st = sbq_prepare(h,
+    const char *hid = S(host_id);
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
                                    "INSERT INTO host_commands "
                                    "(id, host_id, command, status, created_at) "
                                    "VALUES (?1, ?2, ?3, 'pending', datetime('now'))",
                                    err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, S(host_id));
-    sbq_bind_text(st, 3, command);
-    if (exec_stmt(st, err) != 0) goto done;
-    st = sbq_prepare(h, COMMAND_SELECT "FROM host_commands WHERE id = ?1", err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, id);
-    r = sbq_step_row(st, err);
-    if (r == 1) read_host_command(st, out);
-    if (r == 0) sb_fail(err, SB_ERR_GENERIC, "created host command could not be reloaded");
-    sqlite3_finalize(st);
-    rc = r == 1 ? 0 : -1;
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, id, strlen(id), err);
+        sbq_stmt_bind_text_n(&q, 2, hid, strlen(hid), err);
+        sbq_stmt_bind_text_n(&q, 3, command, strlen(command), err);
+        if (q.rc != 0 || sbq_step_done(q.st, err) != 0) goto done;
+    }
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, COMMAND_SELECT "FROM host_commands WHERE id = ?1", err);
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, id, strlen(id), err);
+        r = sbq_stmt_step_row(&q, err);
+        if (r == 1) read_host_command(q.st, out);
+        if (r == 0) sb_fail(err, SB_ERR_GENERIC, "created host command could not be reloaded");
+        rc = r == 1 ? 0 : -1;
+    }
 done:
     UNLOCK(s);
     free(id);
@@ -2553,11 +2557,11 @@ int sb_store_list_host_commands(sb_store *s, const char *host_id, bool pending_o
                                                "ORDER BY created_at"
                               : COMMAND_SELECT "FROM host_commands WHERE host_id = ?1 "
                                                "ORDER BY created_at DESC LIMIT 20";
-        sqlite3_stmt *st = sbq_prepare(h, sql, err);
-        r = st ? 0 : -1;
-        if (st) sbq_bind_text(st, 1, S(host_id));
-        while (st && (r = sbq_step_row(st, err)) == 1) read_host_command(st, sb_host_command_vec_push(&rows));
-        sqlite3_finalize(st);
+        SBQ_AUTO q = sbq_stmt_open(h, sql, err);
+        const char *hid = S(host_id);
+        sbq_stmt_bind_text_n(&q, 1, hid, strlen(hid), err);
+        while ((r = sbq_stmt_step_row(&q, err)) == 1)
+            read_host_command(q.st, sb_host_command_vec_push(&rows));
     }
     UNLOCK(s);
     FINISH_LIST(sb_host_command_vec_free, out, rows, r);

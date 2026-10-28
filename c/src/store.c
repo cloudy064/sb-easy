@@ -828,12 +828,11 @@ static int exec_stmt(sqlite3_stmt *st, sb_err *err) {
 
 /* SELECT 1 FROM hosts WHERE id = ?1 -> 1 exists, 0 missing, -1 error */
 static int host_exists(sqlite3 *db, const char *host_id, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT 1 FROM hosts WHERE id = ?1", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, S(host_id));
-    int r = sbq_step_row(st, err);
-    sqlite3_finalize(st);
-    return r;
+    SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM hosts WHERE id = ?1", err);
+    if (q.rc != 0) return -1;
+    const char *id = S(host_id);
+    sbq_stmt_bind_text_n(&q, 1, id, strlen(id), err);
+    return sbq_stmt_step_row(&q, err);
 }
 
 /* ---- nlohmann emulation ------------------------------------------------
@@ -991,20 +990,19 @@ static int exec_changes(sb_store *s, const char *sql, const char *not_found, sb_
 static void backfill_agent_token_hashes(sb_store *s) {
     sb_strvec ids = {0}, tokens = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s),
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s),
                                    "SELECT id, agent_token FROM hosts "
                                    "WHERE agent_token != '' AND agent_token_hash = ''",
                                    NULL);
-    if (st) {
-        while (sbq_step_row(st, NULL) == 1) {
-            char *id = sbq_text(st, 0);
-            char *token = sbq_text(st, 1);
+        while (q.rc == 0 && sbq_step_row(q.st, NULL) == 1) {
+            char *id = sbq_text(q.st, 0);
+            char *token = sbq_text(q.st, 1);
             sb_strvec_push(&ids, id);
             sb_strvec_push(&tokens, token);
             free(id);
             free(token);
         }
-        sqlite3_finalize(st);
     }
     UNLOCK(s);
     size_t done = 0;
@@ -1160,33 +1158,41 @@ int sb_store_delete_user(sb_store *s, const char *actor_id, const char *user_id,
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
-    sqlite3_stmt *st = sbq_prepare(h, "SELECT role FROM users WHERE id = ?1", err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, S(user_id));
-    int r = sbq_step_row(st, err);
-    bool is_admin = r == 1 && sb_streq((const char *)sqlite3_column_text(st, 0), "admin");
-    sqlite3_finalize(st);
+    const char *uid = S(user_id);
+    int r = -1;
+    bool is_admin = false;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, "SELECT role FROM users WHERE id = ?1", err);
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, uid, strlen(uid), err);
+        r = sbq_stmt_step_row(&q, err);
+        is_admin = r == 1 && sb_streq((const char *)sqlite3_column_text(q.st, 0), "admin");
+    }
     if (r < 0) goto done;
     if (r == 0) {
         rc = 0;
         goto done;
     }
     if (is_admin) {
-        st = sbq_prepare(h, "SELECT COUNT(*) FROM users WHERE role = 'admin'", err);
-        if (!st) goto done;
-        r = sbq_step_row(st, err);
-        int64_t count = r == 1 ? sbq_int(st, 0) : 0;
-        sqlite3_finalize(st);
+        int64_t count = 0;
+        {
+            SBQ_AUTO q = sbq_stmt_open(h, "SELECT COUNT(*) FROM users WHERE role = 'admin'", err);
+            if (q.rc != 0) goto done;
+            r = sbq_stmt_step_row(&q, err);
+            count = r == 1 ? sbq_int(q.st, 0) : 0;
+        }
         if (r < 0) goto done;
         if (r == 1 && count <= 1) {
             sb_fail(err, SB_ERR_VALIDATION, "Cannot delete the last admin");
             goto done;
         }
     }
-    st = sbq_prepare(h, "DELETE FROM users WHERE id = ?1", err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, S(user_id));
-    rc = exec_stmt(st, err);
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, "DELETE FROM users WHERE id = ?1", err);
+        if (q.rc != 0) goto done;
+        sbq_stmt_bind_text_n(&q, 1, uid, strlen(uid), err);
+        rc = q.rc != 0 ? -1 : sbq_step_done(q.st, err);
+    }
 done:
     UNLOCK(s);
     return rc;
@@ -1313,21 +1319,24 @@ int sb_store_update_app_settings(sb_store *s, const sbj *sections, sb_err *err) 
 
 int sb_store_app_setting(sb_store *s, const char *key, sbj **out, sb_err *err) {
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), "SELECT value FROM app_settings WHERE key = ?1", err);
     int r = -1;
-    if (st) {
-        sbq_bind_text(st, 1, S(key));
-        r = sbq_step_row(st, err);
-        if (r == 1) {
-            const char *text = (const char *)sqlite3_column_text(st, 0);
-            sbj *value = text ? sbj_parse(text, (size_t)sqlite3_column_bytes(st, 0), NULL, 0) : NULL;
-            if (value)
-                *out = value;
-            else
-                r = 0;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), "SELECT value FROM app_settings WHERE key = ?1", err);
+        if (q.rc == 0) {
+            const char *k = S(key);
+            sbq_stmt_bind_text_n(&q, 1, k, strlen(k), err);
+            r = sbq_stmt_step_row(&q, err);
+            if (r == 1) {
+                const char *text = (const char *)sqlite3_column_text(q.st, 0);
+                sbj *value =
+                    text ? sbj_parse(text, (size_t)sqlite3_column_bytes(q.st, 0), NULL, 0) : NULL;
+                if (value)
+                    *out = value;
+                else
+                    r = 0;
+            }
         }
     }
-    sqlite3_finalize(st);
     UNLOCK(s);
     return r;
 }
@@ -1508,10 +1517,12 @@ char *sb_store_next_wireguard_address(sb_store *s, const char *server_address, s
     free(host);
     bool taken[255] = {false};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), "SELECT address FROM wireguard_peers", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) {
-        char *address = sbq_text(st, 0);
+    int r = -1;
+    {
+    SBQ_AUTO q = sbq_stmt_open(H(s), "SELECT address FROM wireguard_peers", err);
+    r = q.rc;
+    while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1) {
+        char *address = sbq_text(q.st, 0);
         address[strcspn(address, "/")] = '\0';
         char *address_dot = strrchr(address, '.');
         if (address_dot) {
@@ -1526,7 +1537,7 @@ char *sb_store_next_wireguard_address(sb_store *s, const char *server_address, s
         }
         free(address);
     }
-    sqlite3_finalize(st);
+    }
     UNLOCK(s);
     if (r < 0) {
         free(base);

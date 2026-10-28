@@ -1843,12 +1843,12 @@ sbj *sb_store_restore_backup(sb_store *s, const sbj *backup, sb_err *err) {
  * ====================================================================== */
 
 static int find_profile_locked(sqlite3 *h, const char *id, sb_config_profile *out, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(h, PROFILE_SELECT "FROM config_profiles WHERE id = ?1", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, S(id));
-    int r = sbq_step_row(st, err);
-    if (r == 1 && read_profile(st, out, err) != 0) r = -1;
-    sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(h, PROFILE_SELECT "FROM config_profiles WHERE id = ?1", err);
+    if (q.rc != 0) return -1;
+    const char *pid = S(id);
+    sbq_stmt_bind_text_n(&q, 1, pid, strlen(pid), err);
+    int r = sbq_stmt_step_row(&q, err);
+    if (r == 1 && read_profile(q.st, out, err) != 0) r = -1;
     return r;
 }
 
@@ -1861,21 +1861,23 @@ static int reload_profile(sqlite3 *h, const char *id, sb_config_profile *out, sb
 int sb_store_list_profiles(sb_store *s, sb_config_profile_vec *out, sb_err *err) {
     sb_config_profile_vec rows = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), PROFILE_SELECT "FROM config_profiles ORDER BY name", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) {
-        sb_config_profile p;
-        sb_config_profile_init(&p);
-        if (read_profile(st, &p, err) != 0) {
-            sb_config_profile_free(&p);
-            r = -1;
-            break;
+    int r;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), PROFILE_SELECT "FROM config_profiles ORDER BY name", err);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1) {
+            sb_config_profile p;
+            sb_config_profile_init(&p);
+            if (read_profile(q.st, &p, err) != 0) {
+                sb_config_profile_free(&p);
+                r = -1;
+                break;
+            }
+            sb_config_profile *slot = sb_config_profile_vec_push(&rows);
+            sb_config_profile_free(slot);
+            *slot = p;
         }
-        sb_config_profile *slot = sb_config_profile_vec_push(&rows);
-        sb_config_profile_free(slot);
-        *slot = p;
     }
-    sqlite3_finalize(st);
     UNLOCK(s);
     FINISH_LIST(sb_config_profile_vec_free, out, rows, r);
 }
@@ -1974,12 +1976,12 @@ int sb_store_delete_profile(sb_store *s, const char *id, sb_err *err) {
  * ====================================================================== */
 
 static int find_host_locked(sqlite3 *h, const char *id, sb_host *out, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(h, HOST_SELECT " WHERE h.id = ?1", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, S(id));
-    int r = sbq_step_row(st, err);
-    if (r == 1) read_host(st, out);
-    sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(h, HOST_SELECT " WHERE h.id = ?1", err);
+    if (q.rc != 0) return -1;
+    const char *hid = S(id);
+    sbq_stmt_bind_text_n(&q, 1, hid, strlen(hid), err);
+    int r = sbq_stmt_step_row(&q, err);
+    if (r == 1) read_host(q.st, out);
     return r;
 }
 
@@ -1992,10 +1994,13 @@ static int reload_host(sqlite3 *h, const char *id, sb_host *out, sb_err *err) {
 int sb_store_list_hosts(sb_store *s, sb_host_vec *out, sb_err *err) {
     sb_host_vec rows = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), HOST_SELECT " ORDER BY h.created_at", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) read_host(st, sb_host_vec_push(&rows));
-    sqlite3_finalize(st);
+    int r;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), HOST_SELECT " ORDER BY h.created_at", err);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1)
+            read_host(q.st, sb_host_vec_push(&rows));
+    }
     UNLOCK(s);
     FINISH_LIST(sb_host_vec_free, out, rows, r);
 }
@@ -3046,12 +3051,12 @@ int sb_store_upsert_proxy_nodes(sb_store *s, const sb_parsed_node *nodes, size_t
  * ====================================================================== */
 
 static int find_subscription_locked(sqlite3 *h, const char *id, sb_subscription *out, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(h, SUBSCRIPTION_SELECT "FROM subscriptions WHERE id = ?1", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, S(id));
-    int r = sbq_step_row(st, err);
-    if (r == 1) read_subscription(st, out);
-    sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(h, SUBSCRIPTION_SELECT "FROM subscriptions WHERE id = ?1", err);
+    if (q.rc != 0) return -1;
+    const char *sid = S(id);
+    sbq_stmt_bind_text_n(&q, 1, sid, strlen(sid), err);
+    int r = sbq_stmt_step_row(&q, err);
+    if (r == 1) read_subscription(q.st, out);
     return r;
 }
 
@@ -3064,10 +3069,13 @@ static int reload_subscription(sqlite3 *h, const char *id, sb_subscription *out,
 int sb_store_list_subscriptions(sb_store *s, sb_subscription_vec *out, sb_err *err) {
     sb_subscription_vec rows = {0};
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s), SUBSCRIPTION_SELECT "FROM subscriptions ORDER BY name", err);
-    int r = st ? 0 : -1;
-    while (st && (r = sbq_step_row(st, err)) == 1) read_subscription(st, sb_subscription_vec_push(&rows));
-    sqlite3_finalize(st);
+    int r;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s), SUBSCRIPTION_SELECT "FROM subscriptions ORDER BY name", err);
+        r = q.rc;
+        while (q.rc == 0 && (r = sbq_step_row(q.st, err)) == 1)
+            read_subscription(q.st, sb_subscription_vec_push(&rows));
+    }
     UNLOCK(s);
     FINISH_LIST(sb_subscription_vec_free, out, rows, r);
 }

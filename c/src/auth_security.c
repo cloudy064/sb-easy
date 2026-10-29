@@ -221,9 +221,11 @@ bool sb_auth_security_verify(sb_auth_security *s, const char *token, sb_auth_cla
     }
     char *hash = sb_auth_sec_hash(s, "session", token);
     sb_database_lock(s->database);
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT u.username,u.role FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=? AND a.user_id=? AND a.revoked_at IS NULL AND a.expires_at>?", err);
     bool valid = false;
-    if (st) {
+    {
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT u.username,u.role FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=? AND a.user_id=? AND a.revoked_at IS NULL AND a.expires_at>?", err);
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         sbq_bind_text(st, 1, hash); sbq_bind_text(st, 2, claims.subject); sbq_bind_int(st, 3, sb_unix_now());
         int row = sbq_step_row(st, err);
         if (row == 1) {
@@ -231,13 +233,13 @@ bool sb_auth_security_verify(sb_auth_security *s, const char *token, sb_auth_cla
             claims.username_len = (size_t)sqlite3_column_bytes(st, 0);
             claims.username = sbq_text(st, 0); claims.role = sbq_text(st, 1); valid = true;
         } else if (!row) sb_fail(err, SB_ERR_AUTH, "Invalid or expired session");
-        sqlite3_finalize(st);
+    }
     }
     if (valid) {
-        st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_sessions SET last_seen_at=? WHERE token_hash=? AND last_seen_at<?", err);
-        if (st) {
-            int64_t now = sb_unix_now(); sbq_bind_int(st, 1, now); sbq_bind_text(st, 2, hash); sbq_bind_int(st, 3, now - 60);
-            valid = !sbq_step_done(st, err); sqlite3_finalize(st);
+        SBQ_AUTO u = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_sessions SET last_seen_at=? WHERE token_hash=? AND last_seen_at<?", err);
+        if (u.rc == 0) {
+            int64_t now = sb_unix_now(); sbq_bind_int(u.st, 1, now); sbq_bind_text(u.st, 2, hash); sbq_bind_int(u.st, 3, now - 60);
+            valid = !sbq_step_done(u.st, err);
         } else valid = false;
     }
     sb_database_unlock(s->database); free(hash);

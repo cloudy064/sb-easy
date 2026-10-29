@@ -193,50 +193,57 @@ static int migrate_locked(sqlite3 *h, const migration_vec *migrations, sb_err *e
                  err) != 0)
         return -1;
 
-    sqlite3_stmt *st = sbq_prepare(h,
+    int r;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
                                    "SELECT version FROM _sqlx_migrations WHERE success = FALSE "
                                    "ORDER BY version LIMIT 1",
                                    err);
-    if (!st) return -1;
-    int r = sbq_step_row(st, err);
-    if (r == 1) sb_fail(err, SB_ERR_GENERIC, "migration %lld is partially applied", (long long)sbq_int(st, 0));
-    sqlite3_finalize(st);
+        if (q.rc != 0) return -1;
+        r = sbq_step_row(q.st, err);
+        if (r == 1) sb_fail(err, SB_ERR_GENERIC, "migration %lld is partially applied", (long long)sbq_int(q.st, 0));
+    }
     if (r != 0) return -1;
 
-    st = sbq_prepare(h, "SELECT version FROM _sqlx_migrations ORDER BY version", err);
-    if (!st) return -1;
-    while ((r = sbq_step_row(st, err)) == 1) {
-        int64_t version = sbq_int(st, 0);
-        bool found = false;
-        for (size_t i = 0; i < migrations->len && !found; ++i) found = migrations->items[i].version == version;
-        if (!found) {
-            sb_fail(err, SB_ERR_GENERIC, "applied migration %lld is missing from the migration directory",
-                    (long long)version);
-            r = -1;
-            break;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, "SELECT version FROM _sqlx_migrations ORDER BY version", err);
+        if (q.rc != 0) return -1;
+        while ((r = sbq_step_row(q.st, err)) == 1) {
+            int64_t version = sbq_int(q.st, 0);
+            bool found = false;
+            for (size_t i = 0; i < migrations->len && !found; ++i) found = migrations->items[i].version == version;
+            if (!found) {
+                sb_fail(err, SB_ERR_GENERIC, "applied migration %lld is missing from the migration directory",
+                        (long long)version);
+                r = -1;
+                break;
+            }
         }
     }
-    sqlite3_finalize(st);
     if (r != 0) return -1;
 
     for (size_t i = 0; i < migrations->len; ++i) {
         const migration *m = &migrations->items[i];
-        st = sbq_prepare(h, "SELECT checksum FROM _sqlx_migrations WHERE version = ?1", err);
-        if (!st) return -1;
-        sbq_bind_int(st, 1, m->version);
-        r = sbq_step_row(st, err);
-        if (r == 1) {
-            const void *blob = sqlite3_column_blob(st, 0);
-            int n = sqlite3_column_bytes(st, 0);
-            bool same = blob && n == SHA384_DIGEST_LENGTH && memcmp(blob, m->checksum, (size_t)n) == 0;
-            sqlite3_finalize(st);
+        bool applied = false, same = false;
+        {
+            SBQ_AUTO q = sbq_stmt_open(h, "SELECT checksum FROM _sqlx_migrations WHERE version = ?1", err);
+            if (q.rc != 0) return -1;
+            sbq_bind_int(q.st, 1, m->version);
+            r = sbq_step_row(q.st, err);
+            if (r == 1) {
+                const void *blob = sqlite3_column_blob(q.st, 0);
+                int n = sqlite3_column_bytes(q.st, 0);
+                same = blob && n == SHA384_DIGEST_LENGTH && memcmp(blob, m->checksum, (size_t)n) == 0;
+                applied = true;
+            }
+        }
+        if (applied) {
             if (!same)
                 return sb_fail(err, SB_ERR_GENERIC,
                                "migration %lld checksum differs from the applied sqlx migration",
                                (long long)m->version);
             continue;
         }
-        sqlite3_finalize(st);
         if (r < 0) return -1;
 
         if (sb_starts_with(m->sql, "-- no-transaction"))
@@ -249,31 +256,33 @@ static int migrate_locked(sqlite3 *h, const migration_vec *migrations, sb_err *e
             sbq_rollback(h);
             return -1;
         }
-        st = sbq_prepare(h,
-                         "INSERT INTO _sqlx_migrations "
-                         "(version, description, success, checksum, execution_time) "
-                         "VALUES (?1, ?2, TRUE, ?3, -1)",
-                         err);
-        if (!st) {
-            sbq_rollback(h);
-            return -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(h,
+                                       "INSERT INTO _sqlx_migrations "
+                                       "(version, description, success, checksum, execution_time) "
+                                       "VALUES (?1, ?2, TRUE, ?3, -1)",
+                                       err);
+            if (q.rc != 0) {
+                sbq_rollback(h);
+                return -1;
+            }
+            sbq_bind_int(q.st, 1, m->version);
+            sbq_bind_text(q.st, 2, m->description);
+            sbq_bind_blob(q.st, 3, m->checksum, sizeof m->checksum);
+            r = sbq_step_done(q.st, err);
         }
-        sbq_bind_int(st, 1, m->version);
-        sbq_bind_text(st, 2, m->description);
-        sbq_bind_blob(st, 3, m->checksum, sizeof m->checksum);
-        r = sbq_step_done(st, err);
-        sqlite3_finalize(st);
         if (r != 0 || sbq_commit(h, err) != 0) {
             sbq_rollback(h);
             return -1;
         }
 
-        st = sbq_prepare(h, "UPDATE _sqlx_migrations SET execution_time = ?1 WHERE version = ?2", err);
-        if (!st) return -1;
-        sbq_bind_int(st, 1, elapsed_ns(&started));
-        sbq_bind_int(st, 2, m->version);
-        r = sbq_step_done(st, err);
-        sqlite3_finalize(st);
+        {
+            SBQ_AUTO q = sbq_stmt_open(h, "UPDATE _sqlx_migrations SET execution_time = ?1 WHERE version = ?2", err);
+            if (q.rc != 0) return -1;
+            sbq_bind_int(q.st, 1, elapsed_ns(&started));
+            sbq_bind_int(q.st, 2, m->version);
+            r = sbq_step_done(q.st, err);
+        }
         if (r != 0) return -1;
     }
     return 0;
@@ -295,12 +304,13 @@ int sb_database_migrate(sb_database *db, const char *directory, sb_err *err) {
 int64_t sb_database_applied_migration_count(sb_database *db, sb_err *err) {
     pthread_mutex_lock(&db->mutex);
     int64_t count = -1;
-    sqlite3_stmt *st =
-        sbq_prepare(db->handle, "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE", err);
-    if (st) {
-        int r = sbq_step_row(st, err);
-        count = r == 1 ? sbq_int(st, 0) : r == 0 ? 0 : -1;
-        sqlite3_finalize(st);
+    {
+        SBQ_AUTO q =
+            sbq_stmt_open(db->handle, "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE", err);
+        if (q.rc == 0) {
+            int r = sbq_step_row(q.st, err);
+            count = r == 1 ? sbq_int(q.st, 0) : r == 0 ? 0 : -1;
+        }
     }
     pthread_mutex_unlock(&db->mutex);
     return count;

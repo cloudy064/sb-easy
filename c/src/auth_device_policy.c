@@ -59,31 +59,39 @@ int sb_auth_device_group_save(sb_auth_security *s, const sbj *group, sb_err *err
     if (!id) { sb_strvec_free(&seen); return sb_fail(err, SB_ERR_GENERIC, "Device group ID generation failed"); }
     sb_database_lock(s->database); int result = -1;
     if (sbq_begin(SB_AUTH_DB(s), err)) goto done;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_device_groups(id,name) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, id); sbq_bind_text(st, 2, name->v.str.ptr);
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    int rc;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_device_groups(id,name) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, id); sbq_bind_text(q.st, 2, name->v.str.ptr);
+        rc = sbq_step_done(q.st, err);
+    }
     if (rc) {
         if (sqlite3_errcode(SB_AUTH_DB(s)) == SQLITE_CONSTRAINT)
             sb_fail(err, SB_ERR_CONFLICT, "Device group name already exists");
         goto rollback;
     }
-    st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_device_group_hosts WHERE group_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, id); rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_device_group_hosts WHERE group_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, id); rc = sbq_step_done(q.st, err);
+    }
     if (rc) goto rollback;
     for (size_t i = 0; i < seen.len; ++i) {
-        st = sbq_prepare(SB_AUTH_DB(s), "SELECT 1 FROM hosts WHERE id=?", err);
-        if (!st) goto rollback;
-        sbq_bind_text(st, 1, seen.items[i]); int row = sbq_step_row(st, err); sqlite3_finalize(st);
+        int row = -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT 1 FROM hosts WHERE id=?", err);
+            if (q.rc != 0) goto rollback;
+            sbq_bind_text(q.st, 1, seen.items[i]); row = sbq_step_row(q.st, err);
+        }
         if (row != 1) {
             if (!row) sb_fail(err, SB_ERR_VALIDATION, "Device group references an unknown host");
             goto rollback;
         }
-        st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_device_group_hosts(group_id,host_id) VALUES(?,?)", err);
-        if (!st) goto rollback;
-        sbq_bind_text(st, 1, id); sbq_bind_text(st, 2, seen.items[i]);
-        rc = sbq_step_done(st, err); sqlite3_finalize(st);
+        SBQ_AUTO g = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_device_group_hosts(group_id,host_id) VALUES(?,?)", err);
+        if (g.rc != 0) goto rollback;
+        sbq_bind_text(g.st, 1, id); sbq_bind_text(g.st, 2, seen.items[i]);
+        rc = sbq_step_done(g.st, err);
         if (rc) goto rollback;
     }
     if (sbq_commit(SB_AUTH_DB(s), err)) goto rollback;

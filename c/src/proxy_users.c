@@ -942,23 +942,19 @@ done:
     sbj_free(devices);
     return out;
 }
-sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj *request, int64_t now,
-                             sb_err *err) {
+/* Shape, range and duplicate checks for an exchange request; 0 or -1 (err set). */
+static int validate_exchange_request(const sbj *request, int64_t now, sb_err *err) {
     const sbj *reports = sbj_get(request, "reports");
     if (!sbj_is_object(request) || sbj_obj_len(request) != 4 || !number_ok(request, "version", 1, 1) ||
         !text_ok(sbj_get(request, "boot_id"), 128, true) ||
         !number_ok(request, "request_seq", 1, SAFE_INTEGER) || !sbj_is_array(reports) ||
-        sbj_arr_len(reports) > 4096 || now < 1 || now > 4102444740LL) {
-        sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy lease exchange");
-        return NULL;
-    }
+        sbj_arr_len(reports) > 4096 || now < 1 || now > 4102444740LL)
+        return sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy lease exchange");
     for (size_t i = 0; i < sbj_arr_len(reports); ++i) {
         const sbj *r = sbj_arr_at(reports, i);
         if (!sbj_is_object(r) || sbj_obj_len(r) != 2 || !text_ok(sbj_get(r, "lease_id"), 128, true) ||
-            !number_ok(r, "used_bytes", 0, SAFE_INTEGER)) {
-            sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy lease report");
-            return NULL;
-        }
+            !number_ok(r, "used_bytes", 0, SAFE_INTEGER))
+            return sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy lease report");
     }
     size_t report_count = sbj_arr_len(reports);
     if (report_count > 1) {
@@ -973,11 +969,15 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
                 break;
             }
         free(ids);
-        if (duplicate) {
-            sb_fail(err, SB_ERR_VALIDATION, "Duplicate proxy lease report");
-            return NULL;
-        }
+        if (duplicate) return sb_fail(err, SB_ERR_VALIDATION, "Duplicate proxy lease report");
     }
+    return 0;
+}
+
+sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj *request, int64_t now,
+                             sb_err *err) {
+    if (validate_exchange_request(request, now, err) != 0) return NULL;
+    const sbj *reports = sbj_get(request, "reports");
     const char *boot = sbj_get_str(request, "boot_id", "");
     int64_t seq = sbj_get_int(request, "request_seq", 0);
     char *encoded = sbj_dump(request, -1), *hash = sb_sha256_hex(encoded, strlen(encoded));

@@ -395,16 +395,18 @@ static bool mfa_verify_locked(sb_auth_security *s, const char *user_id, const ch
         sb_fail(err, SB_ERR_AUTH, "Invalid user"); return false;
     }
     int64_t now = sb_unix_now(), last_step = -1, pending_until = 0, locked_until = 0;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT secret_enc,pending_enc,pending_until,last_step,locked_until FROM auth_mfa WHERE user_id=?", err);
-    if (!st) return false;
-    sbq_bind_text(st, 1, user_id);
-    int row = sbq_step_row(st, err);
+    int row = -1;
     char *encrypted = NULL;
-    if (row == 1) {
-        encrypted = sbq_opt_text(st, pending ? 1 : 0); pending_until = sbq_int(st, 2);
-        last_step = sbq_int(st, 3); locked_until = sbq_int(st, 4);
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT secret_enc,pending_enc,pending_until,last_step,locked_until FROM auth_mfa WHERE user_id=?", err);
+        if (q.rc != 0) return false;
+        sbq_bind_text(q.st, 1, user_id);
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            encrypted = sbq_opt_text(q.st, pending ? 1 : 0); pending_until = sbq_int(q.st, 2);
+            last_step = sbq_int(q.st, 3); locked_until = sbq_int(q.st, 4);
+        }
     }
-    sqlite3_finalize(st);
     if (row < 0) return false;
     if (row != 1 || !encrypted || (pending && pending_until <= now)) {
         free(encrypted); sb_fail(err, SB_ERR_AUTH, pending ? "MFA setup has expired" : "MFA is not enabled"); return false;
@@ -434,18 +436,22 @@ static bool mfa_verify_locked(sb_auth_security *s, const char *user_id, const ch
     bool recovery = false;
     if (matched < 0 && !pending) {
         char *hash = recovery_hash(s, user_id, code);
-        st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL", err);
-        if (!st) { free(hash); return false; }
-        sbq_bind_int(st, 1, now); sbq_bind_text(st, 2, user_id); sbq_bind_text(st, 3, hash);
-        int result = sbq_step_done(st, err); sqlite3_finalize(st); free(hash);
+        int result = -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL", err);
+            if (q.rc != 0) { free(hash); return false; }
+            sbq_bind_int(q.st, 1, now); sbq_bind_text(q.st, 2, user_id); sbq_bind_text(q.st, 3, hash);
+            result = sbq_step_done(q.st, err);
+        }
+        free(hash);
         if (result) return false;
         recovery = sqlite3_changes(SB_AUTH_DB(s)) == 1;
     }
     if (matched < 0 && !recovery) { mfa_failed_locked(s, user_id, now, err); return false; }
-    st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_mfa SET last_step=?,failed_attempts=0,locked_until=0 WHERE user_id=?", err);
-    if (!st) return false;
-    sbq_bind_int(st, 1, pending ? last_step : (recovery ? last_step : matched)); sbq_bind_text(st, 2, user_id);
-    int result = sbq_step_done(st, err); sqlite3_finalize(st);
+    SBQ_AUTO fin = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_mfa SET last_step=?,failed_attempts=0,locked_until=0 WHERE user_id=?", err);
+    if (fin.rc != 0) return false;
+    sbq_bind_int(fin.st, 1, pending ? last_step : (recovery ? last_step : matched)); sbq_bind_text(fin.st, 2, user_id);
+    int result = sbq_step_done(fin.st, err);
     if (!result && accepted_step) *accepted_step = matched;
     return !result;
 }

@@ -744,41 +744,43 @@ char *sb_auth_oidc_finish(sb_auth_security *s, const char *state, const char *co
     sb_database_lock(s->database);
     sqlite3 *db = SB_AUTH_DB(s);
     int rc = sbq_begin(db, NULL);
-    sqlite3_stmt *st =
-        !rc ? sbq_prepare(db,
-                          "SELECT binding_hash,verifier_enc,nonce,issuer,client_id,redirect_uri,expires_at "
-                          "FROM auth_oidc_flows WHERE state_hash=?",
-                          NULL)
-            : NULL;
     bool accepted = false;
-    if (st) {
-        sbq_bind_text(st, 1, state_hash);
-        if (sbq_step_row(st, NULL) == 1 && !config_load_locked(s, &c, NULL)) {
-            char *binding_saved = sbq_text(st, 0), *issuer = sbq_text(st, 3);
-            char *client = sbq_text(st, 4), *redirect = sbq_text(st, 5);
-            expires = sbq_int(st, 6);
-            accepted = c.enabled && expires > sb_unix_now() &&
-                       sb_consttime_streq(binding_saved, binding_hash) && sb_streq(c.issuer, issuer) &&
-                       sb_streq(c.client_id, client) && sb_streq(c.redirect_uri, redirect);
-            if (accepted) {
-                verifier_enc = sbq_text(st, 1);
-                nonce = sbq_text(st, 2);
+    if (!rc) {
+        SBQ_AUTO q = sbq_stmt_open(db,
+                                   "SELECT binding_hash,verifier_enc,nonce,issuer,client_id,redirect_uri,expires_at "
+                                   "FROM auth_oidc_flows WHERE state_hash=?",
+                                   NULL);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, state_hash);
+            if (sbq_step_row(q.st, NULL) == 1 && !config_load_locked(s, &c, NULL)) {
+                char *binding_saved = sbq_text(q.st, 0), *issuer = sbq_text(q.st, 3);
+                char *client = sbq_text(q.st, 4), *redirect = sbq_text(q.st, 5);
+                expires = sbq_int(q.st, 6);
+                accepted = c.enabled && expires > sb_unix_now() &&
+                           sb_consttime_streq(binding_saved, binding_hash) && sb_streq(c.issuer, issuer) &&
+                           sb_streq(c.client_id, client) && sb_streq(c.redirect_uri, redirect);
+                if (accepted) {
+                    verifier_enc = sbq_text(q.st, 1);
+                    nonce = sbq_text(q.st, 2);
+                }
+                free(binding_saved);
+                free(issuer);
+                free(client);
+                free(redirect);
             }
-            free(binding_saved);
-            free(issuer);
-            free(client);
-            free(redirect);
         }
     }
-    sqlite3_finalize(st);
-    st = !rc ? sbq_prepare(db, "DELETE FROM auth_oidc_flows WHERE state_hash=?", NULL) : NULL;
-    if (!st)
+    if (rc) {
         rc = -1;
-    if (st) {
-        sbq_bind_text(st, 1, state_hash);
-        rc = sbq_step_done(st, NULL);
+    } else {
+        SBQ_AUTO d = sbq_stmt_open(db, "DELETE FROM auth_oidc_flows WHERE state_hash=?", NULL);
+        if (d.rc != 0) {
+            rc = -1;
+        } else {
+            sbq_bind_text(d.st, 1, state_hash);
+            rc = sbq_step_done(d.st, NULL);
+        }
     }
-    sqlite3_finalize(st);
     if (!rc)
         rc = sbq_commit(db, NULL);
     if (rc)
@@ -837,17 +839,16 @@ char *sb_auth_oidc_finish(sb_auth_security *s, const char *state, const char *co
     sb_database_lock(s->database);
     oidc_config current = {0};
     if (!config_load_locked(s, &current, NULL) && config_same(&c, &current) && expires > sb_unix_now()) {
-        st = sbq_prepare(db,
-                         "SELECT l.user_id FROM auth_oidc_links l JOIN users u ON u.id=l.user_id WHERE "
-                         "issuer=? AND subject=?",
-                         NULL);
-        if (st) {
-            sbq_bind_text(st, 1, c.issuer);
-            sbq_bind_text(st, 2, subject);
-            if (sbq_step_row(st, NULL) == 1)
-                user_id = sbq_text(st, 0);
+        SBQ_AUTO q = sbq_stmt_open(db,
+                                   "SELECT l.user_id FROM auth_oidc_links l JOIN users u ON u.id=l.user_id WHERE "
+                                   "issuer=? AND subject=?",
+                                   NULL);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, c.issuer);
+            sbq_bind_text(q.st, 2, subject);
+            if (sbq_step_row(q.st, NULL) == 1)
+                user_id = sbq_text(q.st, 0);
         }
-        sqlite3_finalize(st);
     }
     config_free(&current);
     sb_database_unlock(s->database);

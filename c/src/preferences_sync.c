@@ -60,8 +60,9 @@ static int arguments(sb_database *database, const char *user_id, const char *slo
 }
 /* Caller holds the shared database lock. */
 static sbj *read_locked(sqlite3 *db, const char *user_id, const char *slot, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT revision,updated_at,envelope FROM auth_preferences WHERE user_id=? AND slot=?", err);
-    if (!st) return NULL;
+    SBQ_AUTO q = sbq_stmt_open(db, "SELECT revision,updated_at,envelope FROM auth_preferences WHERE user_id=? AND slot=?", err);
+    if (q.rc != 0) return NULL;
+    sqlite3_stmt *st = q.st;
     sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, slot);
     int row = sbq_step_row(st, err); sbj *result = NULL;
     if (row == 1) {
@@ -74,7 +75,7 @@ static sbj *read_locked(sqlite3 *db, const char *user_id, const char *slot, sb_e
             if (deleted) sbj_set_bool(result, "deleted", true);
         } else sb_fail(err, SB_ERR_GENERIC, "Stored encrypted preferences are invalid");
     } else if (!row) sb_fail(err, SB_ERR_NOT_FOUND, "Preference slot not found");
-    sqlite3_finalize(st); return result;
+    return result;
 }
 sbj *sb_preferences_get(sb_database *database, const char *user_id, const char *slot, sb_err *err) {
     if (arguments(database, user_id, slot, err) != 0) return NULL;
@@ -91,25 +92,34 @@ sbj *sb_preferences_put(sb_database *database, const char *user_id, const char *
     sbj *result = NULL; sqlite3 *db = sb_database_handle(database);
     sb_database_lock(database);
     if (sbq_begin(db, err) != 0) goto done;
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT revision,length(CAST(envelope AS BLOB)) FROM auth_preferences WHERE user_id=? AND slot=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, slot);
-    int row = sbq_step_row(st, err);
-    int64_t revision = row == 1 ? sbq_int(st, 0) : 0, previous_length = row == 1 ? sbq_int(st, 1) : 0;
-    sqlite3_finalize(st); if (row < 0) goto rollback;
+    int row = -1;
+    int64_t revision = 0, previous_length = 0;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT revision,length(CAST(envelope AS BLOB)) FROM auth_preferences WHERE user_id=? AND slot=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); sbq_bind_text(q.st, 2, slot);
+        row = sbq_step_row(q.st, err);
+        revision = row == 1 ? sbq_int(q.st, 0) : 0; previous_length = row == 1 ? sbq_int(q.st, 1) : 0;
+    }
+    if (row < 0) goto rollback;
     if (revision != expected_revision) { sb_fail(err, SB_ERR_CONFLICT, "Preferences changed on another device; fetch and review before saving"); goto rollback; }
-    st = sbq_prepare(db, "SELECT COUNT(*),COALESCE(SUM(length(CAST(envelope AS BLOB))),0) FROM auth_preferences WHERE user_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); row = sbq_step_row(st, err);
-    bool room = row == 1 && (revision || sbq_int(st, 0) < USER_SLOTS_LIMIT) &&
-        sbq_int(st, 1) - previous_length + (int64_t)length <= USER_BYTES_LIMIT;
-    sqlite3_finalize(st); if (row < 0) goto rollback;
+    bool room = false;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT COUNT(*),COALESCE(SUM(length(CAST(envelope AS BLOB))),0) FROM auth_preferences WHERE user_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); row = sbq_step_row(q.st, err);
+        room = row == 1 && (revision || sbq_int(q.st, 0) < USER_SLOTS_LIMIT) &&
+            sbq_int(q.st, 1) - previous_length + (int64_t)length <= USER_BYTES_LIMIT;
+    }
+    if (row < 0) goto rollback;
     if (!room) { sb_fail(err, SB_ERR_CONFLICT, "Preference storage limit reached (16 slots / 8 MiB)"); goto rollback; }
-    st = sbq_prepare(db, "INSERT INTO auth_preferences(user_id,slot,revision,updated_at,envelope) VALUES(?,?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,envelope=excluded.envelope", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, slot); sbq_bind_int(st, 3, revision + 1);
-    sbq_bind_int(st, 4, (int64_t)time(NULL)); sbq_bind_text(st, 5, encoded);
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st); if (rc != 0) goto rollback;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "INSERT INTO auth_preferences(user_id,slot,revision,updated_at,envelope) VALUES(?,?,?,?,?) ON CONFLICT(user_id,slot) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,envelope=excluded.envelope", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); sbq_bind_text(q.st, 2, slot); sbq_bind_int(q.st, 3, revision + 1);
+        sbq_bind_int(q.st, 4, (int64_t)time(NULL)); sbq_bind_text(q.st, 5, encoded);
+        if (sbq_step_done(q.st, err) != 0) goto rollback;
+    }
     result = read_locked(db, user_id, slot, err);
     if (!result || sbq_commit(db, err) != 0) { sbj_free(result); result = NULL; goto rollback; }
     goto done;
@@ -122,12 +132,14 @@ int sb_preferences_delete(sb_database *database, const char *user_id, const char
     if (expected_revision <= 0 || expected_revision >= INT64_MAX) return sb_fail(err, SB_ERR_VALIDATION, "A positive preference revision is required");
     sqlite3 *db = sb_database_handle(database); int result = -1;
     sb_database_lock(database);
-    sqlite3_stmt *st = sbq_prepare(db, "UPDATE auth_preferences SET revision=revision+1,updated_at=?,envelope=NULL WHERE user_id=? AND slot=? AND revision=?", err);
-    if (st) {
-        sbq_bind_int(st, 1, (int64_t)time(NULL)); sbq_bind_text(st, 2, user_id);
-        sbq_bind_text(st, 3, slot); sbq_bind_int(st, 4, expected_revision);
-        result = sbq_step_done(st, err); sqlite3_finalize(st);
-        if (!result && sqlite3_changes(db) != 1) result = sb_fail(err, SB_ERR_CONFLICT, "Preferences changed or no longer exist; fetch before deleting");
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "UPDATE auth_preferences SET revision=revision+1,updated_at=?,envelope=NULL WHERE user_id=? AND slot=? AND revision=?", err);
+        if (q.rc == 0) {
+            sbq_bind_int(q.st, 1, (int64_t)time(NULL)); sbq_bind_text(q.st, 2, user_id);
+            sbq_bind_text(q.st, 3, slot); sbq_bind_int(q.st, 4, expected_revision);
+            result = sbq_step_done(q.st, err);
+            if (!result && sqlite3_changes(db) != 1) result = sb_fail(err, SB_ERR_CONFLICT, "Preferences changed or no longer exist; fetch before deleting");
+        }
     }
     sb_database_unlock(database); return result;
 }

@@ -76,32 +76,38 @@ static sb_proxy_clock *find_clock(const sb_proxy_clock *identity) {
  * when this process first observes it. No foreign monotonic timestamp is used. */
 static int initialize_snapshot(sb_proxy_clock *clock, sqlite3 *db, sb_err *err) {
     if (sbq_begin(db, err)) return -1;
-    sqlite3_stmt *statement = sbq_prepare(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
-        "AND name IN ('proxy_users','proxy_leases')", err);
-    if (!statement) goto failed;
-    int row = sbq_step_row(statement, err);
-    int64_t tables = row == 1 ? sbq_int(statement, 0) : -1;
-    sqlite3_finalize(statement);
+    int row = -1;
+    int64_t tables = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('proxy_users','proxy_leases')", err);
+        if (q.rc != 0) goto failed;
+        row = sbq_step_row(q.st, err);
+        tables = row == 1 ? sbq_int(q.st, 0) : -1;
+    }
     if (tables < 0) goto failed;
     if (tables == 0) return sbq_commit(db, err); /* Fresh database, before migrations. */
     if (tables != 2) { sb_fail(err, SB_ERR_GENERIC, "Incomplete proxy lease schema"); goto failed; }
-    statement = sbq_prepare(db, "SELECT EXISTS(SELECT 1 FROM proxy_leases WHERE grant_bytes>used_bytes)", err);
-    if (!statement) goto failed;
-    row = sbq_step_row(statement, err);
-    bool outstanding = row == 1 && sbq_int(statement, 0) != 0;
-    sqlite3_finalize(statement);
-    if (row != 1) goto failed;
-    statement = sbq_prepare(db, "SELECT id,epoch FROM proxy_users WHERE deleted=0", err);
-    if (!statement) goto failed;
-    while ((row = sbq_step_row(statement, err)) == 1) {
-        const char *user = (const char *)sqlite3_column_text(statement, 0);
-        int64_t epoch = sbq_int(statement, 1);
-        if (!user || !*user || strlen(user) > 128 || epoch < 1) {
-            sb_fail(err, SB_ERR_GENERIC, "Invalid persisted proxy epoch"); row = -1; break;
-        }
-        epoch_add(clock, user, epoch, epoch > 1 ? clock->last_now + FENCE_MS : 0);
+    bool outstanding = false;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT EXISTS(SELECT 1 FROM proxy_leases WHERE grant_bytes>used_bytes)", err);
+        if (q.rc != 0) goto failed;
+        row = sbq_step_row(q.st, err);
+        outstanding = row == 1 && sbq_int(q.st, 0) != 0;
     }
-    sqlite3_finalize(statement);
+    if (row != 1) goto failed;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT id,epoch FROM proxy_users WHERE deleted=0", err);
+        if (q.rc != 0) goto failed;
+        while ((row = sbq_step_row(q.st, err)) == 1) {
+            const char *user = (const char *)sqlite3_column_text(q.st, 0);
+            int64_t epoch = sbq_int(q.st, 1);
+            if (!user || !*user || strlen(user) > 128 || epoch < 1) {
+                sb_fail(err, SB_ERR_GENERIC, "Invalid persisted proxy epoch"); row = -1; break;
+            }
+            epoch_add(clock, user, epoch, epoch > 1 ? clock->last_now + FENCE_MS : 0);
+        }
+    }
     if (row < 0) goto failed;
     if (sbq_commit(db, err)) goto failed;
     int64_t observed = real_monotonic(NULL);

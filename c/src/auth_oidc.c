@@ -465,38 +465,38 @@ int sb_auth_oidc_begin(sb_auth_security *s, sb_auth_oidc_start *out, sb_err *err
     if (!rc && !config_same(&c, &current))
         rc = sb_fail(err, SB_ERR_AUTH, "OIDC configuration changed");
     config_free(&current);
-    sqlite3_stmt *st =
-        !rc ? sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_oidc_flows WHERE expires_at<=?", err) : NULL;
-    if (!rc && !st)
-        rc = -1;
-    if (st) {
-        sbq_bind_int(st, 1, sb_unix_now());
-        rc = sbq_step_done(st, err);
+    if (!rc) {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_oidc_flows WHERE expires_at<=?", err);
+        if (q.rc != 0) {
+            rc = -1;
+        } else {
+            sbq_bind_int(q.st, 1, sb_unix_now());
+            rc = sbq_step_done(q.st, err);
+        }
     }
-    sqlite3_finalize(st);
-    st = !rc ? sbq_prepare(SB_AUTH_DB(s),
-                           "INSERT INTO "
-                           "auth_oidc_flows(state_hash,binding_hash,verifier_enc,nonce,issuer,client_id,"
-                           "redirect_uri,expires_at) "
-                           "SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM auth_oidc_flows)<1024",
-                           err)
-             : NULL;
-    if (!rc && !st)
-        rc = -1;
-    if (st) {
-        sbq_bind_text(st, 1, state_hash);
-        sbq_bind_text(st, 2, binding_hash);
-        sbq_bind_text(st, 3, encrypted);
-        sbq_bind_text(st, 4, nonce);
-        sbq_bind_text(st, 5, c.issuer);
-        sbq_bind_text(st, 6, c.client_id);
-        sbq_bind_text(st, 7, c.redirect_uri);
-        sbq_bind_int(st, 8, sb_unix_now() + OIDC_FLOW_SECONDS);
-        rc = sbq_step_done(st, err);
-        if (!rc && sqlite3_changes(SB_AUTH_DB(s)) != 1)
-            rc = sb_fail(err, SB_ERR_UNAVAILABLE, "Too many pending OIDC logins");
+    if (!rc) {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s),
+                                   "INSERT INTO "
+                                   "auth_oidc_flows(state_hash,binding_hash,verifier_enc,nonce,issuer,client_id,"
+                                   "redirect_uri,expires_at) "
+                                   "SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM auth_oidc_flows)<1024",
+                                   err);
+        if (q.rc != 0) {
+            rc = -1;
+        } else {
+            sbq_bind_text(q.st, 1, state_hash);
+            sbq_bind_text(q.st, 2, binding_hash);
+            sbq_bind_text(q.st, 3, encrypted);
+            sbq_bind_text(q.st, 4, nonce);
+            sbq_bind_text(q.st, 5, c.issuer);
+            sbq_bind_text(q.st, 6, c.client_id);
+            sbq_bind_text(q.st, 7, c.redirect_uri);
+            sbq_bind_int(q.st, 8, sb_unix_now() + OIDC_FLOW_SECONDS);
+            rc = sbq_step_done(q.st, err);
+            if (!rc && sqlite3_changes(SB_AUTH_DB(s)) != 1)
+                rc = sb_fail(err, SB_ERR_UNAVAILABLE, "Too many pending OIDC logins");
+        }
     }
-    sqlite3_finalize(st);
     sb_database_unlock(s->database);
     if (!rc) {
         out->authorization_url = sb_asprintf("%s?%s", sbj_get_str(d, "authorization_endpoint", ""), form.p);

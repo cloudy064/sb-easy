@@ -370,27 +370,27 @@ int sb_auth_oidc_configure(sb_auth_security *s, const sbj *input, sb_err *err) {
     bool transaction = !rc && !sbq_begin(db, err);
     if (!rc && !transaction)
         rc = -1;
-    sqlite3_stmt *st = !rc ? sbq_prepare(db,
-                                         "INSERT INTO "
-                                         "auth_oidc_config(id,enabled,issuer,client_id,secret_enc,redirect_"
-                                         "uri,discovery) VALUES(1,1,?,?,?,?,?) "
-                                         "ON CONFLICT(id) DO UPDATE SET "
-                                         "enabled=1,issuer=excluded.issuer,client_id=excluded.client_id,"
-                                         "secret_enc=excluded.secret_enc,redirect_uri=excluded.redirect_uri,"
-                                         "discovery=excluded.discovery",
-                                         err)
-                           : NULL;
-    if (!rc && !st)
-        rc = -1;
-    if (st) {
-        sbq_bind_text(st, 1, c.issuer);
-        sbq_bind_text(st, 2, c.client_id);
-        sbq_bind_text(st, 3, c.secret_enc);
-        sbq_bind_text(st, 4, c.redirect_uri);
-        sbq_bind_text(st, 5, c.discovery);
-        rc = sbq_step_done(st, err);
+    if (!rc) {
+        SBQ_AUTO q = sbq_stmt_open(db,
+                                   "INSERT INTO "
+                                   "auth_oidc_config(id,enabled,issuer,client_id,secret_enc,redirect_"
+                                   "uri,discovery) VALUES(1,1,?,?,?,?,?) "
+                                   "ON CONFLICT(id) DO UPDATE SET "
+                                   "enabled=1,issuer=excluded.issuer,client_id=excluded.client_id,"
+                                   "secret_enc=excluded.secret_enc,redirect_uri=excluded.redirect_uri,"
+                                   "discovery=excluded.discovery",
+                                   err);
+        if (q.rc != 0) {
+            rc = -1;
+        } else {
+            sbq_bind_text(q.st, 1, c.issuer);
+            sbq_bind_text(q.st, 2, c.client_id);
+            sbq_bind_text(q.st, 3, c.secret_enc);
+            sbq_bind_text(q.st, 4, c.redirect_uri);
+            sbq_bind_text(q.st, 5, c.discovery);
+            rc = sbq_step_done(q.st, err);
+        }
     }
-    sqlite3_finalize(st);
     if (!rc)
         rc = sbq_exec(db, "DELETE FROM auth_oidc_flows", err);
     if (!rc)

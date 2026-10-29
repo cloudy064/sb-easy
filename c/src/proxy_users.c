@@ -1028,25 +1028,26 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
             sb_fail(err, SB_ERR_AUTH, "Proxy lease host is unknown or disabled");
         goto rollback;
     }
-    sqlite3_stmt *st = sbq_prepare(
-        db,
-        "SELECT request_seq,request_hash,response FROM proxy_lease_sessions WHERE host_id=? AND boot_id=?",
-        err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, host);
-    sbq_bind_text(st, 2, boot);
-    row = sbq_step_row(st, err);
     bool replay = false, conflict = false;
-    if (row == 1) {
-        int64_t previous = sbq_int(st, 0);
-        replay = seq == previous && sb_streq(hash, column(st, 1));
-        conflict = seq != previous + 1 && !replay;
-        if (replay)
-            out = sbj_parse(column(st, 2), (size_t)sqlite3_column_bytes(st, 2), NULL, 0);
-    } else if (!row)
-        conflict = seq != 1;
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT request_seq,request_hash,response FROM proxy_lease_sessions WHERE host_id=? AND boot_id=?",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_text(q.st, 1, host);
+        sbq_bind_text(q.st, 2, boot);
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            int64_t previous = sbq_int(q.st, 0);
+            replay = seq == previous && sb_streq(hash, column(q.st, 1));
+            conflict = seq != previous + 1 && !replay;
+            if (replay)
+                out = sbj_parse(column(q.st, 2), (size_t)sqlite3_column_bytes(q.st, 2), NULL, 0);
+        } else if (!row)
+            conflict = seq != 1;
+    }
     if (row < 0)
         goto rollback;
     if (conflict) {
@@ -1079,12 +1080,13 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
     sbj_set(out, "node", sbj_null());
     sbj *users = sbj_array();
     sbj_set(out, "users", users);
-    st = sbq_prepare(db, "SELECT 1 FROM proxy_ingress_nodes WHERE host_id=? AND enabled=1", err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, host);
-    row = sbq_step_row(st, err);
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM proxy_ingress_nodes WHERE host_id=? AND enabled=1", err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_text(q.st, 1, host);
+        row = sbq_step_row(q.st, err);
+    }
     if (row < 0)
         goto rollback;
     int ready = runtime_ready(db, host, now, NULL, err);
@@ -1095,31 +1097,32 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
         if (!node)
             goto rollback;
         sbj_set(out, "node", node);
-        st = sbq_prepare(
-            db,
-            "SELECT u.id,u.epoch,u.quota_bytes,u.expires_at,u.not_before FROM proxy_users u JOIN proxy_user_nodes b ON "
-            "b.user_id=u.id WHERE b.host_id=? AND u.enabled=1 AND u.deleted=0 AND "
-            "(u.expires_at=0 OR u.expires_at>?) ORDER BY u.id",
-            err);
-        if (!st)
-            goto rollback;
-        sbq_bind_text(st, 1, host);
-        sbq_bind_int(st, 2, now);
-        while ((row = sbq_step_row(st, err)) == 1) {
-            int64_t wait_ms = sb_proxy_clock_wait_ms(database, column(st, 0), sbq_int(st, 1));
-            if (wait_ms > 0 || sbq_int(st, 4) > now) continue;
-            sbj *u = lease_locked(db, host, boot, column(st, 0), sbq_int(st, 1), sbq_int(st, 2),
-                                  sbq_int(st, 3), now, err);
-            if (!u) {
-                row = -1;
-                break;
+        {
+            SBQ_AUTO q = sbq_stmt_open(
+                db,
+                "SELECT u.id,u.epoch,u.quota_bytes,u.expires_at,u.not_before FROM proxy_users u JOIN proxy_user_nodes b ON "
+                "b.user_id=u.id WHERE b.host_id=? AND u.enabled=1 AND u.deleted=0 AND "
+                "(u.expires_at=0 OR u.expires_at>?) ORDER BY u.id",
+                err);
+            if (q.rc != 0)
+                goto rollback;
+            sbq_bind_text(q.st, 1, host);
+            sbq_bind_int(q.st, 2, now);
+            while ((row = sbq_step_row(q.st, err)) == 1) {
+                int64_t wait_ms = sb_proxy_clock_wait_ms(database, column(q.st, 0), sbq_int(q.st, 1));
+                if (wait_ms > 0 || sbq_int(q.st, 4) > now) continue;
+                sbj *u = lease_locked(db, host, boot, column(q.st, 0), sbq_int(q.st, 1), sbq_int(q.st, 2),
+                                      sbq_int(q.st, 3), now, err);
+                if (!u) {
+                    row = -1;
+                    break;
+                }
+                if (sbj_is_null(u))
+                    sbj_free(u);
+                else
+                    sbj_arr_push(users, u);
             }
-            if (sbj_is_null(u))
-                sbj_free(u);
-            else
-                sbj_arr_push(users, u);
         }
-        sqlite3_finalize(st);
         if (row < 0)
             goto rollback;
     }

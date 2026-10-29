@@ -573,10 +573,10 @@ int sb_auth_mfa_disable(sb_auth_security *s, const char *user_id, const char *ke
     if (required_user_locked(s, user_id, err)) goto rollback;
     const char *queries[] = {"DELETE FROM auth_mfa WHERE user_id=?", "DELETE FROM auth_recovery_codes WHERE user_id=?"};
     for (unsigned i = 0; i < 2; ++i) {
-        sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), queries[i], err);
-        if (!st) goto rollback;
-        sbq_bind_text(st, 1, user_id); int rc = sbq_step_done(st, err); sqlite3_finalize(st);
-        if (rc) goto rollback;
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), queries[i], err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id);
+        if (sbq_step_done(q.st, err)) goto rollback;
     }
     if (revoke_locked(s, user_id, NULL, keep_token, err) || clear_challenges_locked(s, user_id, err) || sbq_commit(SB_AUTH_DB(s), err)) goto rollback;
     result = 0; goto done;
@@ -685,21 +685,27 @@ int sb_auth_security_change_role(sb_auth_security *s, const char *user_id, const
         return sb_fail(err, SB_ERR_VALIDATION, "Role must be admin, operator or viewer");
     sb_database_lock(s->database); int result = -1;
     if (sbq_begin(SB_AUTH_DB(s), err)) goto done;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT role,(SELECT count(*) FROM users WHERE role='admin') FROM users WHERE id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); int row = sbq_step_row(st, err);
-    bool prohibited = row == 1 && sb_streq((const char *)sqlite3_column_text(st, 0), "admin") &&
-                      !sb_streq(role, "admin") && sbq_int(st, 1) <= 1;
-    sqlite3_finalize(st);
+    int row = -1;
+    bool prohibited = false;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT role,(SELECT count(*) FROM users WHERE role='admin') FROM users WHERE id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); row = sbq_step_row(q.st, err);
+        prohibited = row == 1 && sb_streq((const char *)sqlite3_column_text(q.st, 0), "admin") &&
+                     !sb_streq(role, "admin") && sbq_int(q.st, 1) <= 1;
+    }
     if (row != 1 || prohibited) {
         if (!row) sb_fail(err, SB_ERR_NOT_FOUND, "User not found");
         if (prohibited) sb_fail(err, SB_ERR_VALIDATION, "Cannot demote the last admin");
         goto rollback;
     }
-    st = sbq_prepare(SB_AUTH_DB(s), "UPDATE users SET role=? WHERE id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, role); sbq_bind_text(st, 2, user_id);
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    int rc;
+    {
+        SBQ_AUTO u = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE users SET role=? WHERE id=?", err);
+        if (u.rc != 0) goto rollback;
+        sbq_bind_text(u.st, 1, role); sbq_bind_text(u.st, 2, user_id);
+        rc = sbq_step_done(u.st, err);
+    }
     if (rc || revoke_locked(s, user_id, NULL, NULL, err) || clear_challenges_locked(s, user_id, err) ||
         sbq_commit(SB_AUTH_DB(s), err)) goto rollback;
     result = 0; goto done;

@@ -249,9 +249,11 @@ sbj *sb_auth_security_sessions(sb_auth_security *s, const char *user_id, const c
     if (!s) return NULL;
     char *hash = current_token ? sb_auth_sec_hash(s, "session", current_token) : NULL;
     sbj *result = sbj_array(); sb_database_lock(s->database);
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT id,method,client_label,created_at,expires_at,last_seen_at,revoked_at,token_hash FROM auth_sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC,rowid DESC LIMIT 100", err);
     int row = -1;
-    if (st) {
+    {
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT id,method,client_label,created_at,expires_at,last_seen_at,revoked_at,token_hash FROM auth_sessions WHERE user_id=? AND expires_at>? ORDER BY created_at DESC,rowid DESC LIMIT 100", err);
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         sbq_bind_text(st, 1, user_id); sbq_bind_int(st, 2, sb_unix_now());
         while ((row = sbq_step_row(st, err)) == 1) {
             sbj *item = sbj_object();
@@ -264,7 +266,7 @@ sbj *sb_auth_security_sessions(sb_auth_security *s, const char *user_id, const c
             sbj_set_bool(item, "current", sb_streq(hash, (const char *)sqlite3_column_text(st, 7)));
             sbj_arr_push(result, item);
         }
-        sqlite3_finalize(st);
+    }
     }
     sb_database_unlock(s->database); free(hash);
     if (row < 0) { sbj_free(result); return NULL; }

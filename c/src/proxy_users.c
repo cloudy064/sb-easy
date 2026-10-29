@@ -271,12 +271,15 @@ sbj *sb_proxy_user_save(sb_database *database, const char *id, const sbj *body, 
             goto rollback;
         }
     } else {
-        sqlite3_stmt *count = sbq_prepare(db, "SELECT COUNT(*) FROM proxy_users WHERE deleted=0", err);
-        if (!count)
-            goto rollback;
-        int row = sbq_step_row(count, err);
-        bool room = row == 1 && sbq_int(count, 0) < 256;
-        sqlite3_finalize(count);
+        int row = -1;
+        bool room = false;
+        {
+            SBQ_AUTO q = sbq_stmt_open(db, "SELECT COUNT(*) FROM proxy_users WHERE deleted=0", err);
+            if (q.rc != 0)
+                goto rollback;
+            row = sbq_step_row(q.st, err);
+            room = row == 1 && sbq_int(q.st, 0) < 256;
+        }
         if (!room) {
             if (row >= 0)
                 sb_fail(err, SB_ERR_CONFLICT, "At most 256 active proxy users are supported");
@@ -284,50 +287,50 @@ sbj *sb_proxy_user_save(sb_database *database, const char *id, const sbj *body, 
         }
     }
     for (size_t i = 0; i < sbj_arr_len(hosts); ++i) {
-        sqlite3_stmt *check = sbq_prepare(db, "SELECT 1 FROM proxy_ingress_nodes WHERE host_id=?", err);
-        if (!check)
-            goto rollback;
-        sbq_bind_text(check, 1, sbj_as_str(sbj_arr_at(hosts, i), ""));
-        int row = sbq_step_row(check, err);
-        sqlite3_finalize(check);
+        int row = -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM proxy_ingress_nodes WHERE host_id=?", err);
+            if (q.rc != 0)
+                goto rollback;
+            sbq_bind_text(q.st, 1, sbj_as_str(sbj_arr_at(hosts, i), ""));
+            row = sbq_step_row(q.st, err);
+        }
         if (row != 1) {
             if (!row)
                 sb_fail(err, SB_ERR_VALIDATION, "Configure the proxy ingress node before binding a user");
             goto rollback;
         }
     }
-    sqlite3_stmt *st = sbq_prepare(
-        db,
-        "INSERT INTO proxy_users(id,name,enabled,quota_bytes,expires_at,max_devices,created_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
-        "name=excluded.name,enabled=excluded.enabled,quota_bytes=excluded.quota_bytes,expires_at=excluded."
-        "expires_at,max_devices=excluded.max_devices,updated_at=excluded.updated_at",
-        err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, sbj_get_str(body, "name", ""));
-    sbq_bind_bool(st, 3, sbj_get_bool(body, "enabled", true));
-    sbq_bind_int(st, 4, sbj_get_int(body, "quota_bytes", 0));
-    sbq_bind_int(st, 5, sbj_get_int(body, "expires_at", 0));
-    sbq_bind_int(st, 6, sbj_get_int(body, "max_devices", 3));
-    sbq_bind_int(st, 7, now);
-    sbq_bind_int(st, 8, now);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    if (rc)
-        goto rollback;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "INSERT INTO proxy_users(id,name,enabled,quota_bytes,expires_at,max_devices,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "name=excluded.name,enabled=excluded.enabled,quota_bytes=excluded.quota_bytes,expires_at=excluded."
+            "expires_at,max_devices=excluded.max_devices,updated_at=excluded.updated_at",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_text(q.st, 1, id);
+        sbq_bind_text(q.st, 2, sbj_get_str(body, "name", ""));
+        sbq_bind_bool(q.st, 3, sbj_get_bool(body, "enabled", true));
+        sbq_bind_int(q.st, 4, sbj_get_int(body, "quota_bytes", 0));
+        sbq_bind_int(q.st, 5, sbj_get_int(body, "expires_at", 0));
+        sbq_bind_int(q.st, 6, sbj_get_int(body, "max_devices", 3));
+        sbq_bind_int(q.st, 7, now);
+        sbq_bind_int(q.st, 8, now);
+        if (sbq_step_done(q.st, err))
+            goto rollback;
+    }
     if (run_id(db, "DELETE FROM proxy_user_nodes WHERE user_id=?", id, err))
         goto rollback;
     for (size_t i = 0; i < sbj_arr_len(hosts); ++i) {
-        st = sbq_prepare(db, "INSERT INTO proxy_user_nodes(user_id,host_id) VALUES(?,?)", err);
-        if (!st)
+        SBQ_AUTO q = sbq_stmt_open(db, "INSERT INTO proxy_user_nodes(user_id,host_id) VALUES(?,?)", err);
+        if (q.rc != 0)
             goto rollback;
-        sbq_bind_text(st, 1, id);
-        sbq_bind_text(st, 2, sbj_as_str(sbj_arr_at(hosts, i), ""));
-        rc = sbq_step_done(st, err);
-        sqlite3_finalize(st);
-        if (rc)
+        sbq_bind_text(q.st, 1, id);
+        sbq_bind_text(q.st, 2, sbj_as_str(sbj_arr_at(hosts, i), ""));
+        if (sbq_step_done(q.st, err))
             goto rollback;
     }
     out = user_locked(database, id, err);

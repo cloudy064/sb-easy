@@ -10,6 +10,9 @@
 #include <time.h>
 #if defined(SB_EASY_EMBED_SINGBOX) && defined(SB_EASY_PROXY_USERS_V1)
 #include "libsb_easy_singbox.h"
+/* Global state: the embedded sing-box engine is a process-wide singleton, so
+ * only one runtime may own it. `native_owned` is guarded by
+ * `native_owner_mutex`. */
 static pthread_mutex_t native_owner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool native_owned;
 #endif

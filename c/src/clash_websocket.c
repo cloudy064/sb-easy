@@ -618,6 +618,8 @@ typedef struct ws_bridge {
 
 /* Live bridges keyed by browser connection (the connection user-data slot is
  * left to the core). */
+/* Global state: `bridges` is the process-wide list of live bridges. Every
+ * read or write of the list must hold `bridges_mutex`. */
 static pthread_mutex_t bridges_mutex = PTHREAD_MUTEX_INITIALIZER;
 static ws_bridge *bridges;
 

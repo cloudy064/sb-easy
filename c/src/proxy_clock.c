@@ -30,6 +30,9 @@ struct sb_proxy_clock {
     struct sb_proxy_clock *next;
 };
 
+/* Global state: `registry` lists the shared clocks, one per database
+ * identity. It is guarded by `registry_mutex`. Entries are reference counted:
+ * attach adds a reference and the last detach unlinks and frees the clock. */
 static pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 static sb_proxy_clock *registry;
 static int64_t real_monotonic(void *unused) {

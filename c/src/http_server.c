@@ -2027,6 +2027,9 @@ static int log_civetweb_message(const struct mg_connection *conn, const char *me
 
 #define SB_HTTP_LOG_CAPACITY 1000
 
+/* Global state: the log sink is process-wide, so at most one server (the
+ * owner) feeds its log ring from it. `g_sink_owner` is guarded by
+ * `g_sink_owner_mutex`. */
 static pthread_mutex_t g_sink_owner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static sb_http_server *g_sink_owner;
 
@@ -2481,6 +2484,9 @@ static void self_singbox_join(sb_http_server *srv) {
 
 /* ---- run_http_server ---------------------------------------------------------- */
 
+/* Global state: self-pipe for SIGINT/SIGTERM. Created in
+ * wait_for_termination(). The signal handler only calls write() on the write
+ * end, which is async-signal-safe, so there is no mutex. One per process. */
 static int g_signal_pipe[2] = {-1, -1};
 
 static void on_termination_signal(int signo) {

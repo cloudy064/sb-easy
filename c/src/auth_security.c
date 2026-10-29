@@ -455,23 +455,25 @@ sbj *sb_auth_mfa_status(sb_auth_security *s, const char *user_id, sb_err *err) {
     sb_database_lock(s->database);
     sbj *result = NULL;
     if (!required_user_locked(s, user_id, err)) {
-        sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT secret_enc IS NOT NULL,pending_enc IS NOT NULL AND pending_until>? FROM auth_mfa WHERE user_id=?", err);
-        if (st) {
-            sbq_bind_int(st, 1, sb_unix_now()); sbq_bind_text(st, 2, user_id);
-            int row = sbq_step_row(st, err);
-            if (row >= 0) {
-                result = sbj_object(); sbj_set_bool(result, "enabled", row == 1 && sbq_int(st, 0));
-                sbj_set_bool(result, "pending", row == 1 && sbq_int(st, 1));
+        {
+            SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT secret_enc IS NOT NULL,pending_enc IS NOT NULL AND pending_until>? FROM auth_mfa WHERE user_id=?", err);
+            if (q.rc == 0) {
+                sbq_bind_int(q.st, 1, sb_unix_now()); sbq_bind_text(q.st, 2, user_id);
+                int row = sbq_step_row(q.st, err);
+                if (row >= 0) {
+                    result = sbj_object(); sbj_set_bool(result, "enabled", row == 1 && sbq_int(q.st, 0));
+                    sbj_set_bool(result, "pending", row == 1 && sbq_int(q.st, 1));
+                }
             }
-            sqlite3_finalize(st);
         }
         if (result) {
-            st = sbq_prepare(SB_AUTH_DB(s), "SELECT count(*) FROM auth_recovery_codes WHERE user_id=? AND used_at IS NULL", err);
             int row = -1;
-            if (st) {
-                sbq_bind_text(st, 1, user_id); row = sbq_step_row(st, err);
-                if (row == 1) sbj_set_int(result, "recovery_codes_remaining", sbq_int(st, 0));
-                sqlite3_finalize(st);
+            {
+                SBQ_AUTO c = sbq_stmt_open(SB_AUTH_DB(s), "SELECT count(*) FROM auth_recovery_codes WHERE user_id=? AND used_at IS NULL", err);
+                if (c.rc == 0) {
+                    sbq_bind_text(c.st, 1, user_id); row = sbq_step_row(c.st, err);
+                    if (row == 1) sbj_set_int(result, "recovery_codes_remaining", sbq_int(c.st, 0));
+                }
             }
             if (row != 1) { sbj_free(result); result = NULL; }
         }
@@ -489,17 +491,16 @@ sbj *sb_auth_mfa_begin(sb_auth_security *s, const char *user_id, sb_err *err) {
     sb_database_lock(s->database);
     sbj *result = NULL;
     if (!required_user_locked(s, user_id, err)) {
-        sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_mfa(user_id,pending_enc,pending_until) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET pending_enc=excluded.pending_enc,pending_until=excluded.pending_until", err);
-        if (st) {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_mfa(user_id,pending_enc,pending_until) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET pending_enc=excluded.pending_enc,pending_until=excluded.pending_until", err);
+        if (q.rc == 0) {
             int64_t until = sb_unix_now() + MFA_PENDING_SECONDS;
-            sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, encrypted); sbq_bind_int(st, 3, until);
-            if (!sbq_step_done(st, err)) {
+            sbq_bind_text(q.st, 1, user_id); sbq_bind_text(q.st, 2, encrypted); sbq_bind_int(q.st, 3, until);
+            if (!sbq_step_done(q.st, err)) {
                 char *label = sb_url_encode(user_id);
                 char *uri = sb_asprintf("otpauth://totp/sb-easy:%s?secret=%s&issuer=sb-easy&algorithm=SHA1&digits=6&period=30", label, secret);
                 result = sbj_object(); sbj_set_str(result, "secret", secret); sbj_set_str(result, "otpauth_uri", uri);
                 sbj_set_int(result, "expires_at", until); free(label); sb_auth_sec_secret_free(uri);
             }
-            sqlite3_finalize(st);
         }
     }
     sb_database_unlock(s->database); free(encrypted); sb_auth_sec_secret_free(secret);

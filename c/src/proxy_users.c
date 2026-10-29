@@ -1015,18 +1015,20 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
     sb_database_lock(database);
     if (begin(db, err))
         goto done;
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT 1 FROM hosts WHERE id=? AND enabled=1", err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, host);
-    int row = sbq_step_row(st, err);
-    sqlite3_finalize(st);
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM hosts WHERE id=? AND enabled=1", err);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, host);
+            row = sbq_step_row(q.st, err);
+        }
+    }
     if (row != 1) {
         if (!row)
             sb_fail(err, SB_ERR_AUTH, "Proxy lease host is unknown or disabled");
         goto rollback;
     }
-    st = sbq_prepare(
+    sqlite3_stmt *st = sbq_prepare(
         db,
         "SELECT request_seq,request_hash,response FROM proxy_lease_sessions WHERE host_id=? AND boot_id=?",
         err);

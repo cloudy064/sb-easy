@@ -145,32 +145,35 @@ static char *issue_locked(sb_auth_security *s, const char *user_id, const char *
         sb_fail(err, SB_ERR_VALIDATION, "Invalid session details"); return NULL;
     }
     if (required_user_locked(s, user_id, err)) return NULL;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT username,role,EXISTS(SELECT 1 FROM auth_mfa WHERE user_id=users.id AND secret_enc IS NOT NULL) FROM users WHERE id=?", err);
-    if (!st) return NULL;
-    sbq_bind_text(st, 1, user_id);
-    int row = sbq_step_row(st, err);
-    if (row != 1) {
-        sqlite3_finalize(st);
-        if (!row) sb_fail(err, SB_ERR_AUTH, "User is unavailable");
-        return NULL;
+    char *id = NULL;
+    int64_t now = 0;
+    sbj *payload = NULL;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT username,role,EXISTS(SELECT 1 FROM auth_mfa WHERE user_id=users.id AND secret_enc IS NOT NULL) FROM users WHERE id=?", err);
+        if (q.rc != 0) return NULL;
+        sbq_bind_text(q.st, 1, user_id);
+        int row = sbq_step_row(q.st, err);
+        if (row != 1) {
+            if (!row) sb_fail(err, SB_ERR_AUTH, "User is unavailable");
+            return NULL;
+        }
+        /* The HTTP layer may have observed disabled MFA before another request
+         * enabled it. Recheck under the same mutex as enrollment and session INSERT;
+         * a method label such as 'password+mfa' is never proof of completion. */
+        if (sbq_int(q.st, 2) && !mfa_completed) {
+            sb_fail(err, SB_ERR_AUTH, "MFA is required; restart login"); return NULL;
+        }
+        id = sb_auth_sec_random(24, err);
+        if (!id) return NULL;
+        now = sb_unix_now();
+        payload = sbj_object();
+        sbj_set_str(payload, "sub", user_id);
+        sbj_set(payload, "username", sbj_strn((const char *)sqlite3_column_text(q.st, 0),
+                                                (size_t)sqlite3_column_bytes(q.st, 0)));
+        sbj_set_str(payload, "role", (const char *)sqlite3_column_text(q.st, 1));
+        sbj_set_str(payload, "jti", id);
+        sbj_set_int(payload, "iat", now); sbj_set_int(payload, "exp", now + SESSION_SECONDS);
     }
-    /* The HTTP layer may have observed disabled MFA before another request
-     * enabled it. Recheck under the same mutex as enrollment and session INSERT;
-     * a method label such as 'password+mfa' is never proof of completion. */
-    if (sbq_int(st, 2) && !mfa_completed) {
-        sqlite3_finalize(st); sb_fail(err, SB_ERR_AUTH, "MFA is required; restart login"); return NULL;
-    }
-    char *id = sb_auth_sec_random(24, err);
-    if (!id) { sqlite3_finalize(st); return NULL; }
-    int64_t now = sb_unix_now();
-    sbj *payload = sbj_object();
-    sbj_set_str(payload, "sub", user_id);
-    sbj_set(payload, "username", sbj_strn((const char *)sqlite3_column_text(st, 0),
-                                            (size_t)sqlite3_column_bytes(st, 0)));
-    sbj_set_str(payload, "role", (const char *)sqlite3_column_text(st, 1));
-    sbj_set_str(payload, "jti", id);
-    sbj_set_int(payload, "iat", now); sbj_set_int(payload, "exp", now + SESSION_SECONDS);
-    sqlite3_finalize(st);
     char *json = sbj_dump(payload, -1); sbj_free(payload);
     char *encoded = sb_base64url_encode((const unsigned char *)json, strlen(json)); free(json);
     char *unsigned_token = sb_asprintf("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.%s", encoded); free(encoded);
@@ -180,22 +183,27 @@ static char *issue_locked(sb_auth_security *s, const char *user_id, const char *
     char *token = sb_asprintf("%s.%s", unsigned_token, signature);
     free(unsigned_token); free(signature); OPENSSL_cleanse(digest, sizeof digest);
     char *hash = sb_auth_sec_hash(s, "session", token);
-    st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_sessions(id,user_id,token_hash,method,client_label,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?)", err);
     int result = -1;
-    if (st) {
-        sbq_bind_text(st, 1, id); sbq_bind_text(st, 2, user_id); sbq_bind_text(st, 3, hash);
-        sbq_bind_text(st, 4, method); sbq_bind_text(st, 5, client_label ? client_label : "");
-        sbq_bind_int(st, 6, now); sbq_bind_int(st, 7, now + SESSION_SECONDS); sbq_bind_int(st, 8, now);
-        result = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+        SBQ_AUTO ins = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_sessions(id,user_id,token_hash,method,client_label,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?)", err);
+        if (ins.rc == 0) {
+            sbq_bind_text(ins.st, 1, id); sbq_bind_text(ins.st, 2, user_id); sbq_bind_text(ins.st, 3, hash);
+            sbq_bind_text(ins.st, 4, method); sbq_bind_text(ins.st, 5, client_label ? client_label : "");
+            sbq_bind_int(ins.st, 6, now); sbq_bind_int(ins.st, 7, now + SESSION_SECONDS); sbq_bind_int(ins.st, 8, now);
+            result = sbq_step_done(ins.st, err);
+        }
     }
     free(id); free(hash);
     if (result) { sb_auth_sec_secret_free(token); return NULL; }
     /* Keep at most 100 recent sessions per account and bounded stale history. */
-    st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_sessions WHERE expires_at<? OR (user_id=? AND id NOT IN (SELECT id FROM auth_sessions WHERE user_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100))", err);
-    if (st) {
-        sbq_bind_int(st, 1, now - 86400); sbq_bind_text(st, 2, user_id); sbq_bind_text(st, 3, user_id);
-        result = sbq_step_done(st, err); sqlite3_finalize(st);
-    } else result = -1;
+    result = -1;
+    {
+        SBQ_AUTO prune = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_sessions WHERE expires_at<? OR (user_id=? AND id NOT IN (SELECT id FROM auth_sessions WHERE user_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100))", err);
+        if (prune.rc == 0) {
+            sbq_bind_int(prune.st, 1, now - 86400); sbq_bind_text(prune.st, 2, user_id); sbq_bind_text(prune.st, 3, user_id);
+            result = sbq_step_done(prune.st, err);
+        }
+    }
     if (result) { sb_auth_sec_secret_free(token); return NULL; }
     return token;
 }
@@ -531,14 +539,19 @@ sbj *sb_auth_mfa_confirm(sb_auth_security *s, const char *user_id, const char *c
         if (sbq_commit(SB_AUTH_DB(s), NULL)) sbq_rollback(SB_AUTH_DB(s));
         goto done;
     }
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_mfa SET secret_enc=pending_enc,pending_enc=NULL,pending_until=0,last_step=? WHERE user_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_int(st, 1, step); sbq_bind_text(st, 2, user_id);
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    int rc;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_mfa SET secret_enc=pending_enc,pending_enc=NULL,pending_until=0,last_step=? WHERE user_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_int(q.st, 1, step); sbq_bind_text(q.st, 2, user_id);
+        rc = sbq_step_done(q.st, err);
+    }
     if (rc) goto rollback;
-    st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_recovery_codes WHERE user_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_recovery_codes WHERE user_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); rc = sbq_step_done(q.st, err);
+    }
     if (rc) goto rollback;
     result = sbj_object(); sbj *codes = sbj_array(); sbj_set(result, "recovery_codes", codes);
     sbj_set_bool(result, "enabled", true);
@@ -546,10 +559,13 @@ sbj *sb_auth_mfa_confirm(sb_auth_security *s, const char *user_id, const char *c
         char *recovery = sb_auth_sec_random(16, err);
         if (!recovery) goto rollback;
         char *hash = recovery_hash(s, user_id, recovery);
-        st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_recovery_codes(user_id,code_hash) VALUES(?,?)", err);
-        if (!st) { free(hash); sb_auth_sec_secret_free(recovery); goto rollback; }
-        sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, hash);
-        rc = sbq_step_done(st, err); sqlite3_finalize(st); free(hash);
+        {
+            SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_recovery_codes(user_id,code_hash) VALUES(?,?)", err);
+            if (q.rc != 0) { free(hash); sb_auth_sec_secret_free(recovery); goto rollback; }
+            sbq_bind_text(q.st, 1, user_id); sbq_bind_text(q.st, 2, hash);
+            rc = sbq_step_done(q.st, err);
+        }
+        free(hash);
         if (rc) { sb_auth_sec_secret_free(recovery); goto rollback; }
         sbj_arr_push(codes, sbj_str(recovery)); sb_auth_sec_secret_free(recovery);
     }
@@ -606,23 +622,31 @@ char *sb_auth_security_challenge_bound(sb_auth_security *s, const char *user_id,
     sb_database_lock(s->database);
     int result = -1;
     if (sbq_begin(SB_AUTH_DB(s), err)) goto done;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT 1 FROM auth_mfa WHERE user_id=? AND secret_enc IS NOT NULL", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); int row = sbq_step_row(st, err); sqlite3_finalize(st);
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT 1 FROM auth_mfa WHERE user_id=? AND secret_enc IS NOT NULL", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); row = sbq_step_row(q.st, err);
+    }
     if (row != 1) {
         if (!row) sb_fail(err, SB_ERR_AUTH, "MFA is not enabled");
         goto rollback;
     }
-    st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_login_challenges WHERE expires_at<=? OR (user_id=? AND challenge_hash NOT IN (SELECT challenge_hash FROM auth_login_challenges WHERE user_id=? ORDER BY rowid DESC LIMIT 9))", err);
-    if (!st) goto rollback;
-    sbq_bind_int(st, 1, sb_unix_now()); sbq_bind_text(st, 2, user_id); sbq_bind_text(st, 3, user_id);
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    int rc;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_login_challenges WHERE expires_at<=? OR (user_id=? AND challenge_hash NOT IN (SELECT challenge_hash FROM auth_login_challenges WHERE user_id=? ORDER BY rowid DESC LIMIT 9))", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_int(q.st, 1, sb_unix_now()); sbq_bind_text(q.st, 2, user_id); sbq_bind_text(q.st, 3, user_id);
+        rc = sbq_step_done(q.st, err);
+    }
     if (rc) goto rollback;
-    st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_login_challenges(challenge_hash,binding_hash,user_id,method,expires_at) VALUES(?,?,?,?,?)", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, hash); sbq_bind_text(st, 2, binding); sbq_bind_text(st, 3, user_id);
-    sbq_bind_text(st, 4, method); sbq_bind_int(st, 5, sb_unix_now() + CHALLENGE_SECONDS);
-    rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_login_challenges(challenge_hash,binding_hash,user_id,method,expires_at) VALUES(?,?,?,?,?)", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, hash); sbq_bind_text(q.st, 2, binding); sbq_bind_text(q.st, 3, user_id);
+        sbq_bind_text(q.st, 4, method); sbq_bind_int(q.st, 5, sb_unix_now() + CHALLENGE_SECONDS);
+        rc = sbq_step_done(q.st, err);
+    }
     if (rc || sbq_commit(SB_AUTH_DB(s), err)) goto rollback;
     result = 0; goto done;
 rollback:
@@ -648,16 +672,18 @@ char *sb_auth_security_complete_bound(sb_auth_security *s, const char *challenge
     char *user_id = NULL, *method = NULL, *token = NULL;
     sb_database_lock(s->database);
     if (sbq_begin(SB_AUTH_DB(s), err)) goto done;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT user_id,method,binding_hash FROM auth_login_challenges WHERE challenge_hash=? AND expires_at>?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, hash); sbq_bind_int(st, 2, sb_unix_now());
-    int row = sbq_step_row(st, err);
-    if (row == 1) {
-        const char *expected = (const char *)sqlite3_column_text(st, 2);
-        bool matches = (!expected && !binding) || (expected && binding && sb_consttime_streq(expected, binding));
-        if (matches) { user_id = sbq_text(st, 0); method = sbq_text(st, 1); }
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT user_id,method,binding_hash FROM auth_login_challenges WHERE challenge_hash=? AND expires_at>?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, hash); sbq_bind_int(q.st, 2, sb_unix_now());
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            const char *expected = (const char *)sqlite3_column_text(q.st, 2);
+            bool matches = (!expected && !binding) || (expected && binding && sb_consttime_streq(expected, binding));
+            if (matches) { user_id = sbq_text(q.st, 0); method = sbq_text(q.st, 1); }
+        }
     }
-    sqlite3_finalize(st);
     if (!user_id) {
         if (row >= 0) sb_fail(err, SB_ERR_AUTH, "Invalid or expired login challenge");
         goto rollback;
@@ -667,9 +693,12 @@ char *sb_auth_security_complete_bound(sb_auth_security *s, const char *challenge
         if (sbq_commit(SB_AUTH_DB(s), NULL)) sbq_rollback(SB_AUTH_DB(s));
         goto done;
     }
-    st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_login_challenges WHERE challenge_hash=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, hash); int rc = sbq_step_done(st, err); sqlite3_finalize(st);
+    int rc;
+    {
+        SBQ_AUTO del = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_login_challenges WHERE challenge_hash=?", err);
+        if (del.rc != 0) goto rollback;
+        sbq_bind_text(del.st, 1, hash); rc = sbq_step_done(del.st, err);
+    }
     if (rc) goto rollback;
     char *full_method = sb_asprintf("%s+mfa", method);
     token = issue_locked(s, user_id, full_method, client_label, true, err); free(full_method);

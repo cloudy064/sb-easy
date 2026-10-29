@@ -124,10 +124,15 @@ add_library(sb_core STATIC ${SB_CORE_SOURCES})
 target_include_directories(sb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_definitions(sb_core PUBLIC _GNU_SOURCE
     SB_EASY_VERSION="${PROJECT_VERSION}")
-target_compile_options(sb_core PRIVATE -Wall -Wextra -Wshadow -Wno-unused-parameter)
-if(SB_EASY_WARNINGS_AS_ERRORS)
-    target_compile_options(sb_core PRIVATE -Werror)
-endif()
+# One warning policy for the core library, programs and tests. -Werror is
+# opt-in through SB_EASY_WARNINGS_AS_ERRORS and applies to every target.
+function(sb_enable_warnings target)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow -Wno-unused-parameter)
+    if(SB_EASY_WARNINGS_AS_ERRORS)
+        target_compile_options(${target} PRIVATE -Werror)
+    endif()
+endfunction()
+sb_enable_warnings(sb_core)
 target_link_libraries(sb_core PUBLIC
     OpenSSL::Crypto OpenSSL::SSL SQLite::SQLite3 CURL::libcurl PkgConfig::YAML
     qjs sb_argon2 sb_qrcodegen sb_civetweb Threads::Threads m)
@@ -167,7 +172,7 @@ foreach(main ${SB_MAINS})
     endif()
     add_executable(${target} ${main})
     target_link_libraries(${target} PRIVATE sb_core)
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    sb_enable_warnings(${target})
 endforeach()
 
 # ---- tests ----
@@ -186,7 +191,7 @@ if(BUILD_TESTING)
         add_executable(${name} ${test_source})
         target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
         target_link_libraries(${name} PRIVATE sb_core)
-        target_compile_options(${name} PRIVATE -Wall -Wno-unused-parameter)
+        sb_enable_warnings(${name})
         add_test(NAME ${name} COMMAND ${name}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
         set_tests_properties(${name} PROPERTIES
@@ -221,7 +226,7 @@ endif()
 if(SB_EASY_EMBED_SINGBOX)
     add_executable(sb-easy-singbox-embedded-smoke tests/singbox_embedded_smoke.c)
     target_link_libraries(sb-easy-singbox-embedded-smoke PRIVATE sb_core)
-    target_compile_options(sb-easy-singbox-embedded-smoke PRIVATE -Wall -Wextra)
+    sb_enable_warnings(sb-easy-singbox-embedded-smoke)
     if(BUILD_TESTING)
         add_test(NAME singbox_embedded_smoke COMMAND sb-easy-singbox-embedded-smoke)
         set_tests_properties(singbox_embedded_smoke PROPERTIES TIMEOUT 30)

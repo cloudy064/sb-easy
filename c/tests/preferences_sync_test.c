@@ -4,8 +4,13 @@
 
 static sbj *envelope_fixture(void) {
     size_t len = 0; char *text = sb_read_file("testdata/preferences-v1.json", &len);
-    if (!text) abort(); sbj *vector = sbj_parse(text, len, NULL, 0); free(text);
-    if (!vector) abort(); sbj *envelope = sbj_clone(sbj_get(vector, "envelope")); sbj_free(vector); return envelope;
+    if (!text) abort();
+    sbj *vector = sbj_parse(text, len, NULL, 0);
+    free(text);
+    if (!vector) abort();
+    sbj *envelope = sbj_clone(sbj_get(vector, "envelope"));
+    sbj_free(vector);
+    return envelope;
 }
 static sb_auth_claims admin_claims(sb_test_server *t) {
     sb_auth_claims claims = {0}; if (!sb_auth_verify_token(t->jwt_secret, t->token, &claims)) abort(); return claims;

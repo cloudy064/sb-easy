@@ -40,13 +40,11 @@ static char *new_secret(bool base64, sb_err *err) {
 }
 static int begin(sqlite3 *db, sb_err *err) { return sbq_exec(db, "BEGIN IMMEDIATE", err); }
 static int run_id(sqlite3 *db, const char *sql, const char *id, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, sql, err);
-    if (!st)
+    SBQ_AUTO q = sbq_stmt_open(db, sql, err);
+    if (q.rc != 0)
         return -1;
-    sbq_bind_text(st, 1, id);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    return rc;
+    sbq_bind_text(q.st, 1, id);
+    return sbq_step_done(q.st, err);
 }
 static const char *column(sqlite3_stmt *st, int i) { return (const char *)sqlite3_column_text(st, i); }
 int sb_proxy_runtime_report(sb_database *database, const char *host_id, const sbj *capabilities, int64_t now,
@@ -66,39 +64,39 @@ int sb_proxy_runtime_report(sb_database *database, const char *host_id, const sb
     }
     sb_database_lock(database);
     sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(
-        db,
-        "INSERT INTO proxy_runtime_reports(host_id,supported,observed_at) SELECT id,?,? FROM hosts WHERE "
-        "id=? AND enabled=1 "
-        "ON CONFLICT(host_id) DO UPDATE SET supported=excluded.supported,observed_at=excluded.observed_at",
-        err);
     int result = -1;
-    if (st) {
-        sbq_bind_bool(st, 1, supported);
-        sbq_bind_int(st, 2, now);
-        sbq_bind_text(st, 3, host_id);
-        result = sbq_step_done(st, err);
-        sqlite3_finalize(st);
-        if (!result && sqlite3_changes(db) != 1)
-            result = sb_fail(err, SB_ERR_AUTH, "Runtime host is unknown or disabled");
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "INSERT INTO proxy_runtime_reports(host_id,supported,observed_at) SELECT id,?,? FROM hosts WHERE "
+            "id=? AND enabled=1 "
+            "ON CONFLICT(host_id) DO UPDATE SET supported=excluded.supported,observed_at=excluded.observed_at",
+            err);
+        if (q.rc == 0) {
+            sbq_bind_bool(q.st, 1, supported);
+            sbq_bind_int(q.st, 2, now);
+            sbq_bind_text(q.st, 3, host_id);
+            result = sbq_step_done(q.st, err);
+            if (!result && sqlite3_changes(db) != 1)
+                result = sb_fail(err, SB_ERR_AUTH, "Runtime host is unknown or disabled");
+        }
     }
     sb_database_unlock(database);
     return result;
 }
 static int runtime_ready(sqlite3 *db, const char *host, int64_t now, int64_t *seen, sb_err *err) {
-    sqlite3_stmt *st =
-        sbq_prepare(db, "SELECT supported,observed_at FROM proxy_runtime_reports WHERE host_id=?", err);
-    if (!st)
+    SBQ_AUTO q =
+        sbq_stmt_open(db, "SELECT supported,observed_at FROM proxy_runtime_reports WHERE host_id=?", err);
+    if (q.rc != 0)
         return -1;
-    sbq_bind_text(st, 1, host);
-    int row = sbq_step_row(st, err), ready = 0;
+    sbq_bind_text(q.st, 1, host);
+    int row = sbq_step_row(q.st, err), ready = 0;
     if (row == 1) {
-        int64_t timestamp = sbq_int(st, 1);
+        int64_t timestamp = sbq_int(q.st, 1);
         if (seen)
             *seen = timestamp;
-        ready = sbq_int(st, 0) && timestamp >= now - RUNTIME_FRESH_SECONDS && timestamp <= now;
+        ready = sbq_int(q.st, 0) && timestamp >= now - RUNTIME_FRESH_SECONDS && timestamp <= now;
     }
-    sqlite3_finalize(st);
     return row < 0 ? -1 : ready;
 }
 static sbj *devices_locked(sqlite3 *db, const char *id, bool policy, int64_t now, sb_err *err) {

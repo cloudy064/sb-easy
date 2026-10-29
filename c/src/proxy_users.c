@@ -9,6 +9,10 @@
 #define LEASE_SECONDS 60
 #define METHOD "2022-blake3-aes-128-gcm"
 #define RUNTIME_FRESH_SECONDS 180
+/* Latest accepted caller-supplied Unix time: 2099-12-31T23:59:00Z. */
+#define MAX_UNIX_TIME 4102444740LL
+/* Most lease reports accepted in one exchange request. */
+#define MAX_EXCHANGE_REPORTS 4096
 
 static bool text_ok(const sbj *v, size_t limit, bool identifier) {
     if (!sbj_is_string(v) || !v->v.str.len || v->v.str.len > limit || sbj_validate_utf8(v, NULL))
@@ -382,7 +386,7 @@ done:
     return rc;
 }
 sbj *sb_proxy_user_reset(sb_database *database, const char *id, int64_t now, sb_err *err) {
-    if (now < 1 || now > 4102444740LL) { sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy reset time"); return NULL; }
+    if (now < 1 || now > MAX_UNIX_TIME) { sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy reset time"); return NULL; }
     sqlite3 *db = sb_database_handle(database);
     sb_database_lock(database);
     sbj *out = NULL;
@@ -976,7 +980,7 @@ static int validate_exchange_request(const sbj *request, int64_t now, sb_err *er
     if (!sbj_is_object(request) || sbj_obj_len(request) != 4 || !number_ok(request, "version", 1, 1) ||
         !text_ok(sbj_get(request, "boot_id"), 128, true) ||
         !number_ok(request, "request_seq", 1, SAFE_INTEGER) || !sbj_is_array(reports) ||
-        sbj_arr_len(reports) > 4096 || now < 1 || now > 4102444740LL)
+        sbj_arr_len(reports) > MAX_EXCHANGE_REPORTS || now < 1 || now > MAX_UNIX_TIME)
         return sb_fail(err, SB_ERR_VALIDATION, "Invalid proxy lease exchange");
     for (size_t i = 0; i < sbj_arr_len(reports); ++i) {
         const sbj *r = sbj_arr_at(reports, i);

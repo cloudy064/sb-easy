@@ -498,41 +498,47 @@ sbj *sb_proxy_device_create(sb_database *database, const char *user_id, const sb
     sb_database_lock(database);
     if (begin(db, err))
         goto done;
-    sqlite3_stmt *st =
-        sbq_prepare(db,
-                    "SELECT max_devices,(SELECT COUNT(*) FROM proxy_devices WHERE user_id=u.id AND enabled=1 "
-                    "AND (expires_at=0 OR expires_at>?)) FROM "
-                    "proxy_users u WHERE id=? AND enabled=1 AND deleted=0 AND (expires_at=0 OR expires_at>?)",
-                    err);
-    if (!st)
-        goto rollback;
-    sbq_bind_int(st, 1, now);
-    sbq_bind_text(st, 2, user_id);
-    sbq_bind_int(st, 3, now);
-    int row = sbq_step_row(st, err);
-    bool room = row == 1 && sbq_int(st, 1) < sbq_int(st, 0);
-    sqlite3_finalize(st);
+    int row = -1;
+    bool room = false;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT max_devices,(SELECT COUNT(*) FROM proxy_devices WHERE user_id=u.id AND enabled=1 "
+            "AND (expires_at=0 OR expires_at>?)) FROM "
+            "proxy_users u WHERE id=? AND enabled=1 AND deleted=0 AND (expires_at=0 OR expires_at>?)",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_int(q.st, 1, now);
+        sbq_bind_text(q.st, 2, user_id);
+        sbq_bind_int(q.st, 3, now);
+        row = sbq_step_row(q.st, err);
+        room = row == 1 && sbq_int(q.st, 1) < sbq_int(q.st, 0);
+    }
     if (!room) {
         if (row >= 0)
             sb_fail(err, row ? SB_ERR_CONFLICT : SB_ERR_FORBIDDEN,
                     row ? "Proxy device limit reached" : "Proxy user is disabled or expired");
         goto rollback;
     }
-    st = sbq_prepare(db,
-                     "INSERT INTO proxy_devices(id,user_id,name,password,token_hash,created_at,expires_at) "
-                     "VALUES(?,?,?,?,?,?,?)",
-                     err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, user_id);
-    sbq_bind_text(st, 3, sbj_get_str(body, "name", ""));
-    sbq_bind_text(st, 4, password);
-    sbq_bind_text(st, 5, hash);
-    sbq_bind_int(st, 6, now);
-    sbq_bind_int(st, 7, sbj_get_int(body, "expires_at", 0));
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
+    int rc = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "INSERT INTO proxy_devices(id,user_id,name,password,token_hash,created_at,expires_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_text(q.st, 1, id);
+        sbq_bind_text(q.st, 2, user_id);
+        sbq_bind_text(q.st, 3, sbj_get_str(body, "name", ""));
+        sbq_bind_text(q.st, 4, password);
+        sbq_bind_text(q.st, 5, hash);
+        sbq_bind_int(q.st, 6, now);
+        sbq_bind_int(q.st, 7, sbj_get_int(body, "expires_at", 0));
+        rc = sbq_step_done(q.st, err);
+    }
     if (rc || sbq_commit(db, err))
         goto rollback;
     out = sbj_object();
@@ -597,31 +603,32 @@ static bool server_name(const sbj *v) {
     return label && !last_dash;
 }
 static sbj *node_locked(sqlite3 *db, const char *host_id, bool policy, int64_t now, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db,
+    sbj *out = NULL;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db,
                                    "SELECT host_id,enabled,server,listen,listen_port,server_key,updated_at "
                                    "FROM proxy_ingress_nodes WHERE host_id=?",
                                    err);
-    if (!st)
-        return NULL;
-    sbq_bind_text(st, 1, host_id);
-    int row = sbq_step_row(st, err);
-    sbj *out = NULL;
-    if (row == 1) {
-        out = sbj_object();
-        sbj_set_str(out, "listen", column(st, 3));
-        sbj_set_int(out, "listen_port", sbq_int(st, 4));
-        if (policy) {
-            sbj_set_str(out, "method", METHOD);
-            sbj_set_str(out, "password", column(st, 5));
-        } else {
-            sbj_set_str(out, "host_id", column(st, 0));
-            sbj_set_bool(out, "enabled", sbq_int(st, 1));
-            sbj_set_str(out, "server", column(st, 2));
-            sbj_set_int(out, "updated_at", sbq_int(st, 6));
-        }
-    } else if (!row)
-        sb_fail(err, SB_ERR_NOT_FOUND, "Proxy ingress node not found");
-    sqlite3_finalize(st);
+        if (q.rc != 0)
+            return NULL;
+        sbq_bind_text(q.st, 1, host_id);
+        int row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            out = sbj_object();
+            sbj_set_str(out, "listen", column(q.st, 3));
+            sbj_set_int(out, "listen_port", sbq_int(q.st, 4));
+            if (policy) {
+                sbj_set_str(out, "method", METHOD);
+                sbj_set_str(out, "password", column(q.st, 5));
+            } else {
+                sbj_set_str(out, "host_id", column(q.st, 0));
+                sbj_set_bool(out, "enabled", sbq_int(q.st, 1));
+                sbj_set_str(out, "server", column(q.st, 2));
+                sbj_set_int(out, "updated_at", sbq_int(q.st, 6));
+            }
+        } else if (!row)
+            sb_fail(err, SB_ERR_NOT_FOUND, "Proxy ingress node not found");
+    }
     if (out && !policy) {
         int64_t seen = 0;
         int ready = runtime_ready(db, host_id, now, &seen, err);
@@ -639,17 +646,18 @@ sbj *sb_proxy_ingress_list(sb_database *database, sb_err *err) {
     sb_database_lock(database);
     sbj *out = sbj_array();
     int row = -1;
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT host_id FROM proxy_ingress_nodes ORDER BY host_id", err);
-    if (st) {
-        while ((row = sbq_step_row(st, err)) == 1) {
-            sbj *node = node_locked(db, column(st, 0), false, sb_unix_now(), err);
-            if (!node) {
-                row = -1;
-                break;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT host_id FROM proxy_ingress_nodes ORDER BY host_id", err);
+        if (q.rc == 0) {
+            while ((row = sbq_step_row(q.st, err)) == 1) {
+                sbj *node = node_locked(db, column(q.st, 0), false, sb_unix_now(), err);
+                if (!node) {
+                    row = -1;
+                    break;
+                }
+                sbj_arr_push(out, node);
             }
-            sbj_arr_push(out, node);
         }
-        sqlite3_finalize(st);
     }
     sb_database_unlock(database);
     if (row < 0) {

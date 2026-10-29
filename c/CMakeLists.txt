@@ -127,7 +127,7 @@ target_compile_definitions(sb_core PUBLIC _GNU_SOURCE
 # One warning policy for the core library, programs and tests. -Werror is
 # opt-in through SB_EASY_WARNINGS_AS_ERRORS and applies to every target.
 function(sb_enable_warnings target)
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow -Wno-unused-parameter)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow)
     if(SB_EASY_WARNINGS_AS_ERRORS)
         target_compile_options(${target} PRIVATE -Werror)
     endif()

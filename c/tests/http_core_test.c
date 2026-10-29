@@ -195,6 +195,7 @@ static int h_block(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
 }
 
 static int h_invalid_utf8(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)req; (void)err;
     sbj *body = sbj_object();
     sbj_set_str(body, "name", "bad\xFF");
     sb_resp_json(resp, 200, body);

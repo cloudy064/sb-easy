@@ -905,6 +905,7 @@ static sbj *optional_field(const sbj *body, const char *field, bool boolean, sb_
 
 /* GET /api/agent/health (public) */
 static int handle_agent_health(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)req; (void)err;
     sbj *body = sbj_object();
     sbj_set_str(body, "status", "ok");
     sb_resp_json(resp, 200, body);

@@ -34,6 +34,7 @@ typedef struct {
 } validator_state;
 
 static int inspecting_validator(const char *temporary, void *user, sb_err *err) {
+    (void)err;
     validator_state *state = user;
     state->validated = true;
     char *tmp = read_text(temporary);
@@ -46,6 +47,7 @@ static int inspecting_validator(const char *temporary, void *user, sb_err *err) 
 }
 
 static int rejecting_validator(const char *temporary, void *user, sb_err *err) {
+    (void)temporary; (void)user;
     return sb_fail(err, SB_ERR_GENERIC, "rejected");
 }
 

@@ -627,6 +627,7 @@ static void parse_stats(const char *dump, size_t len, sb_wireguard_peer_stats_ve
 }
 
 int sb_wireguard_parse_stats(const char *dump, sb_wireguard_peer_stats_vec *out, sb_err *err) {
+    (void)err;
     const char *text = S(dump);
     parse_stats(text, strlen(text), out);
     return 0;

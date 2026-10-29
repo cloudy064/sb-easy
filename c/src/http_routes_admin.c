@@ -177,6 +177,7 @@ static sbj *settings_view(sb_http_server *srv, sb_err *err) {
 
 /* GET /api/health (public) */
 static int handle_health(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)req; (void)err;
     sbj *body = sbj_object();
     sbj_set_str(body, "status", "ok");
     sbj_set_str(body, "service", "sb-easy-c");
@@ -219,6 +220,7 @@ done:
 
 /* GET /api/system/logs */
 static int handle_system_logs(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)err;
     sbj *body = sbj_object();
     sbj_set(body, "lines", sb_http_log_lines(req->server));
     sb_resp_json(resp, 200, body);
@@ -804,6 +806,7 @@ done:
 
 /* GET /api/wireguard/stats */
 static int handle_wireguard_stats(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    (void)err;
     sb_wireguard_peer_stats_vec stats = {0};
     sb_err ignored = {0};
     sbj *peers = sb_wireguard_stats(req->server->wireguard, &stats, &ignored) == 0

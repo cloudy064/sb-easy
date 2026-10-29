@@ -879,39 +879,37 @@ int sb_auth_oidc_link(sb_auth_security *s, const char *user_id, const char *issu
     sb_database_lock(s->database);
     int exists = sb_auth_sec_user_exists_locked(s, user_id, err);
     int rc = exists == 1 ? 0 : exists < 0 ? -1 : sb_fail(err, SB_ERR_NOT_FOUND, "User not found");
-    sqlite3_stmt *st =
-        !rc ? sbq_prepare(SB_AUTH_DB(s),
-                          remove ? "DELETE FROM auth_oidc_links WHERE user_id=? AND issuer=? AND subject=?"
-                                 : "INSERT INTO auth_oidc_links(user_id,issuer,subject) VALUES(?,?,?) ON "
-                                   "CONFLICT(issuer,subject) DO NOTHING",
-                          err)
-            : NULL;
-    if (!rc && !st)
-        rc = -1;
-    if (st) {
-        sbq_bind_text(st, 1, user_id);
-        sbq_bind_text(st, 2, issuer);
-        sbq_bind_text(st, 3, subject);
-        rc = sbq_step_done(st, err);
+    if (!rc) {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s),
+                                   remove ? "DELETE FROM auth_oidc_links WHERE user_id=? AND issuer=? AND subject=?"
+                                          : "INSERT INTO auth_oidc_links(user_id,issuer,subject) VALUES(?,?,?) ON "
+                                            "CONFLICT(issuer,subject) DO NOTHING",
+                                   err);
+        if (q.rc != 0) {
+            rc = -1;
+        } else {
+            sbq_bind_text(q.st, 1, user_id);
+            sbq_bind_text(q.st, 2, issuer);
+            sbq_bind_text(q.st, 3, subject);
+            rc = sbq_step_done(q.st, err);
+        }
     }
-    sqlite3_finalize(st);
     if (!rc && !remove) {
-        st = sbq_prepare(SB_AUTH_DB(s), "SELECT user_id FROM auth_oidc_links WHERE issuer=? AND subject=?",
-                         err);
-        if (!st)
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT user_id FROM auth_oidc_links WHERE issuer=? AND subject=?",
+                                   err);
+        if (q.rc != 0)
             rc = -1;
         else {
-            sbq_bind_text(st, 1, issuer);
-            sbq_bind_text(st, 2, subject);
-            int step = sbq_step_row(st, err);
-            char *owner = step == 1 ? sbq_text(st, 0) : NULL;
+            sbq_bind_text(q.st, 1, issuer);
+            sbq_bind_text(q.st, 2, subject);
+            int step = sbq_step_row(q.st, err);
+            char *owner = step == 1 ? sbq_text(q.st, 0) : NULL;
             if (step < 0)
                 rc = -1;
             else if (!sb_streq(owner, user_id))
                 rc = sb_fail(err, SB_ERR_CONFLICT, "OIDC identity is already linked to another user");
             free(owner);
         }
-        sqlite3_finalize(st);
     }
     sb_database_unlock(s->database);
     return rc;

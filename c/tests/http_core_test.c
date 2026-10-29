@@ -1023,6 +1023,43 @@ TEST(ephemeral_port_and_restart) {
     sb_test_server_stop(&first);
 }
 
+static bool log_has(sb_http_server *server, const char *needle) {
+    sbj *lines = sb_http_log_lines(server);
+    bool found = false;
+    const sbj *line;
+    SBJ_ARR_FOREACH(lines, i, line) found = found || strstr(sbj_as_str(line, ""), needle) != NULL;
+    sbj_free(lines);
+    return found;
+}
+
+/* The log sink is process-wide: the newest server owns it, and freeing the
+ * owner detaches it so a surviving server stops receiving lines. */
+TEST(log_sink_ownership) {
+    sb_test_server first;
+    REQUIRE(start(&first) == 0);
+    sb_err err = {0};
+    sb_test_env env;
+    sb_test_env_init(&env);
+    sb_store *store = sb_store_open(env.db_path, sb_test_migrations_dir(), &err);
+    REQUIRE(store != NULL);
+    sb_http_server_options o;
+    sb_http_server_options_init(&o);
+    sb_str_set(&o.jwt_secret, "contract-jwt-secret");
+    sb_str_set(&o.log_level, "warn");
+    sb_http_server *second = sb_http_server_new(store, &o, &err);
+    REQUIRE(second != NULL);
+    SB_WARN("sink-owner-second");
+    CHECK(log_has(second, "sink-owner-second"));
+    CHECK(!log_has(first.server, "sink-owner-second"));
+    sb_http_server_free(second);
+    SB_WARN("sink-after-owner-free");
+    CHECK(!log_has(first.server, "sink-after-owner-free"));
+    sb_http_server_options_free(&o);
+    sb_store_free(store);
+    sb_test_env_free(&env);
+    sb_test_server_stop(&first);
+}
+
 /* ---- shared helpers ---------------------------------------------------------------------------------- */
 
 TEST(string_helpers) {

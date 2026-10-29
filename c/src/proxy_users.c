@@ -974,6 +974,34 @@ static int validate_exchange_request(const sbj *request, int64_t now, sb_err *er
     return 0;
 }
 
+/* Upserts the stored response for (host, boot) so a retry of the same request
+ * replays it; 0 or -1 (err set). Caller holds the database lock. */
+static int save_lease_session(sqlite3 *db, const char *host, const char *boot, int64_t seq,
+                              const char *hash, const sbj *response, int64_t now, sb_err *err) {
+    char *encoded = sbj_dump(response, -1);
+    int rc = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "INSERT INTO proxy_lease_sessions(host_id,boot_id,request_seq,request_hash,response,updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(host_id,boot_id) DO UPDATE SET "
+            "request_seq=excluded.request_seq,request_hash=excluded.request_hash,response=excluded.response,"
+            "updated_at=excluded.updated_at",
+            err);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, host);
+            sbq_bind_text(q.st, 2, boot);
+            sbq_bind_int(q.st, 3, seq);
+            sbq_bind_text(q.st, 4, hash);
+            sbq_bind_text(q.st, 5, encoded);
+            sbq_bind_int(q.st, 6, now);
+            rc = sbq_step_done(q.st, err);
+        }
+    }
+    free(encoded);
+    return rc;
+}
+
 sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj *request, int64_t now,
                              sb_err *err) {
     if (validate_exchange_request(request, now, err) != 0) return NULL;
@@ -1093,28 +1121,7 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
         if (row < 0)
             goto rollback;
     }
-    encoded = sbj_dump(out, -1);
-    st = sbq_prepare(
-        db,
-        "INSERT INTO proxy_lease_sessions(host_id,boot_id,request_seq,request_hash,response,updated_at) "
-        "VALUES(?,?,?,?,?,?) ON CONFLICT(host_id,boot_id) DO UPDATE SET "
-        "request_seq=excluded.request_seq,request_hash=excluded.request_hash,response=excluded.response,"
-        "updated_at=excluded.updated_at",
-        err);
-    if (!st) {
-        free(encoded);
-        goto rollback;
-    }
-    sbq_bind_text(st, 1, host);
-    sbq_bind_text(st, 2, boot);
-    sbq_bind_int(st, 3, seq);
-    sbq_bind_text(st, 4, hash);
-    sbq_bind_text(st, 5, encoded);
-    sbq_bind_int(st, 6, now);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    free(encoded);
-    if (rc || sbq_commit(db, err))
+    if (save_lease_session(db, host, boot, seq, hash, out, now, err) || sbq_commit(db, err))
         goto rollback;
     goto done;
 rollback:

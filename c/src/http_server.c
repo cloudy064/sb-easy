@@ -522,12 +522,19 @@ static int bounded_string(const sbj *entry, const char *field, size_t maximum, b
     return 0;
 }
 
+/* Most per-domain route statistics entries accepted in one report. */
+#define SB_HTTP_MAX_DOMAIN_STATS 1000
+/* civetweb connection tuning; times in milliseconds, sizes in bytes. */
+#define SB_HTTP_KEEP_ALIVE_TIMEOUT_MS "15000"
+#define SB_HTTP_REQUEST_TIMEOUT_MS "60000"
+#define SB_HTTP_MAX_REQUEST_BYTES "131072"
+
 static sbj *normalize_domain_stats(const sbj *stats, sb_err *err) {
     if (!sbj_is_array(stats)) {
         sb_fail(err, SB_ERR_VALIDATION, "domain_stats must be an array");
         return NULL;
     }
-    if (sbj_arr_len(stats) > 1000) {
+    if (sbj_arr_len(stats) > SB_HTTP_MAX_DOMAIN_STATS) {
         sb_fail(err, SB_ERR_VALIDATION, "domain_stats must contain at most 1000 entries");
         return NULL;
     }
@@ -2186,10 +2193,10 @@ int sb_http_server_start(sb_http_server *srv, sb_err *err) {
                             "decode_url", "no",
                             "decode_query_string", "no",
                             "enable_keep_alive", "yes",
-                            "keep_alive_timeout_ms", "15000",
-                            "request_timeout_ms", "60000",
+                            "keep_alive_timeout_ms", SB_HTTP_KEEP_ALIVE_TIMEOUT_MS,
+                            "request_timeout_ms", SB_HTTP_REQUEST_TIMEOUT_MS,
                             "tcp_nodelay", "1",
-                            "max_request_size", "131072",
+                            "max_request_size", SB_HTTP_MAX_REQUEST_BYTES,
                             "connection_queue", "256",
                             NULL};
     struct mg_callbacks callbacks;

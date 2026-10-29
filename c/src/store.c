@@ -2469,19 +2469,20 @@ int sb_store_find_enabled_host_by_token(sb_store *s, const char *token, sb_host 
     /* Hash first; plaintext remains a fallback until startup backfill completes. */
     char *token_hash = sb_sha256_hex(token, strlen(token));
     LOCK(s);
-    sqlite3_stmt *st = sbq_prepare(H(s),
+    int r = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(H(s),
                                    HOST_SELECT " WHERE ((h.agent_token_hash = ?1 AND h.agent_token_hash != '') "
                                                "OR (h.agent_token = ?2 AND h.agent_token != '')) "
                                                "AND h.enabled = 1",
                                    err);
-    int r = -1;
-    if (st) {
-        sbq_bind_text(st, 1, token_hash);
-        sbq_bind_text(st, 2, token);
-        r = sbq_step_row(st, err);
-        if (r == 1) read_host(st, out);
+        if (q.rc == 0) {
+            sbq_stmt_bind_text_n(&q, 1, token_hash, strlen(token_hash), err);
+            sbq_stmt_bind_text_n(&q, 2, token, strlen(token), err);
+            r = sbq_stmt_step_row(&q, err);
+            if (r == 1) read_host(q.st, out);
+        }
     }
-    sqlite3_finalize(st);
     UNLOCK(s);
     free(token_hash);
     return r;
@@ -2863,15 +2864,15 @@ static char *import_display_tag(sqlite3 *h, const sb_parsed_node *node, const ch
     char *tag = sb_strndup(node->tag, node->tag_len);
     *length = node->tag_len;
     for (size_t suffix = 1; ; ++suffix) {
-        sqlite3_stmt *st = sbq_prepare(h,
-            "SELECT 1 FROM proxy_nodes WHERE tag = ?1 AND (?2 IS NULL OR id != ?2) LIMIT 1", err);
-        if (!st) { free(tag); return NULL; }
-        if (sbq_bind_text_n(st, 1, tag, *length, err) != 0) {
-            sqlite3_finalize(st); free(tag); return NULL;
+        int found;
+        {
+            SBQ_AUTO q = sbq_stmt_open(h,
+                "SELECT 1 FROM proxy_nodes WHERE tag = ?1 AND (?2 IS NULL OR id != ?2) LIMIT 1", err);
+            if (q.rc != 0) { free(tag); return NULL; }
+            sbq_stmt_bind_text_n(&q, 1, tag, *length, err);
+            if (q.rc == 0) sbq_bind_text(q.st, 2, existing_id);
+            found = sbq_stmt_step_row(&q, err);
         }
-        sbq_bind_text(st, 2, existing_id);
-        int found = sbq_step_row(st, err);
-        sqlite3_finalize(st);
         if (found == 0) return tag;
         if (found < 0) { free(tag); return NULL; }
         sb_buf renamed = {0};
@@ -3009,13 +3010,14 @@ int sb_store_upsert_proxy_nodes(sb_store *s, const sb_parsed_node *nodes, size_t
     sqlite3 *h = H(s);
     int rc = 0;
     if (subscription_id) {
-        sqlite3_stmt *st = sbq_prepare(h, "SELECT 1 FROM subscriptions WHERE id = ?1", err);
         int r = -1;
-        if (st) {
-            sbq_bind_text(st, 1, subscription_id);
-            r = sbq_step_row(st, err);
+        {
+            SBQ_AUTO q = sbq_stmt_open(h, "SELECT 1 FROM subscriptions WHERE id = ?1", err);
+            if (q.rc == 0) {
+                sbq_stmt_bind_text_n(&q, 1, subscription_id, strlen(subscription_id), err);
+                r = sbq_stmt_step_row(&q, err);
+            }
         }
-        sqlite3_finalize(st);
         if (r == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Subscription not found");
         rc = r == 1 ? 0 : -1;
     }

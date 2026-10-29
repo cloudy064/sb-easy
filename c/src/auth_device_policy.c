@@ -112,25 +112,28 @@ sbj *sb_auth_user_scope(sb_auth_security *s, const char *user_id, sb_err *err) {
     if (!s) return NULL;
     sb_database_lock(s->database); sbj *result = NULL;
     if (require_user(s, user_id, err)) goto done;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT scope FROM auth_user_scope WHERE user_id=?", err);
-    if (!st) goto done;
-    sbq_bind_text(st, 1, user_id); int row = sbq_step_row(st, err);
-    if (row >= 0) {
-        result = sbj_object(); sbj_set_str(result, "scope", row ? (const char *)sqlite3_column_text(st, 0) : "groups");
-        sbj_set(result, "grants", sbj_array());
-    }
-    sqlite3_finalize(st);
-    if (!result) goto done;
-    st = sbq_prepare(SB_AUTH_DB(s), "SELECT group_id,permission FROM auth_device_grants WHERE user_id=? ORDER BY group_id", err);
-    row = -1;
-    if (st) {
-        sbq_bind_text(st, 1, user_id);
-        while ((row = sbq_step_row(st, err)) == 1) {
-            sbj *grant = sbj_object(); sbj_set_str(grant, "group_id", (const char *)sqlite3_column_text(st, 0));
-            sbj_set_str(grant, "permission", (const char *)sqlite3_column_text(st, 1));
-            sbj_arr_push(sbj_get(result, "grants"), grant);
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT scope FROM auth_user_scope WHERE user_id=?", err);
+        if (q.rc != 0) goto done;
+        sbq_bind_text(q.st, 1, user_id); row = sbq_step_row(q.st, err);
+        if (row >= 0) {
+            result = sbj_object(); sbj_set_str(result, "scope", row ? (const char *)sqlite3_column_text(q.st, 0) : "groups");
+            sbj_set(result, "grants", sbj_array());
         }
-        sqlite3_finalize(st);
+    }
+    if (!result) goto done;
+    row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT group_id,permission FROM auth_device_grants WHERE user_id=? ORDER BY group_id", err);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, user_id);
+            while ((row = sbq_step_row(q.st, err)) == 1) {
+                sbj *grant = sbj_object(); sbj_set_str(grant, "group_id", (const char *)sqlite3_column_text(q.st, 0));
+                sbj_set_str(grant, "permission", (const char *)sqlite3_column_text(q.st, 1));
+                sbj_arr_push(sbj_get(result, "grants"), grant);
+            }
+        }
     }
     if (row < 0) { sbj_free(result); result = NULL; }
 done:
@@ -156,29 +159,34 @@ int sb_auth_user_scope_set(sb_auth_security *s, const char *user_id, const sbj *
     sb_database_lock(s->database); int result = -1;
     if (sbq_begin(SB_AUTH_DB(s), err)) goto done;
     if (require_user(s, user_id, err)) goto rollback;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_user_scope(user_id,scope) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET scope=excluded.scope", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, scope->v.str.ptr);
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st);
-    if (rc) goto rollback;
-    st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_device_grants WHERE user_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, user_id); rc = sbq_step_done(st, err); sqlite3_finalize(st);
-    if (rc) goto rollback;
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_user_scope(user_id,scope) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET scope=excluded.scope", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id); sbq_bind_text(q.st, 2, scope->v.str.ptr);
+        if (sbq_step_done(q.st, err)) goto rollback;
+    }
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_device_grants WHERE user_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, user_id);
+        if (sbq_step_done(q.st, err)) goto rollback;
+    }
     for (size_t i = 0; i < seen.len; ++i) {
-        st = sbq_prepare(SB_AUTH_DB(s), "SELECT 1 FROM auth_device_groups WHERE id=?", err);
-        if (!st) goto rollback;
-        sbq_bind_text(st, 1, seen.items[i]); int row = sbq_step_row(st, err); sqlite3_finalize(st);
+        int row = -1;
+        {
+            SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT 1 FROM auth_device_groups WHERE id=?", err);
+            if (q.rc != 0) goto rollback;
+            sbq_bind_text(q.st, 1, seen.items[i]); row = sbq_step_row(q.st, err);
+        }
         if (row != 1) {
             if (!row) sb_fail(err, SB_ERR_VALIDATION, "Scope references an unknown device group");
             goto rollback;
         }
-        st = sbq_prepare(SB_AUTH_DB(s), "INSERT INTO auth_device_grants(user_id,group_id,permission) VALUES(?,?,?)", err);
-        if (!st) goto rollback;
-        sbq_bind_text(st, 1, user_id); sbq_bind_text(st, 2, seen.items[i]);
-        sbq_bind_text(st, 3, sbj_get_str(sbj_arr_at(grants, i), "permission", ""));
-        rc = sbq_step_done(st, err); sqlite3_finalize(st);
-        if (rc) goto rollback;
+        SBQ_AUTO g = sbq_stmt_open(SB_AUTH_DB(s), "INSERT INTO auth_device_grants(user_id,group_id,permission) VALUES(?,?,?)", err);
+        if (g.rc != 0) goto rollback;
+        sbq_bind_text(g.st, 1, user_id); sbq_bind_text(g.st, 2, seen.items[i]);
+        sbq_bind_text(g.st, 3, sbj_get_str(sbj_arr_at(grants, i), "permission", ""));
+        if (sbq_step_done(g.st, err)) goto rollback;
     }
     if (sbq_commit(SB_AUTH_DB(s), err)) goto rollback;
     result = 0; goto done;

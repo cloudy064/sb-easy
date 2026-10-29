@@ -100,34 +100,33 @@ static int runtime_ready(sqlite3 *db, const char *host, int64_t now, int64_t *se
     return row < 0 ? -1 : ready;
 }
 static sbj *devices_locked(sqlite3 *db, const char *id, bool policy, int64_t now, sb_err *err) {
-    sqlite3_stmt *st =
-        sbq_prepare(db,
+    SBQ_AUTO q =
+        sbq_stmt_open(db,
                     policy ? "SELECT id,name,enabled,created_at,password,expires_at FROM proxy_devices "
                              "WHERE user_id=? AND enabled=1 AND (expires_at=0 OR expires_at>?) ORDER BY id"
                            : "SELECT id,name,enabled,created_at,'',expires_at FROM proxy_devices WHERE "
                              "user_id=? ORDER BY created_at,id",
                     err);
-    if (!st)
+    if (q.rc != 0)
         return NULL;
-    sbq_bind_text(st, 1, id);
+    sbq_bind_text(q.st, 1, id);
     if (policy)
-        sbq_bind_int(st, 2, now);
+        sbq_bind_int(q.st, 2, now);
     sbj *out = sbj_array();
     int row;
-    while ((row = sbq_step_row(st, err)) == 1) {
+    while ((row = sbq_step_row(q.st, err)) == 1) {
         sbj *d = sbj_object();
-        sbj_set_str(d, "id", column(st, 0));
-        sbj_set_int(d, "expires_at", sbq_int(st, 5));
+        sbj_set_str(d, "id", column(q.st, 0));
+        sbj_set_int(d, "expires_at", sbq_int(q.st, 5));
         if (policy)
-            sbj_set_str(d, "password", column(st, 4));
+            sbj_set_str(d, "password", column(q.st, 4));
         else {
-            sbj_set_str(d, "name", column(st, 1));
-            sbj_set_bool(d, "enabled", sbq_int(st, 2));
-            sbj_set_int(d, "created_at", sbq_int(st, 3));
+            sbj_set_str(d, "name", column(q.st, 1));
+            sbj_set_bool(d, "enabled", sbq_int(q.st, 2));
+            sbj_set_int(d, "created_at", sbq_int(q.st, 3));
         }
         sbj_arr_push(out, d);
     }
-    sqlite3_finalize(st);
     if (row < 0) {
         sbj_free(out);
         return NULL;
@@ -193,20 +192,21 @@ sbj *sb_proxy_user_get(sb_database *database, const char *id, sb_err *err) {
 sbj *sb_proxy_users_list(sb_database *database, sb_err *err) {
     sqlite3 *db = sb_database_handle(database);
     sb_database_lock(database);
-    sqlite3_stmt *st =
-        sbq_prepare(db, "SELECT id FROM proxy_users WHERE deleted=0 ORDER BY created_at,id", err);
     sbj *out = sbj_array();
     int row = -1;
-    if (st) {
-        while ((row = sbq_step_row(st, err)) == 1) {
-            sbj *u = user_locked(database, column(st, 0), err);
-            if (!u) {
-                row = -1;
-                break;
+    {
+        SBQ_AUTO q =
+            sbq_stmt_open(db, "SELECT id FROM proxy_users WHERE deleted=0 ORDER BY created_at,id", err);
+        if (q.rc == 0) {
+            while ((row = sbq_step_row(q.st, err)) == 1) {
+                sbj *u = user_locked(database, column(q.st, 0), err);
+                if (!u) {
+                    row = -1;
+                    break;
+                }
+                sbj_arr_push(out, u);
             }
-            sbj_arr_push(out, u);
         }
-        sqlite3_finalize(st);
     }
     sb_database_unlock(database);
     if (row < 0) {

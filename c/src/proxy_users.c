@@ -135,45 +135,49 @@ static sbj *devices_locked(sqlite3 *db, const char *id, bool policy, int64_t now
 }
 static sbj *user_locked(sb_database *database, const char *id, sb_err *err) {
     sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st =
-        sbq_prepare(db,
-                    "SELECT "
-                    "u.id,u.name,u.enabled,u.quota_bytes,u.expires_at,u.max_devices,u.epoch,u.not_before,u."
-                    "created_at,u.updated_at,COALESCE((SELECT SUM(grant_bytes) FROM proxy_leases WHERE "
-                    "user_id=u.id AND epoch=u.epoch),0),COALESCE((SELECT SUM(used_bytes) FROM proxy_leases "
-                    "WHERE user_id=u.id AND epoch=u.epoch),0) FROM proxy_users u WHERE id=? AND deleted=0",
-                    err);
-    if (!st)
-        return NULL;
-    sbq_bind_text(st, 1, id);
-    int row = sbq_step_row(st, err);
+    int row = -1;
     sbj *out = NULL;
-    if (row == 1) {
-        out = sbj_object();
-        sbj_set_str(out, "id", column(st, 0));
-        sbj_set_str(out, "name", column(st, 1));
-        sbj_set_bool(out, "enabled", sbq_int(st, 2));
-        const char *names[] = {"quota_bytes", "expires_at", "max_devices",     "epoch",         "not_before",
-                               "created_at",  "updated_at", "allocated_bytes", "reported_bytes"};
-        for (size_t i = 0; i < sizeof names / sizeof *names; ++i)
-            sbj_set_int(out, names[i], sbq_int(st, (int)i + 3));
-        int64_t wait_ms = sb_proxy_clock_wait_ms(database, id, sbq_int(st, 6));
-        sbj_set_int(out, "lease_wait_seconds", (wait_ms + 999) / 1000);
-    } else if (!row)
-        sb_fail(err, SB_ERR_NOT_FOUND, "Proxy user not found");
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT "
+            "u.id,u.name,u.enabled,u.quota_bytes,u.expires_at,u.max_devices,u.epoch,u.not_before,u."
+            "created_at,u.updated_at,COALESCE((SELECT SUM(grant_bytes) FROM proxy_leases WHERE "
+            "user_id=u.id AND epoch=u.epoch),0),COALESCE((SELECT SUM(used_bytes) FROM proxy_leases "
+            "WHERE user_id=u.id AND epoch=u.epoch),0) FROM proxy_users u WHERE id=? AND deleted=0",
+            err);
+        if (q.rc != 0)
+            return NULL;
+        sbq_bind_text(q.st, 1, id);
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            out = sbj_object();
+            sbj_set_str(out, "id", column(q.st, 0));
+            sbj_set_str(out, "name", column(q.st, 1));
+            sbj_set_bool(out, "enabled", sbq_int(q.st, 2));
+            const char *names[] = {"quota_bytes", "expires_at", "max_devices",     "epoch",         "not_before",
+                                   "created_at",  "updated_at", "allocated_bytes", "reported_bytes"};
+            for (size_t i = 0; i < sizeof names / sizeof *names; ++i)
+                sbj_set_int(out, names[i], sbq_int(q.st, (int)i + 3));
+            int64_t wait_ms = sb_proxy_clock_wait_ms(database, id, sbq_int(q.st, 6));
+            sbj_set_int(out, "lease_wait_seconds", (wait_ms + 999) / 1000);
+        } else if (!row)
+            sb_fail(err, SB_ERR_NOT_FOUND, "Proxy user not found");
+    }
     if (!out)
         return NULL;
-    st = sbq_prepare(db, "SELECT host_id FROM proxy_user_nodes WHERE user_id=? ORDER BY host_id", err);
-    if (!st) {
-        sbj_free(out);
-        return NULL;
-    }
-    sbq_bind_text(st, 1, id);
     sbj *hosts = sbj_array();
-    while ((row = sbq_step_row(st, err)) == 1)
-        sbj_arr_push(hosts, sbj_str(column(st, 0)));
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT host_id FROM proxy_user_nodes WHERE user_id=? ORDER BY host_id", err);
+        if (q.rc != 0) {
+            sbj_free(hosts);
+            sbj_free(out);
+            return NULL;
+        }
+        sbq_bind_text(q.st, 1, id);
+        while ((row = sbq_step_row(q.st, err)) == 1)
+            sbj_arr_push(hosts, sbj_str(column(q.st, 0)));
+    }
     sbj_set(out, "host_ids", hosts);
     sbj *devices = row >= 0 ? devices_locked(db, id, false, 0, err) : NULL;
     if (!devices) {

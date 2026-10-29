@@ -117,11 +117,10 @@ void sb_auth_security_free(sb_auth_security *s) {
 }
 
 int sb_auth_sec_user_exists_locked(sb_auth_security *s, const char *user_id, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT 1 FROM users WHERE id=?", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, user_id);
-    int result = sbq_step_row(st, err); sqlite3_finalize(st);
-    return result;
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT 1 FROM users WHERE id=?", err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, user_id);
+    return sbq_step_row(q.st, err);
 }
 
 static int required_user_locked(sb_auth_security *s, const char *user_id, sb_err *err) {
@@ -275,13 +274,15 @@ sbj *sb_auth_security_sessions(sb_auth_security *s, const char *user_id, const c
 static int revoke_locked(sb_auth_security *s, const char *user_id, const char *session_id,
                            const char *keep_token, sb_err *err) {
     char *keep = keep_token ? sb_auth_sec_hash(s, "session", keep_token) : NULL;
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL AND (? IS NULL OR id=?) AND (? IS NULL OR token_hash<>?)", err);
     int result = -1;
-    if (st) {
-        sbq_bind_int(st, 1, sb_unix_now()); sbq_bind_text(st, 2, user_id);
-        sbq_bind_text(st, 3, session_id); sbq_bind_text(st, 4, session_id);
-        sbq_bind_text(st, 5, keep); sbq_bind_text(st, 6, keep);
-        result = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL AND (? IS NULL OR id=?) AND (? IS NULL OR token_hash<>?)", err);
+        if (q.rc == 0) {
+            sbq_bind_int(q.st, 1, sb_unix_now()); sbq_bind_text(q.st, 2, user_id);
+            sbq_bind_text(q.st, 3, session_id); sbq_bind_text(q.st, 4, session_id);
+            sbq_bind_text(q.st, 5, keep); sbq_bind_text(q.st, 6, keep);
+            result = sbq_step_done(q.st, err);
+        }
     }
     free(keep); return result;
 }
@@ -305,11 +306,13 @@ int sb_auth_security_logout(sb_auth_security *s, const char *token, sb_err *err)
     if (!s || !token || strlen(token) > 16384) return sb_fail(err, SB_ERR_AUTH, "Invalid session");
     char *hash = sb_auth_sec_hash(s, "session", token);
     sb_database_lock(s->database);
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL", err);
     int result = -1;
-    if (st) {
-        sbq_bind_int(st, 1, sb_unix_now()); sbq_bind_text(st, 2, hash);
-        result = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL", err);
+        if (q.rc == 0) {
+            sbq_bind_int(q.st, 1, sb_unix_now()); sbq_bind_text(q.st, 2, hash);
+            result = sbq_step_done(q.st, err);
+        }
     }
     sb_database_unlock(s->database); free(hash); return result;
 }
@@ -372,10 +375,10 @@ static char *recovery_hash(sb_auth_security *s, const char *user_id, const char 
 }
 
 static int mfa_failed_locked(sb_auth_security *s, const char *user_id, int64_t now, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "UPDATE auth_mfa SET failed_attempts=CASE WHEN failed_attempts>=4 THEN 0 ELSE failed_attempts+1 END,locked_until=CASE WHEN failed_attempts>=4 THEN ? ELSE 0 END WHERE user_id=?", err);
-    if (!st) return -1;
-    sbq_bind_int(st, 1, now + MFA_LOCK_SECONDS); sbq_bind_text(st, 2, user_id);
-    int result = sbq_step_done(st, err); sqlite3_finalize(st);
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "UPDATE auth_mfa SET failed_attempts=CASE WHEN failed_attempts>=4 THEN 0 ELSE failed_attempts+1 END,locked_until=CASE WHEN failed_attempts>=4 THEN ? ELSE 0 END WHERE user_id=?", err);
+    if (q.rc != 0) return -1;
+    sbq_bind_int(q.st, 1, now + MFA_LOCK_SECONDS); sbq_bind_text(q.st, 2, user_id);
+    int result = sbq_step_done(q.st, err);
     if (!result) sb_fail(err, SB_ERR_AUTH, "Invalid or already used verification code");
     return -1;
 }
@@ -500,9 +503,10 @@ sbj *sb_auth_mfa_begin(sb_auth_security *s, const char *user_id, sb_err *err) {
 }
 
 static int clear_challenges_locked(sb_auth_security *s, const char *user_id, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_login_challenges WHERE user_id=?", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, user_id); int result = sbq_step_done(st, err); sqlite3_finalize(st); return result;
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_login_challenges WHERE user_id=?", err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, user_id);
+    return sbq_step_done(q.st, err);
 }
 
 sbj *sb_auth_mfa_confirm(sb_auth_security *s, const char *user_id, const char *code,

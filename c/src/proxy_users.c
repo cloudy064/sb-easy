@@ -754,54 +754,58 @@ sbj *sb_proxy_subscription(sb_database *database, const char *token, int64_t now
     sbj *out = NULL;
     sqlite3 *db = sb_database_handle(database);
     sb_database_lock(database);
-    sqlite3_stmt *st = sbq_prepare(
-        db,
-        "SELECT d.user_id,d.password FROM proxy_devices d JOIN proxy_users u ON "
-        "u.id=d.user_id WHERE d.token_hash=? AND d.enabled=1 AND u.enabled=1 AND "
-        "u.deleted=0 AND (u.expires_at=0 OR u.expires_at>?) AND (d.expires_at=0 OR d.expires_at>?)",
-        err);
-    if (!st)
-        goto done;
-    sbq_bind_text(st, 1, hash);
-    sbq_bind_int(st, 2, now);
-    sbq_bind_int(st, 3, now);
-    int row = sbq_step_row(st, err);
-    if (row == 1) {
-        user = sbq_text(st, 0);
-        device_key = sbq_text(st, 1);
-    } else if (!row)
-        sb_fail(err, SB_ERR_AUTH, "Invalid, revoked or expired device subscription");
-    sqlite3_finalize(st);
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT d.user_id,d.password FROM proxy_devices d JOIN proxy_users u ON "
+            "u.id=d.user_id WHERE d.token_hash=? AND d.enabled=1 AND u.enabled=1 AND "
+            "u.deleted=0 AND (u.expires_at=0 OR u.expires_at>?) AND (d.expires_at=0 OR d.expires_at>?)",
+            err);
+        if (q.rc != 0)
+            goto done;
+        sbq_bind_text(q.st, 1, hash);
+        sbq_bind_int(q.st, 2, now);
+        sbq_bind_int(q.st, 3, now);
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            user = sbq_text(q.st, 0);
+            device_key = sbq_text(q.st, 1);
+        } else if (!row)
+            sb_fail(err, SB_ERR_AUTH, "Invalid, revoked or expired device subscription");
+    }
     if (!user)
         goto done;
-    st = sbq_prepare(db,
-                     "SELECT n.host_id,n.server,n.listen_port,n.server_key FROM proxy_user_nodes b JOIN "
-                     "proxy_ingress_nodes n ON n.host_id=b.host_id JOIN hosts h ON h.id=n.host_id "
-                     "JOIN proxy_runtime_reports r ON r.host_id=n.host_id WHERE b.user_id=? AND n.enabled=1 "
-                     "AND h.enabled=1 "
-                     "AND r.supported=1 AND r.observed_at BETWEEN ? AND ? ORDER BY n.host_id",
-                     err);
-    if (!st)
-        goto done;
-    sbq_bind_text(st, 1, user);
-    sbq_bind_int(st, 2, now - RUNTIME_FRESH_SECONDS);
-    sbq_bind_int(st, 3, now);
-    out = sbj_object();
-    sbj *nodes = sbj_array();
-    sbj_set(out, "outbounds", nodes);
-    while ((row = sbq_step_row(st, err)) == 1) {
-        sbj *node = sbj_object();
-        sbj_set_str(node, "type", "shadowsocks");
-        sbj_set_str(node, "tag", column(st, 0));
-        sbj_set_str(node, "server", column(st, 1));
-        sbj_set_int(node, "server_port", sbq_int(st, 2));
-        sbj_set_str(node, "method", METHOD);
-        char *password = sb_asprintf("%s:%s", column(st, 3), device_key);
-        sbj_set_str(node, "password", password);
-        free(password);
-        sbj_arr_push(nodes, node);
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT n.host_id,n.server,n.listen_port,n.server_key FROM proxy_user_nodes b JOIN "
+            "proxy_ingress_nodes n ON n.host_id=b.host_id JOIN hosts h ON h.id=n.host_id "
+            "JOIN proxy_runtime_reports r ON r.host_id=n.host_id WHERE b.user_id=? AND n.enabled=1 "
+            "AND h.enabled=1 "
+            "AND r.supported=1 AND r.observed_at BETWEEN ? AND ? ORDER BY n.host_id",
+            err);
+        if (q.rc != 0)
+            goto done;
+        sbq_bind_text(q.st, 1, user);
+        sbq_bind_int(q.st, 2, now - RUNTIME_FRESH_SECONDS);
+        sbq_bind_int(q.st, 3, now);
+        out = sbj_object();
+        sbj *nodes = sbj_array();
+        sbj_set(out, "outbounds", nodes);
+        while ((row = sbq_step_row(q.st, err)) == 1) {
+            sbj *node = sbj_object();
+            sbj_set_str(node, "type", "shadowsocks");
+            sbj_set_str(node, "tag", column(q.st, 0));
+            sbj_set_str(node, "server", column(q.st, 1));
+            sbj_set_int(node, "server_port", sbq_int(q.st, 2));
+            sbj_set_str(node, "method", METHOD);
+            char *password = sb_asprintf("%s:%s", column(q.st, 3), device_key);
+            sbj_set_str(node, "password", password);
+            free(password);
+            sbj_arr_push(nodes, node);
+        }
     }
-    sqlite3_finalize(st);
     if (row < 0) {
         sbj_free(out);
         out = NULL;
@@ -854,53 +858,57 @@ static sbj *lease_locked(sqlite3 *db, const char *host, const char *boot, const 
     char *id = NULL;
     int64_t grant = 0, used = 0, allocated = 0, hosts = 1;
     sbj *out = NULL;
-    sqlite3_stmt *st = sbq_prepare(db,
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db,
                                    "SELECT id,grant_bytes,used_bytes FROM proxy_leases WHERE user_id=? AND "
                                    "host_id=? AND boot_id=? AND epoch=?",
                                    err);
-    if (!st)
-        goto done;
-    sbq_bind_text(st, 1, user);
-    sbq_bind_text(st, 2, host);
-    sbq_bind_text(st, 3, boot);
-    sbq_bind_int(st, 4, epoch);
-    int row = sbq_step_row(st, err);
-    if (row == 1) {
-        id = sbq_text(st, 0);
-        grant = sbq_int(st, 1);
-        used = sbq_int(st, 2);
+        if (q.rc != 0)
+            goto done;
+        sbq_bind_text(q.st, 1, user);
+        sbq_bind_text(q.st, 2, host);
+        sbq_bind_text(q.st, 3, boot);
+        sbq_bind_int(q.st, 4, epoch);
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            id = sbq_text(q.st, 0);
+            grant = sbq_int(q.st, 1);
+            used = sbq_int(q.st, 2);
+        }
     }
-    sqlite3_finalize(st);
     if (row < 0)
         goto done;
-    st = sbq_prepare(db, "SELECT COALESCE(SUM(grant_bytes),0) FROM proxy_leases WHERE user_id=? AND epoch=?",
-                     err);
-    if (!st)
-        goto done;
-    sbq_bind_text(st, 1, user);
-    sbq_bind_int(st, 2, epoch);
-    row = sbq_step_row(st, err);
-    if (row == 1)
-        allocated = sbq_int(st, 0);
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db, "SELECT COALESCE(SUM(grant_bytes),0) FROM proxy_leases WHERE user_id=? AND epoch=?", err);
+        if (q.rc != 0)
+            goto done;
+        sbq_bind_text(q.st, 1, user);
+        sbq_bind_int(q.st, 2, epoch);
+        row = sbq_step_row(q.st, err);
+        if (row == 1)
+            allocated = sbq_int(q.st, 0);
+    }
     if (row != 1)
         goto done;
-    st = sbq_prepare(
-        db,
-        "SELECT COUNT(*) FROM proxy_user_nodes b JOIN proxy_ingress_nodes n ON n.host_id=b.host_id JOIN "
-        "hosts h ON h.id=n.host_id JOIN proxy_runtime_reports r ON r.host_id=n.host_id "
-        "WHERE b.user_id=? AND n.enabled=1 AND h.enabled=1 AND r.supported=1 AND r.observed_at BETWEEN ? AND "
-        "?",
-        err);
-    if (!st)
-        goto done;
-    sbq_bind_text(st, 1, user);
-    sbq_bind_int(st, 2, now - RUNTIME_FRESH_SECONDS);
-    sbq_bind_int(st, 3, now);
-    row = sbq_step_row(st, err);
-    if (row == 1)
-        hosts = sbq_int(st, 0);
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT COUNT(*) FROM proxy_user_nodes b JOIN proxy_ingress_nodes n ON n.host_id=b.host_id JOIN "
+            "hosts h ON h.id=n.host_id JOIN proxy_runtime_reports r ON r.host_id=n.host_id "
+            "WHERE b.user_id=? AND n.enabled=1 AND h.enabled=1 AND r.supported=1 AND r.observed_at BETWEEN ? AND "
+            "?",
+            err);
+        if (q.rc != 0)
+            goto done;
+        sbq_bind_text(q.st, 1, user);
+        sbq_bind_int(q.st, 2, now - RUNTIME_FRESH_SECONDS);
+        sbq_bind_int(q.st, 3, now);
+        row = sbq_step_row(q.st, err);
+        if (row == 1)
+            hosts = sbq_int(q.st, 0);
+    }
     if (row != 1 || hosts < 1)
         goto done;
     int64_t available = (quota ? quota : SAFE_INTEGER) - allocated;
@@ -924,28 +932,28 @@ static sbj *lease_locked(sqlite3 *db, const char *host, const char *boot, const 
     int64_t until = now + LEASE_SECONDS;
     if (expiry && expiry < until)
         until = expiry;
-    st = sbq_prepare(
-        db,
-        "INSERT INTO "
-        "proxy_leases(id,user_id,host_id,boot_id,epoch,grant_bytes,used_bytes,expires_at,updated_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,host_id,boot_id,epoch) DO UPDATE SET "
-        "grant_bytes=excluded.grant_bytes,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
-        err);
-    if (!st)
-        goto done;
-    sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, user);
-    sbq_bind_text(st, 3, host);
-    sbq_bind_text(st, 4, boot);
-    sbq_bind_int(st, 5, epoch);
-    sbq_bind_int(st, 6, grant);
-    sbq_bind_int(st, 7, used);
-    sbq_bind_int(st, 8, until);
-    sbq_bind_int(st, 9, now);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    if (rc)
-        goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "INSERT INTO "
+            "proxy_leases(id,user_id,host_id,boot_id,epoch,grant_bytes,used_bytes,expires_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,host_id,boot_id,epoch) DO UPDATE SET "
+            "grant_bytes=excluded.grant_bytes,expires_at=excluded.expires_at,updated_at=excluded.updated_at",
+            err);
+        if (q.rc != 0)
+            goto done;
+        sbq_bind_text(q.st, 1, id);
+        sbq_bind_text(q.st, 2, user);
+        sbq_bind_text(q.st, 3, host);
+        sbq_bind_text(q.st, 4, boot);
+        sbq_bind_int(q.st, 5, epoch);
+        sbq_bind_int(q.st, 6, grant);
+        sbq_bind_int(q.st, 7, used);
+        sbq_bind_int(q.st, 8, until);
+        sbq_bind_int(q.st, 9, now);
+        if (sbq_step_done(q.st, err))
+            goto done;
+    }
     out = sbj_object();
     sbj_set_str(out, "id", user);
     sbj_set_int(out, "epoch", epoch);

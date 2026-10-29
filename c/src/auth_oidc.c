@@ -773,12 +773,12 @@ char *sb_auth_oidc_finish(sb_auth_security *s, const char *state, const char *co
     if (rc) {
         rc = -1;
     } else {
-        SBQ_AUTO d = sbq_stmt_open(db, "DELETE FROM auth_oidc_flows WHERE state_hash=?", NULL);
-        if (d.rc != 0) {
+        SBQ_AUTO del = sbq_stmt_open(db, "DELETE FROM auth_oidc_flows WHERE state_hash=?", NULL);
+        if (del.rc != 0) {
             rc = -1;
         } else {
-            sbq_bind_text(d.st, 1, state_hash);
-            rc = sbq_step_done(d.st, NULL);
+            sbq_bind_text(del.st, 1, state_hash);
+            rc = sbq_step_done(del.st, NULL);
         }
     }
     if (!rc)

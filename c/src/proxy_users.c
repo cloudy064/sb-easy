@@ -353,16 +353,17 @@ int sb_proxy_user_remove(sb_database *database, const char *id, int64_t now, sb_
     int rc = -1;
     if (begin(db, err))
         goto done;
-    sqlite3_stmt *st = sbq_prepare(
-        db,
-        "UPDATE proxy_users SET enabled=0,deleted=1,claim_hash=NULL,updated_at=? WHERE id=? AND deleted=0",
-        err);
-    if (!st)
-        goto rollback;
-    sbq_bind_int(st, 1, now);
-    sbq_bind_text(st, 2, id);
-    rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "UPDATE proxy_users SET enabled=0,deleted=1,claim_hash=NULL,updated_at=? WHERE id=? AND deleted=0",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_int(q.st, 1, now);
+        sbq_bind_text(q.st, 2, id);
+        rc = sbq_step_done(q.st, err);
+    }
     if (rc)
         goto rollback;
     if (sqlite3_changes(db) != 1) {
@@ -387,21 +388,21 @@ sbj *sb_proxy_user_reset(sb_database *database, const char *id, int64_t now, sb_
     sbj *out = NULL;
     if (begin(db, err))
         goto done;
-    sqlite3_stmt *st =
-        sbq_prepare(db,
-                    "UPDATE proxy_users SET epoch=epoch+1,not_before=MAX(?,COALESCE((SELECT MAX(expires_at) "
-                    "FROM proxy_leases WHERE user_id=proxy_users.id),0)),updated_at=? WHERE id=? AND "
-                    "deleted=0 AND epoch<9007199254740991",
-                    err);
-    if (!st)
-        goto rollback;
-    sbq_bind_int(st, 1, now + LEASE_SECONDS);
-    sbq_bind_int(st, 2, now);
-    sbq_bind_text(st, 3, id);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    if (rc)
-        goto rollback;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "UPDATE proxy_users SET epoch=epoch+1,not_before=MAX(?,COALESCE((SELECT MAX(expires_at) "
+            "FROM proxy_leases WHERE user_id=proxy_users.id),0)),updated_at=? WHERE id=? AND "
+            "deleted=0 AND epoch<9007199254740991",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_int(q.st, 1, now + LEASE_SECONDS);
+        sbq_bind_int(q.st, 2, now);
+        sbq_bind_text(q.st, 3, id);
+        if (sbq_step_done(q.st, err))
+            goto rollback;
+    }
     if (sqlite3_changes(db) != 1) {
         sb_fail(err, SB_ERR_NOT_FOUND, "Proxy user not found");
         goto rollback;
@@ -431,19 +432,20 @@ sbj *sb_proxy_claim_rotate(sb_database *database, const char *id, int64_t now, s
     sbj *out = NULL;
     sb_database_lock(database);
     sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st =
-        sbq_prepare(db, "UPDATE proxy_users SET claim_hash=?,updated_at=? WHERE id=? AND deleted=0", err);
-    if (st) {
-        sbq_bind_text(st, 1, hash);
-        sbq_bind_int(st, 2, now);
-        sbq_bind_text(st, 3, id);
-        int rc = sbq_step_done(st, err);
-        sqlite3_finalize(st);
-        if (!rc && sqlite3_changes(db) == 1) {
-            out = sbj_object();
-            sbj_set_str(out, "claim_token", token);
-        } else if (!rc)
-            sb_fail(err, SB_ERR_NOT_FOUND, "Proxy user not found");
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db, "UPDATE proxy_users SET claim_hash=?,updated_at=? WHERE id=? AND deleted=0", err);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, hash);
+            sbq_bind_int(q.st, 2, now);
+            sbq_bind_text(q.st, 3, id);
+            int rc = sbq_step_done(q.st, err);
+            if (!rc && sqlite3_changes(db) == 1) {
+                out = sbj_object();
+                sbj_set_str(out, "claim_token", token);
+            } else if (!rc)
+                sb_fail(err, SB_ERR_NOT_FOUND, "Proxy user not found");
+        }
     }
     sb_database_unlock(database);
     free(hash);
@@ -457,19 +459,20 @@ char *sb_proxy_claim_resolve(sb_database *database, const char *token, int64_t n
     }
     char *hash = sb_sha256_hex(token, strlen(token)), *out = NULL;
     sb_database_lock(database);
-    sqlite3_stmt *st = sbq_prepare(sb_database_handle(database),
+    {
+        SBQ_AUTO q = sbq_stmt_open(sb_database_handle(database),
                                    "SELECT id FROM proxy_users WHERE claim_hash=? AND deleted=0 AND "
                                    "enabled=1 AND (expires_at=0 OR expires_at>?)",
                                    err);
-    if (st) {
-        sbq_bind_text(st, 1, hash);
-        sbq_bind_int(st, 2, now);
-        int row = sbq_step_row(st, err);
-        if (row == 1)
-            out = sbq_text(st, 0);
-        else if (!row)
-            sb_fail(err, SB_ERR_AUTH, "Invalid or expired proxy claim token");
-        sqlite3_finalize(st);
+        if (q.rc == 0) {
+            sbq_bind_text(q.st, 1, hash);
+            sbq_bind_int(q.st, 2, now);
+            int row = sbq_step_row(q.st, err);
+            if (row == 1)
+                out = sbq_text(q.st, 0);
+            else if (!row)
+                sb_fail(err, SB_ERR_AUTH, "Invalid or expired proxy claim token");
+        }
     }
     sb_database_unlock(database);
     free(hash);
@@ -554,16 +557,17 @@ int sb_proxy_device_revoke(sb_database *database, const char *user_id, const cha
     sb_database_lock(database);
     sqlite3 *db = sb_database_handle(database);
     int rc = -1;
-    sqlite3_stmt *st =
-        sbq_prepare(db, "UPDATE proxy_devices SET enabled=0,revoked_at=? WHERE id=? AND user_id=?", err);
-    if (st) {
-        sbq_bind_int(st, 1, now);
-        sbq_bind_text(st, 2, device_id);
-        sbq_bind_text(st, 3, user_id);
-        rc = sbq_step_done(st, err);
-        sqlite3_finalize(st);
-        if (!rc && sqlite3_changes(db) != 1)
-            rc = sb_fail(err, SB_ERR_NOT_FOUND, "Proxy device not found");
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db, "UPDATE proxy_devices SET enabled=0,revoked_at=? WHERE id=? AND user_id=?", err);
+        if (q.rc == 0) {
+            sbq_bind_int(q.st, 1, now);
+            sbq_bind_text(q.st, 2, device_id);
+            sbq_bind_text(q.st, 3, user_id);
+            rc = sbq_step_done(q.st, err);
+            if (!rc && sqlite3_changes(db) != 1)
+                rc = sb_fail(err, SB_ERR_NOT_FOUND, "Proxy device not found");
+        }
     }
     sb_database_unlock(database);
     return rc;

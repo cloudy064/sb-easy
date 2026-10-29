@@ -19,9 +19,11 @@ sbj *sb_auth_device_groups(sb_auth_security *s, sb_err *err) {
     if (!s) return NULL;
     sbj *result = sbj_array();
     sb_database_lock(s->database);
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "SELECT g.id,g.name,h.host_id FROM auth_device_groups g LEFT JOIN auth_device_group_hosts h ON h.group_id=g.id ORDER BY g.name,g.id,h.host_id", err);
     int row = -1;
-    if (st) {
+    {
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "SELECT g.id,g.name,h.host_id FROM auth_device_groups g LEFT JOIN auth_device_group_hosts h ON h.group_id=g.id ORDER BY g.name,g.id,h.host_id", err);
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         sbj *current = NULL;
         while ((row = sbq_step_row(st, err)) == 1) {
             const char *id = (const char *)sqlite3_column_text(st, 0);
@@ -33,7 +35,7 @@ sbj *sb_auth_device_groups(sb_auth_security *s, sb_err *err) {
             if (sqlite3_column_type(st, 2) != SQLITE_NULL)
                 sbj_arr_push(sbj_get(current, "host_ids"), sbj_str((const char *)sqlite3_column_text(st, 2)));
         }
-        sqlite3_finalize(st);
+    }
     }
     sb_database_unlock(s->database);
     if (row < 0) { sbj_free(result); return NULL; }
@@ -95,11 +97,13 @@ done:
 int sb_auth_device_group_remove(sb_auth_security *s, const char *group_id, sb_err *err) {
     if (!s || !sb_auth_sec_token(group_id, 128)) return sb_fail(err, SB_ERR_VALIDATION, "Invalid device group ID");
     sb_database_lock(s->database);
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s), "DELETE FROM auth_device_groups WHERE id=?", err);
     int result = -1;
-    if (st) {
-        sbq_bind_text(st, 1, group_id); result = sbq_step_done(st, err); sqlite3_finalize(st);
+    {
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s), "DELETE FROM auth_device_groups WHERE id=?", err);
+    if (q.rc == 0) {
+        sbq_bind_text(q.st, 1, group_id); result = sbq_step_done(q.st, err);
         if (!result && !sqlite3_changes(SB_AUTH_DB(s))) result = sb_fail(err, SB_ERR_NOT_FOUND, "Device group not found");
+    }
     }
     sb_database_unlock(s->database); return result;
 }
@@ -190,17 +194,20 @@ bool sb_auth_device_allowed(sb_auth_security *s, const char *user_id, const char
         sb_fail(err, SB_ERR_FORBIDDEN, "Device access denied"); return false;
     }
     sb_database_lock(s->database);
-    sqlite3_stmt *st = sbq_prepare(SB_AUTH_DB(s),
+    bool allowed = false; int row = -1;
+    {
+    SBQ_AUTO q = sbq_stmt_open(SB_AUTH_DB(s),
         "SELECT u.role='admin' OR ((u.role='operator' OR (u.role='viewer' AND ?=0)) "
         "AND EXISTS(SELECT 1 FROM hosts WHERE id=?) AND EXISTS(SELECT 1 FROM auth_user_scope s "
         "WHERE s.user_id=u.id AND (s.scope='all' OR EXISTS(SELECT 1 FROM auth_device_grants g "
         "JOIN auth_device_group_hosts h ON h.group_id=g.group_id WHERE g.user_id=u.id AND h.host_id=? "
         "AND (?=0 OR g.permission='operate'))))) FROM users u WHERE u.id=?", err);
-    bool allowed = false; int row = -1;
-    if (st) {
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         sbq_bind_bool(st, 1, mutate); sbq_bind_text(st, 2, host_id); sbq_bind_text(st, 3, host_id);
         sbq_bind_bool(st, 4, mutate); sbq_bind_text(st, 5, user_id);
-        row = sbq_step_row(st, err); allowed = row == 1 && sbq_int(st, 0); sqlite3_finalize(st);
+        row = sbq_step_row(st, err); allowed = row == 1 && sbq_int(st, 0);
+    }
     }
     sb_database_unlock(s->database);
     if (!allowed && row >= 0) sb_fail(err, SB_ERR_FORBIDDEN, "Device access denied");

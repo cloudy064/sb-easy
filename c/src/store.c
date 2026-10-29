@@ -1610,46 +1610,40 @@ static int restore_subscription(sqlite3 *h, const sbj *value, size_t *count, sb_
         jv_int(value, "refresh_interval", 3600, &refresh, err) ||
         jv_str(value, "created_at", "", &created_at, err))
         return -1;
-    sqlite3_stmt *st = sbq_prepare(h,
-                                   "INSERT OR REPLACE INTO subscriptions "
-                                   "(id, name, url, enabled, refresh_interval, last_fetched_at, "
-                                   "last_fetch_result, created_at, updated_at, usage, last_attempt_at, "
-                                   "last_error, next_refresh_at, failure_count) "
-                                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, "
-                                   "COALESCE(NULLIF(?8, ''), datetime('now')), datetime('now'), ?9, ?10, ?11, ?12, ?13)",
-                                   err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, id);
-    if (sbq_bind_text_n(st, 2, name,
-                        sbj_has(value, "name") ? sbj_get(value, "name")->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        return -1;
-    }
-    if (sbq_bind_text_n(st, 3, url,
-                        sbj_has(value, "url") ? sbj_get(value, "url")->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        return -1;
-    }
-    sbq_bind_bool(st, 4, enabled);
-    sbq_bind_int(st, 5, refresh);
-    sbq_bind_text(st, 6, jv_opt_str(value, "last_fetched_at"));
-    sbq_bind_text(st, 7, jv_opt_str(value, "last_fetch_result"));
-    sbq_bind_text(st, 8, created_at);
+    SBQ_AUTO q = sbq_stmt_open(h,
+                               "INSERT OR REPLACE INTO subscriptions "
+                               "(id, name, url, enabled, refresh_interval, last_fetched_at, "
+                               "last_fetch_result, created_at, updated_at, usage, last_attempt_at, "
+                               "last_error, next_refresh_at, failure_count) "
+                               "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, "
+                               "COALESCE(NULLIF(?8, ''), datetime('now')), datetime('now'), ?9, ?10, ?11, ?12, ?13)",
+                               err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, id);
+    sbq_stmt_bind_text_n(&q, 2, name,
+                         sbj_has(value, "name") ? sbj_get(value, "name")->v.str.len : 0, err);
+    sbq_stmt_bind_text_n(&q, 3, url,
+                         sbj_has(value, "url") ? sbj_get(value, "url")->v.str.len : 0, err);
+    if (q.rc != 0) return -1;
+    sbq_bind_bool(q.st, 4, enabled);
+    sbq_bind_int(q.st, 5, refresh);
+    sbq_bind_text(q.st, 6, jv_opt_str(value, "last_fetched_at"));
+    sbq_bind_text(q.st, 7, jv_opt_str(value, "last_fetch_result"));
+    sbq_bind_text(q.st, 8, created_at);
     const sbj *usage = sbj_get(value, "usage");
     sbj *empty = sbj_object();
-    int usage_rc = bind_dump(st, 9, sbj_is_object(usage) ? usage : empty, err);
+    int usage_rc = bind_dump(q.st, 9, sbj_is_object(usage) ? usage : empty, err);
     sbj_free(empty);
-    if (usage_rc != 0) { sqlite3_finalize(st); return -1; }
-    sbq_bind_text(st, 10, jv_opt_str(value, "last_attempt_at"));
-    sbq_bind_text(st, 11, jv_opt_str(value, "last_error"));
+    if (usage_rc != 0) return -1;
+    sbq_bind_text(q.st, 10, jv_opt_str(value, "last_attempt_at"));
+    sbq_bind_text(q.st, 11, jv_opt_str(value, "last_error"));
     int64_t next_refresh = 0, failure_count = 0;
     if (jv_int(value, "next_refresh_at", 0, &next_refresh, err) ||
-        jv_int(value, "failure_count", 0, &failure_count, err)) {
-        sqlite3_finalize(st); return -1;
-    }
-    sbq_bind_int(st, 12, next_refresh < 0 ? 0 : next_refresh);
-    sbq_bind_int(st, 13, failure_count < 0 ? 0 : (failure_count > 20 ? 20 : failure_count));
-    if (exec_stmt(st, err) != 0) return -1;
+        jv_int(value, "failure_count", 0, &failure_count, err))
+        return -1;
+    sbq_bind_int(q.st, 12, next_refresh < 0 ? 0 : next_refresh);
+    sbq_bind_int(q.st, 13, failure_count < 0 ? 0 : (failure_count > 20 ? 20 : failure_count));
+    if (sbq_step_done(q.st, err) != 0) return -1;
     ++*count;
     return 0;
 }
@@ -1730,41 +1724,35 @@ static int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err
         jv_int(value, "quota_bytes", 0, &quota, err) ||
         jv_str(value, "created_at", "", &created_at, err))
         return -1;
-    sqlite3_stmt *st = sbq_prepare(h,
-                                   "INSERT OR REPLACE INTO wireguard_peers "
-                                   "(id, name, private_key, public_key, preshared_key, address, dns, "
-                                   "enabled, persistent_keepalive, allowed_ips, expire_at, "
-                                   "quota_bytes, created_at, updated_at, notes, host_id) "
-                                   "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
-                                   "COALESCE(NULLIF(?13, ''), datetime('now')), datetime('now'), "
-                                   "?14, ?15)",
-                                   err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, id);
-    if (sbq_bind_text_n(st, 2, name,
-                        sbj_has(value, "name") ? sbj_get(value, "name")->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        return -1;
-    }
-    sbq_bind_text(st, 3, private_key);
-    sbq_bind_text(st, 4, public_key);
-    sbq_bind_text(st, 5, jv_opt_str(value, "preshared_key"));
-    sbq_bind_text(st, 6, address);
-    sbq_bind_text(st, 7, dns);
-    sbq_bind_bool(st, 8, enabled);
-    sbq_bind_int(st, 9, keepalive);
-    sbq_bind_text(st, 10, allowed_ips);
-    sbq_bind_text(st, 11, jv_opt_str(value, "expire_at"));
-    sbq_bind_int(st, 12, quota);
-    sbq_bind_text(st, 13, created_at);
+    SBQ_AUTO q = sbq_stmt_open(h,
+                               "INSERT OR REPLACE INTO wireguard_peers "
+                               "(id, name, private_key, public_key, preshared_key, address, dns, "
+                               "enabled, persistent_keepalive, allowed_ips, expire_at, "
+                               "quota_bytes, created_at, updated_at, notes, host_id) "
+                               "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
+                               "COALESCE(NULLIF(?13, ''), datetime('now')), datetime('now'), "
+                               "?14, ?15)",
+                               err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, id);
+    sbq_stmt_bind_text_n(&q, 2, name,
+                         sbj_has(value, "name") ? sbj_get(value, "name")->v.str.len : 0, err);
+    sbq_bind_text(q.st, 3, private_key);
+    sbq_bind_text(q.st, 4, public_key);
+    sbq_bind_text(q.st, 5, jv_opt_str(value, "preshared_key"));
+    sbq_bind_text(q.st, 6, address);
+    sbq_bind_text(q.st, 7, dns);
+    sbq_bind_bool(q.st, 8, enabled);
+    sbq_bind_int(q.st, 9, keepalive);
+    sbq_bind_text(q.st, 10, allowed_ips);
+    sbq_bind_text(q.st, 11, jv_opt_str(value, "expire_at"));
+    sbq_bind_int(q.st, 12, quota);
+    sbq_bind_text(q.st, 13, created_at);
     const sbj *notes = sbj_get(value, "notes");
-    if (sbq_bind_text_n(st, 14, jv_opt_str(value, "notes"),
-                        sbj_is_string(notes) ? notes->v.str.len : 0, err) != 0) {
-        sqlite3_finalize(st);
-        return -1;
-    }
-    sbq_bind_text(st, 15, jv_opt_str(value, "host_id"));
-    if (exec_stmt(st, err) != 0) return -1;
+    sbq_stmt_bind_text_n(&q, 14, jv_opt_str(value, "notes"),
+                         sbj_is_string(notes) ? notes->v.str.len : 0, err);
+    sbq_bind_text(q.st, 15, jv_opt_str(value, "host_id"));
+    if (q.rc != 0 || sbq_step_done(q.st, err) != 0) return -1;
     ++*count;
     return 0;
 }
@@ -3461,26 +3449,28 @@ static sbj *wg_snapshot_locked(sqlite3 *h, sb_err *err) {
     sbj *snapshot = sbj_object(), *settings = sbj_object(), *peers = sbj_array();
     sbj_set(snapshot, "app_settings", settings);
     sbj_set(snapshot, "wireguard_peers", peers);
-    sqlite3_stmt *st = sbq_prepare(h,
-        "SELECT key, value FROM app_settings WHERE key IN ('wg_server_key', 'wireguard_interface') ORDER BY key", err);
-    if (!st) goto fail;
-    int r;
-    while ((r = sbq_step_row(st, err)) == 1) {
-        sbj *value = parse_object_col(st, 1, "WireGuard settings", err);
-        if (!value) { sqlite3_finalize(st); goto fail; }
-        sbj_set(settings, (const char *)sqlite3_column_text(st, 0), value);
+    int r = 0;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+            "SELECT key, value FROM app_settings WHERE key IN ('wg_server_key', 'wireguard_interface') ORDER BY key", err);
+        if (q.rc != 0) goto fail;
+        while ((r = sbq_step_row(q.st, err)) == 1) {
+            sbj *value = parse_object_col(q.st, 1, "WireGuard settings", err);
+            if (!value) goto fail;
+            sbj_set(settings, (const char *)sqlite3_column_text(q.st, 0), value);
+        }
     }
-    sqlite3_finalize(st);
     if (r < 0) goto fail;
-    st = sbq_prepare(h, WIREGUARD_PEER_SELECT " ORDER BY id", err);
-    if (!st) goto fail;
-    while ((r = sbq_step_row(st, err)) == 1) {
-        sb_wireguard_peer peer; sb_wireguard_peer_init(&peer);
-        read_wireguard_peer(st, &peer);
-        sbj_arr_push(peers, sb_wireguard_peer_to_json(&peer));
-        sb_wireguard_peer_free(&peer);
+    {
+        SBQ_AUTO q = sbq_stmt_open(h, WIREGUARD_PEER_SELECT " ORDER BY id", err);
+        if (q.rc != 0) goto fail;
+        while ((r = sbq_step_row(q.st, err)) == 1) {
+            sb_wireguard_peer peer; sb_wireguard_peer_init(&peer);
+            read_wireguard_peer(q.st, &peer);
+            sbj_arr_push(peers, sb_wireguard_peer_to_json(&peer));
+            sb_wireguard_peer_free(&peer);
+        }
     }
-    sqlite3_finalize(st);
     if (r < 0) goto fail;
     return snapshot;
 fail:

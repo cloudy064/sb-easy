@@ -32,12 +32,13 @@ static void config_free(oidc_config *c) {
 }
 static int config_load_locked(sb_auth_security *s, oidc_config *c, sb_err *err) {
     memset(c, 0, sizeof *c);
-    sqlite3_stmt *st = sbq_prepare(
+    SBQ_AUTO q = sbq_stmt_open(
         SB_AUTH_DB(s),
         "SELECT enabled,issuer,client_id,secret_enc,redirect_uri,discovery FROM auth_oidc_config WHERE id=1",
         err);
-    if (!st)
+    if (q.rc != 0)
         return -1;
+    sqlite3_stmt *st = q.st;
     int rc = sbq_step_row(st, err);
     if (rc == 1) {
         c->present = true;
@@ -48,7 +49,6 @@ static int config_load_locked(sb_auth_security *s, oidc_config *c, sb_err *err) 
         c->redirect_uri = sbq_text(st, 4);
         c->discovery = sbq_text(st, 5);
     }
-    sqlite3_finalize(st);
     return rc < 0 ? -1 : 0;
 }
 static bool config_same(const oidc_config *a, const oidc_config *b) {
@@ -926,34 +926,31 @@ sbj *sb_auth_oidc_links(sb_auth_security *s, const char *user_id, sb_err *err) {
     sbj *result = exists == 1 ? sbj_array() : NULL;
     if (exists == 0)
         sb_fail(err, SB_ERR_NOT_FOUND, "User not found");
-    sqlite3_stmt *st =
-        result
-            ? sbq_prepare(
-                  SB_AUTH_DB(s),
-                  "SELECT issuer,subject FROM auth_oidc_links WHERE user_id=? ORDER BY issuer,subject", err)
-            : NULL;
-    if (result && !st) {
-        sbj_free(result);
-        result = NULL;
-    }
-    if (st) {
-        sbq_bind_text(st, 1, user_id);
-        int step;
-        while ((step = sbq_step_row(st, err)) == 1) {
-            sbj *link = sbj_object();
-            char *issuer = sbq_text(st, 0), *subject = sbq_text(st, 1);
-            sbj_set_str(link, "issuer", issuer);
-            sbj_set_str(link, "subject", subject);
-            sbj_arr_push(result, link);
-            free(issuer);
-            free(subject);
-        }
-        if (step < 0) {
+    if (result) {
+        SBQ_AUTO q = sbq_stmt_open(
+            SB_AUTH_DB(s),
+            "SELECT issuer,subject FROM auth_oidc_links WHERE user_id=? ORDER BY issuer,subject", err);
+        if (q.rc != 0) {
             sbj_free(result);
             result = NULL;
+        } else {
+            sbq_bind_text(q.st, 1, user_id);
+            int step;
+            while ((step = sbq_step_row(q.st, err)) == 1) {
+                sbj *link = sbj_object();
+                char *issuer = sbq_text(q.st, 0), *subject = sbq_text(q.st, 1);
+                sbj_set_str(link, "issuer", issuer);
+                sbj_set_str(link, "subject", subject);
+                sbj_arr_push(result, link);
+                free(issuer);
+                free(subject);
+            }
+            if (step < 0) {
+                sbj_free(result);
+                result = NULL;
+            }
         }
     }
-    sqlite3_finalize(st);
     sb_database_unlock(s->database);
     return result;
 }

@@ -13,16 +13,13 @@ struct sb_observability {
     pthread_t thread;
     bool running, stopping;
 };
-static int finish(sqlite3_stmt *st, sb_err *err) {
-    if (!st) return -1;
-    int rc = sbq_step_done(st, err); sqlite3_finalize(st); return rc;
-}
+static int finish(sqlite3_stmt *st, sb_err *err) { return sbq_step_done(st, err); }
 static int64_t saturated_add(int64_t a, int64_t b) { return a > MAX_COUNTER - b ? MAX_COUNTER : a + b; }
 static bool valid_time(int64_t now) { return now > 0 && now < INT64_C(253402300800); }
 static int ensure_host(sqlite3 *db, const char *host, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, "INSERT OR IGNORE INTO observability_hosts(host_id) VALUES(?)", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, host); return finish(st, err);
+    SBQ_AUTO q = sbq_stmt_open(db, "INSERT OR IGNORE INTO observability_hosts(host_id) VALUES(?)", err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, host); return finish(q.st, err);
 }
 int sb_observability_sample(sb_database *database, const char *host, const sbj *sample, int64_t now, sb_err *err) {
     if (!database || !host || !valid_time(now) || !sbj_is_object(sample))
@@ -37,23 +34,30 @@ int sb_observability_sample(sb_database *database, const char *host, const sbj *
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database); int rc = -1;
     if (sbq_begin(db, err) != 0) goto done;
     if (ensure_host(db, host, err) != 0) goto rollback;
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT sampled_at,up_counter,down_counter,observed_up,observed_down,counter_resets FROM observability_hosts WHERE host_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, host); int row = sbq_step_row(st, err);
-    int64_t at = sbq_int(st, 0), up = sbq_int(st, 1), down = sbq_int(st, 2);
-    int64_t observed_up = sbq_int(st, 3), observed_down = sbq_int(st, 4), resets = sbq_int(st, 5);
-    sqlite3_finalize(st); if (row != 1) goto rollback;
+    int row = -1;
+    int64_t at = 0, up = 0, down = 0, observed_up = 0, observed_down = 0, resets = 0;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT sampled_at,up_counter,down_counter,observed_up,observed_down,counter_resets FROM observability_hosts WHERE host_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_text(q.st, 1, host); row = sbq_step_row(q.st, err);
+        at = sbq_int(q.st, 0); up = sbq_int(q.st, 1); down = sbq_int(q.st, 2);
+        observed_up = sbq_int(q.st, 3); observed_down = sbq_int(q.st, 4); resets = sbq_int(q.st, 5);
+    }
+    if (row != 1) goto rollback;
     if (now < at) { rc = sbq_commit(db, err); goto done; }
     int64_t du = at ? (values[2] >= up ? values[2] - up : values[2]) : 0;
     int64_t dd = at ? (values[3] >= down ? values[3] - down : values[3]) : 0;
     int64_t reset = at && (values[2] < up || values[3] < down) ? 1 : 0;
-    st = sbq_prepare(db, "UPDATE observability_hosts SET sampled_at=?,up_counter=?,down_counter=?,observed_up=?,observed_down=?,counter_resets=? WHERE host_id=?", err);
-    if (!st) goto rollback;
-    sbq_bind_int(st, 1, now); sbq_bind_int(st, 2, values[2]); sbq_bind_int(st, 3, values[3]);
-    sbq_bind_int(st, 4, saturated_add(observed_up, du)); sbq_bind_int(st, 5, saturated_add(observed_down, dd));
-    sbq_bind_int(st, 6, saturated_add(resets, reset)); sbq_bind_text(st, 7, host);
-    if (finish(st, err) != 0) goto rollback;
-    st = sbq_prepare(db,
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "UPDATE observability_hosts SET sampled_at=?,up_counter=?,down_counter=?,observed_up=?,observed_down=?,counter_resets=? WHERE host_id=?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_int(q.st, 1, now); sbq_bind_int(q.st, 2, values[2]); sbq_bind_int(q.st, 3, values[3]);
+        sbq_bind_int(q.st, 4, saturated_add(observed_up, du)); sbq_bind_int(q.st, 5, saturated_add(observed_down, dd));
+        sbq_bind_int(q.st, 6, saturated_add(resets, reset)); sbq_bind_text(q.st, 7, host);
+        if (finish(q.st, err) != 0) goto rollback;
+    }
+    {
+    SBQ_AUTO q = sbq_stmt_open(db,
         "INSERT INTO observability_samples(host_id,bucket,samples,up_average,down_average,connections_max,up_bytes,down_bytes,counter_resets) VALUES(?,?,1,?,?,?,?,?,?) "
         "ON CONFLICT(host_id,bucket) DO UPDATE SET "
         "up_average=up_average+(excluded.up_average-up_average)/(samples+1),"
@@ -61,11 +65,13 @@ int sb_observability_sample(sb_database *database, const char *host, const sbj *
         "connections_max=MAX(connections_max,excluded.connections_max),"
         "up_bytes=MIN(9007199254740991,up_bytes+excluded.up_bytes),down_bytes=MIN(9007199254740991,down_bytes+excluded.down_bytes),"
         "counter_resets=counter_resets+excluded.counter_resets", err);
-    if (!st) goto rollback;
-    sbq_bind_text(st, 1, host); sbq_bind_int(st, 2, now / 60 * 60);
-    sbq_bind_int(st, 3, values[0]); sbq_bind_int(st, 4, values[1]); sbq_bind_int(st, 5, values[4]);
-    sbq_bind_int(st, 6, du); sbq_bind_int(st, 7, dd); sbq_bind_int(st, 8, reset);
-    if (finish(st, err) != 0 || sbq_commit(db, err) != 0) goto rollback;
+    if (q.rc != 0) goto rollback;
+    sbq_bind_text(q.st, 1, host); sbq_bind_int(q.st, 2, now / 60 * 60);
+    sbq_bind_int(q.st, 3, values[0]); sbq_bind_int(q.st, 4, values[1]); sbq_bind_int(q.st, 5, values[4]);
+    sbq_bind_int(q.st, 6, du); sbq_bind_int(q.st, 7, dd); sbq_bind_int(q.st, 8, reset);
+    if (finish(q.st, err) != 0) goto rollback;
+    }
+    if (sbq_commit(db, err) != 0) goto rollback;
     rc = 0; goto done;
 rollback: sbq_rollback(db);
 done: sb_database_unlock(database); return rc;
@@ -74,9 +80,11 @@ int sb_observability_target(sb_database *database, const char *host, const char 
     if (!database || !host || !etag || !*etag || strlen(etag) > 256 || !valid_time(now))
         return sb_fail(err, SB_ERR_VALIDATION, "Invalid configuration target");
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(db, "INSERT INTO observability_hosts(host_id,target_etag,target_since) VALUES(?,?,?) ON CONFLICT(host_id) DO UPDATE SET target_since=CASE WHEN target_etag!=excluded.target_etag THEN excluded.target_since ELSE target_since END,target_etag=excluded.target_etag", err);
     int rc = -1;
-    if (st) { sbq_bind_text(st, 1, host); sbq_bind_text(st, 2, etag); sbq_bind_int(st, 3, now); rc = finish(st, err); }
+    {
+    SBQ_AUTO q = sbq_stmt_open(db, "INSERT INTO observability_hosts(host_id,target_etag,target_since) VALUES(?,?,?) ON CONFLICT(host_id) DO UPDATE SET target_since=CASE WHEN target_etag!=excluded.target_etag THEN excluded.target_since ELSE target_since END,target_etag=excluded.target_etag", err);
+    if (q.rc == 0) { sbq_bind_text(q.st, 1, host); sbq_bind_text(q.st, 2, etag); sbq_bind_int(q.st, 3, now); rc = finish(q.st, err); }
+    }
     sb_database_unlock(database); return rc;
 }
 int sb_observability_status(sb_database *database, const char *host, const sbj *state, int64_t now, sb_err *err) {
@@ -86,17 +94,20 @@ int sb_observability_status(sb_database *database, const char *host, const sbj *
     bool applied = sbj_get_bool(state, "running", false) && *etag && strlen(etag) <= 256 &&
                    !*sbj_get_str(state, "last_error", "");
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database); int rc = -1;
-    sqlite3_stmt *st = sbq_prepare(db, "INSERT INTO observability_hosts(host_id,status_at,applied_etag,applied_at) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET status_at=MAX(status_at,excluded.status_at),applied_etag=CASE WHEN ? THEN excluded.applied_etag ELSE applied_etag END,applied_at=CASE WHEN ? THEN excluded.applied_at ELSE applied_at END", err);
-    if (st) {
-        sbq_bind_text(st, 1, host); sbq_bind_int(st, 2, now); sbq_bind_text(st, 3, applied ? etag : "");
-        sbq_bind_int(st, 4, applied ? now : 0); sbq_bind_int(st, 5, applied); sbq_bind_int(st, 6, applied);
-        rc = finish(st, err);
+    {
+    SBQ_AUTO q = sbq_stmt_open(db, "INSERT INTO observability_hosts(host_id,status_at,applied_etag,applied_at) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET status_at=MAX(status_at,excluded.status_at),applied_etag=CASE WHEN ? THEN excluded.applied_etag ELSE applied_etag END,applied_at=CASE WHEN ? THEN excluded.applied_at ELSE applied_at END", err);
+    if (q.rc == 0) {
+        sbq_bind_text(q.st, 1, host); sbq_bind_int(q.st, 2, now); sbq_bind_text(q.st, 3, applied ? etag : "");
+        sbq_bind_int(q.st, 4, applied ? now : 0); sbq_bind_int(q.st, 5, applied); sbq_bind_int(q.st, 6, applied);
+        rc = finish(q.st, err);
+    }
     }
     sb_database_unlock(database); return rc;
 }
 static sbj *settings_locked(sqlite3 *db, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT retention_days,offline_seconds,drift_seconds,node_latency_ms,metrics_token_hash IS NOT NULL FROM observability_settings WHERE id=1", err);
-    if (!st) return NULL;
+    SBQ_AUTO q = sbq_stmt_open(db, "SELECT retention_days,offline_seconds,drift_seconds,node_latency_ms,metrics_token_hash IS NOT NULL FROM observability_settings WHERE id=1", err);
+    if (q.rc != 0) return NULL;
+    sqlite3_stmt *st = q.st;
     sbj *out = NULL;
     if (sbq_step_row(st, err) == 1) {
         out = sbj_object(); const char *keys[] = {"retention_days", "offline_seconds", "drift_seconds", "node_latency_ms"};
@@ -104,7 +115,7 @@ static sbj *settings_locked(sqlite3 *db, sb_err *err) {
         sbj_set_bool(out, "metrics_token_configured", sbq_int(st, 4) != 0);
         sbj_set_int(out, "sample_bucket_seconds", 60); sbj_set_int(out, "evaluation_interval_seconds", 30);
     }
-    sqlite3_finalize(st); return out;
+    return out;
 }
 sbj *sb_observability_settings(sb_database *database, sb_err *err) {
     sb_database_lock(database); sbj *out = settings_locked(sb_database_handle(database), err); sb_database_unlock(database); return out;
@@ -116,21 +127,23 @@ int sb_observability_configure(sb_database *database, const sbj *settings, sb_er
         if (!sbj_is_integer(sbj_get(settings, fields[i])) || (v[i] = sbj_get_int(settings, fields[i], -1)) < low[i] || v[i] > high[i])
             return sb_fail(err, SB_ERR_VALIDATION, "Invalid observability setting: %s", fields[i]);
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(db, "UPDATE observability_settings SET retention_days=?,offline_seconds=?,drift_seconds=?,node_latency_ms=? WHERE id=1", err);
     int rc = -1;
-    if (st) { for (int i = 0; i < 4; ++i) sbq_bind_int(st, i + 1, v[i]); rc = finish(st, err); }
+    {
+    SBQ_AUTO q = sbq_stmt_open(db, "UPDATE observability_settings SET retention_days=?,offline_seconds=?,drift_seconds=?,node_latency_ms=? WHERE id=1", err);
+    if (q.rc == 0) { for (int i = 0; i < 4; ++i) sbq_bind_int(q.st, i + 1, v[i]); rc = finish(q.st, err); }
+    }
     sb_database_unlock(database); return rc;
 }
 /* Single active event per kind/resource. Acknowledgement does not suppress
  * recovery or a later recurrence, which receives a new event ID. */
 static int alert_locked(sqlite3 *db, const char *kind, const char *resource, const char *host,
                          bool active, int64_t now, sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, active ?
+    SBQ_AUTO q = sbq_stmt_open(db, active ?
         "INSERT INTO observability_alerts(kind,resource_id,host_id,opened_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(kind,resource_id) WHERE resolved_at IS NULL DO UPDATE SET updated_at=excluded.updated_at" :
         "UPDATE observability_alerts SET resolved_at=?4,updated_at=?5 WHERE kind=?1 AND resource_id=?2 AND resolved_at IS NULL", err);
-    if (!st) return -1;
-    sbq_bind_text(st, 1, kind); sbq_bind_text(st, 2, resource); sbq_bind_text(st, 3, host);
-    sbq_bind_int(st, 4, now); sbq_bind_int(st, 5, now); return finish(st, err);
+    if (q.rc != 0) return -1;
+    sbq_bind_text(q.st, 1, kind); sbq_bind_text(q.st, 2, resource); sbq_bind_text(q.st, 3, host);
+    sbq_bind_int(q.st, 4, now); sbq_bind_int(q.st, 5, now); return finish(q.st, err);
 }
 int sb_observability_evaluate(sb_database *database, int64_t now, sb_err *err) {
     if (!database || !valid_time(now)) return sb_fail(err, SB_ERR_VALIDATION, "Invalid monitor time");
@@ -140,13 +153,15 @@ int sb_observability_evaluate(sb_database *database, int64_t now, sb_err *err) {
     int64_t retention = sbj_get_int(settings, "retention_days", 30) * 86400;
     int64_t offline = sbj_get_int(settings, "offline_seconds", 180), drift = sbj_get_int(settings, "drift_seconds", 300);
     int64_t latency = sbj_get_int(settings, "node_latency_ms", 5000); sbj_free(settings);
-    sqlite3_stmt *st = sbq_prepare(db,
+    int row;
+    {
+    SBQ_AUTO q = sbq_stmt_open(db,
         "SELECT h.id,h.enabled,COALESCE(o.status_at,0),CAST(strftime('%s',h.created_at) AS INTEGER),"
         "COALESCE(o.target_etag,''),COALESCE(o.applied_etag,''),COALESCE(o.target_since,0),"
         "CASE WHEN json_valid(h.singbox_state) THEN COALESCE(json_extract(h.singbox_state,'$.last_error'),'') ELSE '' END "
         "FROM hosts h LEFT JOIN observability_hosts o ON o.host_id=h.id", err);
-    if (!st) goto rollback;
-    int row;
+    if (q.rc != 0) goto rollback;
+    sqlite3_stmt *st = q.st;
     while ((row = sbq_step_row(st, err)) == 1) {
         const char *id = (const char *)sqlite3_column_text(st, 0);
         bool enabled = sbq_int(st, 1) != 0;
@@ -158,12 +173,15 @@ int sb_observability_evaluate(sb_database *database, int64_t now, sb_err *err) {
         if (alert_locked(db, "device_offline", id, id, enabled && missing && strcmp(id, "self") != 0, now, err) != 0 ||
             alert_locked(db, "config_drift", id, id, enabled && mismatch, now, err) != 0 ||
             alert_locked(db, "config_failure", id, id, enabled && *failure, now, err) != 0) {
-            sqlite3_finalize(st); goto rollback;
+            goto rollback;
         }
     }
-    sqlite3_finalize(st); if (row < 0) goto rollback;
-    st = sbq_prepare(db, "SELECT id,enabled,latency,CAST(strftime('%s',last_latency_test) AS INTEGER) FROM proxy_nodes", err);
-    if (!st) goto rollback;
+    }
+    if (row < 0) goto rollback;
+    {
+    SBQ_AUTO q = sbq_stmt_open(db, "SELECT id,enabled,latency,CAST(strftime('%s',last_latency_test) AS INTEGER) FROM proxy_nodes", err);
+    if (q.rc != 0) goto rollback;
+    sqlite3_stmt *st = q.st;
     while ((row = sbq_step_row(st, err)) == 1) {
         const char *id = (const char *)sqlite3_column_text(st, 0); int64_t tested = sbq_int(st, 3);
         bool fresh = sbq_int(st, 1) && tested > 0 && now >= tested && now - tested <= 3600;
@@ -171,19 +189,26 @@ int sb_observability_evaluate(sb_database *database, int64_t now, sb_err *err) {
         if (alert_locked(db, "node_unreachable", id, NULL, fresh && failed, now, err) != 0 ||
             alert_locked(db, "node_slow", id, NULL, fresh && !failed && sqlite3_column_double(st, 2) >= latency, now, err) != 0 ||
             alert_locked(db, "node_probe_stale", id, NULL, sbq_int(st, 1) && tested > 0 && now - tested > 3600, now, err) != 0) {
-            sqlite3_finalize(st); goto rollback;
+            goto rollback;
         }
     }
-    sqlite3_finalize(st); if (row < 0) goto rollback;
-    st = sbq_prepare(db, "UPDATE observability_alerts SET resolved_at=?1,updated_at=?1 WHERE resolved_at IS NULL AND host_id IS NULL AND kind IN ('node_unreachable','node_slow','node_probe_stale') AND NOT EXISTS(SELECT 1 FROM proxy_nodes WHERE id=resource_id)", err);
-    if (!st) goto rollback;
-    sbq_bind_int(st, 1, now); if (finish(st, err) != 0) goto rollback;
-    st = sbq_prepare(db, "DELETE FROM observability_samples WHERE bucket<?", err);
-    if (!st) goto rollback;
-    sbq_bind_int(st, 1, now - retention); if (finish(st, err) != 0) goto rollback;
-    st = sbq_prepare(db, "DELETE FROM observability_alerts WHERE resolved_at IS NOT NULL AND updated_at<?", err);
-    if (!st) goto rollback;
-    sbq_bind_int(st, 1, now - retention); if (finish(st, err) != 0) goto rollback;
+    }
+    if (row < 0) goto rollback;
+    {
+    SBQ_AUTO q = sbq_stmt_open(db, "UPDATE observability_alerts SET resolved_at=?1,updated_at=?1 WHERE resolved_at IS NULL AND host_id IS NULL AND kind IN ('node_unreachable','node_slow','node_probe_stale') AND NOT EXISTS(SELECT 1 FROM proxy_nodes WHERE id=resource_id)", err);
+    if (q.rc != 0) goto rollback;
+    sbq_bind_int(q.st, 1, now); if (finish(q.st, err) != 0) goto rollback;
+    }
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "DELETE FROM observability_samples WHERE bucket<?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_int(q.st, 1, now - retention); if (finish(q.st, err) != 0) goto rollback;
+    }
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "DELETE FROM observability_alerts WHERE resolved_at IS NOT NULL AND updated_at<?", err);
+        if (q.rc != 0) goto rollback;
+        sbq_bind_int(q.st, 1, now - retention); if (finish(q.st, err) != 0) goto rollback;
+    }
     if (sbq_commit(db, err) != 0) goto rollback;
     rc = 0; goto done;
 rollback: sbq_rollback(db);
@@ -196,12 +221,14 @@ sbj *sb_observability_history(sb_database *database, const char *host, int64_t f
         sb_fail(err, SB_ERR_VALIDATION, "History requires a range of at most 2000 buckets and a 60/300/3600/86400-second step"); return NULL;
     }
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(db,
+    sbj *out = NULL;
+    {
+    SBQ_AUTO q = sbq_stmt_open(db,
         "SELECT (bucket/?4)*?4,SUM(samples),SUM(up_average*samples)/SUM(samples),SUM(down_average*samples)/SUM(samples),"
         "MAX(connections_max),MIN(9007199254740991,SUM(CAST(up_bytes AS REAL))),MIN(9007199254740991,SUM(CAST(down_bytes AS REAL))),SUM(counter_resets) "
         "FROM observability_samples WHERE host_id=?1 AND bucket>=?2 AND bucket<=?3 GROUP BY (bucket/?4)*?4 ORDER BY 1", err);
-    sbj *out = NULL;
-    if (st) {
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         sbq_bind_text(st, 1, host); sbq_bind_int(st, 2, from); sbq_bind_int(st, 3, to); sbq_bind_int(st, 4, step);
         out = sbj_array(); int row;
         while ((row = sbq_step_row(st, err)) == 1) {
@@ -213,20 +240,22 @@ sbj *sb_observability_history(sb_database *database, const char *host, int64_t f
             sbj_arr_push(out, sample);
         }
         if (row < 0) { sbj_free(out); out = NULL; }
-        sqlite3_finalize(st);
+    }
     }
     sb_database_unlock(database); return out;
 }
 sbj *sb_observability_hosts(sb_database *database, int64_t now, sb_err *err) {
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(db,
+    sbj *out = NULL;
+    {
+    SBQ_AUTO q = sbq_stmt_open(db,
         "SELECT h.id,h.name,h.enabled,h.singbox_state,COALESCE(o.sampled_at,0),COALESCE(o.observed_up,0),COALESCE(o.observed_down,0),"
         "COALESCE(o.counter_resets,0),COALESCE(o.status_at,0),COALESCE(o.target_etag,''),COALESCE(o.applied_etag,''),COALESCE(o.applied_at,0),"
         "COALESCE(s.up_average,0),COALESCE(s.down_average,0),COALESCE(s.connections_max,0),"
         "(SELECT offline_seconds FROM observability_settings WHERE id=1) "
         "FROM hosts h LEFT JOIN observability_hosts o ON o.host_id=h.id LEFT JOIN observability_samples s ON s.host_id=h.id AND s.bucket=(o.sampled_at/60)*60 ORDER BY h.name,h.id", err);
-    sbj *out = NULL;
-    if (st) {
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         out = sbj_array(); int row;
         while ((row = sbq_step_row(st, err)) == 1) {
             sbj *item = sbj_object(); char *id = sbq_text(st, 0), *name = sbq_text(st, 1), *state = sbq_text(st, 3);
@@ -249,15 +278,17 @@ sbj *sb_observability_hosts(sb_database *database, int64_t now, sb_err *err) {
             sbj_arr_push(out, item);
         }
         if (row < 0) { sbj_free(out); out = NULL; }
-        sqlite3_finalize(st);
+    }
     }
     sb_database_unlock(database); return out;
 }
 sbj *sb_observability_alerts(sb_database *database, const char *host, bool active, sb_err *err) {
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT id,kind,resource_id,host_id,opened_at,updated_at,resolved_at,acknowledged_at FROM observability_alerts WHERE (?1 IS NULL OR host_id=?1) AND (?2=0 OR resolved_at IS NULL) ORDER BY opened_at DESC,id DESC LIMIT 500", err);
     sbj *out = NULL;
-    if (st) {
+    {
+    SBQ_AUTO q = sbq_stmt_open(db, "SELECT id,kind,resource_id,host_id,opened_at,updated_at,resolved_at,acknowledged_at FROM observability_alerts WHERE (?1 IS NULL OR host_id=?1) AND (?2=0 OR resolved_at IS NULL) ORDER BY opened_at DESC,id DESC LIMIT 500", err);
+    sqlite3_stmt *st = q.st;
+    if (q.rc == 0) {
         sbq_bind_text(st, 1, host); sbq_bind_int(st, 2, active); out = sbj_array(); int row;
         while ((row = sbq_step_row(st, err)) == 1) {
             sbj *item = sbj_object(); sbj_set_int(item, "id", sbq_int(st, 0));
@@ -268,17 +299,19 @@ sbj *sb_observability_alerts(sb_database *database, const char *host, bool activ
             sbj_arr_push(out, item);
         }
         if (row < 0) { sbj_free(out); out = NULL; }
-        sqlite3_finalize(st);
+    }
     }
     sb_database_unlock(database); return out;
 }
 int sb_observability_ack(sb_database *database, int64_t id, const char *user, sb_err *err) {
     sb_database_lock(database); sqlite3 *db = sb_database_handle(database);
-    sqlite3_stmt *st = sbq_prepare(db, "UPDATE observability_alerts SET acknowledged_at=?,acknowledged_by=? WHERE id=? AND resolved_at IS NULL", err);
     int rc = -1;
-    if (st) {
-        sbq_bind_int(st, 1, sb_unix_now()); sbq_bind_text(st, 2, user); sbq_bind_int(st, 3, id); rc = finish(st, err);
-        if (rc == 0 && !sqlite3_changes(db)) rc = sb_fail(err, SB_ERR_NOT_FOUND, "Active alert not found");
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "UPDATE observability_alerts SET acknowledged_at=?,acknowledged_by=? WHERE id=? AND resolved_at IS NULL", err);
+        if (q.rc == 0) {
+            sbq_bind_int(q.st, 1, sb_unix_now()); sbq_bind_text(q.st, 2, user); sbq_bind_int(q.st, 3, id); rc = finish(q.st, err);
+            if (rc == 0 && !sqlite3_changes(db)) rc = sb_fail(err, SB_ERR_NOT_FOUND, "Active alert not found");
+        }
     }
     sb_database_unlock(database); return rc;
 }
@@ -287,9 +320,11 @@ char *sb_observability_rotate_token(sb_database *database, bool revoke, sb_err *
     if (!revoke && !random) { sb_fail(err, SB_ERR_GENERIC, "Random generation failed"); return NULL; }
     char *token = random ? sb_asprintf("sbm_%s", random) : NULL; free(random);
     char *hash = token ? sb_sha256_hex(token, strlen(token)) : NULL;
-    sb_database_lock(database); sqlite3_stmt *st = sbq_prepare(sb_database_handle(database), "UPDATE observability_settings SET metrics_token_hash=? WHERE id=1", err);
-    int rc = -1;
-    if (st) { sbq_bind_text(st, 1, hash); rc = finish(st, err); }
+    sb_database_lock(database); int rc = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(sb_database_handle(database), "UPDATE observability_settings SET metrics_token_hash=? WHERE id=1", err);
+        if (q.rc == 0) { sbq_bind_text(q.st, 1, hash); rc = finish(q.st, err); }
+    }
     sb_database_unlock(database); free(hash);
     if (rc != 0) { free(token); return NULL; }
     return revoke ? sb_strdup("") : token;
@@ -297,13 +332,13 @@ char *sb_observability_rotate_token(sb_database *database, bool revoke, sb_err *
 bool sb_observability_check_token(sb_database *database, const char *token) {
     if (!token || strlen(token) != 68 || strncmp(token, "sbm_", 4) != 0) return false;
     char *hash = sb_sha256_hex(token, strlen(token)); bool valid = false;
-    sb_database_lock(database); sqlite3_stmt *st = sbq_prepare(sb_database_handle(database), "SELECT metrics_token_hash FROM observability_settings WHERE id=1", NULL);
-    if (st) {
-        if (sbq_step_row(st, NULL) == 1) {
-            const char *saved = (const char *)sqlite3_column_text(st, 0);
+    sb_database_lock(database);
+    {
+        SBQ_AUTO q = sbq_stmt_open(sb_database_handle(database), "SELECT metrics_token_hash FROM observability_settings WHERE id=1", NULL);
+        if (q.rc == 0 && sbq_step_row(q.st, NULL) == 1) {
+            const char *saved = (const char *)sqlite3_column_text(q.st, 0);
             valid = saved && strlen(saved) == 64 && CRYPTO_memcmp(hash, saved, 64) == 0;
         }
-        sqlite3_finalize(st);
     }
     sb_database_unlock(database); free(hash); return valid;
 }

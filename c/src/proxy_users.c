@@ -688,12 +688,14 @@ sbj *sb_proxy_ingress_save(sb_database *database, const char *host_id, const sbj
     sb_database_lock(database);
     if (begin(db, err))
         goto done;
-    sqlite3_stmt *st = sbq_prepare(db, "SELECT 1 FROM hosts WHERE id=? AND enabled=1", err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, host_id);
-    int row = sbq_step_row(st, err);
-    sqlite3_finalize(st);
+    int row = -1;
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM hosts WHERE id=? AND enabled=1", err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_text(q.st, 1, host_id);
+        row = sbq_step_row(q.st, err);
+    }
     if (row != 1) {
         if (!row)
             sb_fail(err, SB_ERR_VALIDATION, "Ingress requires an enabled host");
@@ -709,26 +711,26 @@ sbj *sb_proxy_ingress_save(sb_database *database, const char *host_id, const sbj
             goto rollback;
         }
     }
-    st = sbq_prepare(
-        db,
-        "INSERT INTO proxy_ingress_nodes(host_id,enabled,server,listen,listen_port,server_key,updated_at) "
-        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET "
-        "enabled=excluded.enabled,server=excluded.server,listen=excluded.listen,listen_port=excluded.listen_"
-        "port,updated_at=excluded.updated_at",
-        err);
-    if (!st)
-        goto rollback;
-    sbq_bind_text(st, 1, host_id);
-    sbq_bind_bool(st, 2, sbj_get_bool(body, "enabled", false));
-    sbq_bind_text(st, 3, sbj_get_str(body, "server", ""));
-    sbq_bind_text(st, 4, listen->v.str.ptr);
-    sbq_bind_int(st, 5, sbj_get_int(body, "listen_port", 0));
-    sbq_bind_text(st, 6, key);
-    sbq_bind_int(st, 7, now);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    if (rc)
-        goto rollback;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "INSERT INTO proxy_ingress_nodes(host_id,enabled,server,listen,listen_port,server_key,updated_at) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET "
+            "enabled=excluded.enabled,server=excluded.server,listen=excluded.listen,listen_"
+            "port=excluded.listen_port,updated_at=excluded.updated_at",
+            err);
+        if (q.rc != 0)
+            goto rollback;
+        sbq_bind_text(q.st, 1, host_id);
+        sbq_bind_bool(q.st, 2, sbj_get_bool(body, "enabled", false));
+        sbq_bind_text(q.st, 3, sbj_get_str(body, "server", ""));
+        sbq_bind_text(q.st, 4, listen->v.str.ptr);
+        sbq_bind_int(q.st, 5, sbj_get_int(body, "listen_port", 0));
+        sbq_bind_text(q.st, 6, key);
+        sbq_bind_int(q.st, 7, now);
+        if (sbq_step_done(q.st, err))
+            goto rollback;
+    }
     out = node_locked(db, host_id, false, now, err);
     if (!out || sbq_commit(db, err)) {
         sbj_free(out);
@@ -813,31 +815,32 @@ done:
 }
 static int report_locked(sqlite3 *db, const char *host, const char *boot, const sbj *report, int64_t now,
                          sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(
-        db, "SELECT grant_bytes,used_bytes FROM proxy_leases WHERE id=? AND host_id=? AND boot_id=?", err);
-    if (!st)
-        return -1;
     const char *id = sbj_get_str(report, "lease_id", "");
     int64_t used = sbj_get_int(report, "used_bytes", 0);
-    sbq_bind_text(st, 1, id);
-    sbq_bind_text(st, 2, host);
-    sbq_bind_text(st, 3, boot);
-    int row = sbq_step_row(st, err);
-    bool valid = row == 1 && used >= sbq_int(st, 1) && used <= sbq_int(st, 0);
-    sqlite3_finalize(st);
+    int row = -1;
+    bool valid = false;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db, "SELECT grant_bytes,used_bytes FROM proxy_leases WHERE id=? AND host_id=? AND boot_id=?", err);
+        if (q.rc != 0)
+            return -1;
+        sbq_bind_text(q.st, 1, id);
+        sbq_bind_text(q.st, 2, host);
+        sbq_bind_text(q.st, 3, boot);
+        row = sbq_step_row(q.st, err);
+        valid = row == 1 && used >= sbq_int(q.st, 1) && used <= sbq_int(q.st, 0);
+    }
     if (!valid)
         return row < 0 ? -1
                        : sb_fail(err, SB_ERR_CONFLICT,
                                  "Unknown lease, counter rollback or usage exceeding the grant");
-    st = sbq_prepare(db, "UPDATE proxy_leases SET used_bytes=?,updated_at=? WHERE id=?", err);
-    if (!st)
+    SBQ_AUTO u = sbq_stmt_open(db, "UPDATE proxy_leases SET used_bytes=?,updated_at=? WHERE id=?", err);
+    if (u.rc != 0)
         return -1;
-    sbq_bind_int(st, 1, used);
-    sbq_bind_int(st, 2, now);
-    sbq_bind_text(st, 3, id);
-    int rc = sbq_step_done(st, err);
-    sqlite3_finalize(st);
-    return rc;
+    sbq_bind_int(u.st, 1, used);
+    sbq_bind_int(u.st, 2, now);
+    sbq_bind_text(u.st, 3, id);
+    return sbq_step_done(u.st, err);
 }
 static sbj *lease_locked(sqlite3 *db, const char *host, const char *boot, const char *user, int64_t epoch,
                          int64_t quota, int64_t expiry, int64_t now, sb_err *err) {

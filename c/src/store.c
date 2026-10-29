@@ -779,8 +779,9 @@ static char *controller_address(const char *address, size_t len, size_t *out_len
 
 static int read_nodes(sqlite3 *db, const char *sql, const char *host_id, sb_proxy_node_vec *out,
                       sb_err *err) {
-    sqlite3_stmt *st = sbq_prepare(db, sql, err);
-    if (!st) return -1;
+    SBQ_AUTO q = sbq_stmt_open(db, sql, err);
+    if (q.rc != 0) return -1;
+    sqlite3_stmt *st = q.st;
     if (host_id) sbq_bind_text(st, 1, host_id);
     int r;
     while ((r = sbq_step_row(st, err)) == 1) {
@@ -815,7 +816,6 @@ static int read_nodes(sqlite3 *db, const char *sql, const char *host_id, sb_prox
         sbj_free(n->protocol_config);
         n->protocol_config = config;
     }
-    sqlite3_finalize(st);
     return r < 0 ? -1 : 0;
 }
 
@@ -3618,22 +3618,22 @@ int sb_store_wg_import_rollback(sb_store *s, const char *id, const char *actor,
     sqlite3 *h = H(s);
     int rc = sbq_begin(h, err);
     if (rc != 0) goto done;
-    sqlite3_stmt *st = sbq_prepare(h,
-        "SELECT before_snapshot, after_snapshot, inserted_ids, status FROM wireguard_imports WHERE id = ?1", err);
-    if (!st) { rc = -1; goto done; }
-    sbq_bind_text(st, 1, S(id));
-    int found = sbq_step_row(st, err);
-    if (found != 1) {
-        sqlite3_finalize(st);
-        rc = found < 0 ? -1 : sb_fail(err, SB_ERR_NOT_FOUND, "Migration record not found"); goto done;
+    {
+        SBQ_AUTO q = sbq_stmt_open(h,
+            "SELECT before_snapshot, after_snapshot, inserted_ids, status FROM wireguard_imports WHERE id = ?1", err);
+        if (q.rc != 0) { rc = -1; goto done; }
+        sbq_bind_text(q.st, 1, S(id));
+        int found = sbq_step_row(q.st, err);
+        if (found != 1) {
+            rc = found < 0 ? -1 : sb_fail(err, SB_ERR_NOT_FOUND, "Migration record not found"); goto done;
+        }
+        if (strcmp((const char *)sqlite3_column_text(q.st, 3), "applied") != 0) {
+            rc = sb_fail(err, SB_ERR_CONFLICT, "Migration was already rolled back"); goto done;
+        }
+        before = parse_object_col(q.st, 0, "migration before snapshot", err);
+        after = parse_object_col(q.st, 1, "migration after snapshot", err);
+        ids = sbj_parse((const char *)sqlite3_column_text(q.st, 2), (size_t)sqlite3_column_bytes(q.st, 2), NULL, 0);
     }
-    if (strcmp((const char *)sqlite3_column_text(st, 3), "applied") != 0) {
-        sqlite3_finalize(st); rc = sb_fail(err, SB_ERR_CONFLICT, "Migration was already rolled back"); goto done;
-    }
-    before = parse_object_col(st, 0, "migration before snapshot", err);
-    after = parse_object_col(st, 1, "migration after snapshot", err);
-    ids = sbj_parse((const char *)sqlite3_column_text(st, 2), (size_t)sqlite3_column_bytes(st, 2), NULL, 0);
-    sqlite3_finalize(st);
     if (!before || !after || !sbj_is_array(ids)) { rc = sb_fail(err, SB_ERR_GENERIC, "Invalid migration rollback record"); goto done; }
     current = wg_snapshot_locked(h, err);
     if (!current) { rc = -1; goto done; }
@@ -3644,16 +3644,16 @@ int sb_store_wg_import_rollback(sb_store *s, const char *id, const char *actor,
     SBJ_ARR_FOREACH(ids, index, peer_id) {
         const char *queries[] = {"DELETE FROM one_time_links WHERE peer_id = ?1", "DELETE FROM wireguard_peers WHERE id = ?1"};
         for (size_t i = 0; i < 2 && rc == 0; ++i) {
-            st = sbq_prepare(h, queries[i], err);
-            if (!st) { rc = -1; break; }
-            sbq_bind_text(st, 1, sbj_as_str(peer_id, "")); rc = exec_stmt(st, err);
+            SBQ_AUTO q = sbq_stmt_open(h, queries[i], err);
+            if (q.rc != 0) { rc = -1; break; }
+            sbq_bind_text(q.st, 1, sbj_as_str(peer_id, "")); rc = sbq_step_done(q.st, err);
         }
     }
     if (rc == 0) rc = wg_settings_locked(h, sbj_get(before, "app_settings"), err);
     if (rc == 0) {
-        st = sbq_prepare(h, "UPDATE wireguard_imports SET status = 'rolled_back' WHERE id = ?1", err);
-        if (!st) rc = -1;
-        else { sbq_bind_text(st, 1, id); rc = exec_stmt(st, err); }
+        SBQ_AUTO q = sbq_stmt_open(h, "UPDATE wireguard_imports SET status = 'rolled_back' WHERE id = ?1", err);
+        if (q.rc != 0) rc = -1;
+        else { sbq_bind_text(q.st, 1, id); rc = sbq_step_done(q.st, err); }
     }
     if (rc == 0) rc = wg_import_audit(h, actor, actor_len, "wireguard.import.rollback", id, err);
     if (rc == 0) rc = sbq_commit(h, err);

@@ -711,14 +711,13 @@ static bool supported_proxy_type(const char *type, size_t len) {
     return false;
 }
 
-static int validate_proxy(const char *tag, size_t tag_len, const char *node_type, size_t type_len,
-                          const char *server, size_t server_len,
-                          uint16_t port, const sbj *config, sb_err *err) {
-    if (!tag || tag_len == 0 || !server || server_len == 0 || port == 0U || !sbj_is_object(config))
+static int validate_proxy(const sb_proxy_record *node, sb_err *err) {
+    if (!node->tag || node->tag_len == 0 || !node->server || node->server_len == 0 ||
+        node->server_port == 0U || !sbj_is_object(node->protocol_config))
         return sb_fail(err, SB_ERR_VALIDATION,
                        "Proxy tag, server, port, and object protocol_config are required");
-    if (!supported_proxy_type(S(node_type), type_len))
-        return sb_fail(err, SB_ERR_VALIDATION, "Unsupported proxy type: %s", S(node_type));
+    if (!supported_proxy_type(S(node->node_type), node->node_type_len))
+        return sb_fail(err, SB_ERR_VALIDATION, "Unsupported proxy type: %s", S(node->node_type));
     return 0;
 }
 
@@ -925,8 +924,11 @@ static int exec_bound(sqlite3_stmt *st, int bound, sb_err *err) {
 /* ParsedProxyNode::fingerprint(): its key material is read with json::value(),
  * which throws for present-but-non-string members (sb_parsed_node_fingerprint
  * silently uses ""). Returns the malloc'd fingerprint or NULL (err set). */
-static char *fingerprint_of(const char *node_type, size_t type_len, const char *server, size_t server_len,
-                            uint16_t port, const sbj *config, sb_err *err) {
+static char *fingerprint_of(const sb_proxy_record *node, sb_err *err) {
+    const char *node_type = node->node_type, *server = node->server;
+    size_t type_len = node->node_type_len, server_len = node->server_len;
+    uint16_t port = node->server_port;
+    const sbj *config = node->protocol_config;
     const char *t = S(node_type), *first = NULL, *second = NULL, *ignored;
     if (sb_strn_eq(t, type_len, "shadowsocks") || sb_strn_eq(t, type_len, "trojan") || sb_strn_eq(t, type_len, "hysteria2")) {
         first = "password";
@@ -2698,12 +2700,9 @@ int sb_store_find_proxy_node(sb_store *s, const char *id, sb_proxy_record *out, 
 
 int sb_store_create_proxy_node(sb_store *s, const sb_proxy_record *node, sb_proxy_record *out,
                                sb_err *err) {
-    if (validate_proxy(node->tag, node->tag_len, node->node_type, node->node_type_len,
-                       node->server, node->server_len, node->server_port,
-                       node->protocol_config, err) != 0)
+    if (validate_proxy(node, err) != 0)
         return -1;
-    char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
-                                       node->protocol_config, err);
+    char *fingerprint = fingerprint_of(node, err);
     if (!fingerprint) return -1;
     if (node->subscription_id) {
         char *scoped = sb_asprintf("%s:%s", node->subscription_id, fingerprint);
@@ -2762,13 +2761,10 @@ done:
 
 int sb_store_update_proxy_node(sb_store *s, const sb_proxy_record *node, sb_proxy_record *out,
                                sb_err *err) {
-    if (validate_proxy(node->tag, node->tag_len, node->node_type, node->node_type_len,
-                       node->server, node->server_len, node->server_port,
-                       node->protocol_config, err) != 0)
+    if (validate_proxy(node, err) != 0)
         return -1;
     if (sb_str_empty(node->id)) return sb_fail(err, SB_ERR_VALIDATION, "Proxy id is required");
-    char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
-                                       node->protocol_config, err);
+    char *fingerprint = fingerprint_of(node, err);
     if (!fingerprint) return -1;
     if (node->subscription_id) {
         char *scoped = sb_asprintf("%s:%s", node->subscription_id, fingerprint);
@@ -2875,12 +2871,9 @@ static char *import_display_tag(sqlite3 *h, const sb_parsed_node *node, const ch
 /* One node of upsert_proxy_nodes; errors are collected by the caller. */
 static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscription_id,
                       sb_proxy_upsert_result *result, sb_err *err) {
-    if (validate_proxy(node->tag, node->tag_len, node->node_type, node->node_type_len,
-                       node->server, node->server_len, node->server_port,
-                       node->protocol_config, err) != 0)
+    if (validate_proxy(node, err) != 0)
         return -1;
-    char *fingerprint = fingerprint_of(node->node_type, node->node_type_len, node->server, node->server_len, node->server_port,
-                                       node->protocol_config, err);
+    char *fingerprint = fingerprint_of(node, err);
     if (!fingerprint) return -1;
     char *legacy_fingerprint = sb_strdup(fingerprint);
     if (subscription_id) {

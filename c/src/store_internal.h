@@ -89,4 +89,12 @@ int read_proxy_record(sqlite3_stmt *st, sb_proxy_record *r, sb_err *err);
 int validate_proxy(const sb_proxy_record *node, sb_err *err);
 char *fingerprint_of(const sb_proxy_record *node, sb_err *err);
 
+#define PROFILE_SELECT                                                                 \
+    "SELECT id, name, template, mode, rule_script, "                                   \
+    "rule_script_enabled, created_at, updated_at "
+
+int read_profile(sqlite3_stmt *st, sb_config_profile *p, sb_err *err);
+int jv_str(const sbj *obj, const char *key, const char *def, const char **out, sb_err *err);
+int find_profile_locked(sqlite3 *h, const char *id, sb_config_profile *out, sb_err *err);
+
 #endif

@@ -68,4 +68,16 @@ void read_subscription(sqlite3_stmt *st, sb_subscription *s);
 int exec_changes(sb_store *s, const char *sql, const char *not_found, sb_err *err, int nbinds, const char *const *binds);
 int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscription_id, sb_proxy_upsert_result *result, sb_err *err);
 
+#define HOST_SELECT                                                                    \
+    "\nSELECT h.id, h.name, h.agent_token, h.capabilities, h.profile_id,\n"            \
+    "       h.wg_address, h.wg_public_key, h.wg_endpoint, h.clash_api,\n"              \
+    "       h.clash_secret, h.last_seen, h.singbox_state, h.enabled,\n"                \
+    "       h.created_at, h.updated_at,\n"                                             \
+    "       (SELECT COUNT(*) FROM host_outbounds o WHERE o.host_id = h.id)\n"          \
+    "FROM hosts h\n"
+
+sbj *parse_object_or_empty(const char *text);
+void read_host(sqlite3_stmt *st, sb_host *h);
+char *new_agent_token(void);
+
 #endif

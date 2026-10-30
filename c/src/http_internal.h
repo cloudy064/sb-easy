@@ -221,4 +221,8 @@ void sb_http_register_proxy_user_routes(sb_http_server *srv);
  * mg_start (needs srv->mg). */
 void sb_http_register_clash_websocket(sb_http_server *srv);
 
+int self_singbox_start(sb_http_server *srv, sb_err *err);
+void self_singbox_request_stop(sb_http_server *srv);
+void self_singbox_join(sb_http_server *srv);
+
 #endif

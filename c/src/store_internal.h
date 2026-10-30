@@ -30,4 +30,32 @@ int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err);
 
 int exec_stmt(sqlite3_stmt *st, sb_err *err);
 
+#define COMMAND_SELECT "SELECT id, host_id, command, status, result, created_at, acked_at "
+
+#define VEC_APPEND_MOVE(dst, src)                                                      \
+    do {                                                                               \
+        if ((dst)->len + (src)->len > (dst)->cap) {                                    \
+            (dst)->cap = (dst)->len + (src)->len;                                      \
+            (dst)->items = sb_xrealloc((dst)->items, (dst)->cap * sizeof *(dst)->items); \
+        }                                                                              \
+        if ((src)->len)                                                                \
+            memcpy((dst)->items + (dst)->len, (src)->items, (src)->len * sizeof *(src)->items); \
+        (dst)->len += (src)->len;                                                      \
+        free((src)->items);                                                            \
+        memset((src), 0, sizeof *(src));                                               \
+    } while (0)
+
+#define FINISH_LIST(free_fn, out, rows, r)                                             \
+    do {                                                                               \
+        if ((r) < 0) {                                                                 \
+            free_fn(&(rows));                                                          \
+            return -1;                                                                 \
+        }                                                                              \
+        VEC_APPEND_MOVE((out), &(rows));                                               \
+        return 0;                                                                      \
+    } while (0)
+
+int host_exists(sqlite3 *db, const char *host_id, sb_err *err);
+void read_host_command(sqlite3_stmt *st, sb_host_command *c);
+
 #endif

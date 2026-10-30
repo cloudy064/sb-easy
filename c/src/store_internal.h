@@ -28,4 +28,6 @@ int bind_dump(sqlite3_stmt *st, int i, const sbj *value, sb_err *err);
 int exec_bound(sqlite3_stmt *st, int bound, sb_err *err);
 int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err);
 
+int exec_stmt(sqlite3_stmt *st, sb_err *err);
+
 #endif

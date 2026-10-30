@@ -58,4 +58,14 @@ int exec_stmt(sqlite3_stmt *st, sb_err *err);
 int host_exists(sqlite3 *db, const char *host_id, sb_err *err);
 void read_host_command(sqlite3_stmt *st, sb_host_command *c);
 
+#define SUBSCRIPTION_SELECT                                                            \
+    "SELECT id, name, url, enabled, refresh_interval, last_fetched_at, "               \
+    "last_fetch_result, created_at, updated_at, usage, last_attempt_at, last_error, "    \
+    "next_refresh_at, failure_count "
+
+sbj *strvec_to_json(const sb_strvec *v);
+void read_subscription(sqlite3_stmt *st, sb_subscription *s);
+int exec_changes(sb_store *s, const char *sql, const char *not_found, sb_err *err, int nbinds, const char *const *binds);
+int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscription_id, sb_proxy_upsert_result *result, sb_err *err);
+
 #endif

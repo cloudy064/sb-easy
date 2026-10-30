@@ -80,4 +80,13 @@ sbj *parse_object_or_empty(const char *text);
 void read_host(sqlite3_stmt *st, sb_host *h);
 char *new_agent_token(void);
 
+#define PROXY_SELECT                                                                   \
+    "SELECT id, tag, node_type, enabled, server, server_port, "                        \
+    "protocol_config, subscription_id, fingerprint, latency, "                         \
+    "last_latency_test, created_at, updated_at, source_tag "
+
+int read_proxy_record(sqlite3_stmt *st, sb_proxy_record *r, sb_err *err);
+int validate_proxy(const sb_proxy_record *node, sb_err *err);
+char *fingerprint_of(const sb_proxy_record *node, sb_err *err);
+
 #endif

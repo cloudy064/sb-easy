@@ -1034,6 +1034,73 @@ static int save_lease_session(sqlite3 *db, const char *host, const char *boot, i
     return rc;
 }
 
+/* Builds the lease snapshot for one exchange. Caller holds the database lock
+ * and an open transaction; returns NULL with err set on failure. */
+static sbj *build_lease_snapshot(sb_database *database, sqlite3 *db, const char *host, const char *boot,
+                                 int64_t seq, int64_t now, sb_err *err) {
+    int row = -1;
+    sbj *out = sbj_object();
+    sbj_set_int(out, "version", 1);
+    sbj_set_str(out, "host_id", host);
+    sbj_set_str(out, "boot_id", boot);
+    sbj_set_int(out, "request_seq", seq);
+    sbj_set_int(out, "generated_at", now);
+    sbj_set_int(out, "expires_at", now + LEASE_SECONDS);
+    sbj_set(out, "node", sbj_null());
+    sbj *users = sbj_array();
+    sbj_set(out, "users", users);
+    {
+        SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM proxy_ingress_nodes WHERE host_id=? AND enabled=1", err);
+        if (q.rc != 0)
+            goto fail;
+        sbq_bind_text(q.st, 1, host);
+        row = sbq_step_row(q.st, err);
+    }
+    if (row < 0)
+        goto fail;
+    int ready = runtime_ready(db, host, now, NULL, err);
+    if (ready < 0)
+        goto fail;
+    if (row == 1 && ready == 1) {
+        sbj *node = node_locked(db, host, true, now, err);
+        if (!node)
+            goto fail;
+        sbj_set(out, "node", node);
+        {
+            SBQ_AUTO q = sbq_stmt_open(
+                db,
+                "SELECT u.id,u.epoch,u.quota_bytes,u.expires_at,u.not_before FROM proxy_users u JOIN proxy_user_nodes b ON "
+                "b.user_id=u.id WHERE b.host_id=? AND u.enabled=1 AND u.deleted=0 AND "
+                "(u.expires_at=0 OR u.expires_at>?) ORDER BY u.id",
+                err);
+            if (q.rc != 0)
+                goto fail;
+            sbq_bind_text(q.st, 1, host);
+            sbq_bind_int(q.st, 2, now);
+            while ((row = sbq_step_row(q.st, err)) == 1) {
+                int64_t wait_ms = sb_proxy_clock_wait_ms(database, column(q.st, 0), sbq_int(q.st, 1));
+                if (wait_ms > 0 || sbq_int(q.st, 4) > now) continue;
+                sbj *u = lease_locked(db, host, boot, column(q.st, 0), sbq_int(q.st, 1), sbq_int(q.st, 2),
+                                      sbq_int(q.st, 3), now, err);
+                if (!u) {
+                    row = -1;
+                    break;
+                }
+                if (sbj_is_null(u))
+                    sbj_free(u);
+                else
+                    sbj_arr_push(users, u);
+            }
+        }
+        if (row < 0)
+            goto fail;
+    }
+    return out;
+fail:
+    sbj_free(out);
+    return NULL;
+}
+
 sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj *request, int64_t now,
                              sb_err *err) {
     if (validate_exchange_request(request, now, err) != 0) return NULL;
@@ -1102,62 +1169,9 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
     for (size_t i = 0; i < sbj_arr_len(reports); ++i)
         if (report_locked(db, host, boot, sbj_arr_at(reports, i), now, err))
             goto rollback;
-    out = sbj_object();
-    sbj_set_int(out, "version", 1);
-    sbj_set_str(out, "host_id", host);
-    sbj_set_str(out, "boot_id", boot);
-    sbj_set_int(out, "request_seq", seq);
-    sbj_set_int(out, "generated_at", now);
-    sbj_set_int(out, "expires_at", now + LEASE_SECONDS);
-    sbj_set(out, "node", sbj_null());
-    sbj *users = sbj_array();
-    sbj_set(out, "users", users);
-    {
-        SBQ_AUTO q = sbq_stmt_open(db, "SELECT 1 FROM proxy_ingress_nodes WHERE host_id=? AND enabled=1", err);
-        if (q.rc != 0)
-            goto rollback;
-        sbq_bind_text(q.st, 1, host);
-        row = sbq_step_row(q.st, err);
-    }
-    if (row < 0)
+    out = build_lease_snapshot(database, db, host, boot, seq, now, err);
+    if (!out)
         goto rollback;
-    int ready = runtime_ready(db, host, now, NULL, err);
-    if (ready < 0)
-        goto rollback;
-    if (row == 1 && ready == 1) {
-        sbj *node = node_locked(db, host, true, now, err);
-        if (!node)
-            goto rollback;
-        sbj_set(out, "node", node);
-        {
-            SBQ_AUTO q = sbq_stmt_open(
-                db,
-                "SELECT u.id,u.epoch,u.quota_bytes,u.expires_at,u.not_before FROM proxy_users u JOIN proxy_user_nodes b ON "
-                "b.user_id=u.id WHERE b.host_id=? AND u.enabled=1 AND u.deleted=0 AND "
-                "(u.expires_at=0 OR u.expires_at>?) ORDER BY u.id",
-                err);
-            if (q.rc != 0)
-                goto rollback;
-            sbq_bind_text(q.st, 1, host);
-            sbq_bind_int(q.st, 2, now);
-            while ((row = sbq_step_row(q.st, err)) == 1) {
-                int64_t wait_ms = sb_proxy_clock_wait_ms(database, column(q.st, 0), sbq_int(q.st, 1));
-                if (wait_ms > 0 || sbq_int(q.st, 4) > now) continue;
-                sbj *u = lease_locked(db, host, boot, column(q.st, 0), sbq_int(q.st, 1), sbq_int(q.st, 2),
-                                      sbq_int(q.st, 3), now, err);
-                if (!u) {
-                    row = -1;
-                    break;
-                }
-                if (sbj_is_null(u))
-                    sbj_free(u);
-                else
-                    sbj_arr_push(users, u);
-            }
-        }
-        if (row < 0)
-            goto rollback;
-    }
     if (save_lease_session(db, host, boot, seq, hash, out, now, err) || sbq_commit(db, err))
         goto rollback;
     goto done;

@@ -97,4 +97,7 @@ int read_profile(sqlite3_stmt *st, sb_config_profile *p, sb_err *err);
 int jv_str(const sbj *obj, const char *key, const char *def, const char **out, sb_err *err);
 int find_profile_locked(sqlite3 *h, const char *id, sb_config_profile *out, sb_err *err);
 
+char *controller_address(const char *address, size_t len, size_t *out_len);
+int read_nodes(sqlite3 *db, const char *sql, const char *host_id, sb_proxy_node_vec *out, sb_err *err);
+
 #endif

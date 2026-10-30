@@ -63,7 +63,7 @@ static bool environment_flag(const char *name, bool fallback) {
     return result;
 }
 
-static bool c_space(unsigned char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
+bool c_space(unsigned char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
 
 /* std::from_chars for an unsigned integer over the whole text. */
 static bool parse_unsigned(const char *text, size_t len, uint64_t limit, uint64_t *out) {
@@ -145,7 +145,7 @@ static int path_exists(const char *path) {
 }
 
 /* Throwing std::filesystem::exists(path). */
-static int path_exists_or_fail(const char *path, bool *exists, sb_err *err) {
+int path_exists_or_fail(const char *path, bool *exists, sb_err *err) {
     int result = path_exists(path);
     if (result < 0)
         return sb_fail(err, SB_ERR_IO, "filesystem error: status: %s [%s]", strerror(errno), path);
@@ -156,7 +156,7 @@ static int path_exists_or_fail(const char *path, bool *exists, sb_err *err) {
 /* std::ifstream + read, as libstdc++ does it: 1 read into *out, 0 when the
  * file cannot be opened, -1 when reading fails (a directory opens but
  * basic_filebuf::underflow throws "... error reading the file: <errno>"). */
-static int read_stream(const char *path, char **out, size_t *len, sb_err *err) {
+int read_stream(const char *path, char **out, size_t *len, sb_err *err) {
     *out = NULL;
     *len = 0;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -212,7 +212,7 @@ static sbj *parse_json(const char *text, size_t len, sb_err *err) {
 }
 
 /* json::parse(text, nullptr, false): NULL for a discarded value. */
-static sbj *parse_json_lenient(const char *text, size_t len) {
+sbj *parse_json_lenient(const char *text, size_t len) {
     text = skip_bom(text, &len);
     return len ? sbj_parse(text, len, NULL, 0) : NULL;
 }
@@ -600,136 +600,6 @@ static int transform_options(sb_agent_config_options *out, sb_err *err) {
     out->default_proxy_outbound = *default_outbound ? sb_strdup(default_outbound) : NULL;
     sbj_free(out->local_route_rules);
     out->local_route_rules = rules;
-    return 0;
-}
-
-/* ---- external commands ------------------------------------------------ */
-
-static int split_command_line(const char *command, sb_strvec *out, sb_err *err) {
-    memset(out, 0, sizeof *out);
-    sb_buf current = {0};
-    char quote = 0;
-    bool escaped = false, started = false;
-    for (const char *p = command; *p; ++p) {
-        char character = *p;
-        if (escaped) {
-            sb_buf_putc(&current, character);
-            escaped = false;
-            started = true;
-            continue;
-        }
-        if (character == '\\' && quote != '\'') {
-            escaped = true;
-            started = true;
-            continue;
-        }
-        if (quote != 0) {
-            if (character == quote) quote = 0;
-            else sb_buf_putc(&current, character);
-            started = true;
-            continue;
-        }
-        if (character == '\'' || character == '"') {
-            quote = character;
-            started = true;
-            continue;
-        }
-        if (c_space((unsigned char)character)) {
-            if (started) {
-                sb_strvec_push_take(out, sb_buf_detach(&current));
-                started = false;
-            }
-            continue;
-        }
-        sb_buf_putc(&current, character);
-        started = true;
-    }
-    if (escaped || quote != 0) {
-        sb_buf_free(&current);
-        sb_strvec_free(out);
-        return sb_fail(err, SB_ERR_VALIDATION, "unterminated command escape or quote");
-    }
-    if (started) sb_strvec_push_take(out, sb_buf_detach(&current));
-    sb_buf_free(&current);
-    return 0;
-}
-
-typedef struct {
-    bool success;
-    char *detail; /* owned */
-} process_result;
-
-static process_result run_program(const sb_strvec *arguments) {
-    process_result result = {false, NULL};
-    if (arguments->len == 0 || arguments->items[0][0] == '\0') {
-        result.detail = sb_strdup("command is empty");
-        return result;
-    }
-    char **argv = sb_xcalloc(arguments->len + 1, sizeof *argv);
-    for (size_t i = 0; i < arguments->len; ++i) argv[i] = arguments->items[i];
-    pid_t process = 0;
-    int spawn_error = posix_spawnp(&process, argv[0], NULL, NULL, argv, environ);
-    free(argv);
-    if (spawn_error != 0) {
-        result.detail = sb_asprintf("spawn failed: %s", strerror(spawn_error));
-        return result;
-    }
-    int status = 0;
-    while (waitpid(process, &status, 0) < 0) {
-        if (errno != EINTR) {
-            result.detail = sb_asprintf("wait failed: %s", strerror(errno));
-            return result;
-        }
-    }
-    if (WIFEXITED(status)) {
-        result.success = WEXITSTATUS(status) == 0;
-        result.detail = sb_asprintf("exit code %d", WEXITSTATUS(status));
-        return result;
-    }
-    if (WIFSIGNALED(status)) {
-        result.detail = sb_asprintf("terminated by signal %d", WTERMSIG(status));
-        return result;
-    }
-    result.detail = sb_strdup("process ended without an exit status");
-    return result;
-}
-
-/* 1 read, 0 missing, -1 error. */
-static int read_existing(const char *path, char **out, size_t *len, sb_err *err) {
-    int opened = read_stream(path, out, len, err);
-    if (opened != 0) return opened;
-    bool exists = false;
-    if (path_exists_or_fail(path, &exists, err) != 0) return -1;
-    if (!exists) return 0;
-    return sb_fail(err, SB_ERR_IO, "cannot read existing config: %s", path);
-}
-
-/* C++ proxy_test_tags(): *all = true for std::nullopt. */
-static int proxy_test_tags(const char *command, sbj **tags, bool *all, sb_err *err) {
-    static const char prefix[] = "test-proxies";
-    const size_t prefix_len = sizeof prefix - 1;
-    *tags = NULL;
-    *all = true;
-    if (strcmp(command, prefix) == 0) return 0;
-    if (!sb_starts_with(command, prefix) || strlen(command) <= prefix_len ||
-        !c_space((unsigned char)command[prefix_len]))
-        return sb_fail(err, SB_ERR_VALIDATION, "not a test-proxies command");
-    const char *suffix = command + prefix_len;
-    while (*suffix && c_space((unsigned char)*suffix)) ++suffix;
-    sbj *parsed = parse_json_lenient(suffix, strlen(suffix));
-    if (!sbj_is_array(parsed)) {
-        sbj_free(parsed);
-        return 0;
-    }
-    const sbj *value;
-    SBJ_ARR_FOREACH(parsed, i, value) {
-        if (!sbj_is_string(value)) {
-            sbj_free(parsed);
-            return 0;
-        }
-    }
-    *tags = parsed;
-    *all = false;
     return 0;
 }
 

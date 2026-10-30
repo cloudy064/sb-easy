@@ -1034,6 +1034,52 @@ static int save_lease_session(sqlite3 *db, const char *host, const char *boot, i
     return rc;
 }
 
+/* Compares the request with the stored session for (host, boot). Caller holds
+ * the database lock and an open transaction. Returns 0 for a new request, 1 for
+ * an exact replay (*replayed receives the stored snapshot), -1 with err set on
+ * a sequence conflict, an invalid stored snapshot, or a database error. */
+static int check_lease_session(sqlite3 *db, const char *host, const char *boot, int64_t seq, const char *hash,
+                               sbj **replayed, sb_err *err) {
+    bool replay = false, conflict = false;
+    sbj *stored = NULL;
+    int row;
+    {
+        SBQ_AUTO q = sbq_stmt_open(
+            db,
+            "SELECT request_seq,request_hash,response FROM proxy_lease_sessions WHERE host_id=? AND boot_id=?",
+            err);
+        if (q.rc != 0)
+            return -1;
+        sbq_bind_text(q.st, 1, host);
+        sbq_bind_text(q.st, 2, boot);
+        row = sbq_step_row(q.st, err);
+        if (row == 1) {
+            int64_t previous = sbq_int(q.st, 0);
+            replay = seq == previous && sb_streq(hash, column(q.st, 1));
+            conflict = seq != previous + 1 && !replay;
+            if (replay)
+                stored = sbj_parse(column(q.st, 2), (size_t)sqlite3_column_bytes(q.st, 2), NULL, 0);
+        } else if (!row)
+            conflict = seq != 1;
+    }
+    if (row < 0)
+        return -1;
+    if (conflict) {
+        sb_fail(err, SB_ERR_CONFLICT,
+                "Proxy lease sequence changed; retry the same request or use the next sequence");
+        return -1;
+    }
+    if (replay) {
+        if (!stored) {
+            sb_fail(err, SB_ERR_GENERIC, "Stored proxy lease snapshot is invalid");
+            return -1;
+        }
+        *replayed = stored;
+        return 1;
+    }
+    return 0;
+}
+
 /* Builds the lease snapshot for one exchange. Caller holds the database lock
  * and an open transaction; returns NULL with err set on failure. */
 static sbj *build_lease_snapshot(sb_database *database, sqlite3 *db, const char *host, const char *boot,
@@ -1127,38 +1173,10 @@ sbj *sb_proxy_lease_exchange(sb_database *database, const char *host, const sbj 
             sb_fail(err, SB_ERR_AUTH, "Proxy lease host is unknown or disabled");
         goto rollback;
     }
-    bool replay = false, conflict = false;
-    {
-        SBQ_AUTO q = sbq_stmt_open(
-            db,
-            "SELECT request_seq,request_hash,response FROM proxy_lease_sessions WHERE host_id=? AND boot_id=?",
-            err);
-        if (q.rc != 0)
-            goto rollback;
-        sbq_bind_text(q.st, 1, host);
-        sbq_bind_text(q.st, 2, boot);
-        row = sbq_step_row(q.st, err);
-        if (row == 1) {
-            int64_t previous = sbq_int(q.st, 0);
-            replay = seq == previous && sb_streq(hash, column(q.st, 1));
-            conflict = seq != previous + 1 && !replay;
-            if (replay)
-                out = sbj_parse(column(q.st, 2), (size_t)sqlite3_column_bytes(q.st, 2), NULL, 0);
-        } else if (!row)
-            conflict = seq != 1;
-    }
-    if (row < 0)
+    int session = check_lease_session(db, host, boot, seq, hash, &out, err);
+    if (session < 0)
         goto rollback;
-    if (conflict) {
-        sb_fail(err, SB_ERR_CONFLICT,
-                "Proxy lease sequence changed; retry the same request or use the next sequence");
-        goto rollback;
-    }
-    if (replay) {
-        if (!out) {
-            sb_fail(err, SB_ERR_GENERIC, "Stored proxy lease snapshot is invalid");
-            goto rollback;
-        }
+    if (session == 1) {
         if (sbq_commit(db, err)) {
             sbj_free(out);
             out = NULL;

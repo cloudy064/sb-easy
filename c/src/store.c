@@ -2871,9 +2871,14 @@ static char *import_display_tag(sqlite3 *h, const sb_parsed_node *node, const ch
 /* One node of upsert_proxy_nodes; errors are collected by the caller. */
 static int upsert_one(sqlite3 *h, const sb_parsed_node *node, const char *subscription_id,
                       sb_proxy_upsert_result *result, sb_err *err) {
-    if (validate_proxy(node, err) != 0)
+    sb_proxy_record view = {0};
+    view.tag = node->tag; view.tag_len = node->tag_len;
+    view.node_type = node->node_type; view.node_type_len = node->node_type_len;
+    view.server = node->server; view.server_len = node->server_len;
+    view.server_port = node->server_port; view.protocol_config = node->protocol_config;
+    if (validate_proxy(&view, err) != 0)
         return -1;
-    char *fingerprint = fingerprint_of(node, err);
+    char *fingerprint = fingerprint_of(&view, err);
     if (!fingerprint) return -1;
     char *legacy_fingerprint = sb_strdup(fingerprint);
     if (subscription_id) {

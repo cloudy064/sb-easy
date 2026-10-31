@@ -462,6 +462,7 @@ void sb_http_sync_wireguard_best_effort(sb_http_server *srv) {
 #define SB_HTTP_KEEP_ALIVE_TIMEOUT_MS "15000"
 #define SB_HTTP_REQUEST_TIMEOUT_MS "60000"
 #define SB_HTTP_MAX_REQUEST_BYTES "131072"
+
 /* ---- methods ----------------------------------------------------------- */
 
 static const char *const method_names[M_COUNT] = {"GET",   "POST", "HEAD", "PUT",   "DELETE",  "OPTIONS",

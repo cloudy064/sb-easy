@@ -27,6 +27,9 @@ extern const char *const settings_upsert_sql;
 int bind_dump(sqlite3_stmt *st, int i, const sbj *value, sb_err *err);
 int exec_bound(sqlite3_stmt *st, int bound, sb_err *err);
 int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err);
+int jv_bool(const sbj *obj, const char *key, bool def, bool *out, sb_err *err);
+int jv_int(const sbj *obj, const char *key, int64_t def, int64_t *out, sb_err *err);
+const char *jv_opt_str(const sbj *obj, const char *key);
 
 int exec_stmt(sqlite3_stmt *st, sb_err *err);
 

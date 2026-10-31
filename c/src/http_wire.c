@@ -47,7 +47,7 @@ void wire_set_header(wire_response *w, const char *name, const char *value) {
     wire_set_header_n(w, name, value, strlen(value));
 }
 
-static const char *wire_header(const wire_response *w, const char *lowered_name) {
+const char *wire_header(const wire_response *w, const char *lowered_name) {
     for (size_t i = 0; i < w->names.len; ++i)
         if (strcmp(w->names.items[i], lowered_name) == 0) return w->values.items[i];
     return NULL;

@@ -30,6 +30,7 @@ int restore_peer(sqlite3 *h, const sbj *value, size_t *count, sb_err *err);
 int jv_bool(const sbj *obj, const char *key, bool def, bool *out, sb_err *err);
 int jv_int(const sbj *obj, const char *key, int64_t def, int64_t *out, sb_err *err);
 const char *jv_opt_str(const sbj *obj, const char *key);
+void read_user(sqlite3_stmt *st, sb_user_account *u);
 
 int exec_stmt(sqlite3_stmt *st, sb_err *err);
 

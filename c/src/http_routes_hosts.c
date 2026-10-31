@@ -524,8 +524,8 @@ static int endpoint_tag_in_use(const sbj *endpoints, const sb_render_request *re
 /* managed_render_request(store, wireguard, host, provision, control_plane):
  * `host` may be replaced by its provisioned version; `out` must be
  * initialised (sb_render_request_init). */
-static int managed_render_request(sb_http_server *srv, sb_host *host, bool provision_network_identity,
-                                  const char *control_plane_server, sb_render_request *out, sb_err *err) {
+int managed_render_request(sb_http_server *srv, sb_host *host, bool provision_network_identity,
+                           const char *control_plane_server, sb_render_request *out, sb_err *err) {
     bool embedded = false;
     if (uses_embedded_managed_network(host, &embedded, err) != 0) return -1;
     if (embedded && provision_network_identity && !host->wg_address) {

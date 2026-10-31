@@ -16,8 +16,10 @@ void respond_ok(sb_http_resp *resp);
 const char *route_param(const sb_http_req *req);
 sbj *render_config(const sb_render_request *request, sb_err *err);
 sbj *commands_to_json(const sb_host_command_vec *commands);
+int managed_render_request(sb_http_server *srv, sb_host *host, bool provision_network_identity,
+                           const char *control_plane_server, sb_render_request *out, sb_err *err);
 
-/* http_routes_agent.c: /api/agent/*, /api/devices/enroll, host captures. */
+/* http_routes_agent.c: the agent routes, device enrollment and host captures. */
 void sb_http_register_agent_routes(sb_http_server *srv);
 
 #endif

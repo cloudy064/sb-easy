@@ -224,7 +224,8 @@ void sb_http_register_clash_websocket(sb_http_server *srv);
 int self_singbox_start(sb_http_server *srv, sb_err *err);
 void self_singbox_request_stop(sb_http_server *srv);
 void self_singbox_join(sb_http_server *srv);
-n/* http_log.c: server log ring fed by the process-wide log sink. */
+
+/* http_log.c: server log ring fed by the process-wide log sink. */
 void sb_http_log_attach(sb_http_server *srv);
 void sb_http_log_detach(sb_http_server *srv);
 int sb_http_parse_log_level(const char *configured, sb_log_level *out, sb_err *err);

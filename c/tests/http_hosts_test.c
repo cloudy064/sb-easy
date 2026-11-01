@@ -306,6 +306,9 @@ TEST(hosts_contract) {
     free(body);
     CHECK_EQ_INT(r.status, 200); /* released Android apps keep their enrollment alias */
     sb_test_response_free(&r);
+    free(original_token); /* each redeem rotated the credential; follow the stored one */
+    original_token = host_token(&t, host_id);
+    REQUIRE(original_token && *original_token);
 
     /* Windows opts into provenance without changing legacy config responses. */
     r = call_as(&t, original_token, "GET", "/api/agent/config?sources=1", NULL);
@@ -1047,8 +1050,7 @@ TEST(host_subresources) {
     path = sb_asprintf("/api/hosts/%s/token", id);
     char *token = host_token(&t, id);
     r = call(&t, "GET", path, NULL);
-    expected = sb_asprintf("{\"agent_token\":\"%s\",\"host_id\":\"%s\",\"server\":\"https://panel.example.com\"}",
-                           token, id);
+    expected = sb_asprintf("{\"has_token\":true,\"host_id\":\"%s\",\"server\":\"https://panel.example.com\"}", id);
     CHECK_STR(r.body, expected);
     free(expected);
     sb_test_response_free(&r);

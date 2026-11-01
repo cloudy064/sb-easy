@@ -239,7 +239,7 @@ def run(args, root):
             assert rendered["experimental"]["clash_api"]["secret"] == connection_fields["clash_secret"]
         api("/api/hosts/" + reference_host["id"], method="DELETE")
         print("PASS: complete host profile references reject prefix aliases; connection fields survive CRUD/rendering")
-        agent_headers = {"Authorization": "Bearer " + api("/api/hosts/" + host["id"] + "/token")["agent_token"]}
+        agent_headers = {"Authorization": "Bearer " + redeemed["agent_token"]}
         diagnostic = {"reason": "r" * 78 + "\0éend", "app_version": "app\0tail",
                       "core_version": "core\0tail", "logs": ["short\0tail", "l" * 3998 + "\0éend"]}
         status, _, _ = request("/api/agent/diagnostics", diagnostic, headers=agent_headers, authenticated=False)
@@ -319,7 +319,8 @@ def run(args, root):
         for n, (host_id, config_path) in enumerate(agents):
             saved = json.loads((config_path.parent / "device-credential.json").read_text())
             assert saved["host_name"] == f"e2e-agent-{n}\0tail"
-        agent_tokens = [api(f"/api/hosts/{host_id}/token")["agent_token"] for host_id, _ in agents]
+        agent_tokens = [json.loads((config_path.parent / "device-credential.json").read_text())["agent_token"]
+                        for _, config_path in agents]
 
         def agent_config(agent_token, etag=None):
             headers = {"Authorization": "Bearer " + agent_token}

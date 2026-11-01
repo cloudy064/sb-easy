@@ -277,7 +277,7 @@ TEST(hosts_contract) {
     free(body);
     CHECK_EQ_INT(r.status, 200); /* devices redeem without admin auth */
     CHECK_STR(jstr(r.json, "host_id"), host_id);
-    CHECK_STR(jstr(r.json, "agent_token"), original_token);
+    CHECK(jstr(r.json, "agent_token") && !sb_streq(jstr(r.json, "agent_token"), original_token)); /* redeem rotates */
     CHECK_STR(jstr(r.json, "profile.id"), profile_id);
     sb_test_response_free(&r);
 
@@ -546,7 +546,8 @@ TEST(hosts_contract) {
     char *token_path = sb_asprintf("/api/hosts/%s/token", host_id);
     r = call(&t, "GET", token_path, NULL);
     free(token_path);
-    CHECK_STR(jstr(r.json, "agent_token"), original_token); /* token reveal contract */
+    CHECK(!sbj_has(r.json, "agent_token")); /* the plaintext token is no longer revealed */
+    CHECK_EQ_INT(jbool(r.json, "has_token"), 1);
     CHECK_STR(jstr(r.json, "server"), "https://panel.example.com");
     sb_test_response_free(&r);
     char *rotate_path = sb_asprintf("/api/hosts/%s/rotate-token", host_id);

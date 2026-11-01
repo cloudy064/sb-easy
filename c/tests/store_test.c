@@ -503,7 +503,8 @@ TEST(device_enrollment_codes_are_platform_neutral_expiring_and_single_use) {
     REQUIRE(sb_store_redeem_agent_enrollment(s, e.code, device, &r, &err) == 0);
     sbj_free(device);
     CHECK_STR(r.host_id, created.id);
-    CHECK_STR(r.agent_token, created.agent_token);
+    CHECK(!sb_streq(r.agent_token, created.agent_token)); /* redeem rotates the token */
+    CHECK_EQ_INT(strlen(r.agent_token), 64);
     CHECK_STR(r.profile_id, "android-client");
     CHECK_STR(r.profile_name, "Managed Device");
     sb_host reloaded;

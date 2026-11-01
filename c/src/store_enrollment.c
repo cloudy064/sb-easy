@@ -167,6 +167,30 @@ int sb_store_redeem_agent_enrollment(sb_store *s, const char *code, const sbj *d
             rc = -1;
         }
     }
+    if (rc == 0) {
+        /* Redeeming rotates the credential: a reinstalled device cannot leave an
+         * older device holding the same long-lived token. */
+        char *token = new_agent_token();
+        char *token_hash = sb_sha256_hex(token, strlen(token));
+        sqlite3_stmt *st = sbq_prepare(h,
+                                       "UPDATE hosts SET agent_token = ?1, agent_token_hash = ?2 WHERE id = ?3",
+                                       err);
+        if (st) {
+            sbq_bind_text(st, 1, token);
+            sbq_bind_text(st, 2, token_hash);
+            sbq_bind_text(st, 3, result.host_id);
+            rc = exec_stmt(st, err);
+        } else {
+            rc = -1;
+        }
+        if (rc == 0) {
+            free(result.agent_token);
+            result.agent_token = token;
+            token = NULL;
+        }
+        free(token);
+        free(token_hash);
+    }
     if (rc == 0) rc = sbq_commit(h, err);
     if (rc != 0) sbq_rollback(h);
     UNLOCK(s);

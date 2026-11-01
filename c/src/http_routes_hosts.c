@@ -804,7 +804,8 @@ static int handle_host_token(sb_http_req *req, sb_http_resp *resp, sb_err *err) 
     }
     sbj *out = sbj_object();
     sbj_set_str(out, "host_id", S(host.id));
-    sbj_set_str(out, "agent_token", S(host.agent_token));
+    /* The plaintext token is shown once, by rotate-token or enrollment. */
+    sbj_set_bool(out, "has_token", !sb_str_empty(host.agent_token));
     sbj_set_str(out, "server", S(srv->opts.public_server));
     sb_host_free(&host);
     sb_resp_json(resp, 200, out);

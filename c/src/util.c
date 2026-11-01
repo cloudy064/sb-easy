@@ -432,13 +432,17 @@ int64_t sb_monotonic_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-__attribute__((format(strftime, 2, 0)))
+/* Only called with the string literals below, so the format is never
+ * attacker-controlled; suppress the nonliteral check for this one call. */
 static char *fmt_utc(int64_t t, const char *fmt) {
     time_t tt = (time_t)t;
     struct tm tm;
     gmtime_r(&tt, &tm);
     char buf[64];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
     strftime(buf, sizeof buf, fmt, &tm);
+#pragma GCC diagnostic pop
     return sb_strdup(buf);
 }
 

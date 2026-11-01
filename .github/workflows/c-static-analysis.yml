@@ -1,0 +1,55 @@
+name: C static analysis (report only)
+on:
+  pull_request:
+    paths: ['c/**', '.github/workflows/c-static-analysis.yml']
+  push:
+    branches: [master]
+    paths: ['c/**', '.github/workflows/c-static-analysis.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: c-static-analysis-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  analyze:
+    name: clang-tidy and cppcheck (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools and native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc git pkg-config clang-tidy cppcheck \
+            libcurl4-openssl-dev libyaml-dev libsqlite3-dev libssl-dev
+      - name: Configure (compile_commands.json)
+        run: cmake -S c -B build/c-analysis -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=Debug
+      - name: Build dependencies so generated headers exist
+        run: cmake --build build/c-analysis --parallel 2
+      - name: cppcheck (report only)
+        continue-on-error: true
+        run: |
+          cppcheck --enable=warning,performance,portability --inconclusive \
+            --suppress=missingIncludeSystem --inline-suppr --std=c11 \
+            --project=build/c-analysis/compile_commands.json \
+            --file-filter='c/src/*' --quiet 2> build/cppcheck.txt || true
+          wc -l build/cppcheck.txt
+          head -n 200 build/cppcheck.txt
+      - name: clang-tidy (report only)
+        continue-on-error: true
+        run: |
+          files=$(ls c/src/*.c)
+          clang-tidy -p build/c-analysis \
+            --checks='-*,bugprone-*,clang-analyzer-*,-bugprone-easily-swappable-parameters' \
+            --quiet $files > build/clang-tidy.txt 2>&1 || true
+          grep -c 'warning:' build/clang-tidy.txt || true
+          head -n 200 build/clang-tidy.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: c-static-analysis-reports
+          path: |
+            build/cppcheck.txt
+            build/clang-tidy.txt
+          if-no-files-found: ignore

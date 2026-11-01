@@ -432,6 +432,7 @@ int64_t sb_monotonic_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+__attribute__((format(strftime, 2, 0)))
 static char *fmt_utc(int64_t t, const char *fmt) {
     time_t tt = (time_t)t;
     struct tm tm;

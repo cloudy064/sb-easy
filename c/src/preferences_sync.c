@@ -16,7 +16,7 @@ static bool canonical_base64(const sbj *value, size_t exact_length, size_t minim
     size_t n = value->v.str.len;
     const char *text = value->v.str.ptr;
     if (!n || n > ENVELOPE_LIMIT || n % 4) return false;
-    size_t pad = (text[n - 1] == '=') + (text[n - 2] == '=');
+    size_t pad = (size_t)((text[n - 1] == '=') + (text[n - 2] == '='));
     for (size_t i = 0; i < n; ++i) {
         unsigned char c = (unsigned char)text[i];
         bool alphabet = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||

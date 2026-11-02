@@ -333,6 +333,39 @@ static sbj *related_logs(sbw_core *core, const sbj *before, unsigned short sourc
     sbj_free(after);
     return output;
 }
+/* Builds the probe report; takes ownership of observed. */
+static sbj *probe_result(const probe_url *url, DWORD win_error, DWORD status, ULONGLONG started,
+                         sbj *observed, sbw_core *core, sbj *before, unsigned short source_port,
+                         sbj *private_config) {
+    sbj *result = sbj_object();
+    sbj_set_str(result, "url", url->display);
+    sbj_set_str(result, "host", url->host_utf8);
+    sbj_set_int(result, "port", url->port);
+    sbj_set_bool(result, "success", !win_error && status >= 200 && status < 400);
+    sbj_set_int(result, "http_status", status);
+    sbj_set_int(result, "elapsed_ms", (int64_t)(GetTickCount64() - started));
+    sbj_set_str(result, "error_code",
+                win_error       ? transport_error(win_error)
+                : status >= 400 ? "PROBE_HTTP_STATUS"
+                                : "");
+    sbj *evidence = sbj_object();
+    sbj_set_bool(evidence, "observed", observed != NULL);
+    if (observed) {
+        sbj_set(evidence, "connection", observed);
+        observed = NULL;
+    }
+    sbj *logs = related_logs(core, before, source_port, private_config);
+    bool dns_observed = false;
+    for (size_t i = 0; i < sbj_arr_len(logs); ++i)
+        if (strstr(sbj_as_str(sbj_arr_at(logs, i), ""), "dns:"))
+            dns_observed = true;
+    sbj_set(evidence, "logs", logs);
+    sbj_set_str(evidence, "dns", dns_observed ? "correlated_logs" : "unobserved");
+    sbj_set_str(evidence, "public_exit_ip", "unobserved");
+    sbj_set_str(evidence, "process_scope", "diagnostic-service-request");
+    sbj_set(result, "evidence", evidence);
+    return result;
+}
 sbj *sbw_route_probe(const sbw_runtime_config *config, sbw_core *core, DWORD pid, HANDLE cancel,
                      const sbj *params, sbw_error *error) {
     DWORD timeout = timeout_value(params, 10000, 15000);
@@ -473,33 +506,9 @@ failed:
     if (!win_error)
         win_error = ERROR_WINHTTP_INTERNAL_ERROR;
 response:
-    result = sbj_object();
-    sbj_set_str(result, "url", url.display);
-    sbj_set_str(result, "host", url.host_utf8);
-    sbj_set_int(result, "port", url.port);
-    sbj_set_bool(result, "success", !win_error && status >= 200 && status < 400);
-    sbj_set_int(result, "http_status", status);
-    sbj_set_int(result, "elapsed_ms", (int64_t)(GetTickCount64() - started));
-    sbj_set_str(result, "error_code",
-                win_error       ? transport_error(win_error)
-                : status >= 400 ? "PROBE_HTTP_STATUS"
-                                : "");
-    sbj *evidence = sbj_object();
-    sbj_set_bool(evidence, "observed", observed != NULL);
-    if (observed) {
-        sbj_set(evidence, "connection", observed);
-        observed = NULL;
-    }
-    sbj *logs = related_logs(core, before, source_port, private_config);
-    bool dns_observed = false;
-    for (size_t i = 0; i < sbj_arr_len(logs); ++i)
-        if (strstr(sbj_as_str(sbj_arr_at(logs, i), ""), "dns:"))
-            dns_observed = true;
-    sbj_set(evidence, "logs", logs);
-    sbj_set_str(evidence, "dns", dns_observed ? "correlated_logs" : "unobserved");
-    sbj_set_str(evidence, "public_exit_ip", "unobserved");
-    sbj_set_str(evidence, "process_scope", "diagnostic-service-request");
-    sbj_set(result, "evidence", evidence);
+    result = probe_result(&url, win_error, status, started, observed, core, before, source_port,
+                          private_config);
+    observed = NULL;
 done:
     if (request)
         WinHttpCloseHandle(request);

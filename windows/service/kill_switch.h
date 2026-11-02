@@ -22,7 +22,12 @@ int sbw_kill_switch_apply(bool enabled, const wchar_t *core_executable, const wc
  * or proof of packet-level leak protection. Keys: available, enabled, error_code,
  * filter_count, tun_allowed, persistent. Never enables/removes policy. */
 sbj *sbw_kill_switch_status(void);
-typedef enum sbw_kill_startup_action { SBW_KILL_UNCHANGED, SBW_KILL_ENABLE, SBW_KILL_DISABLE, SBW_KILL_PRESERVE_UNKNOWN } sbw_kill_startup_action;
+typedef enum sbw_kill_startup_action {
+    SBW_KILL_UNCHANGED,
+    SBW_KILL_ENABLE,
+    SBW_KILL_DISABLE,
+    SBW_KILL_PRESERVE_UNKNOWN
+} sbw_kill_startup_action;
 /* Pure startup decision: only a valid persisted boolean authorizes disable. */
 sbw_kill_startup_action sbw_kill_switch_startup_action(const sbj *preference, const sbj *observed);
 

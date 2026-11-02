@@ -34,8 +34,8 @@ sbw_directory_guard *sbw_secure_directory_open_readonly(const wchar_t *directory
 void sbw_secure_directory_close(sbw_directory_guard *directory);
 /* Basenames only. The returned file is pinned without write/delete sharing;
  * caller closes it before replacing or removing the file. */
-HANDLE sbw_secure_directory_file(sbw_directory_guard *directory, const wchar_t *name,
-    DWORD access, DWORD disposition, sbw_error *error);
+HANDLE sbw_secure_directory_file(sbw_directory_guard *directory, const wchar_t *name, DWORD access,
+                                 DWORD disposition, sbw_error *error);
 wchar_t *sbw_secure_directory_path(const sbw_directory_guard *directory, const wchar_t *name);
 
 #endif

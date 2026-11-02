@@ -55,15 +55,16 @@ static bool forbidden_option(const sbj *value, unsigned depth) {
 }
 bool sbw_subscription_node_valid(const sbj *node) {
     const char *type = sbj_get_str(node, "type", "");
-    const char *types[] = {"shadowsocks", "vmess", "vless", "trojan", "hysteria2", "tuic", "http", "socks"};
+    const char *types[] = {"shadowsocks", "vmess", "vless", "trojan",
+                           "hysteria2",   "tuic",  "http",  "socks"};
     bool supported = false;
     for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i)
         if (!strcmp(type, types[i]))
             supported = true;
     if (!supported || !plain_string(sbj_get(node, "tag"), 80, false) ||
-        !plain_string(sbj_get(node, "server"), 253, false) || !sbj_is_integer(sbj_get(node, "server_port")) ||
-        sbj_get_int(node, "server_port", 0) < 1 || sbj_get_int(node, "server_port", 0) > 65535 ||
-        forbidden_option(node, 0))
+        !plain_string(sbj_get(node, "server"), 253, false) ||
+        !sbj_is_integer(sbj_get(node, "server_port")) || sbj_get_int(node, "server_port", 0) < 1 ||
+        sbj_get_int(node, "server_port", 0) > 65535 || forbidden_option(node, 0))
         return false;
     if ((!strcmp(type, "vmess") || !strcmp(type, "vless") || !strcmp(type, "tuic")) &&
         !plain_string(sbj_get(node, "uuid"), 128, false))
@@ -122,7 +123,8 @@ int sbw_subscriptions_merge(sbj *config, const sbj *identity, sbw_error *error) 
         for (size_t j = 0; j < sbj_arr_len(nodes); ++j) {
             const sbj *node = sbj_arr_at(nodes, j);
             if (!sbw_subscription_node_valid(node))
-                return sbw_fail(error, "SUBSCRIPTION_INVALID", "A saved subscription node is invalid.");
+                return sbw_fail(error, "SUBSCRIPTION_INVALID",
+                                "A saved subscription node is invalid.");
             char tag[128];
             sprintf_s(tag, sizeof(tag), "local-%s/%s", sbj_get_str(sub, "id", ""),
                       sbj_get_str(node, "tag", ""));
@@ -140,7 +142,8 @@ int sbw_subscriptions_merge(sbj *config, const sbj *identity, sbw_error *error) 
     return 0;
 }
 sbj *sbw_subscriptions_summary(const sbj *source, const sbj *identity) {
-    sbj *result = sbj_object(), *list = sbj_array(), *sources = sbj_get(source, "subscription_sources");
+    sbj *result = sbj_object(), *list = sbj_array(),
+        *sources = sbj_get(source, "subscription_sources");
     sbj_set(result, "managed", sbj_is_array(sources) ? sbj_clone(sources) : sbj_array());
     sbj_set_bool(result, "sources_available", sbj_is_array(sources));
     const sbj *subs = sbj_get(identity, "local_subscriptions");
@@ -175,7 +178,8 @@ sbj *sbw_subscriptions_summary(const sbj *source, const sbj *identity) {
         }
         sbj_set(item, "metadata", metadata);
         sbj_set(item, "report",
-                sbj_is_object(sbj_get(sub, "report")) ? sbj_clone(sbj_get(sub, "report")) : sbj_object());
+                sbj_is_object(sbj_get(sub, "report")) ? sbj_clone(sbj_get(sub, "report"))
+                                                      : sbj_object());
         sbj_arr_push(list, item);
     }
     sbj_set(result, "local", list);
@@ -189,7 +193,8 @@ static int64_t refresh_minutes(const sbj *params, const sbj *existing, bool remo
         return -1;
     return remote ? value : 0;
 }
-sbj *sbw_subscriptions_change(const sbj *identity, const sbj *params, bool remove, sbw_error *error) {
+sbj *sbw_subscriptions_change(const sbj *identity, const sbj *params, bool remove,
+                              sbw_error *error) {
     if (!sbj_is_object(identity)) {
         sbw_fail(error, "NOT_CONFIGURED", "Set up a local or managed profile first.");
         return NULL;
@@ -212,13 +217,15 @@ sbj *sbw_subscriptions_change(const sbj *identity, const sbj *params, bool remov
         bool remote = url && *sbj_as_str(url, "");
         int64_t minutes = refresh_minutes(params, existing, remote);
         if (!plain_string(sbj_get(params, "name"), 100, false) || !sbj_is_array(nodes) ||
-            !sbj_arr_len(nodes) || sbj_arr_len(nodes) > 256 || (url && !valid_url(url, true)) || minutes < 0)
+            !sbj_arr_len(nodes) || sbj_arr_len(nodes) > 256 || (url && !valid_url(url, true)) ||
+            minutes < 0)
             goto invalid;
         for (size_t i = 0; i < sbj_arr_len(nodes); ++i) {
             if (!sbw_subscription_node_valid(sbj_arr_at(nodes, i)))
                 goto invalid;
             for (size_t j = 0; j < i; ++j)
-                if (sbj_equal(sbj_get(sbj_arr_at(nodes, i), "tag"), sbj_get(sbj_arr_at(nodes, j), "tag")))
+                if (sbj_equal(sbj_get(sbj_arr_at(nodes, i), "tag"),
+                              sbj_get(sbj_arr_at(nodes, j), "tag")))
                     goto invalid;
         }
         char generated[37];
@@ -226,9 +233,10 @@ sbj *sbw_subscriptions_change(const sbj *identity, const sbj *params, bool remov
         if (!*id) {
             if (FAILED(CoCreateGuid(&guid)))
                 goto invalid;
-            sprintf_s(generated, sizeof(generated), "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                      guid.Data1, guid.Data2, guid.Data3, guid.Data4[0], guid.Data4[1], guid.Data4[2],
-                      guid.Data4[3], guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+            sprintf_s(generated, sizeof(generated),
+                      "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", guid.Data1, guid.Data2,
+                      guid.Data3, guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+                      guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
             id = generated;
         }
         updated = existing ? sbj_clone(existing) : sbj_object();
@@ -238,7 +246,8 @@ sbj *sbw_subscriptions_change(const sbj *identity, const sbj *params, bool remov
         sbj_set(updated, "nodes", sbj_clone(nodes));
         sbj_set_int(updated, "refresh_interval_minutes", minutes);
         if (!existing)
-            sbj_set_int(updated, "next_refresh_at", minutes ? (int64_t)time(NULL) + minutes * 60 : 0);
+            sbj_set_int(updated, "next_refresh_at",
+                        minutes ? (int64_t)time(NULL) + minutes * 60 : 0);
     }
     sbj *copy = sbj_clone(identity), *list = sbj_array();
     for (size_t i = 0; i < sbj_arr_len(old); ++i) {
@@ -289,7 +298,8 @@ sbj *sbw_subscription_metadata(const char *header, uint64_t now) {
             --key_end;
         int field = -1;
         for (size_t i = 0; i < 4; ++i)
-            if ((size_t)(key_end - cursor) == strlen(names[i]) && !memcmp(cursor, names[i], strlen(names[i])))
+            if ((size_t)(key_end - cursor) == strlen(names[i]) &&
+                !memcmp(cursor, names[i], strlen(names[i])))
                 field = (int)i;
         if (field >= 0) {
             if (seen & (1U << (unsigned)field))
@@ -327,7 +337,8 @@ sbj *sbw_subscription_metadata(const char *header, uint64_t now) {
         uint64_t used = values[0] + values[1];
         sbj_set_int(result, "used_bytes", (int64_t)used);
         if ((seen & 4U) && values[2]) {
-            sbj_set_int(result, "remaining_bytes", (int64_t)(used < values[2] ? values[2] - used : 0));
+            sbj_set_int(result, "remaining_bytes",
+                        (int64_t)(used < values[2] ? values[2] - used : 0));
             sbj_set_bool(result, "quota_exhausted", used >= values[2]);
         }
     }
@@ -350,7 +361,8 @@ static char *response_header(HINTERNET request, const wchar_t *name) {
         return NULL;
     wchar_t *buffer = sb_xcalloc((size_t)size / sizeof(wchar_t) + 1, sizeof(wchar_t));
     char *result = NULL;
-    if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CUSTOM, name, buffer, &size, WINHTTP_NO_HEADER_INDEX))
+    if (WinHttpQueryHeaders(request, WINHTTP_QUERY_CUSTOM, name, buffer, &size,
+                            WINHTTP_NO_HEADER_INDEX))
         result = sbw_utf8(buffer, NULL);
     free(buffer);
     return result;
@@ -397,7 +409,8 @@ static void CALLBACK fetch_callback(HINTERNET handle, DWORD_PTR context, DWORD s
 }
 static bool fetch_wait(fetch_state *state, LONG expected, HANDLE cancel, ULONGLONG deadline) {
     for (;;) {
-        if ((cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) || GetTickCount64() >= deadline)
+        if ((cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) ||
+            GetTickCount64() >= deadline)
             return false;
         LONG stage = InterlockedCompareExchange(&state->stage, 0, 0);
         if (stage < 0)
@@ -426,8 +439,8 @@ static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
         goto done;
     URL_COMPONENTS parts = {0};
     parts.dwStructSize = sizeof(parts);
-    parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength = parts.dwUserNameLength =
-        parts.dwPasswordLength = (DWORD)-1;
+    parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
+        parts.dwUserNameLength = parts.dwPasswordLength = (DWORD)-1;
     if (!WinHttpCrackUrl(wide, 0, 0, &parts) ||
         (parts.nScheme != INTERNET_SCHEME_HTTPS && parts.nScheme != INTERNET_SCHEME_HTTP) ||
         !parts.dwHostNameLength || parts.dwUserNameLength || parts.dwPasswordLength)
@@ -442,24 +455,25 @@ static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
         path[0] = L'/';
     if (parts.dwExtraInfoLength)
         wcsncat_s(path, length + 2, parts.lpszExtraInfo, parts.dwExtraInfoLength);
-    session = WinHttpOpen(L"sb-easy subscription", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-                          WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC);
+    session = WinHttpOpen(L"sb-easy subscription", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC);
     if (!session)
         goto done;
     WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
     connection = WinHttpConnect(session, host, parts.nPort, 0);
     if (!connection)
         goto done;
-    request =
-        WinHttpOpenRequest(connection, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                           parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+    request = WinHttpOpenRequest(connection, L"GET", path, NULL, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
     if (!request)
         goto done;
     DWORD disabled = WINHTTP_DISABLE_AUTHENTICATION | WINHTTP_DISABLE_COOKIES,
           autologon = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH,
           policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
     if (!WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &disabled, sizeof(disabled)) ||
-        !WinHttpSetOption(request, WINHTTP_OPTION_AUTOLOGON_POLICY, &autologon, sizeof(autologon)) ||
+        !WinHttpSetOption(request, WINHTTP_OPTION_AUTOLOGON_POLICY, &autologon,
+                          sizeof(autologon)) ||
         !WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy)))
         goto done;
     state = sb_xcalloc(1, sizeof(*state));
@@ -470,12 +484,13 @@ static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
     DWORD_PTR context = (DWORD_PTR)state;
     if (!WinHttpSetOption(request, WINHTTP_OPTION_CONTEXT_VALUE, &context, sizeof(context)) ||
         WinHttpSetStatusCallback(request, fetch_callback,
-                                 WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS | WINHTTP_CALLBACK_FLAG_HANDLES,
+                                 WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS |
+                                     WINHTTP_CALLBACK_FLAG_HANDLES,
                                  0) == WINHTTP_INVALID_STATUS_CALLBACK)
         goto done;
     InterlockedIncrement(&state->references);
-    if ((!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
-                             context) &&
+    if ((!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0,
+                             0, context) &&
          GetLastError() != ERROR_IO_PENDING) ||
         !fetch_wait(state, 1, cancel, deadline))
         goto done;
@@ -484,7 +499,8 @@ static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
         goto done;
     DWORD status = 0, size = sizeof(status);
     if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) ||
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &size,
+                             WINHTTP_NO_HEADER_INDEX) ||
         status != 200)
         goto done;
     for (;;) {
@@ -496,7 +512,8 @@ static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
         LONG read = InterlockedCompareExchange(&state->read_length, 0, 0);
         if (!read)
             break;
-        if (read < 0 || read > (LONG)sizeof(state->bytes) || body.len + (size_t)read > SUB_MAX_BYTES)
+        if (read < 0 || read > (LONG)sizeof(state->bytes) ||
+            body.len + (size_t)read > SUB_MAX_BYTES)
             goto done;
         sb_buf_append(&body, state->bytes, (size_t)read);
     }
@@ -532,8 +549,9 @@ done:
     }
     if (!result)
         sbw_fail(error,
-                 cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0 ? "SUBSCRIPTION_CANCELLED"
-                                                                           : "SUBSCRIPTION_FETCH_FAILED",
+                 cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0
+                     ? "SUBSCRIPTION_CANCELLED"
+                     : "SUBSCRIPTION_FETCH_FAILED",
                  "Unable to download the HTTP(S) subscription within 30 seconds (maximum 256 KB).");
     return result;
 }
@@ -575,7 +593,8 @@ sbj *sbw_subscription_fetch(const char *url, HANDLE cancel, sbw_error *error) {
     job->complete = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!job->cancel || !job->complete) {
         fetch_job_release(job);
-        sbw_fail(error, "SUBSCRIPTION_FETCH_FAILED", "Unable to initialize the subscription download.");
+        sbw_fail(error, "SUBSCRIPTION_FETCH_FAILED",
+                 "Unable to initialize the subscription download.");
         return NULL;
     }
     InterlockedIncrement(&job->references);
@@ -605,7 +624,8 @@ sbj *sbw_subscription_fetch(const char *url, HANDLE cancel, sbw_error *error) {
     fetch_job_release(job);
     return result;
 }
-static sbj *import_content(const sbj *identity, const sbj *params, const sbj *download, sbw_error *error) {
+static sbj *import_content(const sbj *identity, const sbj *params, const sbj *download,
+                           sbw_error *error) {
     const sbj *body = download ? sbj_get(download, "body") : sbj_get(params, "body");
     if (!sbw_json_string(body, SUB_MAX_BYTES, false)) {
         sbw_fail(error, "SUBSCRIPTION_INVALID", "Provide a subscription body or address.");
@@ -625,13 +645,15 @@ static sbj *import_content(const sbj *identity, const sbj *params, const sbj *do
         for (size_t i = 0; i < sbj_arr_len(items); ++i) {
             sbj *item = sbj_arr_at(items, i);
             const char *id = sbj_get_str(item, "id", "");
-            if ((*requested && !strcmp(id, requested)) || (!*requested && !find_subscription(identity, id))) {
+            if ((*requested && !strcmp(id, requested)) ||
+                (!*requested && !find_subscription(identity, id))) {
                 saved = item;
                 break;
             }
         }
         if (saved) {
-            int64_t now = (int64_t)time(NULL), minutes = sbj_get_int(saved, "refresh_interval_minutes", 0);
+            int64_t now = (int64_t)time(NULL),
+                    minutes = sbj_get_int(saved, "refresh_interval_minutes", 0);
             sbj_set(saved, "report", sbj_clone(sbj_get(parsed, "report")));
             sbj_set(saved, "metadata",
                     download ? sbj_clone(sbj_get(download, "metadata"))
@@ -646,7 +668,8 @@ static sbj *import_content(const sbj *identity, const sbj *params, const sbj *do
     sbj_free(parsed);
     return updated;
 }
-sbj *sbw_subscriptions_import(const sbj *identity, const sbj *params, HANDLE cancel, sbw_error *error) {
+sbj *sbw_subscriptions_import(const sbj *identity, const sbj *params, HANDLE cancel,
+                              sbw_error *error) {
     if (!sbj_is_object(params))
         goto invalid;
     const char *allowed[] = {"id", "name", "url", "body", "refresh_interval_minutes"};
@@ -674,10 +697,12 @@ invalid:
              "Provide a name, a subscription address or body, and an optional refresh interval.");
     return NULL;
 }
-sbj *sbw_subscriptions_refresh(const sbj *identity, const char *id, HANDLE cancel, sbw_error *error) {
+sbj *sbw_subscriptions_refresh(const sbj *identity, const char *id, HANDLE cancel,
+                               sbw_error *error) {
     const sbj *existing = id ? find_subscription(identity, id) : NULL;
     if (!existing || !valid_url(sbj_get(existing, "url"), false)) {
-        sbw_fail(error, "SUBSCRIPTION_NOT_REMOTE", "This subscription has no saved remote address.");
+        sbw_fail(error, "SUBSCRIPTION_NOT_REMOTE",
+                 "This subscription has no saved remote address.");
         return NULL;
     }
     sbj *params = sbj_object();
@@ -688,7 +713,8 @@ sbj *sbw_subscriptions_refresh(const sbj *identity, const char *id, HANDLE cance
     sbj_free(params);
     return updated;
 }
-sbj *sbw_subscriptions_failure(const sbj *identity, const char *id, const char *code, uint64_t now) {
+sbj *sbw_subscriptions_failure(const sbj *identity, const char *id, const char *code,
+                               uint64_t now) {
     sbj *updated = sbj_clone(identity);
     sbj *item = (sbj *)find_subscription(updated, id);
     if (!item)
@@ -701,7 +727,8 @@ sbj *sbw_subscriptions_failure(const sbj *identity, const char *id, const char *
         delay = 3600;
     const char *safe =
         code && (!strcmp(code, "SUBSCRIPTION_CANCELLED") || !strcmp(code, "SUBSCRIPTION_INVALID") ||
-                 !strcmp(code, "SUBSCRIPTION_FETCH_FAILED") || !strcmp(code, "ROUTING_NODE_UNAVAILABLE"))
+                 !strcmp(code, "SUBSCRIPTION_FETCH_FAILED") ||
+                 !strcmp(code, "ROUTING_NODE_UNAVAILABLE"))
             ? code
             : "SUBSCRIPTION_REFRESH_FAILED";
     sbj_set_int(item, "last_attempt_at", (int64_t)now);
@@ -719,7 +746,8 @@ const char *sbw_subscriptions_due(const sbj *identity, uint64_t now) {
         const sbj *sub = sbj_arr_at(subs, i);
         int64_t minutes = sbj_get_int(sub, "refresh_interval_minutes", 360),
                 at = sbj_get_int(sub, "next_refresh_at", 0);
-        if (!valid_id(sbj_get(sub, "id")) || !valid_url(sbj_get(sub, "url"), false) || minutes <= 0 || at < 0)
+        if (!valid_id(sbj_get(sub, "id")) || !valid_url(sbj_get(sub, "url"), false) ||
+            minutes <= 0 || at < 0)
             continue;
         if ((uint64_t)at <= now && (uint64_t)at < earliest) {
             earliest = (uint64_t)at;

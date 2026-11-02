@@ -20,7 +20,7 @@ typedef struct sbw_core_status {
     DWORD process_id;
     bool has_exit_code;
     DWORD exit_code;
-    bool last_stop_forced; /* Job termination was needed; OS routing cleanup is not proven. */
+    bool last_stop_forced;  /* Job termination was needed; OS routing cleanup is not proven. */
     DWORD stop_signal_code; /* helper exit code; MAXDWORD when it could not run */
 } sbw_core_status;
 
@@ -46,7 +46,8 @@ int sbw_core_version_check(sbw_core *core, const char *expected, HANDLE cancel, 
 /* Checks these exact bytes first, reusing a successful config_check only for
  * identical bytes. The cached check is consumed by this attempt. No shell,
  * PATH search, or extra args. */
-int sbw_core_start(sbw_core *core, const char *json, size_t length, HANDLE cancel, sbw_error *error);
+int sbw_core_start(sbw_core *core, const char *json, size_t length, HANDLE cancel,
+                   sbw_error *error);
 int sbw_core_stop(sbw_core *core, sbw_error *error);
 int sbw_core_poll(sbw_core *core, sbw_core_status *status, sbw_error *error);
 /* Fixed operation names and error codes only; never pass request/config data. */

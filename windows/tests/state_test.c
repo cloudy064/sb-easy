@@ -3,9 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#define CHECK(condition) do { if (!(condition)) { \
-    fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); return 1; \
-} } while (0)
+#define CHECK(condition)                                                                           \
+    do {                                                                                           \
+        if (!(condition)) {                                                                        \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition);                        \
+            return 1;                                                                              \
+        }                                                                                          \
+    } while (0)
 
 int main(void) {
     sb_windows_runtime_state state;
@@ -46,7 +50,8 @@ int main(void) {
     CHECK(sb_windows_recovery_due(&recovery, 2100));
     sb_windows_recovery_failed(&recovery, 2100);
     CHECK(recovery.attempts == 2 && recovery.retry_at_ms == 6100);
-    for (unsigned i = 0; i < 20; ++i) sb_windows_recovery_failed(&recovery, 10000);
+    for (unsigned i = 0; i < 20; ++i)
+        sb_windows_recovery_failed(&recovery, 10000);
     CHECK(recovery.retry_at_ms == 70000);
     sb_windows_recovery_healthy(&recovery, 20000);
     CHECK(recovery.attempts > 0 && !sb_windows_recovery_due(&recovery, 90000));

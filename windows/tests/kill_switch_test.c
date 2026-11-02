@@ -5,12 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CHECK(value)                                                                                         \
-    do {                                                                                                     \
-        if (!(value)) {                                                                                      \
-            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #value);                                      \
-            exit(1);                                                                                         \
-        }                                                                                                    \
+#define CHECK(value)                                                                               \
+    do {                                                                                           \
+        if (!(value)) {                                                                            \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #value);                            \
+            exit(1);                                                                               \
+        }                                                                                          \
     } while (0)
 
 typedef struct flow {
@@ -30,11 +30,14 @@ typedef struct evaluation {
     unsigned filters, fail_at;
     bool keys[SBW_KILL_FILTER_SLOTS];
 } evaluation;
-static bool equal_guid(const GUID *left, const GUID *right) { return !memcmp(left, right, sizeof(*left)); }
+static bool equal_guid(const GUID *left, const GUID *right) {
+    return !memcmp(left, right, sizeof(*left));
+}
 static bool matches(const flow *candidate, const FWPM_FILTER_CONDITION0 *condition) {
     const FWP_CONDITION_VALUE0 *value = &condition->conditionValue;
     if (equal_guid(&condition->fieldKey, &sbw_kill_app_id))
-        return value->type == FWP_BYTE_BLOB_TYPE && strlen(candidate->application) == value->byteBlob->size &&
+        return value->type == FWP_BYTE_BLOB_TYPE &&
+               strlen(candidate->application) == value->byteBlob->size &&
                !memcmp(candidate->application, value->byteBlob->data, value->byteBlob->size);
     if (equal_guid(&condition->fieldKey, &sbw_kill_flags))
         return value->type == FWP_UINT32 && condition->matchType == FWP_MATCH_FLAGS_ALL_SET &&
@@ -91,8 +94,8 @@ static DWORD observe(void *context, const FWPM_FILTER0 *filter) {
     }
     return ERROR_SUCCESS;
 }
-static flow *add(evaluation *set, unsigned layer, const char *app, UINT64 interface_luid, UINT8 protocol,
-                 UINT16 local, UINT16 remote) {
+static flow *add(evaluation *set, unsigned layer, const char *app, UINT64 interface_luid,
+                 UINT8 protocol, UINT16 local, UINT16 remote) {
     CHECK(set->count < sizeof(set->cases) / sizeof(*set->cases));
     flow *item = &set->cases[set->count++];
     memset(item, 0, sizeof(*item));
@@ -109,7 +112,8 @@ static FWP_BYTE_BLOB app_blob(const char *name) {
     return result;
 }
 int main(void) {
-    sbj *observed = sbj_object(), *yes = sbj_bool(true), *no = sbj_bool(false), *invalid = sbj_int(0);
+    sbj *observed = sbj_object(), *yes = sbj_bool(true), *no = sbj_bool(false),
+        *invalid = sbj_int(0);
     sbj_set_int(observed, "filter_count", 24);
     CHECK(sbw_kill_switch_startup_action(NULL, observed) == SBW_KILL_PRESERVE_UNKNOWN);
     CHECK(sbw_kill_switch_startup_action(invalid, observed) == SBW_KILL_PRESERVE_UNKNOWN);
@@ -119,7 +123,10 @@ int main(void) {
     CHECK(sbw_kill_switch_startup_action(NULL, observed) == SBW_KILL_UNCHANGED);
     CHECK(sbw_kill_switch_startup_action(no, observed) == SBW_KILL_UNCHANGED);
     CHECK(sbw_kill_switch_startup_action(yes, observed) == SBW_KILL_ENABLE);
-    sbj_free(observed); sbj_free(yes); sbj_free(no); sbj_free(invalid);
+    sbj_free(observed);
+    sbj_free(yes);
+    sbj_free(no);
+    sbj_free(invalid);
     FWP_BYTE_BLOB service = app_blob("fixed-service"), core = app_blob("pinned-core"),
                   dhcp = app_blob("system-svchost");
     for (unsigned connected = 0; connected < 2; ++connected) {
@@ -136,7 +143,8 @@ int main(void) {
             add(&set, layer, "pinned-core", 88, IPPROTO_UDP, 50000, 443);
             add(&set, layer, "system-svchost", 88, IPPROTO_UDP, (UINT16)((layer & 1) ? 546 : 68),
                 (UINT16)((layer & 1) ? 547 : 67));
-            add(&set, layer, "browser", 88, IPPROTO_TCP, 50000, 80)->flags = FWP_CONDITION_FLAG_IS_LOOPBACK;
+            add(&set, layer, "browser", 88, IPPROTO_TCP, 50000, 80)->flags =
+                FWP_CONDITION_FLAG_IS_LOOPBACK;
             add(&set, layer, "browser", 777, IPPROTO_TCP, 50000, 443);
             add(&set, layer, "system-svchost", 777, IPPROTO_UDP, 50000, 53);
             CHECK(set.count == start + 11);
@@ -177,10 +185,13 @@ int main(void) {
     }
     evaluation failure = {0};
     failure.fail_at = 7;
-    CHECK(sbw_kill_switch_build(&service, &core, &dhcp, 0, observe, &failure) == ERROR_ACCESS_DENIED &&
+    CHECK(sbw_kill_switch_build(&service, &core, &dhcp, 0, observe, &failure) ==
+              ERROR_ACCESS_DENIED &&
           failure.filters == 7);
-    CHECK(sbw_kill_switch_build(NULL, &core, &dhcp, 0, observe, &failure) == ERROR_INVALID_PARAMETER);
-    puts("WFP policy: dual-stack TCP/UDP/DNS blocking, pinned app and TUN exceptions, constrained DHCP/NDP, "
+    CHECK(sbw_kill_switch_build(NULL, &core, &dhcp, 0, observe, &failure) ==
+          ERROR_INVALID_PARAMETER);
+    puts("WFP policy: dual-stack TCP/UDP/DNS blocking, pinned app and TUN exceptions, constrained "
+         "DHCP/NDP, "
          "stable persistent identities passed; host firewall unchanged.");
     return 0;
 }

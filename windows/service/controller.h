@@ -8,8 +8,8 @@
 
 typedef struct sbw_controller sbw_controller;
 /* Takes ownership of remote/store, including on failure. cancel is borrowed. */
-sbw_controller *sbw_controller_new(sbw_control_plane *remote, sbw_store *store,
-                                 HANDLE cancel, sbw_error *error);
+sbw_controller *sbw_controller_new(sbw_control_plane *remote, sbw_store *store, HANDLE cancel,
+                                   sbw_error *error);
 void sbw_controller_free(sbw_controller *controller);
 /* Startup-only attachment; owns core. An unavailable core does not block enrollment. */
 void sbw_controller_set_core(sbw_controller *controller, sbw_core *core, const sbw_error *error);
@@ -25,8 +25,8 @@ void sbw_controller_background_tick(sbw_controller *controller, uint64_t now_ms)
 /* Returned JSON is caller-owned. No response contains plaintext device/node
  * credentials or panel tokens. Encrypted archives and scoped preview/window
  * capabilities are returned only to authorized preference operations. */
-sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method,
-                             const sbj *params, bool authorized, sbw_error *error);
+sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params,
+                             bool authorized, sbw_error *error);
 bool sbw_is_mutating_method(const char *method);
 /* Nonblocking when a mutation owns the controller; observes exit and clears
  * stale active metadata. The service also monitors health while UI is closed. */

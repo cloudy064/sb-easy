@@ -7,5 +7,5 @@ int sbw_pipe_request(const wchar_t *pipe, const char *body, HANDLE cancel, DWORD
 /* Installer helpers run outside the install tree. Their expected image comes
  * from the administrator-controlled SCM configuration, verified before use. */
 int sbw_pipe_request_expected(const wchar_t *pipe, const wchar_t *expected_binary, const char *body,
-    HANDLE cancel, DWORD timeout_ms, char **response, sbw_error *error);
+                              HANDLE cancel, DWORD timeout_ms, char **response, sbw_error *error);
 #endif

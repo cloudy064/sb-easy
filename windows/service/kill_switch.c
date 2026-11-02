@@ -4,8 +4,10 @@
 
 sbw_kill_startup_action sbw_kill_switch_startup_action(const sbj *preference, const sbj *observed) {
     bool existing = sbj_get_int(observed, "filter_count", 0) > 0;
-    if (!sbj_is_bool(preference)) return existing ? SBW_KILL_PRESERVE_UNKNOWN : SBW_KILL_UNCHANGED;
-    if (sbj_as_bool(preference, false)) return SBW_KILL_ENABLE;
+    if (!sbj_is_bool(preference))
+        return existing ? SBW_KILL_PRESERVE_UNKNOWN : SBW_KILL_UNCHANGED;
+    if (sbj_as_bool(preference, false))
+        return SBW_KILL_ENABLE;
     return existing ? SBW_KILL_DISABLE : SBW_KILL_UNCHANGED;
 }
 #include <iphlpapi.h>
@@ -27,11 +29,16 @@ const GUID sbw_kill_layers[4] = {
     {0x4a72393b, 0x319f, 0x44bc, {0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4}},
     {0xe1cd9fe7, 0xf4b5, 0x4273, {0x96, 0xc0, 0x59, 0x2e, 0x48, 0x7b, 0x86, 0x50}},
     {0xa3b42c97, 0x9f04, 0x4672, {0xb8, 0x7e, 0xce, 0xe9, 0xc4, 0x83, 0x25, 0x7f}}};
-const GUID sbw_kill_app_id = {0xd78e1e87, 0x8644, 0x4ea5, {0x94, 0x37, 0xd8, 0x09, 0xec, 0xef, 0xc9, 0x71}};
-const GUID sbw_kill_flags = {0x632ce23b, 0x5167, 0x435c, {0x86, 0xd7, 0xe9, 0x03, 0x68, 0x4a, 0xa8, 0x0c}};
-const GUID sbw_kill_nexthop = {0x93ae8f5b, 0x7f6f, 0x4719, {0x98, 0xc8, 0x14, 0xe9, 0x74, 0x29, 0xef, 0x04}};
-const GUID sbw_kill_arrival = {0x618a9b6d, 0x386b, 0x4136, {0xad, 0x6e, 0xb5, 0x15, 0x87, 0xcf, 0xb1, 0xcd}};
-const GUID sbw_kill_protocol = {0x3971ef2b, 0x623e, 0x4f9a, {0x8c, 0xb1, 0x6e, 0x79, 0xb8, 0x06, 0xb9, 0xa7}};
+const GUID sbw_kill_app_id = {
+    0xd78e1e87, 0x8644, 0x4ea5, {0x94, 0x37, 0xd8, 0x09, 0xec, 0xef, 0xc9, 0x71}};
+const GUID sbw_kill_flags = {
+    0x632ce23b, 0x5167, 0x435c, {0x86, 0xd7, 0xe9, 0x03, 0x68, 0x4a, 0xa8, 0x0c}};
+const GUID sbw_kill_nexthop = {
+    0x93ae8f5b, 0x7f6f, 0x4719, {0x98, 0xc8, 0x14, 0xe9, 0x74, 0x29, 0xef, 0x04}};
+const GUID sbw_kill_arrival = {
+    0x618a9b6d, 0x386b, 0x4136, {0xad, 0x6e, 0xb5, 0x15, 0x87, 0xcf, 0xb1, 0xcd}};
+const GUID sbw_kill_protocol = {
+    0x3971ef2b, 0x623e, 0x4f9a, {0x8c, 0xb1, 0x6e, 0x79, 0xb8, 0x06, 0xb9, 0xa7}};
 const GUID sbw_kill_local_port = {
     0x0c1ba1af, 0x5765, 0x453f, {0xaf, 0x22, 0xa8, 0xf7, 0x91, 0xac, 0x77, 0x5b}};
 const GUID sbw_kill_remote_port = {
@@ -45,7 +52,9 @@ GUID sbw_kill_filter_key(unsigned index) {
     key.Data4[7] = (BYTE)index;
     return key;
 }
-static bool same_guid(const GUID *left, const GUID *right) { return !memcmp(left, right, sizeof(*left)); }
+static bool same_guid(const GUID *left, const GUID *right) {
+    return !memcmp(left, right, sizeof(*left));
+}
 static FWPM_FILTER_CONDITION0 condition(const GUID *key, FWP_DATA_TYPE type) {
     FWPM_FILTER_CONDITION0 result = {0};
     result.fieldKey = *key;
@@ -72,10 +81,10 @@ static DWORD emit_filter(sbw_kill_filter_sink sink, void *context, unsigned laye
     return sink(context, &filter);
 }
 DWORD sbw_kill_switch_build(const FWP_BYTE_BLOB *service_app, const FWP_BYTE_BLOB *core_app,
-                            const FWP_BYTE_BLOB *dhcp_app, UINT64 tun_luid, sbw_kill_filter_sink sink,
-                            void *context) {
-    if (!service_app || !service_app->size || !core_app || !core_app->size || !dhcp_app || !dhcp_app->size ||
-        !sink)
+                            const FWP_BYTE_BLOB *dhcp_app, UINT64 tun_luid,
+                            sbw_kill_filter_sink sink, void *context) {
+    if (!service_app || !service_app->size || !core_app || !core_app->size || !dhcp_app ||
+        !dhcp_app->size || !sink)
         return ERROR_INVALID_PARAMETER;
     for (unsigned layer = 0; layer < 4; ++layer) {
         DWORD code = emit_filter(sink, context, layer, 0, L"sb-easy: block other traffic", NULL, 0);
@@ -104,9 +113,10 @@ DWORD sbw_kill_switch_build(const FWP_BYTE_BLOB *service_app, const FWP_BYTE_BLO
             if (code)
                 return code;
         }
-        FWPM_FILTER_CONDITION0 dhcp[4] = {
-            condition(&sbw_kill_app_id, FWP_BYTE_BLOB_TYPE), condition(&sbw_kill_protocol, FWP_UINT8),
-            condition(&sbw_kill_local_port, FWP_UINT16), condition(&sbw_kill_remote_port, FWP_UINT16)};
+        FWPM_FILTER_CONDITION0 dhcp[4] = {condition(&sbw_kill_app_id, FWP_BYTE_BLOB_TYPE),
+                                          condition(&sbw_kill_protocol, FWP_UINT8),
+                                          condition(&sbw_kill_local_port, FWP_UINT16),
+                                          condition(&sbw_kill_remote_port, FWP_UINT16)};
         dhcp[0].conditionValue.byteBlob = (FWP_BYTE_BLOB *)dhcp_app;
         dhcp[1].conditionValue.uint8 = IPPROTO_UDP;
         dhcp[2].conditionValue.uint16 = (UINT16)((layer & 1) ? 546 : 68);
@@ -122,16 +132,17 @@ DWORD sbw_kill_switch_build(const FWP_BYTE_BLOB *service_app, const FWP_BYTE_BLO
                     address.addr[0] = scope ? 0xff : 0xfe;
                     address.addr[1] = scope ? 0x02 : 0x80;
                     address.prefixLength = (UINT8)(scope ? 16 : 10);
-                    FWPM_FILTER_CONDITION0 ndp[4] = {condition(&sbw_kill_protocol, FWP_UINT8),
-                                                     condition(&sbw_kill_local_port, FWP_UINT16),
-                                                     condition(&sbw_kill_remote_port, FWP_UINT16),
-                                                     condition(&sbw_kill_remote_address, FWP_V6_ADDR_MASK)};
+                    FWPM_FILTER_CONDITION0 ndp[4] = {
+                        condition(&sbw_kill_protocol, FWP_UINT8),
+                        condition(&sbw_kill_local_port, FWP_UINT16),
+                        condition(&sbw_kill_remote_port, FWP_UINT16),
+                        condition(&sbw_kill_remote_address, FWP_V6_ADDR_MASK)};
                     ndp[0].conditionValue.uint8 = IPPROTO_ICMPV6;
                     ndp[1].conditionValue.uint16 = (UINT16)(133 + kind);
                     ndp[2].conditionValue.uint16 = 0;
                     ndp[3].conditionValue.v6AddrMask = &address;
-                    code = emit_filter(sink, context, layer, 6 + kind * 2 + scope, L"sb-easy: local-link NDP",
-                                       ndp, 4);
+                    code = emit_filter(sink, context, layer, 6 + kind * 2 + scope,
+                                       L"sb-easy: local-link NDP", ndp, 4);
                     if (code)
                         return code;
                 }
@@ -269,8 +280,9 @@ done:
         (void)FwpmEngineClose0(engine);
     if (code)
         return sbw_fail(error, tun_missing ? "KILL_SWITCH_TUN_UNAVAILABLE" : "KILL_SWITCH_FAILED",
-                        tun_missing ? "The owned TUN interface is not available for network protection."
-                                    : "Windows network protection could not be updated.");
+                        tun_missing
+                            ? "The owned TUN interface is not available for network protection."
+                            : "Windows network protection could not be updated.");
     return 0;
 }
 sbj *sbw_kill_switch_status(void) {
@@ -315,9 +327,9 @@ sbj *sbw_kill_switch_status(void) {
                 GUID key = sbw_kill_filter_key(layer * 32);
                 if (same_guid(&filter->filterKey, &key) &&
                     same_guid(&filter->layerKey, &sbw_kill_layers[layer]) &&
-                    same_guid(&filter->subLayerKey, &sbw_kill_sublayer_key) && !filter->numFilterConditions &&
-                    (filter->flags & SBW_KILL_PERSISTENT) && !(filter->flags & SBW_KILL_DISABLED) &&
-                    filter->action.type == FWP_ACTION_BLOCK)
+                    same_guid(&filter->subLayerKey, &sbw_kill_sublayer_key) &&
+                    !filter->numFilterConditions && (filter->flags & SBW_KILL_PERSISTENT) &&
+                    !(filter->flags & SBW_KILL_DISABLED) && filter->action.type == FWP_ACTION_BLOCK)
                     denied |= 1U << layer;
                 key = sbw_kill_filter_key(layer * 32 + 4);
                 if (same_guid(&filter->filterKey, &key))
@@ -345,21 +357,22 @@ sbj *sbw_kill_switch_status(void) {
 }
 bool sbw_kill_switch_recovery_disabled(void) {
     HKEY key = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\sb-easy", 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) !=
-        ERROR_SUCCESS)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\sb-easy", 0,
+                      KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS)
         return false;
     DWORD value = 0, type = 0, size = sizeof(value);
-    LSTATUS code = RegQueryValueExW(key, L"KillSwitchRecoveryDisabled", NULL, &type, (BYTE *)&value, &size);
+    LSTATUS code =
+        RegQueryValueExW(key, L"KillSwitchRecoveryDisabled", NULL, &type, (BYTE *)&value, &size);
     RegCloseKey(key);
     return code == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(value) && value == 1;
 }
 int sbw_kill_switch_set_recovery_disabled(bool disabled, sbw_error *error) {
     HKEY key = NULL;
-    LSTATUS code =
-        disabled ? RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\sb-easy", 0, NULL, REG_OPTION_NON_VOLATILE,
-                                   KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL)
-                 : RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\sb-easy", 0, KEY_SET_VALUE | KEY_WOW64_64KEY,
-                                 &key);
+    LSTATUS code = disabled ? RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\sb-easy", 0, NULL,
+                                              REG_OPTION_NON_VOLATILE,
+                                              KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL)
+                            : RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\sb-easy", 0,
+                                            KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
     if (!disabled && code == ERROR_FILE_NOT_FOUND)
         return 0;
     if (code == ERROR_SUCCESS) {

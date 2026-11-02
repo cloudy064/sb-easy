@@ -34,8 +34,8 @@ static int storage_fail(sbw_error *error, const char *code) {
 
 bool sbw_trusted_storage_owner(PSID owner, PSID service_user) {
     return owner && service_user && IsValidSid(owner) && IsValidSid(service_user) &&
-        (EqualSid(owner, service_user) || IsWellKnownSid(owner, WinLocalSystemSid) ||
-         IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+           (EqualSid(owner, service_user) || IsWellKnownSid(owner, WinLocalSystemSid) ||
+            IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
 }
 
 static wchar_t *wide_copy(const wchar_t *value) {
@@ -50,7 +50,8 @@ static wchar_t *join_path(const wchar_t *base, const wchar_t *leaf) {
     bool separator = a > 0 && base[a - 1] != L'\\';
     wchar_t *result = sb_xcalloc(a + b + (separator ? 2 : 1), sizeof(*result));
     memcpy(result, base, a * sizeof(*result));
-    if (separator) result[a++] = L'\\';
+    if (separator)
+        result[a++] = L'\\';
     memcpy(result + a, leaf, (b + 1) * sizeof(*result));
     return result;
 }
@@ -74,41 +75,62 @@ static int descriptor_init(secure_store *store, sbw_error *error) {
     DWORD length = 0;
     BOOL present = FALSE, defaulted = FALSE;
     int result = -1;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) goto done;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        goto done;
     (void)GetTokenInformation(token, TokenUser, NULL, 0, &length);
-    if (!length) goto done;
+    if (!length)
+        goto done;
     information = sb_xmalloc(length);
-    if (!GetTokenInformation(token, TokenUser, information, length, &length)) goto done;
+    if (!GetTokenInformation(token, TokenUser, information, length, &length))
+        goto done;
     PSID user = ((TOKEN_USER *)information)->User.Sid;
     DWORD sid_length = GetLengthSid(user);
     store->user_sid = sb_xmalloc(sid_length);
-    if (!CopySid(sid_length, store->user_sid, user)) goto done;
-    if (!ConvertSidToStringSidW(user, &sid_text)) goto done;
-    DWORD is_app=0,app_size=sizeof is_app;
-    if(GetTokenInformation(token,TokenIsAppContainer,&is_app,sizeof is_app,&app_size)&&is_app){
-        DWORD needed=0;GetTokenInformation(token,TokenAppContainerSid,NULL,0,&needed);
-        BYTE *app=needed?sb_xmalloc(needed):NULL;
-        bool got=app&&GetTokenInformation(token,TokenAppContainerSid,app,needed,&needed)&&
-            ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION*)app)->TokenAppContainer,&app_sid_text);
-        free(app);if(!got)goto done;
+    if (!CopySid(sid_length, store->user_sid, user))
+        goto done;
+    if (!ConvertSidToStringSidW(user, &sid_text))
+        goto done;
+    DWORD is_app = 0, app_size = sizeof is_app;
+    if (GetTokenInformation(token, TokenIsAppContainer, &is_app, sizeof is_app, &app_size) &&
+        is_app) {
+        DWORD needed = 0;
+        GetTokenInformation(token, TokenAppContainerSid, NULL, 0, &needed);
+        BYTE *app = needed ? sb_xmalloc(needed) : NULL;
+        bool got = app && GetTokenInformation(token, TokenAppContainerSid, app, needed, &needed) &&
+                   ConvertSidToStringSidW(
+                       ((TOKEN_APPCONTAINER_INFORMATION *)app)->TokenAppContainer, &app_sid_text);
+        free(app);
+        if (!got)
+            goto done;
     }
     const wchar_t prefix[] = L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;";
     size_t prefix_length = wcslen(prefix), text_length = wcslen(sid_text);
-    const wchar_t app_prefix[]=L"(A;OICI;FA;;;";
-    size_t app_length=app_sid_text?wcslen(app_prefix)+wcslen(app_sid_text)+1:0;
+    const wchar_t app_prefix[] = L"(A;OICI;FA;;;";
+    size_t app_length = app_sid_text ? wcslen(app_prefix) + wcslen(app_sid_text) + 1 : 0;
     sddl = sb_xcalloc(prefix_length + text_length + 2 + app_length, sizeof(*sddl));
     memcpy(sddl, prefix, prefix_length * sizeof(*sddl));
     memcpy(sddl + prefix_length, sid_text, text_length * sizeof(*sddl));
     sddl[prefix_length + text_length] = L')';
-    if(app_sid_text){wcscat_s(sddl,prefix_length+text_length+2+app_length,app_prefix);wcscat_s(sddl,prefix_length+text_length+2+app_length,app_sid_text);wcscat_s(sddl,prefix_length+text_length+2+app_length,L")");}
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &store->descriptor, NULL)) goto done;
-    if (!GetSecurityDescriptorDacl(store->descriptor, &present, &store->acl, &defaulted) || !present) goto done;
+    if (app_sid_text) {
+        wcscat_s(sddl, prefix_length + text_length + 2 + app_length, app_prefix);
+        wcscat_s(sddl, prefix_length + text_length + 2 + app_length, app_sid_text);
+        wcscat_s(sddl, prefix_length + text_length + 2 + app_length, L")");
+    }
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1,
+                                                              &store->descriptor, NULL))
+        goto done;
+    if (!GetSecurityDescriptorDacl(store->descriptor, &present, &store->acl, &defaulted) ||
+        !present)
+        goto done;
     result = 0;
 done:
-    if (token) CloseHandle(token);
+    if (token)
+        CloseHandle(token);
     free(information);
-    if (sid_text) LocalFree(sid_text);
-    if (app_sid_text) LocalFree(app_sid_text);
+    if (sid_text)
+        LocalFree(sid_text);
+    if (app_sid_text)
+        LocalFree(app_sid_text);
     free(sddl);
     return result == 0 ? 0 : storage_fail(error, "STORAGE_ERROR");
 }
@@ -116,21 +138,29 @@ done:
 static int descriptor_apply(const secure_store *store, HANDLE object, sbw_error *error) {
     PSID owner = NULL;
     PSECURITY_DESCRIPTOR current = NULL;
-    if (GetSecurityInfo(object, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &current)
-        != ERROR_SUCCESS) return storage_fail(error, "STORAGE_ERROR");
+    if (GetSecurityInfo(object, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, NULL, NULL,
+                        NULL, &current) != ERROR_SUCCESS)
+        return storage_fail(error, "STORAGE_ERROR");
     bool trusted = sbw_trusted_storage_owner(owner, store->user_sid);
     LocalFree(current);
-    if (!trusted) return storage_fail(error, "UNSAFE_STORAGE_PATH");
-    if (SetSecurityInfo(object, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                        NULL, NULL, store->acl, NULL) != ERROR_SUCCESS)
+    if (!trusted)
+        return storage_fail(error, "UNSAFE_STORAGE_PATH");
+    if (SetSecurityInfo(object, SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL,
+                        store->acl, NULL) != ERROR_SUCCESS)
         return storage_fail(error, "STORAGE_ERROR");
     return 0;
 }
 
 static wchar_t *normalized_directory(const wchar_t *input, sbw_error *error) {
-    if (!input || !*input) { storage_fail(error, "UNSAFE_STORAGE_PATH"); return NULL; }
+    if (!input || !*input) {
+        storage_fail(error, "UNSAFE_STORAGE_PATH");
+        return NULL;
+    }
     wchar_t *supplied = wide_copy(input);
-    for (wchar_t *p = supplied; *p; ++p) if (*p == L'/') *p = L'\\';
+    for (wchar_t *p = supplied; *p; ++p)
+        if (*p == L'/')
+            *p = L'\\';
     DWORD required = GetFullPathNameW(supplied, 0, NULL, NULL);
     if (!required || required > 32760) {
         free(supplied);
@@ -140,13 +170,17 @@ static wchar_t *normalized_directory(const wchar_t *input, sbw_error *error) {
     wchar_t *path = sb_xcalloc((size_t)required + 1, sizeof(*path));
     DWORD copied = GetFullPathNameW(supplied, required + 1, path, NULL);
     free(supplied);
-    if (!copied || copied > required) goto unsafe;
+    if (!copied || copied > required)
+        goto unsafe;
     size_t length = wcslen(path);
-    while (length > 3 && path[length - 1] == L'\\') path[--length] = L'\0';
+    while (length > 3 && path[length - 1] == L'\\')
+        path[--length] = L'\0';
     if (length < 4 || path[1] != L':' || path[2] != L'\\' || wcschr(path + 2, L':') ||
-        !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z'))) goto unsafe;
+        !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')))
+        goto unsafe;
     wchar_t root[] = {path[0], L':', L'\\', L'\0'};
-    if (GetDriveTypeW(root) != DRIVE_FIXED) goto unsafe;
+    if (GetDriveTypeW(root) != DRIVE_FIXED)
+        goto unsafe;
     return path;
 unsafe:
     free(path);
@@ -163,20 +197,28 @@ static int pin_directories(secure_store *store, sbw_error *error) {
     store->parents = sb_xcalloc(length + 1, sizeof(*store->parents));
     SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), store->descriptor, FALSE};
     for (size_t i = 3; i <= length; ++i) {
-        if (current[i] != L'\\' && current[i] != L'\0') continue;
+        if (current[i] != L'\\' && current[i] != L'\0')
+            continue;
         wchar_t saved = current[i];
         current[i] = L'\0';
-        if (!store->readonly && !CreateDirectoryW(current, &security) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        if (!store->readonly && !CreateDirectoryW(current, &security) &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
             free(current);
             return storage_fail(error, "STORAGE_ERROR");
         }
         const wchar_t *component = wcsrchr(current, L'\\') + 1;
-        bool managed = !store->readonly && (i == length ||
-            (i == parent_end && CompareStringOrdinal(component, -1, L"sb-easy", -1, TRUE) == CSTR_EQUAL));
-        HANDLE directory = CreateFileW(current, FILE_READ_ATTRIBUTES | (managed ? READ_CONTROL | WRITE_DAC : 0),
-            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-        if (directory == INVALID_HANDLE_VALUE) { free(current); return storage_fail(error, "STORAGE_ERROR"); }
+        bool managed =
+            !store->readonly &&
+            (i == length || (i == parent_end && CompareStringOrdinal(component, -1, L"sb-easy", -1,
+                                                                     TRUE) == CSTR_EQUAL));
+        HANDLE directory =
+            CreateFileW(current, FILE_READ_ATTRIBUTES | (managed ? READ_CONTROL | WRITE_DAC : 0),
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (directory == INVALID_HANDLE_VALUE) {
+            free(current);
+            return storage_fail(error, "STORAGE_ERROR");
+        }
         if (reject_reparse(directory, true, error) != 0 ||
             (managed && descriptor_apply(store, directory, error) != 0)) {
             CloseHandle(directory);
@@ -196,43 +238,65 @@ static int secure_load(void *context, sbj **out, sbw_error *error) {
     DATA_BLOB decrypted = {0};
     HANDLE file = INVALID_HANDLE_VALUE;
     int result = -1;
-    if (!out) return storage_fail(error, "STORAGE_ERROR");
+    if (!out)
+        return storage_fail(error, "STORAGE_ERROR");
     *out = NULL;
     file = CreateFileW(store->file, GENERIC_READ | WRITE_DAC, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                        FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     if (file == INVALID_HANDLE_VALUE) {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND) return 0;
+        if (GetLastError() == ERROR_FILE_NOT_FOUND)
+            return 0;
         return storage_fail(error, "STORAGE_ERROR");
     }
-    if (reject_reparse(file, false, error) != 0 || descriptor_apply(store, file, error) != 0) goto done;
+    if (reject_reparse(file, false, error) != 0 || descriptor_apply(store, file, error) != 0)
+        goto done;
     LARGE_INTEGER size = {0};
-    if (!GetFileSizeEx(file, &size)) { storage_fail(error, "STORAGE_ERROR"); goto done; }
-    if (size.QuadPart <= 0 || size.QuadPart > SBW_MAX_STORE_BYTES) { storage_fail(error, "STORAGE_CORRUPT"); goto done; }
+    if (!GetFileSizeEx(file, &size)) {
+        storage_fail(error, "STORAGE_ERROR");
+        goto done;
+    }
+    if (size.QuadPart <= 0 || size.QuadPart > SBW_MAX_STORE_BYTES) {
+        storage_fail(error, "STORAGE_CORRUPT");
+        goto done;
+    }
     DWORD length = (DWORD)size.QuadPart, read = 0;
     bytes = sb_xmalloc(length);
-    if (!ReadFile(file, bytes, length, &read, NULL) || read != length) { storage_fail(error, "STORAGE_ERROR"); goto done; }
+    if (!ReadFile(file, bytes, length, &read, NULL) || read != length) {
+        storage_fail(error, "STORAGE_ERROR");
+        goto done;
+    }
     DATA_BLOB encrypted = {length, bytes};
-    if (!CryptUnprotectData(&encrypted, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &decrypted)) {
+    if (!CryptUnprotectData(&encrypted, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN,
+                            &decrypted)) {
         storage_fail(error, "STORAGE_CORRUPT");
         goto done;
     }
     *out = sbw_json_parse((const char *)decrypted.pbData, decrypted.cbData, 40, error);
-    if (!*out) { storage_fail(error, "STORAGE_CORRUPT"); goto done; }
+    if (!*out) {
+        storage_fail(error, "STORAGE_CORRUPT");
+        goto done;
+    }
     result = 0;
 done:
-    if (decrypted.pbData) { SecureZeroMemory(decrypted.pbData, decrypted.cbData); LocalFree(decrypted.pbData); }
+    if (decrypted.pbData) {
+        SecureZeroMemory(decrypted.pbData, decrypted.cbData);
+        LocalFree(decrypted.pbData);
+    }
     free(bytes);
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (file != INVALID_HANDLE_VALUE)
+        CloseHandle(file);
     return result;
 }
 
 static int secure_save(void *context, const sbj *state, sbw_error *error) {
     secure_store *store = context;
     sbj *previous = NULL;
-    if (secure_load(context, &previous, error) != 0) return -1;
+    if (secure_load(context, &previous, error) != 0)
+        return -1;
     sbj_free(previous);
     sb_err json_error = {0};
-    if (!state || sbj_validate_utf8(state, &json_error) != 0) return storage_fail(error, "STORAGE_ERROR");
+    if (!state || sbj_validate_utf8(state, &json_error) != 0)
+        return storage_fail(error, "STORAGE_ERROR");
     char *plain = sbj_dump(state, -1);
     size_t plain_length = strlen(plain);
     if (plain_length > SBW_MAX_STORE_BYTES - 4096) {
@@ -245,7 +309,8 @@ static int secure_save(void *context, const sbj *state, sbw_error *error) {
                                          CRYPTPROTECT_UI_FORBIDDEN, &encrypted);
     SecureZeroMemory(plain, plain_length);
     free(plain);
-    if (!protected_ok) return storage_fail(error, "STORAGE_ERROR");
+    if (!protected_ok)
+        return storage_fail(error, "STORAGE_ERROR");
     BYTE random[16] = {0};
     wchar_t filename[64] = L"device-state.tmp-";
     const wchar_t hex[] = L"0123456789abcdef";
@@ -253,7 +318,8 @@ static int secure_save(void *context, const sbj *state, sbw_error *error) {
     HANDLE file = INVALID_HANDLE_VALUE;
     bool created = false;
     int result = -1;
-    if (BCryptGenRandom(NULL, random, (ULONG)sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) goto done;
+    if (BCryptGenRandom(NULL, random, (ULONG)sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+        goto done;
     size_t prefix = wcslen(filename);
     for (size_t i = 0; i < sizeof(random); ++i) {
         filename[prefix + i * 2] = hex[random[i] >> 4];
@@ -261,20 +327,26 @@ static int secure_save(void *context, const sbj *state, sbw_error *error) {
     }
     temporary = join_path(store->directory, filename);
     SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), store->descriptor, FALSE};
-    file = CreateFileW(temporary, GENERIC_WRITE, 0, &security, CREATE_NEW,
+    file = CreateFileW(
+        temporary, GENERIC_WRITE, 0, &security, CREATE_NEW,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL);
-    if (file == INVALID_HANDLE_VALUE) goto done;
+    if (file == INVALID_HANDLE_VALUE)
+        goto done;
     created = true;
     DWORD written = 0;
     if (!WriteFile(file, encrypted.pbData, encrypted.cbData, &written, NULL) ||
-        written != encrypted.cbData || !FlushFileBuffers(file)) goto done;
+        written != encrypted.cbData || !FlushFileBuffers(file))
+        goto done;
     CloseHandle(file);
     file = INVALID_HANDLE_VALUE;
-    if (!MoveFileExW(temporary, store->file, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) goto done;
+    if (!MoveFileExW(temporary, store->file, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        goto done;
     result = 0;
 done:
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-    if (result != 0 && created) DeleteFileW(temporary);
+    if (file != INVALID_HANDLE_VALUE)
+        CloseHandle(file);
+    if (result != 0 && created)
+        DeleteFileW(temporary);
     free(temporary);
     LocalFree(encrypted.pbData);
     return result == 0 ? 0 : storage_fail(error, "STORAGE_ERROR");
@@ -283,17 +355,22 @@ done:
 static int secure_clear(void *context, sbw_error *error) {
     secure_store *store = context;
     sbj *previous = NULL;
-    if (secure_load(context, &previous, error) != 0) return -1;
-    if (!previous) return 0;
+    if (secure_load(context, &previous, error) != 0)
+        return -1;
+    if (!previous)
+        return 0;
     sbj_free(previous);
-    HANDLE file = CreateFileW(store->file, DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC, 0,
-                              NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (file == INVALID_HANDLE_VALUE) return storage_fail(error, "STORAGE_ERROR");
+    HANDLE file = CreateFileW(store->file, DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC,
+                              0, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return storage_fail(error, "STORAGE_ERROR");
     int result = -1;
     if (reject_reparse(file, false, error) == 0 && descriptor_apply(store, file, error) == 0) {
         FILE_DISPOSITION_INFO disposition = {TRUE};
-        result = SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition)) ? 0
-            : storage_fail(error, "STORAGE_ERROR");
+        result =
+            SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition))
+                ? 0
+                : storage_fail(error, "STORAGE_ERROR");
     }
     CloseHandle(file);
     return result;
@@ -301,11 +378,15 @@ static int secure_clear(void *context, sbw_error *error) {
 
 static void secure_destroy(void *context) {
     secure_store *store = context;
-    if (!store) return;
-    if (store->lock && store->lock != INVALID_HANDLE_VALUE) CloseHandle(store->lock);
-    for (size_t i = store->parent_count; i > 0; --i) CloseHandle(store->parents[i - 1]);
+    if (!store)
+        return;
+    if (store->lock && store->lock != INVALID_HANDLE_VALUE)
+        CloseHandle(store->lock);
+    for (size_t i = store->parent_count; i > 0; --i)
+        CloseHandle(store->parents[i - 1]);
     free(store->parents);
-    if (store->descriptor) LocalFree(store->descriptor);
+    if (store->descriptor)
+        LocalFree(store->descriptor);
     free(store->user_sid);
     free(store->directory);
     free(store->file);
@@ -313,72 +394,109 @@ static void secure_destroy(void *context) {
 }
 
 void sbw_store_free(sbw_store *store) {
-    if (!store) return;
-    if (store->destroy) store->destroy(store->context);
+    if (!store)
+        return;
+    if (store->destroy)
+        store->destroy(store->context);
     free(store);
 }
 
-struct sbw_directory_guard { secure_store storage; };
+struct sbw_directory_guard {
+    secure_store storage;
+};
 static bool private_basename(const wchar_t *name) {
-    if (!name || !*name || wcslen(name) > 180 || name[0] == L'.' || wcsstr(name, L"..")) return false;
-    for (const wchar_t *p = name; *p; ++p) if (!((*p >= L'a' && *p <= L'z') || (*p >= L'A' && *p <= L'Z') ||
-        (*p >= L'0' && *p <= L'9') || *p == L'-' || *p == L'_' || *p == L'.')) return false;
+    if (!name || !*name || wcslen(name) > 180 || name[0] == L'.' || wcsstr(name, L".."))
+        return false;
+    for (const wchar_t *p = name; *p; ++p)
+        if (!((*p >= L'a' && *p <= L'z') || (*p >= L'A' && *p <= L'Z') ||
+              (*p >= L'0' && *p <= L'9') || *p == L'-' || *p == L'_' || *p == L'.'))
+            return false;
     return name[wcslen(name) - 1] != L'.';
 }
-static sbw_directory_guard *directory_open(const wchar_t *directory, bool readonly, sbw_error *error) {
+static sbw_directory_guard *directory_open(const wchar_t *directory, bool readonly,
+                                           sbw_error *error) {
     sbw_directory_guard *guard = sb_xcalloc(1, sizeof(*guard));
     secure_store *context = &guard->storage;
     context->readonly = readonly;
-    if (descriptor_init(context, error) != 0) goto failed;
+    if (descriptor_init(context, error) != 0)
+        goto failed;
     context->directory = normalized_directory(directory, error);
-    if (!context->directory || pin_directories(context, error) != 0) goto failed;
+    if (!context->directory || pin_directories(context, error) != 0)
+        goto failed;
     return guard;
 failed:
-    secure_destroy(context); return NULL;
+    secure_destroy(context);
+    return NULL;
 }
 sbw_directory_guard *sbw_secure_directory_open(const wchar_t *directory, sbw_error *error) {
     return directory_open(directory, false, error);
 }
-sbw_directory_guard *sbw_secure_directory_open_readonly(const wchar_t *directory, sbw_error *error) {
+sbw_directory_guard *sbw_secure_directory_open_readonly(const wchar_t *directory,
+                                                        sbw_error *error) {
     return directory_open(directory, true, error);
 }
 void sbw_secure_directory_close(sbw_directory_guard *directory) {
-    if (directory) secure_destroy(&directory->storage);
+    if (directory)
+        secure_destroy(&directory->storage);
 }
 wchar_t *sbw_secure_directory_path(const sbw_directory_guard *directory, const wchar_t *name) {
-    return directory && private_basename(name) ? join_path(directory->storage.directory, name) : NULL;
+    return directory && private_basename(name) ? join_path(directory->storage.directory, name)
+                                               : NULL;
 }
-HANDLE sbw_secure_directory_file(sbw_directory_guard *directory, const wchar_t *name,
-    DWORD access, DWORD disposition, sbw_error *error) {
+HANDLE sbw_secure_directory_file(sbw_directory_guard *directory, const wchar_t *name, DWORD access,
+                                 DWORD disposition, sbw_error *error) {
     wchar_t *path = sbw_secure_directory_path(directory, name);
     if (!path || (disposition != OPEN_EXISTING && disposition != CREATE_NEW) ||
-        (directory->storage.readonly && (disposition != OPEN_EXISTING || (access & (GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER))))) {
-        free(path); storage_fail(error, "UNSAFE_STORAGE_PATH"); return INVALID_HANDLE_VALUE;
+        (directory->storage.readonly &&
+         (disposition != OPEN_EXISTING ||
+          (access & (GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER))))) {
+        free(path);
+        storage_fail(error, "UNSAFE_STORAGE_PATH");
+        return INVALID_HANDLE_VALUE;
     }
-    SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), directory->storage.descriptor, FALSE};
-    HANDLE file = CreateFileW(path, access | READ_CONTROL | (directory->storage.readonly ? 0 : WRITE_DAC) | FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-        &security, disposition, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL);
+    SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), directory->storage.descriptor,
+                                    FALSE};
+    HANDLE file = CreateFileW(
+        path,
+        access | READ_CONTROL | (directory->storage.readonly ? 0 : WRITE_DAC) |
+            FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, &security, disposition,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL);
     free(path);
-    if (file == INVALID_HANDLE_VALUE) { DWORD status = GetLastError(); storage_fail(error, "STORAGE_ERROR"); SetLastError(status); return file; }
-    if (reject_reparse(file, false, error) != 0 || (!directory->storage.readonly && descriptor_apply(&directory->storage, file, error) != 0)) {
-        CloseHandle(file); return INVALID_HANDLE_VALUE;
+    if (file == INVALID_HANDLE_VALUE) {
+        DWORD status = GetLastError();
+        storage_fail(error, "STORAGE_ERROR");
+        SetLastError(status);
+        return file;
+    }
+    if (reject_reparse(file, false, error) != 0 ||
+        (!directory->storage.readonly && descriptor_apply(&directory->storage, file, error) != 0)) {
+        CloseHandle(file);
+        return INVALID_HANDLE_VALUE;
     }
     return file;
 }
 
 sbw_store *sbw_secure_store_new(const wchar_t *directory, sbw_error *error) {
     secure_store *context = sb_xcalloc(1, sizeof(*context));
-    if (descriptor_init(context, error) != 0) goto failed;
+    if (descriptor_init(context, error) != 0)
+        goto failed;
     context->directory = normalized_directory(directory, error);
-    if (!context->directory || pin_directories(context, error) != 0) goto failed;
+    if (!context->directory || pin_directories(context, error) != 0)
+        goto failed;
     context->file = join_path(context->directory, L"device-state.dat");
     wchar_t *lock_path = join_path(context->directory, L"state.lock");
     SECURITY_ATTRIBUTES security = {sizeof(SECURITY_ATTRIBUTES), context->descriptor, FALSE};
     context->lock = CreateFileW(lock_path, GENERIC_READ | GENERIC_WRITE | WRITE_DAC, 0, &security,
-                                 OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+                                OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     free(lock_path);
-    if (context->lock == INVALID_HANDLE_VALUE) { storage_fail(error, "STORAGE_ERROR"); goto failed; }
-    if (reject_reparse(context->lock, false, error) != 0 || descriptor_apply(context, context->lock, error) != 0) goto failed;
+    if (context->lock == INVALID_HANDLE_VALUE) {
+        storage_fail(error, "STORAGE_ERROR");
+        goto failed;
+    }
+    if (reject_reparse(context->lock, false, error) != 0 ||
+        descriptor_apply(context, context->lock, error) != 0)
+        goto failed;
     sbw_store *store = sb_xcalloc(1, sizeof(*store));
     store->context = context;
     store->load = secure_load;
@@ -393,7 +511,8 @@ failed:
 
 wchar_t *sbw_default_data_directory(bool console, sbw_error *error) {
     PWSTR folder = NULL;
-    if (FAILED(SHGetKnownFolderPath(console ? &FOLDERID_LocalAppData : &FOLDERID_ProgramData, 0, NULL, &folder))) {
+    if (FAILED(SHGetKnownFolderPath(console ? &FOLDERID_LocalAppData : &FOLDERID_ProgramData, 0,
+                                    NULL, &folder))) {
         storage_fail(error, "STORAGE_ERROR");
         return NULL;
     }

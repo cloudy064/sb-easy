@@ -44,7 +44,9 @@ void sb_strvec_push_take(sb_strvec *v, char *s) {
     }
     v->items[v->len++] = s;
 }
-void sb_strvec_push(sb_strvec *v, const char *s) { sb_strvec_push_take(v, sb_strdup(s)); }
+void sb_strvec_push(sb_strvec *v, const char *s) {
+    sb_strvec_push_take(v, sb_strdup(s));
+}
 void sb_strvec_free(sb_strvec *v) {
     for (size_t i = 0; i < v->len; ++i)
         free(v->items[i]);
@@ -86,7 +88,8 @@ static bool append_node(sbj *nodes, sbj *node, sbj *warnings, size_t position) {
         while (prefix && ((unsigned char)original[prefix] & 0xc0U) == 0x80U)
             --prefix;
         char replacement[81];
-        int n = sprintf_s(replacement, sizeof(replacement), "%.*s (%u)", (int)prefix, original, ++suffix);
+        int n = sprintf_s(replacement, sizeof(replacement), "%.*s (%u)", (int)prefix, original,
+                          ++suffix);
         if (n < 1) {
             free(original);
             sbj_free(node);
@@ -107,8 +110,8 @@ static char *base64_body(const char *body, size_t length) {
         unsigned char c = (unsigned char)body[i];
         if (c == ' ' || c == '\r' || c == '\n' || c == '\t')
             continue;
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' ||
-              c == '/' || c == '_' || c == '-' || c == '=')) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '+' || c == '/' || c == '_' || c == '-' || c == '=')) {
             sb_buf_free(&normalized);
             return NULL;
         }
@@ -129,8 +132,8 @@ static char *base64_body(const char *body, size_t length) {
     }
     DWORD bytes = (DWORD)(normalized.len * 3 / 4 + 1);
     char *decoded = sb_xcalloc((size_t)bytes + 1, 1);
-    if (!CryptStringToBinaryA(normalized.p, (DWORD)normalized.len, CRYPT_STRING_BASE64, (BYTE *)decoded,
-                              &bytes, NULL, NULL) ||
+    if (!CryptStringToBinaryA(normalized.p, (DWORD)normalized.len, CRYPT_STRING_BASE64,
+                              (BYTE *)decoded, &bytes, NULL, NULL) ||
         memchr(decoded, 0, bytes)) {
         free(decoded);
         decoded = NULL;

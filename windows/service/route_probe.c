@@ -39,8 +39,10 @@ static bool parse_url(const sbj *value, probe_url *url, sbw_error *error) {
         url->port = 80;
     } else
         goto invalid;
-    const char *end = authority + strcspn(authority, "/?#"), *host = authority, *host_end = end, *port = NULL;
-    if (host == end || memchr(host, '@', (size_t)(end - host)) || memchr(host, '%', (size_t)(end - host)))
+    const char *end = authority + strcspn(authority, "/?#"), *host = authority, *host_end = end,
+               *port = NULL;
+    if (host == end || memchr(host, '@', (size_t)(end - host)) ||
+        memchr(host, '%', (size_t)(end - host)))
         goto invalid;
     if (*host == '[') {
         ++host;
@@ -85,8 +87,8 @@ static bool parse_url(const sbj *value, probe_url *url, sbw_error *error) {
     url->host_utf8 = sb_strndup(host, (size_t)(host_end - host));
     /* WinHTTP requires brackets around an IPv6 server name. Keep the bare
      * address separately for results and connection-evidence matching. */
-    char *connect_host = *authority == '[' ? sb_asprintf("[%s]", url->host_utf8)
-                                          : sb_strdup(url->host_utf8);
+    char *connect_host =
+        *authority == '[' ? sb_asprintf("[%s]", url->host_utf8) : sb_strdup(url->host_utf8);
     url->host = sbw_wide(connect_host, error);
     free(connect_host);
     if (!url->host)
@@ -134,21 +136,24 @@ sbj *sbw_route_delay(const sbw_runtime_config *config, DWORD pid, HANDLE cancel,
                      sbw_error *error) {
     DWORD timeout = timeout_value(params, 5000, 10000);
     probe_url url = {0};
-    if (!keys_valid(params, true) || !timeout || !sbw_json_string(sbj_get(params, "target"), 512, false)) {
-        sbw_fail(error, "INVALID_REQUEST", "Choose a node or group and a timeout between 1000 and 10000 ms.");
+    if (!keys_valid(params, true) || !timeout ||
+        !sbw_json_string(sbj_get(params, "target"), 512, false)) {
+        sbw_fail(error, "INVALID_REQUEST",
+                 "Choose a node or group and a timeout between 1000 and 10000 ms.");
         return NULL;
     }
     sbj *default_url = sbj_str("https://www.gstatic.com/generate_204");
-    bool valid = parse_url(sbj_get(params, "url") ? sbj_get(params, "url") : default_url, &url, error);
+    bool valid =
+        parse_url(sbj_get(params, "url") ? sbj_get(params, "url") : default_url, &url, error);
     sbj_free(default_url);
     if (!valid)
         return NULL;
     sbj *response = NULL;
     const char *target = sbj_get_str(params, "target", "");
     char *request_url = sbw_utf8(url.wide, error);
-    int rc = request_url
-                 ? sbw_runtime_delay(config, pid, cancel, target, request_url, timeout, &response, error)
-                 : -1;
+    int rc = request_url ? sbw_runtime_delay(config, pid, cancel, target, request_url, timeout,
+                                             &response, error)
+                         : -1;
     sbw_secret_free(request_url);
     if (rc) {
         url_free(&url);
@@ -188,8 +193,9 @@ static void CALLBACK request_callback(HINTERNET handle, DWORD_PTR context, DWORD
         return;
     }
     if (status == WINHTTP_CALLBACK_STATUS_REQUEST_ERROR) {
-        DWORD code = length >= sizeof(WINHTTP_ASYNC_RESULT) ? ((WINHTTP_ASYNC_RESULT *)info)->dwError
-                                                            : ERROR_WINHTTP_INTERNAL_ERROR;
+        DWORD code = length >= sizeof(WINHTTP_ASYNC_RESULT)
+                         ? ((WINHTTP_ASYNC_RESULT *)info)->dwError
+                         : ERROR_WINHTTP_INTERNAL_ERROR;
         InterlockedExchange(&state->win_error, (LONG)code);
         InterlockedExchange(&state->stage, -1);
     } else if (status == WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE)
@@ -238,7 +244,8 @@ static sbj *connection_evidence(const sbj *snapshot, const sbj *baseline, const 
         if (known_connection(baseline, connection))
             continue;
         const char *type = sbj_get_str(m, "type", "");
-        if (strcmp(type, "http/" SBW_PROBE_INBOUND) || _stricmp(sbj_get_str(m, "host", ""), url->host_utf8))
+        if (strcmp(type, "http/" SBW_PROBE_INBOUND) ||
+            _stricmp(sbj_get_str(m, "host", ""), url->host_utf8))
             continue;
         char port[16];
         sprintf_s(port, sizeof(port), "%u", url->port);
@@ -252,14 +259,16 @@ static sbj *connection_evidence(const sbj *snapshot, const sbj *baseline, const 
         sbj *out = sbj_object(), *metadata = sbj_object(), *chain = sbj_array();
         safe_field(out, "id", connection, private_config);
         safe_field(out, "rule", connection, private_config);
-        const char *keys[] = {"host",        "sourceIP", "sourcePort", "destinationIP", "destinationPort",
-                              "processPath", "type",     "network",    "dnsMode"};
+        const char *keys[] = {"host",          "sourceIP",        "sourcePort",
+                              "destinationIP", "destinationPort", "processPath",
+                              "type",          "network",         "dnsMode"};
         for (size_t k = 0; k < sizeof(keys) / sizeof(*keys); ++k)
             safe_field(metadata, keys[k], m, private_config);
         const sbj *chains = sbj_get(connection, "chains");
         for (size_t k = 0; k < sbj_arr_len(chains) && k < 32; ++k)
             if (sbw_json_string(sbj_arr_at(chains, k), 512, false)) {
-                char *safe = sbw_diagnostics_redact(sbj_as_str(sbj_arr_at(chains, k), ""), private_config);
+                char *safe =
+                    sbw_diagnostics_redact(sbj_as_str(sbj_arr_at(chains, k), ""), private_config);
                 sbj_arr_push(chain, sbj_str(safe));
                 sbw_secret_free(safe);
             }
@@ -378,8 +387,9 @@ sbj *sbw_route_probe(const sbw_runtime_config *config, sbw_core *core, DWORD pid
     wchar_t *password = sbw_wide(config->probe_secret, error);
     if (!password)
         goto failed;
-    bool credentials = WinHttpSetCredentials(request, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC,
-                                             L"sb-easy-probe", password, NULL) != FALSE;
+    bool credentials =
+        WinHttpSetCredentials(request, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC,
+                              L"sb-easy-probe", password, NULL) != FALSE;
     SecureZeroMemory(password, (wcslen(password) + 1) * sizeof(wchar_t));
     free(password);
     if (!credentials)
@@ -392,11 +402,11 @@ sbj *sbw_route_probe(const sbw_runtime_config *config, sbw_core *core, DWORD pid
     DWORD_PTR context = (DWORD_PTR)state;
     if (!WinHttpSetOption(request, WINHTTP_OPTION_CONTEXT_VALUE, &context, sizeof(context)))
         goto failed;
-    if (WinHttpSetStatusCallback(request, request_callback,
-                                 WINHTTP_CALLBACK_FLAG_SENDREQUEST_COMPLETE |
-                                     WINHTTP_CALLBACK_FLAG_HEADERS_AVAILABLE |
-                                     WINHTTP_CALLBACK_FLAG_REQUEST_ERROR | WINHTTP_CALLBACK_FLAG_HANDLES,
-                                 0) == WINHTTP_INVALID_STATUS_CALLBACK)
+    if (WinHttpSetStatusCallback(
+            request, request_callback,
+            WINHTTP_CALLBACK_FLAG_SENDREQUEST_COMPLETE | WINHTTP_CALLBACK_FLAG_HEADERS_AVAILABLE |
+                WINHTTP_CALLBACK_FLAG_REQUEST_ERROR | WINHTTP_CALLBACK_FLAG_HANDLES,
+            0) == WINHTTP_INVALID_STATUS_CALLBACK)
         goto failed;
     InterlockedIncrement(&state->references);
     callback_owned = true;
@@ -404,8 +414,8 @@ sbj *sbw_route_probe(const sbw_runtime_config *config, sbw_core *core, DWORD pid
      * system proxy discovery or a direct fallback for this request. */
     if (sbw_runtime_probe_owner(config, pid, error))
         goto done;
-    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
-                            context) &&
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0,
+                            0, context) &&
         GetLastError() != ERROR_IO_PENDING)
         goto failed;
     bool receiving = false;
@@ -439,14 +449,16 @@ sbj *sbw_route_probe(const sbw_runtime_config *config, sbw_core *core, DWORD pid
             sbj *snapshot = NULL;
             sbw_error ignored = {0};
             if (!sbw_runtime_config_get(config, pid, cancel, "/connections", &snapshot, &ignored))
-                observed = connection_evidence(snapshot, baseline, &url, source_port, private_config);
+                observed =
+                    connection_evidence(snapshot, baseline, &url, source_port, private_config);
             sbj_free(snapshot);
             next_snapshot = GetTickCount64() + 150;
         }
         if (stage >= 2) {
             DWORD size = sizeof(status);
             if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                     WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX))
+                                     WINHTTP_HEADER_NAME_BY_INDEX, &status, &size,
+                                     WINHTTP_NO_HEADER_INDEX))
                 goto failed;
             unsigned short current_source = request_source(request);
             if (current_source)

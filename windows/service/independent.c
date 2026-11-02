@@ -57,16 +57,23 @@ sbj *sbw_independent_snapshot(const sbj *identity, sbw_error *error) {
         return NULL;
     }
     sbj *config = sbj_parse_cstr(
-        "{\"inbounds\":[{\"type\":\"tun\",\"tag\":\"local-tun\",\"interface_name\":\"sb-easy\",\"address\":["
+        "{\"inbounds\":[{\"type\":\"tun\",\"tag\":\"local-tun\",\"interface_name\":\"sb-easy\","
+        "\"address\":["
         "\"172.19.0.1/30\",\"fd71:5be:a5e::1/"
-        "126\"],\"auto_route\":true,\"strict_route\":true}],\"outbounds\":[{\"type\":\"direct\",\"tag\":"
-        "\"direct\"}],\"dns\":{\"servers\":[{\"type\":\"https\",\"tag\":\"local-remote-dns\",\"server\":\"1."
+        "126\"],\"auto_route\":true,\"strict_route\":true}],\"outbounds\":[{\"type\":\"direct\","
+        "\"tag\":"
+        "\"direct\"}],\"dns\":{\"servers\":[{\"type\":\"https\",\"tag\":\"local-remote-dns\","
+        "\"server\":\"1."
         "1.1.1\",\"path\":\"/"
-        "dns-query\"},{\"type\":\"https\",\"tag\":\"local-bootstrap-dns\",\"server\":\"1.1.1.1\",\"path\":\"/"
+        "dns-query\"},{\"type\":\"https\",\"tag\":\"local-bootstrap-dns\",\"server\":\"1.1.1.1\","
+        "\"path\":\"/"
         "dns-query\"}],\"rules\":[],\"final\":\"local-remote-dns\",\"strategy\":\"prefer_ipv4\","
-        "\"independent_cache\":true},\"route\":{\"auto_detect_interface\":true,\"find_process\":true,"
-        "\"rules\":[{\"action\":\"sniff\"},{\"protocol\":\"dns\",\"action\":\"hijack-dns\"},{\"ip_is_"
-        "private\":true,\"outbound\":\"direct\"}],\"final\":\"direct\",\"default_domain_resolver\":\"local-"
+        "\"independent_cache\":true},\"route\":{\"auto_detect_interface\":true,\"find_process\":"
+        "true,"
+        "\"rules\":[{\"action\":\"sniff\"},{\"protocol\":\"dns\",\"action\":\"hijack-dns\"},{\"ip_"
+        "is_"
+        "private\":true,\"outbound\":\"direct\"}],\"final\":\"direct\",\"default_domain_resolver\":"
+        "\"local-"
         "bootstrap-dns\"}}");
     sbj *check = sbj_clone(config);
     if (sbw_subscriptions_merge(check, identity, error)) {
@@ -90,7 +97,8 @@ sbj *sbw_independent_snapshot(const sbj *identity, sbw_error *error) {
     sbj_free(check);
     if (!etag) {
         sbj_free(config);
-        sbw_fail(error, "RUNTIME_RESOURCE_ERROR", "The local configuration digest could not be generated.");
+        sbw_fail(error, "RUNTIME_RESOURCE_ERROR",
+                 "The local configuration digest could not be generated.");
         return NULL;
     }
     sbj *snapshot = sbj_object();

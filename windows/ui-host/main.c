@@ -60,12 +60,6 @@ typedef struct desktop {
 static desktop *current_desktop;
 static UINT taskbar_created;
 
-static wchar_t *wide_copy(const wchar_t *text) {
-    size_t size = (wcslen(text) + 1) * sizeof(wchar_t);
-    wchar_t *copy = sb_xmalloc(size);
-    memcpy(copy, text, size);
-    return copy;
-}
 static void queue_push(message **head, message **tail, char *text) {
     message *item = sb_xcalloc(1, sizeof(*item));
     item->text = text;
@@ -1042,7 +1036,7 @@ static void tray_action(desktop *app, LPARAM action) {
     }
 }
 static wchar_t *parent_path(const wchar_t *path) {
-    wchar_t *copy = wide_copy(path);
+    wchar_t *copy = sbw_wide_copy(path);
     wchar_t *slash = wcsrchr(copy, L'\\');
     if (slash == copy + 2 && copy[1] == L':')
         slash[1] = L'\0';
@@ -1181,14 +1175,14 @@ static bool parse_arguments(desktop *app) {
         const wchar_t *arg = args[i];
         if (!wcscmp(arg, L"--pipe-name") && i + 1 < count) {
             free(app->pipe);
-            app->pipe = wide_copy(args[++i]);
+            app->pipe = sbw_wide_copy(args[++i]);
         } else if (!wcscmp(arg, L"--smoke-test") && i + 1 < count) {
             wchar_t absolute[32768];
             DWORD length = GetFullPathNameW(args[++i], 32768, absolute, NULL);
             if (!length || length >= 32768)
                 goto done;
             free(app->screenshot);
-            app->screenshot = wide_copy(absolute);
+            app->screenshot = sbw_wide_copy(absolute);
         } else if (!wcscmp(arg, L"--expect-disconnected"))
             app->expect_disconnected = true;
         else if (!wcscmp(arg, L"--expect-enrolled"))
@@ -1204,13 +1198,13 @@ static bool parse_arguments(desktop *app) {
                 wcscmp(page, L"diagnostics"))
                 goto done;
             free(app->smoke_page);
-            app->smoke_page = wide_copy(page);
+            app->smoke_page = sbw_wide_copy(page);
         } else if (!wcscmp(arg, L"--smoke-theme") && i + 1 < count) {
             const wchar_t *theme = args[++i];
             if (wcscmp(theme, L"system") && wcscmp(theme, L"light") && wcscmp(theme, L"dark"))
                 goto done;
             free(app->smoke_theme);
-            app->smoke_theme = wide_copy(theme);
+            app->smoke_theme = sbw_wide_copy(theme);
         } else if (!wcscmp(arg, L"--smoke-refresh"))
             app->smoke_refresh = true;
         else if (!wcscmp(arg, L"--smoke-validate"))
@@ -1225,10 +1219,10 @@ static bool parse_arguments(desktop *app) {
             if (!length || length >= 32768)
                 goto done;
             free(app->service_data);
-            app->service_data = wide_copy(absolute);
+            app->service_data = sbw_wide_copy(absolute);
         } else if (!wcscmp(arg, L"--smoke-control-plane") && i + 1 < count) {
             free(app->smoke_control_plane);
-            app->smoke_control_plane = wide_copy(args[++i]);
+            app->smoke_control_plane = sbw_wide_copy(args[++i]);
         } else if (!wcscmp(arg, L"--smoke-width") && i + 1 < count) {
             wchar_t *end;
             long value = wcstol(args[++i], &end, 10);
@@ -1315,7 +1309,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
     InitializeCriticalSection(&app->mutex);
     InitializeConditionVariable(&app->ready);
     app->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
-    app->pipe = wide_copy(default_pipe);
+    app->pipe = sbw_wide_copy(default_pipe);
     if (!app->cancel || !parse_arguments(app))
         goto cleanup;
     current_desktop = app;

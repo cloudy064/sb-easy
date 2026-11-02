@@ -226,6 +226,12 @@ invalid:
     sbw_fail(error, "INVALID_TEXT", "Text is not valid Unicode.");
     return NULL;
 }
+wchar_t *sbw_wide_copy(const wchar_t *text) {
+    size_t size = (wcslen(text) + 1) * sizeof(wchar_t);
+    wchar_t *copy = sb_xmalloc(size);
+    memcpy(copy, text, size);
+    return copy;
+}
 wchar_t *sbw_path_join(const wchar_t *directory, const wchar_t *name) {
     size_t a = wcslen(directory), b = wcslen(name);
     if (a > 32767 || b > 32767 || a + b + 2 > 32768)

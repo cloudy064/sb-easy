@@ -38,13 +38,6 @@ bool sbw_trusted_storage_owner(PSID owner, PSID service_user) {
             IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
 }
 
-static wchar_t *wide_copy(const wchar_t *value) {
-    size_t length = wcslen(value);
-    wchar_t *copy = sb_xmalloc((length + 1) * sizeof(*copy));
-    memcpy(copy, value, (length + 1) * sizeof(*copy));
-    return copy;
-}
-
 static wchar_t *join_path(const wchar_t *base, const wchar_t *leaf) {
     size_t a = wcslen(base), b = wcslen(leaf);
     bool separator = a > 0 && base[a - 1] != L'\\';
@@ -157,7 +150,7 @@ static wchar_t *normalized_directory(const wchar_t *input, sbw_error *error) {
         storage_fail(error, "UNSAFE_STORAGE_PATH");
         return NULL;
     }
-    wchar_t *supplied = wide_copy(input);
+    wchar_t *supplied = sbw_wide_copy(input);
     for (wchar_t *p = supplied; *p; ++p)
         if (*p == L'/')
             *p = L'\\';
@@ -191,7 +184,7 @@ unsafe:
 static int pin_directories(secure_store *store, sbw_error *error) {
     size_t length = wcslen(store->directory);
     size_t parent_end = (size_t)(wcsrchr(store->directory, L'\\') - store->directory);
-    wchar_t *current = wide_copy(store->directory);
+    wchar_t *current = sbw_wide_copy(store->directory);
     /* Each pinned prefix removes FILE_SHARE_DELETE so ancestors cannot be
      * renamed or replaced between subsequent no-follow opens. */
     store->parents = sb_xcalloc(length + 1, sizeof(*store->parents));

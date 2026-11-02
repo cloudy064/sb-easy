@@ -16,6 +16,8 @@ bool sbw_json_string(const sbj *value, size_t limit, bool empty_allowed);
 wchar_t *sbw_wide(const char *text, sbw_error *error);
 char *sbw_utf8(const wchar_t *text, sbw_error *error);
 wchar_t *sbw_path_join(const wchar_t *directory, const wchar_t *name);
+/* Copies a NUL-terminated wide string; the caller releases it with free. */
+wchar_t *sbw_wide_copy(const wchar_t *text);
 wchar_t *sbw_executable_directory(sbw_error *error);
 void sbw_secret_free(char *text);
 #endif

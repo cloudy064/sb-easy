@@ -59,7 +59,7 @@ static bool registered_service(DWORD pid, const wchar_t *expected_binary) {
          status.dwCurrentState != SERVICE_START_PENDING) ||
         status.dwProcessId != pid || status.dwServiceType != SERVICE_WIN32_OWN_PROCESS)
         goto done;
-    QueryServiceConfigW(service, NULL, 0, &size);
+    (void)QueryServiceConfigW(service, NULL, 0, &size); /* size probe; failure expected */
     if (!size || size > 65536)
         goto done;
     config = sb_xmalloc(size);

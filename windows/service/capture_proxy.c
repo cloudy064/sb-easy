@@ -87,7 +87,7 @@ int sbw_capture_configure(sbw_capture *c, const sbj *config, sbw_error *e) {
         c->issue[0] = 0;
     }
     int result = action(c, "configure", config, e);
-    if (!result)
+    if (!result && c)
         c->enabled = sbj_get_bool(config, "enabled", false);
     return result;
 }

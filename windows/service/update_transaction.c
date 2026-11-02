@@ -62,7 +62,7 @@ static wchar_t *service_binary(sbw_error *error) {
     wchar_t *path = NULL;
     if (!service)
         goto done;
-    QueryServiceConfigW(service, NULL, 0, &size);
+    (void)QueryServiceConfigW(service, NULL, 0, &size); /* size probe; failure expected */
     if (!size || size > 65536)
         goto done;
     config = sb_xcalloc(size, 1);

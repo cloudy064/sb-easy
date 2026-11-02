@@ -83,7 +83,13 @@ static void str_free(str *s) {
 }
 static sbj *sbj_sv(sv v) { return sbj_strn(v.p, v.n); }
 
-static int hex_value(char c) { return sb_hex_value(c); }
+/* Self-contained: the Windows and Apple builds compile this file without util.c. */
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 
 static str percent_decode(sv v, bool plus_as_space) {
     sb_buf b = {0};

@@ -2685,6 +2685,90 @@ static sbj *identity_change_handle(sbw_controller *controller, const char *metho
     sbj_free(new_identity);
     return result;
 }
+/* extensions.*; the caller holds mutation_lock and releases it. */
+static sbj *extensions_handle(sbw_controller *controller, const char *method, const sbj *params,
+                              sbw_error *error) {
+    sbj *result = NULL;
+    if (sb_streq(method, "extensions.list") && !sbj_obj_len(params))
+        result = extensions_snapshot(controller);
+    else if (sb_streq(method, "extensions.catalog") && !sbj_obj_len(params))
+        result = sbw_store_catalog();
+    else if (sb_streq(method, "extensions.progress") && !sbj_obj_len(params))
+        result = sbw_store_progress();
+    else if (sb_streq(method, "extensions.catalog_update") && sbj_obj_len(params) == 1 &&
+             sbw_json_string(sbj_get(params, "envelope"), 900U * 1024U, false)) {
+        const sbj *envelope = sbj_get(params, "envelope");
+        if (!sbw_store_catalog_update(envelope->v.str.ptr, envelope->v.str.len, error)) {
+            extensions_tick(controller, GetTickCount64(), true);
+            result = sbw_store_catalog();
+        }
+    } else if (sb_streq(method, "extensions.install") && sbj_obj_len(params) == 1 &&
+               sbw_extension_release_find(sbj_get_str(params, "id", ""))) {
+        const char *id = sbj_get_str(params, "id", "");
+        if (sb_streq(id, "network-tools"))
+            sbw_fail(error, "BUILTIN_FEATURE",
+                     "Connections, rules and logs are included in the app.");
+        else if (!sbw_store_install(id, error))
+            result = sbw_store_progress();
+    } else if (sb_streq(method, "extensions.rollback") && sbj_obj_len(params) == 1 &&
+               sbw_extension_release_find(sbj_get_str(params, "id", ""))) {
+        const char *id = sbj_get_str(params, "id", "");
+        if (sbw_store_busy())
+            sbw_fail(error, "BUSY", "An extension installation is in progress.");
+        else if (!extension_stop(controller, id, false, error) && !sbw_store_rollback(id, error))
+            result = extensions_snapshot(controller);
+    } else if (sb_streq(method, "extensions.change") && sbj_obj_len(params) == 2 &&
+               sbw_extension_release_find(sbj_get_str(params, "id", ""))) {
+        const char *action = sbj_get_str(params, "action", ""), *id = sbj_get_str(params, "id", "");
+        if (sbw_store_busy())
+            sbw_fail(error, "BUSY", "An extension installation is in progress.");
+        else if (sb_streq(action, "enable") || sb_streq(action, "disable") ||
+                 sb_streq(action, "remove")) {
+            if (!extension_stop(controller, id, false, error) &&
+                !(sb_streq(action, "enable") ? extension_enable(controller, id, error)
+                                             : sbw_extension_change(id, action, error)))
+                result = extensions_snapshot(controller);
+        } else
+            sbw_fail(error, "INVALID_REQUEST", "Unknown extension action.");
+    } else
+        sbw_fail(error, "INVALID_REQUEST", "Invalid extension request.");
+    return result;
+}
+/* traffic.snapshot/clear; the caller holds mutation_lock and releases it. */
+static sbj *traffic_handle(sbw_controller *controller, const char *method, sbw_error *error) {
+    ensure_statistics(controller);
+    if (!sbw_traffic_running(controller->traffic)) {
+        sbw_fail(error, "EXTENSION_FAILED",
+                 "Statistics worker stopped. Re-enable it in the store.");
+        return NULL;
+    }
+    if (sb_streq(method, "traffic.clear")) {
+        if (!collect_traffic(controller) || !controller->core) {
+            sbw_fail(error, "TRAFFIC_UNAVAILABLE",
+                     "Cannot clear statistics until collection and storage are available.");
+            return NULL;
+        }
+        sbw_traffic *blank = sbw_traffic_new();
+        sbj *saved = sbw_traffic_snapshot(blank);
+        sbw_traffic_free(blank);
+        int stored =
+            saved ? sbw_core_traffic_save(controller->core, saved, error)
+                  : sbw_fail(error, "EXTENSION_FAILED", "Statistics worker did not respond.");
+        sbj_free(saved);
+        if (stored != 0) {
+            return NULL;
+        }
+        controller->traffic_storage_ok = controller->traffic_load_ok = true;
+        sbw_traffic_clear(controller->traffic);
+    }
+    sbj *result = sbw_traffic_snapshot(controller->traffic);
+    if (!result) {
+        sbw_fail(error, "EXTENSION_FAILED", "Statistics worker did not respond.");
+        return NULL;
+    }
+    sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
+    return result;
+}
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params,
                              bool authorized, sbw_error *error) {
     if (!controller || !method) {
@@ -2755,52 +2839,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             sbw_fail(error, "BUSY", "A connection operation is in progress.");
             return NULL;
         }
-        sbj *result = NULL;
-        if (sb_streq(method, "extensions.list") && !sbj_obj_len(params))
-            result = extensions_snapshot(controller);
-        else if (sb_streq(method, "extensions.catalog") && !sbj_obj_len(params))
-            result = sbw_store_catalog();
-        else if (sb_streq(method, "extensions.progress") && !sbj_obj_len(params))
-            result = sbw_store_progress();
-        else if (sb_streq(method, "extensions.catalog_update") && sbj_obj_len(params) == 1 &&
-                 sbw_json_string(sbj_get(params, "envelope"), 900U * 1024U, false)) {
-            const sbj *envelope = sbj_get(params, "envelope");
-            if (!sbw_store_catalog_update(envelope->v.str.ptr, envelope->v.str.len, error)) {
-                extensions_tick(controller, GetTickCount64(), true);
-                result = sbw_store_catalog();
-            }
-        } else if (sb_streq(method, "extensions.install") && sbj_obj_len(params) == 1 &&
-                   sbw_extension_release_find(sbj_get_str(params, "id", ""))) {
-            const char *id = sbj_get_str(params, "id", "");
-            if (sb_streq(id, "network-tools"))
-                sbw_fail(error, "BUILTIN_FEATURE",
-                         "Connections, rules and logs are included in the app.");
-            else if (!sbw_store_install(id, error))
-                result = sbw_store_progress();
-        } else if (sb_streq(method, "extensions.rollback") && sbj_obj_len(params) == 1 &&
-                   sbw_extension_release_find(sbj_get_str(params, "id", ""))) {
-            const char *id = sbj_get_str(params, "id", "");
-            if (sbw_store_busy())
-                sbw_fail(error, "BUSY", "An extension installation is in progress.");
-            else if (!extension_stop(controller, id, false, error) &&
-                     !sbw_store_rollback(id, error))
-                result = extensions_snapshot(controller);
-        } else if (sb_streq(method, "extensions.change") && sbj_obj_len(params) == 2 &&
-                   sbw_extension_release_find(sbj_get_str(params, "id", ""))) {
-            const char *action = sbj_get_str(params, "action", ""),
-                       *id = sbj_get_str(params, "id", "");
-            if (sbw_store_busy())
-                sbw_fail(error, "BUSY", "An extension installation is in progress.");
-            else if (sb_streq(action, "enable") || sb_streq(action, "disable") ||
-                     sb_streq(action, "remove")) {
-                if (!extension_stop(controller, id, false, error) &&
-                    !(sb_streq(action, "enable") ? extension_enable(controller, id, error)
-                                                 : sbw_extension_change(id, action, error)))
-                    result = extensions_snapshot(controller);
-            } else
-                sbw_fail(error, "INVALID_REQUEST", "Unknown extension action.");
-        } else
-            sbw_fail(error, "INVALID_REQUEST", "Invalid extension request.");
+        sbj *result = extensions_handle(controller, method, params, error);
         ReleaseSRWLockExclusive(&controller->mutation_lock);
         return result;
     }
@@ -2834,41 +2873,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             sbw_fail(error, "BUSY", "A connection operation is in progress.");
             return NULL;
         }
-        ensure_statistics(controller);
-        if (!sbw_traffic_running(controller->traffic)) {
-            ReleaseSRWLockExclusive(&controller->mutation_lock);
-            sbw_fail(error, "EXTENSION_FAILED",
-                     "Statistics worker stopped. Re-enable it in the store.");
-            return NULL;
-        }
-        if (sb_streq(method, "traffic.clear")) {
-            if (!collect_traffic(controller) || !controller->core) {
-                ReleaseSRWLockExclusive(&controller->mutation_lock);
-                sbw_fail(error, "TRAFFIC_UNAVAILABLE",
-                         "Cannot clear statistics until collection and storage are available.");
-                return NULL;
-            }
-            sbw_traffic *blank = sbw_traffic_new();
-            sbj *saved = sbw_traffic_snapshot(blank);
-            sbw_traffic_free(blank);
-            int stored =
-                saved ? sbw_core_traffic_save(controller->core, saved, error)
-                      : sbw_fail(error, "EXTENSION_FAILED", "Statistics worker did not respond.");
-            sbj_free(saved);
-            if (stored != 0) {
-                ReleaseSRWLockExclusive(&controller->mutation_lock);
-                return NULL;
-            }
-            controller->traffic_storage_ok = controller->traffic_load_ok = true;
-            sbw_traffic_clear(controller->traffic);
-        }
-        sbj *result = sbw_traffic_snapshot(controller->traffic);
-        if (!result) {
-            ReleaseSRWLockExclusive(&controller->mutation_lock);
-            sbw_fail(error, "EXTENSION_FAILED", "Statistics worker did not respond.");
-            return NULL;
-        }
-        sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
+        sbj *result = traffic_handle(controller, method, error);
         ReleaseSRWLockExclusive(&controller->mutation_lock);
         return result;
     }

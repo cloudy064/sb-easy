@@ -350,6 +350,14 @@ int sbw_capture_configure(sbw_capture *c,const sbj *config,sbw_error *error) {
 static void parse_address(const char *text,unsigned char out[16]) {
     if(InetPtonA(AF_INET6,text,out)==1)return;memset(out,0,16);out[10]=out[11]=255;if(InetPtonA(AF_INET,text,out+12)!=1)memset(out,0,16);
 }
+/* Strict 1-65535 decimal port; anything else (empty, signed, trailing text, out of range) is rejected
+ * so the flow is dropped instead of being silently truncated into another port. */
+static bool parse_port(const char *text,unsigned short *out){
+    if(!text||*text<'0'||*text>'9')return false;
+    char *end=NULL;unsigned long value=strtoul(text,&end,10);
+    if(*end||value<1||value>65535)return false;
+    *out=(unsigned short)value;return true;
+}
 int sbw_capture_set_broker(sbw_capture *c,HANDLE driver,DWORD pid,DWORD index,sbw_error *error){
     DWORD flags=0;if(!c||!driver||driver==INVALID_HANDLE_VALUE||!pid||!index||!GetHandleInformation(driver,&flags))return failure(error,"The capture broker handle is invalid.");
     sbw_capture_stop(c);c->pending_driver=driver;c->broker_pid=pid;c->broker_index=index;c->attempted_pid=0;return 0;
@@ -362,7 +370,9 @@ void sbw_capture_observe(sbw_capture *c,DWORD pid,const wchar_t *interface_name,
     for(size_t i=0;i<sbj_arr_len(rows)&&c->flow_count<FLOWS_MAX;++i) {
         const sbj *m=sbj_get(sbj_arr_at(rows,i),"metadata");attribution *flow=&c->flows[c->flow_count++];memset(flow,0,sizeof *flow);
         parse_address(sbj_get_str(m,"sourceIP",""),flow->key.local);parse_address(sbj_get_str(m,"destinationIP",""),flow->key.remote);
-        flow->key.local_port=(unsigned short)atoi(sbj_get_str(m,"sourcePort","0"));flow->key.remote_port=(unsigned short)atoi(sbj_get_str(m,"destinationPort","0"));
+        unsigned short local_port=0,remote_port=0;
+        if(!parse_port(sbj_get_str(m,"sourcePort",""),&local_port)||!parse_port(sbj_get_str(m,"destinationPort",""),&remote_port)){--c->flow_count;continue;}
+        flow->key.local_port=local_port;flow->key.remote_port=remote_port;
         flow->key.protocol=_stricmp(sbj_get_str(m,"network",""),"tcp")==0?6:17;
         const char *app=sbj_get_str(m,"processPath",""),*base=app;for(const char *p=app;*p;++p)if(*p=='/'||*p=='\\')base=p+1;
         if(!*base)base=sbj_get_str(m,"process","");if(strlen(base)<sizeof flow->app)strcpy_s(flow->app,sizeof flow->app,base);

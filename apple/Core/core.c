@@ -460,6 +460,33 @@ static void set_platform_sections(sbj *root, const char *tun_tag) {
     sbj_set(experimental, "cache_file", cache);
     sbj_set(root, "experimental", experimental);
 }
+/* Pins the user-selected node as the default of the final selector. */
+static bool select_default_node(const sbj *prefs, sbj *outbounds, sbj *final_outbound,
+                                const char **message) {
+    const char *selected = sbj_get_str(prefs, "selected_tag", "");
+    if (*selected) {
+        if (!outbound_named(outbounds, selected) ||
+            !sbj_string_is(sbj_get(final_outbound, "type"), "selector")) {
+            *message = "已选择的节点不再可用，请重新选择";
+            return false;
+        }
+        sbj *candidates = sbj_get(final_outbound, "outbounds");
+        bool found = false;
+        for (size_t i = 0; i < sbj_arr_len(candidates); ++i)
+            if (sbj_string_is(sbj_arr_at(candidates, i), selected))
+                found = true;
+        if (!found && sb_starts_with(selected, "local-")) {
+            sbj_arr_push(candidates, sbj_str(selected));
+            found = true;
+        }
+        if (!found) {
+            *message = "节点不属于默认策略组";
+            return false;
+        }
+        sbj_set_str(final_outbound, "default", selected);
+    }
+    return true;
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -581,28 +608,8 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         message = "默认出口不存在";
         goto bad;
     }
-    const char *selected = sbj_get_str(prefs, "selected_tag", "");
-    if (*selected) {
-        if (!outbound_named(outbounds, selected) ||
-            !sbj_string_is(sbj_get(final_outbound, "type"), "selector")) {
-            message = "已选择的节点不再可用，请重新选择";
-            goto bad;
-        }
-        sbj *candidates = sbj_get(final_outbound, "outbounds");
-        bool found = false;
-        for (size_t i = 0; i < sbj_arr_len(candidates); ++i)
-            if (sbj_string_is(sbj_arr_at(candidates, i), selected))
-                found = true;
-        if (!found && sb_starts_with(selected, "local-")) {
-            sbj_arr_push(candidates, sbj_str(selected));
-            found = true;
-        }
-        if (!found) {
-            message = "节点不属于默认策略组";
-            goto bad;
-        }
-        sbj_set_str(final_outbound, "default", selected);
-    }
+    if (!select_default_node(prefs, outbounds, final_outbound, &message))
+        goto bad;
     sbj *dns = sbj_get_or_object(root, "dns");
     if (!sbj_is_object(dns)) {
         goto bad;

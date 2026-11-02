@@ -1595,31 +1595,8 @@ static void health_tick(sbw_controller *controller) {
     controller->health_snapshot = snapshot;
     ReleaseSRWLockExclusive(&controller->state_lock);
 }
-void sbw_controller_background_tick(sbw_controller *controller, uint64_t now) {
-    if (!controller || !TryAcquireSRWLockExclusive(&controller->user_operation_lock))
-        return;
-    if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
-        ReleaseSRWLockExclusive(&controller->user_operation_lock);
-        return;
-    }
-    if (controller->management_stop &&
-        WaitForSingleObject(controller->management_stop, 0) == WAIT_OBJECT_0) {
-        ReleaseSRWLockExclusive(&controller->mutation_lock);
-        ReleaseSRWLockExclusive(&controller->user_operation_lock);
-        return;
-    }
-    if (controller->management_io_cancel)
-        ResetEvent(controller->management_io_cancel);
-    ReleaseSRWLockExclusive(&controller->user_operation_lock);
-    if (sbw_updater_installing(controller->updater)) {
-        ReleaseSRWLockExclusive(&controller->mutation_lock);
-        return;
-    }
-    extensions_tick(controller, now, false);
-    if (!ready(controller, NULL) || cancelled(controller, NULL))
-        goto done;
-    HANDLE cancel =
-        controller->management_io_cancel ? controller->management_io_cancel : controller->cancel;
+/* Re-reads the firewall protection state every 5 s and restores it when requested but missing. */
+static void kill_switch_refresh(sbw_controller *controller, uint64_t now) {
     if (!controller->kill_switch_checked_ms || now - controller->kill_switch_checked_ms >= 5000) {
         sbj *protection = sbw_kill_switch_status();
         controller->kill_switch_checked_ms = now;
@@ -1647,6 +1624,59 @@ void sbw_controller_background_tick(sbw_controller *controller, uint64_t now) {
             ReleaseSRWLockExclusive(&controller->state_lock);
         }
     }
+}
+/* Sends the periodic status report; a failure only fills cycle_error when it is still empty. */
+static void report_status_to_center(sbw_controller *controller, HANDLE cancel,
+                                    sbw_error *cycle_error) {
+    sbw_error operation = {0};
+    if (controller->remote->report_status) {
+        sbj *status = sbj_object();
+        sbj_set_str(status, "singbox_version", controller->core ? SB_EASY_CORE_VERSION : NULL);
+        sbj_set_str(status, "app_version", SB_EASY_VERSION);
+        sbj_set_bool(status, "singbox_running", controller->runtime.core_running);
+        sbj_set_str(status, "config_etag", sbj_get_str(controller->active, "etag", NULL));
+        sbj_set_str(status, "last_error",
+                    cycle_error->code[0]                ? cycle_error->message
+                    : controller->runtime_error.code[0] ? controller->runtime_error.message
+                                                        : NULL);
+        memset(&operation, 0, sizeof operation);
+        int reported = controller->remote->report_status(
+            controller->remote->context, controller->identity, status, cancel, &operation);
+        sbj_free(status);
+        AcquireSRWLockExclusive(&controller->state_lock);
+        if (!reported)
+            controller->last_report_at = (uint64_t)time(NULL) * 1000;
+        else if (!cycle_error->code[0])
+            *cycle_error = operation;
+        ReleaseSRWLockExclusive(&controller->state_lock);
+    }
+}
+void sbw_controller_background_tick(sbw_controller *controller, uint64_t now) {
+    if (!controller || !TryAcquireSRWLockExclusive(&controller->user_operation_lock))
+        return;
+    if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
+        ReleaseSRWLockExclusive(&controller->user_operation_lock);
+        return;
+    }
+    if (controller->management_stop &&
+        WaitForSingleObject(controller->management_stop, 0) == WAIT_OBJECT_0) {
+        ReleaseSRWLockExclusive(&controller->mutation_lock);
+        ReleaseSRWLockExclusive(&controller->user_operation_lock);
+        return;
+    }
+    if (controller->management_io_cancel)
+        ResetEvent(controller->management_io_cancel);
+    ReleaseSRWLockExclusive(&controller->user_operation_lock);
+    if (sbw_updater_installing(controller->updater)) {
+        ReleaseSRWLockExclusive(&controller->mutation_lock);
+        return;
+    }
+    extensions_tick(controller, now, false);
+    if (!ready(controller, NULL) || cancelled(controller, NULL))
+        goto done;
+    HANDLE cancel =
+        controller->management_io_cancel ? controller->management_io_cancel : controller->cancel;
+    kill_switch_refresh(controller, now);
     observe_core(controller, false);
     LONG generation = InterlockedCompareExchange(&controller->network_generation, 0, 0);
     if (generation != controller->network_observed) {
@@ -1740,27 +1770,7 @@ void sbw_controller_background_tick(sbw_controller *controller, uint64_t now) {
     memset(&operation, 0, sizeof operation);
     if (management_telemetry(controller, now, cancel, &operation) != 0 && !cycle_error.code[0])
         cycle_error = operation;
-    if (controller->remote->report_status) {
-        sbj *status = sbj_object();
-        sbj_set_str(status, "singbox_version", controller->core ? SB_EASY_CORE_VERSION : NULL);
-        sbj_set_str(status, "app_version", SB_EASY_VERSION);
-        sbj_set_bool(status, "singbox_running", controller->runtime.core_running);
-        sbj_set_str(status, "config_etag", sbj_get_str(controller->active, "etag", NULL));
-        sbj_set_str(status, "last_error",
-                    cycle_error.code[0]                 ? cycle_error.message
-                    : controller->runtime_error.code[0] ? controller->runtime_error.message
-                                                        : NULL);
-        memset(&operation, 0, sizeof operation);
-        int reported = controller->remote->report_status(
-            controller->remote->context, controller->identity, status, cancel, &operation);
-        sbj_free(status);
-        AcquireSRWLockExclusive(&controller->state_lock);
-        if (!reported)
-            controller->last_report_at = (uint64_t)time(NULL) * 1000;
-        else if (!cycle_error.code[0])
-            cycle_error = operation;
-        ReleaseSRWLockExclusive(&controller->state_lock);
-    }
+    report_status_to_center(controller, cancel, &cycle_error);
     AcquireSRWLockExclusive(&controller->state_lock);
     controller->management_error = cycle_error;
     ReleaseSRWLockExclusive(&controller->state_lock);

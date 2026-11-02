@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for the vendored civetweb server.
+#
+# Every report left after the test fixtures were made race-free has both
+# accesses inside civetweb (stop_flag written by mg_stop without the lock that
+# consume_socket holds while reading it, plus start/stop bookkeeping). Only
+# civetweb function names are listed; races whose stacks touch sb-easy code
+# only are not suppressed.
+#
+# Usage: TSAN_OPTIONS="suppressions=<repo>/c/tsan.supp" ctest ...
+race:mg_stop
+race:consume_socket
+race:master_thread_run
+race:push_inner
+race:mg_get_server_ports
+race:close_all_listening_sockets
+race:mg_poll

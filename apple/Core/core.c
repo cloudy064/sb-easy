@@ -587,6 +587,36 @@ static bool add_dns_servers(sbj *route, sbj *dns, sbj *servers, bool managed) {
     }
     return true;
 }
+/* Standalone mode routes everything through a selector over all subscription nodes.
+ * On success the selector takes ownership of *leafs. */
+static bool add_standalone_selector(bool managed, sbj *route, sbj *outbounds, sbj **leafs,
+                                    const char **message) {
+    if (!managed) {
+        if (!sbj_arr_len(*leafs)) {
+            *message = "独立模式需要至少一个订阅节点";
+            return false;
+        }
+        sbj *selector = sbj_object();
+        sbj_set_str(selector, "type", "selector");
+        sbj_set_str(selector, "tag", DEFAULT_SELECTOR);
+        sbj_set(selector, "outbounds", *leafs);
+        *leafs = NULL;
+        sbj_arr_push(outbounds, selector);
+        sbj_set_str(route, "final", DEFAULT_SELECTOR);
+    }
+    return true;
+}
+/* Finds the outbound or endpoint named by route.final. */
+static sbj *find_final_outbound(const sbj *route, sbj *outbounds, const sbj *endpoints,
+                                const char **message) {
+    const char *final = sbj_get_str(route, "final", "");
+    sbj *final_outbound = outbound_named(outbounds, final);
+    if (!final_outbound)
+        final_outbound = outbound_named(endpoints, final);
+    if (!final_outbound)
+        *message = "默认出口不存在";
+    return final_outbound;
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -646,29 +676,13 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     if (!sbj_is_object(route)) {
         goto bad;
     }
-    if (!managed) {
-        if (!sbj_arr_len(leafs)) {
-            message = "独立模式需要至少一个订阅节点";
-            goto bad;
-        }
-        sbj *selector = sbj_object();
-        sbj_set_str(selector, "type", "selector");
-        sbj_set_str(selector, "tag", DEFAULT_SELECTOR);
-        sbj_set(selector, "outbounds", leafs);
-        leafs = NULL;
-        sbj_arr_push(outbounds, selector);
-        sbj_set_str(route, "final", DEFAULT_SELECTOR);
-    }
+    if (!add_standalone_selector(managed, route, outbounds, &leafs, &message))
+        goto bad;
     sbj_free(leafs);
     leafs = NULL;
-    const char *final = sbj_get_str(route, "final", "");
-    sbj *final_outbound = outbound_named(outbounds, final);
+    sbj *final_outbound = find_final_outbound(route, outbounds, endpoints, &message);
     if (!final_outbound)
-        final_outbound = outbound_named(endpoints, final);
-    if (!final_outbound) {
-        message = "默认出口不存在";
         goto bad;
-    }
     if (!select_default_node(prefs, outbounds, final_outbound, &message))
         goto bad;
     sbj *dns = sbj_get_or_object(root, "dns");

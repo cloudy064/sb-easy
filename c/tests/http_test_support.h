@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -306,7 +307,7 @@ typedef struct {
     pthread_t thread;
     sb_fixture_handler handler;
     void *user;
-    volatile int stop;
+    atomic_int stop;
     pthread_mutex_t mutex;
     sb_strvec seen; /* "METHOD target" of every request, in order */
 } sb_fixture;
@@ -329,10 +330,10 @@ SB_TEST_UNUSED static void sb_fixture_request_free(sb_fixture_request *r) {
 
 SB_TEST_UNUSED static void *sb_fixture_main(void *arg) {
     sb_fixture *f = arg;
-    while (!f->stop) {
+    while (!atomic_load(&f->stop)) {
         int c = accept(f->listener, NULL, NULL);
         if (c < 0) {
-            if (f->stop) break;
+            if (atomic_load(&f->stop)) break;
             continue;
         }
         sb_buf in = {0};
@@ -403,7 +404,7 @@ SB_TEST_UNUSED static int sb_fixture_start(sb_fixture *f, sb_fixture_handler han
 }
 
 SB_TEST_UNUSED static void sb_fixture_stop(sb_fixture *f) {
-    f->stop = 1;
+    atomic_store(&f->stop, 1);
     shutdown(f->listener, SHUT_RDWR);
     close(f->listener);
     pthread_join(f->thread, NULL);

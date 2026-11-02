@@ -420,6 +420,33 @@ static bool fetch_wait(fetch_state *state, LONG expected, HANDLE cancel, ULONGLO
         (void)WaitForSingleObject(state->event, 25);
     }
 }
+/* Splits an http(s) URL without credentials into host, path+query, port and scheme. */
+static bool fetch_target(const wchar_t *wide, wchar_t **host_out, wchar_t **path_out,
+                         INTERNET_PORT *port, bool *secure) {
+    URL_COMPONENTS parts = {0};
+    parts.dwStructSize = sizeof(parts);
+    parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
+        parts.dwUserNameLength = parts.dwPasswordLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wide, 0, 0, &parts) ||
+        (parts.nScheme != INTERNET_SCHEME_HTTPS && parts.nScheme != INTERNET_SCHEME_HTTP) ||
+        !parts.dwHostNameLength || parts.dwUserNameLength || parts.dwPasswordLength)
+        return false;
+    wchar_t *host = sb_xcalloc((size_t)parts.dwHostNameLength + 1, sizeof(wchar_t));
+    wmemcpy(host, parts.lpszHostName, parts.dwHostNameLength);
+    size_t length = (size_t)parts.dwUrlPathLength + parts.dwExtraInfoLength;
+    wchar_t *path = sb_xcalloc(length + 2, sizeof(wchar_t));
+    if (parts.dwUrlPathLength)
+        wmemcpy(path, parts.lpszUrlPath, parts.dwUrlPathLength);
+    else
+        path[0] = L'/';
+    if (parts.dwExtraInfoLength)
+        wcsncat_s(path, length + 2, parts.lpszExtraInfo, parts.dwExtraInfoLength);
+    *host_out = host;
+    *path_out = path;
+    *port = parts.nPort;
+    *secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
+    return true;
+}
 static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
     wchar_t *wide = NULL, *host = NULL, *path = NULL;
     HINTERNET session = NULL, connection = NULL, request = NULL;
@@ -437,35 +464,20 @@ static sbj *fetch_run(const char *url, HANDLE cancel, sbw_error *error) {
     wide = sbw_wide(url, error);
     if (!wide)
         goto done;
-    URL_COMPONENTS parts = {0};
-    parts.dwStructSize = sizeof(parts);
-    parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
-        parts.dwUserNameLength = parts.dwPasswordLength = (DWORD)-1;
-    if (!WinHttpCrackUrl(wide, 0, 0, &parts) ||
-        (parts.nScheme != INTERNET_SCHEME_HTTPS && parts.nScheme != INTERNET_SCHEME_HTTP) ||
-        !parts.dwHostNameLength || parts.dwUserNameLength || parts.dwPasswordLength)
+    INTERNET_PORT port = 0;
+    bool secure = false;
+    if (!fetch_target(wide, &host, &path, &port, &secure))
         goto done;
-    host = sb_xcalloc((size_t)parts.dwHostNameLength + 1, sizeof(wchar_t));
-    wmemcpy(host, parts.lpszHostName, parts.dwHostNameLength);
-    size_t length = (size_t)parts.dwUrlPathLength + parts.dwExtraInfoLength;
-    path = sb_xcalloc(length + 2, sizeof(wchar_t));
-    if (parts.dwUrlPathLength)
-        wmemcpy(path, parts.lpszUrlPath, parts.dwUrlPathLength);
-    else
-        path[0] = L'/';
-    if (parts.dwExtraInfoLength)
-        wcsncat_s(path, length + 2, parts.lpszExtraInfo, parts.dwExtraInfoLength);
     session = WinHttpOpen(L"sb-easy subscription", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC);
     if (!session)
         goto done;
     WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
-    connection = WinHttpConnect(session, host, parts.nPort, 0);
+    connection = WinHttpConnect(session, host, port, 0);
     if (!connection)
         goto done;
     request = WinHttpOpenRequest(connection, L"GET", path, NULL, WINHTTP_NO_REFERER,
-                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                 parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
     if (!request)
         goto done;
     DWORD disabled = WINHTTP_DISABLE_AUTHENTICATION | WINHTTP_DISABLE_COOKIES,

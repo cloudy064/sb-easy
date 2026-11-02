@@ -762,6 +762,54 @@ static int connection_stop(sbw_controller *controller, sbw_error *error) {
     ReleaseSRWLockExclusive(&controller->state_lock);
     return stopped;
 }
+/* Publishes a started and durably saved configuration as the active, last-good one. */
+static void activation_commit(sbw_controller *controller, const sbj *identity, const sbj *source,
+                              sbw_runtime_config *next) {
+    AcquireSRWLockExclusive(&controller->state_lock);
+    sbj *saved_identity = sbj_clone(identity), *saved_good = sbj_clone(source),
+        *saved_active = sbj_clone(source);
+    sbj_set(saved_good, "local_identity", sbj_clone(identity));
+    if (sbw_identity_is_independent(identity)) {
+        sbj *saved_candidate = sbj_clone(source);
+        sbj_free(controller->candidate);
+        controller->candidate = saved_candidate;
+    }
+    sbj_free(controller->identity);
+    controller->identity = saved_identity;
+    sbj_free(controller->last_good);
+    controller->last_good = saved_good;
+    controller->active = saved_active;
+    controller->active_config = *next;
+    memset(next, 0, sizeof *next);
+    sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_CORE_HEALTHY);
+    sb_windows_recovery_healthy(&controller->recovery, GetTickCount64());
+    memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
+    ReleaseSRWLockExclusive(&controller->state_lock);
+}
+/* Stops the core that failed to start; false when cleanup failed or TUN needed a forced stop. */
+static bool stop_failed_core(sbw_controller *controller, const sbw_runtime_config *next,
+                             sbw_error *failure) {
+    sbw_error cleanup_error = {0};
+    sbw_core_status cleaned = {0};
+    bool safe_to_restore = sbw_core_stop(controller->core, &cleanup_error) == 0;
+    if (safe_to_restore && sbw_core_poll(controller->core, &cleaned, &cleanup_error) != 0)
+        safe_to_restore = false;
+    if (safe_to_restore && next->has_tun && cleaned.last_stop_forced) {
+        safe_to_restore = false;
+        sbw_fail(&cleanup_error, "TUN_FORCE_STOPPED",
+                 "The failed TUN core required forced termination; network cleanup must be "
+                 "verified before restoring another configuration.");
+    }
+    if (!safe_to_restore) {
+        char message[256];
+        (void)sprintf_s(message, sizeof(message),
+                        "Core startup failed (%s). Cleanup also failed (%s); verify network "
+                        "recovery before reconnecting.",
+                        failure->code, cleanup_error.code);
+        sbw_fail(failure, cleanup_error.code, message);
+    }
+    return safe_to_restore;
+}
 static int connection_activate(sbw_controller *controller, const sbj *source, const sbj *identity,
                                bool force, sbw_error *error) {
     if (!controller->identity)
@@ -809,47 +857,10 @@ static int connection_activate(sbw_controller *controller, const sbj *source, co
         save_state(controller, identity,
                    sbw_identity_is_independent(identity) ? source : controller->candidate, source,
                    &failure) == 0) {
-        AcquireSRWLockExclusive(&controller->state_lock);
-        sbj *saved_identity = sbj_clone(identity), *saved_good = sbj_clone(source),
-            *saved_active = sbj_clone(source);
-        sbj_set(saved_good, "local_identity", sbj_clone(identity));
-        if (sbw_identity_is_independent(identity)) {
-            sbj *saved_candidate = sbj_clone(source);
-            sbj_free(controller->candidate);
-            controller->candidate = saved_candidate;
-        }
-        sbj_free(controller->identity);
-        controller->identity = saved_identity;
-        sbj_free(controller->last_good);
-        controller->last_good = saved_good;
-        controller->active = saved_active;
-        controller->active_config = next;
-        memset(&next, 0, sizeof next);
-        sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_CORE_HEALTHY);
-        sb_windows_recovery_healthy(&controller->recovery, GetTickCount64());
-        memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
-        ReleaseSRWLockExclusive(&controller->state_lock);
+        activation_commit(controller, identity, source, &next);
         return 0;
     }
-    sbw_error cleanup_error = {0};
-    sbw_core_status cleaned = {0};
-    bool safe_to_restore = sbw_core_stop(controller->core, &cleanup_error) == 0;
-    if (safe_to_restore && sbw_core_poll(controller->core, &cleaned, &cleanup_error) != 0)
-        safe_to_restore = false;
-    if (safe_to_restore && next.has_tun && cleaned.last_stop_forced) {
-        safe_to_restore = false;
-        sbw_fail(&cleanup_error, "TUN_FORCE_STOPPED",
-                 "The failed TUN core required forced termination; network cleanup must be "
-                 "verified before restoring another configuration.");
-    }
-    if (!safe_to_restore) {
-        char message[256];
-        (void)sprintf_s(message, sizeof(message),
-                        "Core startup failed (%s). Cleanup also failed (%s); verify network "
-                        "recovery before reconnecting.",
-                        failure.code, cleanup_error.code);
-        sbw_fail(&failure, cleanup_error.code, message);
-    }
+    bool safe_to_restore = stop_failed_core(controller, &next, &failure);
     sbw_runtime_config_free(&next);
     bool rollback = safe_to_restore && controller->last_good && !cancelled(controller, NULL);
     if (rollback) {

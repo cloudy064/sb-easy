@@ -518,6 +518,19 @@ static bool add_local_group_rules(const sbj *prefs, sbj *outbounds, sbj *rules, 
     }
     return true;
 }
+/* Only plain WireGuard endpoints are allowed; the extension owns sockets and listeners. */
+static bool endpoints_valid(const sbj *endpoints) {
+    if (endpoints && (!sbj_is_array(endpoints) || sbj_arr_len(endpoints) > SBA_MAX_ENDPOINTS)) {
+        return false;
+    }
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
+        if (!sbj_string_is(sbj_get(sbj_arr_at(endpoints, i), "type"), "wireguard") ||
+            sbj_get_bool(sbj_arr_at(endpoints, i), "system", false) ||
+            sbj_get_int(sbj_arr_at(endpoints, i), "listen_port", 0) != 0) {
+            return false;
+        }
+    return true;
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -554,15 +567,8 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     }
     sbj_del(root, "services");
     const sbj *endpoints = sbj_get(root, "endpoints");
-    if (endpoints && (!sbj_is_array(endpoints) || sbj_arr_len(endpoints) > SBA_MAX_ENDPOINTS)) {
+    if (!endpoints_valid(endpoints))
         goto bad;
-    }
-    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
-        if (!sbj_string_is(sbj_get(sbj_arr_at(endpoints, i), "type"), "wireguard") ||
-            sbj_get_bool(sbj_arr_at(endpoints, i), "system", false) ||
-            sbj_get_int(sbj_arr_at(endpoints, i), "listen_port", 0) != 0) {
-            goto bad;
-        }
     sbj *outbounds = sbj_get(root, "outbounds");
     if (!outbounds) {
         outbounds = sbj_array();

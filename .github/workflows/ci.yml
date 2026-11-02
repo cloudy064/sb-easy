@@ -63,6 +63,16 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: windows/ui/package-lock.json
+      - name: Check windows/ C formatting (clang-format, see windows/.clang-format)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem windows -Recurse -Include *.c,*.h | Where-Object { $_.FullName -notmatch 'node_modules|[\\/]dist[\\/]' }
+          $bad = 0
+          foreach ($f in $files) {
+            clang-format --dry-run -Werror --style=file $f.FullName 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) { $bad++ }
+          }
+          if ($bad -gt 0) { throw "$bad file(s) are not clang-format clean" }
       - name: Build UI, native service and desktop; run tests
         shell: pwsh
         run: ./windows/scripts/build.ps1

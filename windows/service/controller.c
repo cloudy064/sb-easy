@@ -2786,6 +2786,120 @@ static sbj *traffic_handle(sbw_controller *controller, const char *method, sbw_e
     sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
     return result;
 }
+static sbj *mode_set_handle(sbw_controller *controller, const sbj *params, sbw_error *error) {
+    sbj *result = NULL;
+    if (sbj_obj_len(params) != 1 || (!sbj_string_is(sbj_get(params, "mode"), "managed") &&
+                                     !sbj_string_is(sbj_get(params, "mode"), "independent"))) {
+        sbw_fail(error, "INVALID_REQUEST", "Choose managed or independent mode.");
+        return NULL;
+    }
+    if (switch_mode(controller, sbj_string_is(sbj_get(params, "mode"), "independent"), error) ==
+        0) {
+        AcquireSRWLockShared(&controller->state_lock);
+        result = runtime_status(controller);
+        ReleaseSRWLockShared(&controller->state_lock);
+    }
+    return result;
+}
+static sbj *management_settings_set_handle(sbw_controller *controller, const sbj *params,
+                                           sbw_error *error) {
+    sbj *result = NULL;
+    if (management_settings_change(controller, params, error) == 0) {
+        AcquireSRWLockShared(&controller->state_lock);
+        result = management_status(controller);
+        ReleaseSRWLockShared(&controller->state_lock);
+    }
+    return result;
+}
+static sbj *routing_health_check_handle(sbw_controller *controller) {
+    sbj *result = NULL;
+    sbw_health_reset(controller->health);
+    AcquireSRWLockExclusive(&controller->state_lock);
+    sbj_free(controller->health_snapshot);
+    controller->health_snapshot = sbw_health_snapshot(NULL);
+    result = config_summary(controller);
+    ReleaseSRWLockExclusive(&controller->state_lock);
+    return result;
+}
+static sbj *routing_health_set_handle(sbw_controller *controller, const sbj *params,
+                                      sbw_error *error) {
+    sbj *result = NULL;
+    sbj *new_identity = NULL;
+    if (!controller->identity) {
+        sbw_fail(error, "NOT_ENROLLED", "Set up managed or independent mode first.");
+        return NULL;
+    }
+    new_identity = sbw_health_change(controller->identity, params, error);
+    if (new_identity && !save_state(controller, new_identity, controller->candidate,
+                                    controller->last_good, error)) {
+        AcquireSRWLockExclusive(&controller->state_lock);
+        sbj_free(controller->identity);
+        controller->identity = new_identity;
+        new_identity = NULL;
+        result = config_summary(controller);
+        ReleaseSRWLockExclusive(&controller->state_lock);
+    }
+    sbj_free(new_identity);
+    return result;
+}
+static sbj *routing_automatic_set_handle(sbw_controller *controller, const sbj *params,
+                                         sbw_error *error) {
+    sbj *result = NULL;
+    sbj *new_identity = NULL;
+    new_identity =
+        sbw_routing_automatic(controller->active ? controller->active : controller->candidate,
+                              controller->identity, params, error);
+    if (new_identity && !apply_local_identity(controller, new_identity, error)) {
+        AcquireSRWLockShared(&controller->state_lock);
+        result = config_summary(controller);
+        ReleaseSRWLockShared(&controller->state_lock);
+    }
+    sbj_free(new_identity);
+    return result;
+}
+static sbj *routing_diagnostic_handle(sbw_controller *controller, const char *method,
+                                      const sbj *params, sbw_error *error) {
+    sbj *result = NULL;
+    sbw_core_status process = {0};
+    if (!controller->active || !controller->runtime.core_running ||
+        sbw_core_poll(controller->core, &process, error) != 0 || !process.process_running) {
+        sbw_fail(error, "NOT_CONNECTED", "Connect before running a routing diagnostic.");
+        return NULL;
+    }
+    result = sb_streq(method, "routing.probe")
+                 ? sbw_route_probe(&controller->active_config, controller->core, process.process_id,
+                                   controller->cancel, params, error)
+                 : sbw_route_delay(&controller->active_config, process.process_id,
+                                   controller->cancel, params, error);
+    return result;
+}
+static sbj *config_validate_handle(sbw_controller *controller, sbw_error *error) {
+    sbj *result = NULL;
+    if (!controller->candidate) {
+        sbw_fail(error, "NO_CANDIDATE", "Download a candidate configuration before validating it.");
+        return NULL;
+    }
+    if (!controller->core) {
+        sbw_fail(error, "CORE_UNAVAILABLE",
+                 "The pinned sing-box core is not available. Run the core preparation script "
+                 "first.");
+        return NULL;
+    }
+    sbw_error check_error = {0};
+    sbw_runtime_config adapted = {0};
+    int checked = prepare_candidate(controller, controller->candidate, &adapted, &check_error);
+    if (checked == 0)
+        checked = check_config(controller, &adapted, &check_error);
+    sbw_runtime_config_free(&adapted);
+    record_check(controller, checked == 0, &check_error);
+    AcquireSRWLockShared(&controller->state_lock);
+    if (checked == 0)
+        result = config_summary(controller);
+    ReleaseSRWLockShared(&controller->state_lock);
+    if (checked != 0)
+        sbw_fail(error, check_error.code, check_error.message);
+    return result;
+}
 /* Methods that take parameters; every other method must be called with an empty object. */
 static bool method_accepts_params(const char *method) {
     static const char *const prefixes[] = {"updates.", "preferences.", "subscriptions.",
@@ -2999,66 +3113,17 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     } else if (!strncmp(method, "preferences.", 12)) {
         result = preferences_dispatch(controller, method, params, error);
     } else if (sb_streq(method, "mode.set")) {
-        if (sbj_obj_len(params) != 1 || (!sbj_string_is(sbj_get(params, "mode"), "managed") &&
-                                         !sbj_string_is(sbj_get(params, "mode"), "independent"))) {
-            sbw_fail(error, "INVALID_REQUEST", "Choose managed or independent mode.");
-            goto done;
-        }
-        if (switch_mode(controller, sbj_string_is(sbj_get(params, "mode"), "independent"), error) ==
-            0) {
-            AcquireSRWLockShared(&controller->state_lock);
-            result = runtime_status(controller);
-            ReleaseSRWLockShared(&controller->state_lock);
-        }
+        result = mode_set_handle(controller, params, error);
     } else if (sb_streq(method, "management.settings.set")) {
-        if (management_settings_change(controller, params, error) == 0) {
-            AcquireSRWLockShared(&controller->state_lock);
-            result = management_status(controller);
-            ReleaseSRWLockShared(&controller->state_lock);
-        }
+        result = management_settings_set_handle(controller, params, error);
     } else if (sb_streq(method, "routing.health.check")) {
-        sbw_health_reset(controller->health);
-        AcquireSRWLockExclusive(&controller->state_lock);
-        sbj_free(controller->health_snapshot);
-        controller->health_snapshot = sbw_health_snapshot(NULL);
-        result = config_summary(controller);
-        ReleaseSRWLockExclusive(&controller->state_lock);
+        result = routing_health_check_handle(controller);
     } else if (sb_streq(method, "routing.health.set")) {
-        if (!controller->identity) {
-            sbw_fail(error, "NOT_ENROLLED", "Set up managed or independent mode first.");
-            goto done;
-        }
-        new_identity = sbw_health_change(controller->identity, params, error);
-        if (new_identity && !save_state(controller, new_identity, controller->candidate,
-                                        controller->last_good, error)) {
-            AcquireSRWLockExclusive(&controller->state_lock);
-            sbj_free(controller->identity);
-            controller->identity = new_identity;
-            new_identity = NULL;
-            result = config_summary(controller);
-            ReleaseSRWLockExclusive(&controller->state_lock);
-        }
+        result = routing_health_set_handle(controller, params, error);
     } else if (sb_streq(method, "routing.automatic.set")) {
-        new_identity =
-            sbw_routing_automatic(controller->active ? controller->active : controller->candidate,
-                                  controller->identity, params, error);
-        if (new_identity && !apply_local_identity(controller, new_identity, error)) {
-            AcquireSRWLockShared(&controller->state_lock);
-            result = config_summary(controller);
-            ReleaseSRWLockShared(&controller->state_lock);
-        }
+        result = routing_automatic_set_handle(controller, params, error);
     } else if (sb_streq(method, "routing.probe") || sb_streq(method, "routing.delay")) {
-        sbw_core_status process = {0};
-        if (!controller->active || !controller->runtime.core_running ||
-            sbw_core_poll(controller->core, &process, error) != 0 || !process.process_running) {
-            sbw_fail(error, "NOT_CONNECTED", "Connect before running a routing diagnostic.");
-            goto done;
-        }
-        result = sb_streq(method, "routing.probe")
-                     ? sbw_route_probe(&controller->active_config, controller->core,
-                                       process.process_id, controller->cancel, params, error)
-                     : sbw_route_delay(&controller->active_config, process.process_id,
-                                       controller->cancel, params, error);
+        result = routing_diagnostic_handle(controller, method, params, error);
     } else if (sb_streq(method, "connection.start") || sb_streq(method, "connection.stop")) {
         result = connection_handle(controller, method, error);
     } else if (sb_streq(method, "subscriptions.fetch")) {
@@ -3079,30 +3144,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
     } else if (sb_streq(method, "enrollment.forget")) {
         result = enrollment_forget_handle(controller, error);
     } else if (sb_streq(method, "config.validate")) {
-        if (!controller->candidate) {
-            sbw_fail(error, "NO_CANDIDATE",
-                     "Download a candidate configuration before validating it.");
-            goto done;
-        }
-        if (!controller->core) {
-            sbw_fail(error, "CORE_UNAVAILABLE",
-                     "The pinned sing-box core is not available. Run the core preparation script "
-                     "first.");
-            goto done;
-        }
-        sbw_error check_error = {0};
-        sbw_runtime_config adapted = {0};
-        int checked = prepare_candidate(controller, controller->candidate, &adapted, &check_error);
-        if (checked == 0)
-            checked = check_config(controller, &adapted, &check_error);
-        sbw_runtime_config_free(&adapted);
-        record_check(controller, checked == 0, &check_error);
-        AcquireSRWLockShared(&controller->state_lock);
-        if (checked == 0)
-            result = config_summary(controller);
-        ReleaseSRWLockShared(&controller->state_lock);
-        if (checked != 0)
-            sbw_fail(error, check_error.code, check_error.message);
+        result = config_validate_handle(controller, error);
     } else {
         if (refresh_configuration(controller, false, controller->cancel, error) != 0)
             goto done;

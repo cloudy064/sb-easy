@@ -23,6 +23,8 @@ int sbw_capture_mark_uploaded(sbw_capture *capture, const char *digest, sbw_erro
 bool sbw_capture_wifi(void);
 /* Pure parsing/filtering seams used by fixture tests; no network is changed. */
 bool sbw_capture_digest_valid(const char *digest);
+/* Number of attributed flows retained by the last sbw_capture_observe call. */
+size_t sbw_capture_test_flow_count(sbw_capture *capture);
 int sbw_capture_hash(const void *bytes, size_t size, char digest[65]);
 int sbw_capture_test_packet(sbw_capture *capture, const void *packet, size_t length,
                             const char *app, const char *host, sbw_error *error);

@@ -60,6 +60,31 @@ int main(void) {
     CHECK(sbj_arr_len(sbj_get(snapshot, "files")) == 0);
     CHECK(!sbj_get_bool(sbj_get(snapshot, "config"), "enabled", true));
     sbj_free(snapshot);
+    /* Ports must be strict 1-65535 decimals; malformed flows are dropped, not truncated. */
+    const char *observed =
+        "{\"connections\":["
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":"
+        "\"1234\",\"destinationPort\":\"443\",\"network\":\"tcp\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":"
+        "\"\",\"destinationPort\":\"443\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":"
+        "\"0\",\"destinationPort\":\"443\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":"
+        "\"1234\",\"destinationPort\":\"65536\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":\"-"
+        "1\",\"destinationPort\":\"443\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":"
+        "\"80abc\",\"destinationPort\":\"443\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":\"+"
+        "80\",\"destinationPort\":\"443\"}},"
+        "{\"metadata\":{\"sourceIP\":\"10.0.0.1\",\"destinationIP\":\"1.1.1.1\",\"sourcePort\":"
+        "\"65535\",\"destinationPort\":\"1\",\"network\":\"udp\"}}"
+        "]}";
+    sbj *flows = sbj_parse_cstr(observed);
+    CHECK(flows);
+    sbw_capture_observe(other, 1, L"sb-easy", flows);
+    CHECK(sbw_capture_test_flow_count(other) == 2);
+    sbj_free(flows);
     sbw_capture_free(other);
     CHECK(sbw_capture_delete(capture, digest, &error) == 0);
     free(digest);

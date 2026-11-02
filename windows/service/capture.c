@@ -807,6 +807,14 @@ static bool parse_port(const char *text, unsigned short *out) {
     *out = (unsigned short)value;
     return true;
 }
+size_t sbw_capture_test_flow_count(sbw_capture *c) {
+    if (!c)
+        return 0;
+    AcquireSRWLockExclusive(&c->lock);
+    size_t count = c->flow_count;
+    ReleaseSRWLockExclusive(&c->lock);
+    return count;
+}
 int sbw_capture_set_broker(sbw_capture *c, HANDLE driver, DWORD pid, DWORD index,
                            sbw_error *error) {
     DWORD flags = 0;

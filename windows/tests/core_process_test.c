@@ -225,388 +225,499 @@ static HANDLE launch_owner(const wchar_t *fixture, const wchar_t *directory, con
     return process.hProcess;
 }
 
+typedef struct test_state {
+    const wchar_t *fixture;
+    sbw_error error;
+    sbw_core *core, *duplicate;
+    wchar_t *root, *directory, *marker, *missing, *lock;
+    wchar_t *crash_directory, *crash_lock, *ready, *keep, *unsafe;
+    wchar_t *sentinel_ready, *sentinel_signal;
+    char *json;
+    HANDLE cancel, checker, leaked, primary, child, owner, sentinel;
+    check_context context;
+    sbw_core_options options;
+} test_state;
+
+#define CHECK_T(condition)                                                                         \
+    do {                                                                                           \
+        if (!(condition)) {                                                                        \
+            fprintf(stderr, "%s:%d: %s (core=%s, win32=%lu)\n", __FILE__, __LINE__, #condition,    \
+                    t->error.code, GetLastError());                                                \
+            return 1;                                                                              \
+        }                                                                                          \
+    } while (0)
+
+static int scenario_construct(test_state *t) {
+    t->options.executable = L"relative.exe";
+    CHECK_T(!sbw_core_new(&t->options, &t->error) && !strcmp(t->error.code, "CORE_INVALID_PATH"));
+    t->options.executable = t->missing;
+    CHECK_T(!sbw_core_new(&t->options, &t->error) && !strcmp(t->error.code, "CORE_UNAVAILABLE"));
+    t->options.executable = t->fixture;
+    t->core = sbw_core_new(&t->options, &t->error);
+    CHECK_T(t->core);
+    CHECK_T(sbw_core_preflight(t->core, false, &t->error) == 0);
+    int preflight = sbw_core_preflight(t->core, true, &t->error);
+    CHECK_T(preflight == 0 || !strcmp(t->error.code, "CORE_ELEVATION_REQUIRED"));
+    t->duplicate = sbw_core_new(&t->options, &t->error);
+    CHECK_T(!t->duplicate);
+    CHECK_T(!DeleteFileW(t->fixture) && GetLastError() == ERROR_SHARING_VIOLATION);
+    return 0;
+}
+
+static int scenario_versions_and_checks(test_state *t) {
+    sbw_core_status status = {0};
+    DWORD exit_code = MAXDWORD;
+    CHECK_T(sbw_core_version_check(t->core, "1.14.3", NULL, &t->error) == 0);
+    memset(&t->error, 0, sizeof(t->error));
+    CHECK_T(sbw_core_version_check(t->core, "1.14.4", NULL, &t->error) != 0 &&
+            !strcmp(t->error.code, "CORE_VERSION_MISMATCH"));
+    CHECK_T(sbw_core_config_check(t->core, "{}", 2, NULL, &exit_code, &t->error) == 0 &&
+            exit_code == 0);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && !status.process_running &&
+            !status.has_exit_code);
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    return 0;
+}
+
+static int scenario_check_cache(test_state *t) {
+    /* A check cache is exact-byte and single-use, and survives stopping the old
+     * instance. Equivalent JSON with different bytes must be checked again. */
+    free(t->json);
+    t->json = fixture_config("count_checks", t->marker, NULL);
+    CHECK_T(sbw_core_config_check(t->core, t->json, strlen(t->json), NULL, NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 1);
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 1);
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 2);
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0);
+    CHECK_T(sbw_core_config_check(t->core, t->json, strlen(t->json), NULL, NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 3);
+    char *changed = sb_asprintf("%s ", t->json);
+    free(t->json);
+    t->json = changed;
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 4);
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0);
+    CHECK_T(sbw_core_config_check(t->core, t->json, strlen(t->json), NULL, NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 5);
+    CHECK_T(sbw_core_config_check(t->core, "[]", 2, NULL, NULL, &t->error) != 0);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            read_pid(t->marker) == 6);
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0 && DeleteFileW(t->marker));
+    free(t->json);
+    t->json = NULL;
+    return 0;
+}
+
+static int scenario_graceful_stop(test_state *t) {
+    sbw_core_status status = {0};
+    /* The fixture acknowledges targeted BREAK with exit 42. A second run
+     * ignores it and proves the bounded Job fallback remains available. */
+    t->json = fixture_config("graceful", t->marker, NULL);
+    t->sentinel = launch_sentinel(t->fixture, 0, t->sentinel_ready, t->sentinel_signal);
+    CHECK_T(t->sentinel && wait_pid(t->sentinel_ready));
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            wait_pid(t->marker));
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && status.process_running);
+    t->primary =
+        OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, status.process_id);
+    CHECK_T(t->primary && sbw_core_stop(t->core, &t->error) == 0);
+    DWORD graceful_code = 0;
+    CHECK_T(GetExitCodeProcess(t->primary, &graceful_code) && graceful_code == 42);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && !status.last_stop_forced);
+    CHECK_T(parent_breaks == 0 && WaitForSingleObject(t->sentinel, 0) == WAIT_TIMEOUT &&
+            GetFileAttributesW(t->sentinel_signal) == INVALID_FILE_ATTRIBUTES);
+    CHECK_T(TerminateProcess(t->sentinel, 99) &&
+            WaitForSingleObject(t->sentinel, 2000) == WAIT_OBJECT_0);
+    CloseHandle(t->sentinel);
+    t->sentinel = NULL;
+    CHECK_T(DeleteFileW(t->sentinel_ready));
+    CloseHandle(t->primary);
+    t->primary = NULL;
+    CHECK_T(DeleteFileW(t->marker));
+    free(t->json);
+    t->json = fixture_config("ignore_break", t->marker, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            wait_pid(t->marker));
+    ULONGLONG stop_begin = GetTickCount64();
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0 && GetTickCount64() - stop_begin < 3000);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && status.last_stop_forced);
+    CHECK_T(DeleteFileW(t->marker));
+    free(t->json);
+    t->json = NULL;
+    return 0;
+}
+
+static int scenario_slow_graceful(test_state *t) {
+    sbw_core_status status = {0};
+    /* Real adapter teardown can exceed the old 1.5 second graceful allowance. */
+    sbw_core_free(t->core);
+    t->options.stop_timeout_ms = 5000;
+    t->core = sbw_core_new(&t->options, &t->error);
+    CHECK_T(t->core);
+    t->json = fixture_config("slow_graceful", t->marker, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            wait_pid(t->marker));
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && !status.last_stop_forced &&
+            status.stop_signal_code == 0);
+    CHECK_T(DeleteFileW(t->marker));
+    free(t->json);
+    t->json = NULL;
+    sbw_core_free(t->core);
+    t->options.stop_timeout_ms = 2000;
+    t->core = sbw_core_new(&t->options, &t->error);
+    CHECK_T(t->core);
+    return 0;
+}
+
+static int scenario_console_peer(test_state *t) {
+    sbw_core_status status = {0};
+    /* A third peer attached to the core's console must suppress BREAK entirely;
+     * only the core's own Job is terminated, leaving the outsider untouched. */
+    t->json = fixture_config("graceful", t->marker, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0 &&
+            wait_pid(t->marker));
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && status.process_running);
+    t->sentinel =
+        launch_sentinel(t->fixture, status.process_id, t->sentinel_ready, t->sentinel_signal);
+    CHECK_T(t->sentinel && wait_pid(t->sentinel_ready));
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && status.last_stop_forced);
+    CHECK_T(parent_breaks == 0 && WaitForSingleObject(t->sentinel, 0) == WAIT_TIMEOUT &&
+            GetFileAttributesW(t->sentinel_signal) == INVALID_FILE_ATTRIBUTES);
+    CHECK_T(TerminateProcess(t->sentinel, 99) &&
+            WaitForSingleObject(t->sentinel, 2000) == WAIT_OBJECT_0);
+    CloseHandle(t->sentinel);
+    t->sentinel = NULL;
+    CHECK_T(DeleteFileW(t->marker) && DeleteFileW(t->sentinel_ready));
+    free(t->json);
+    t->json = NULL;
+    return 0;
+}
+
+static int scenario_config_failures_and_cancel(test_state *t) {
+    sbw_core_status status = {0};
+    DWORD exit_code = MAXDWORD;
+    CHECK_T(sbw_core_config_check(t->core, "[]", 2, NULL, NULL, &t->error) != 0 &&
+            !strcmp(t->error.code, "CORE_CONFIG_INVALID"));
+    CHECK_T(sbw_core_config_check(t->core, "{", 1, NULL, NULL, &t->error) != 0 &&
+            !strcmp(t->error.code, "CORE_CONFIG_INVALID"));
+    t->json = fixture_config("check_fail", NULL, NULL);
+    CHECK_T(sbw_core_config_check(t->core, t->json, strlen(t->json), NULL, &exit_code, &t->error) !=
+                0 &&
+            !strcmp(t->error.code, "CORE_CHECK_FAILED") && exit_code == 17);
+    CHECK_T(!strstr(t->error.message, "FIXTURE_SECRET"));
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) != 0 &&
+            !strcmp(t->error.code, "CORE_CHECK_FAILED"));
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && !status.process_running);
+    free(t->json);
+    t->json = fixture_config("check_timeout", NULL, NULL);
+    ULONGLONG before = GetTickCount64();
+    CHECK_T(sbw_core_config_check(t->core, t->json, strlen(t->json), NULL, &exit_code, &t->error) !=
+                0 &&
+            !strcmp(t->error.code, "CORE_CHECK_TIMEOUT") && exit_code == MAXDWORD);
+    CHECK_T(GetTickCount64() - before < 4000 && config_count(t->directory, NULL) == 0);
+    t->cancel = CreateEventW(NULL, TRUE, TRUE, NULL);
+    CHECK_T(t->cancel);
+    CHECK_T(sbw_core_config_check(t->core, "{}", 2, t->cancel, NULL, &t->error) != 0 &&
+            !strcmp(t->error.code, "CORE_CANCELLED"));
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    CHECK_T(ResetEvent(t->cancel));
+    t->context.core = t->core;
+    t->context.cancel = t->cancel;
+    t->checker = CreateThread(NULL, 0, blocking_check, &t->context, 0, NULL);
+    CHECK_T(t->checker);
+    before = GetTickCount64();
+    while (!config_count(t->directory, NULL) && GetTickCount64() - before < 600)
+        Sleep(5);
+    CHECK_T(config_count(t->directory, NULL) == 1);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) != 0 && !strcmp(t->error.code, "CORE_BUSY"));
+    CHECK_T(sbw_core_stop(t->core, &t->error) != 0 && !strcmp(t->error.code, "CORE_BUSY"));
+    CHECK_T(SetEvent(t->cancel));
+    CHECK_T(WaitForSingleObject(t->checker, 4000) == WAIT_OBJECT_0);
+    CloseHandle(t->checker);
+    t->checker = NULL;
+    CHECK_T(t->context.result != 0 && !strcmp(t->context.error.code, "CORE_CANCELLED"));
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    return 0;
+}
+
+static int scenario_noisy_inherit(test_state *t) {
+    sbw_core_status status = {0};
+    SECURITY_ATTRIBUTES inheritable = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
+    t->leaked = CreateEventW(&inheritable, TRUE, FALSE, NULL);
+    CHECK_T(t->leaked);
+    free(t->json);
+    t->json = fixture_config("noisy", NULL, t->leaked);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && status.process_running &&
+            !status.has_exit_code);
+    t->primary = OpenProcess(SYNCHRONIZE, FALSE, status.process_id);
+    CHECK_T(t->primary);
+    bool denied = false;
+    CHECK_T(config_count(t->directory, &denied) == 1 && denied);
+    Sleep(100);
+    CHECK_T(WaitForSingleObject(t->leaked, 0) == WAIT_TIMEOUT);
+    CHECK_T(sbw_core_start(t->core, "{}", 2, NULL, &t->error) != 0 &&
+            !strcmp(t->error.code, "CORE_ALREADY_RUNNING"));
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0 &&
+            WaitForSingleObject(t->primary, 0) == WAIT_OBJECT_0);
+    CloseHandle(t->primary);
+    t->primary = NULL;
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    CHECK_T(sbw_core_poll(t->core, &status, &t->error) == 0 && !status.process_running);
+    return 0;
+}
+
+static int scenario_crash(test_state *t) {
+    sbw_core_status status = {0};
+    free(t->json);
+    t->json = fixture_config("crash", NULL, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0);
+    CHECK_T(await_exit(t->core, &status, &t->error) && status.has_exit_code &&
+            status.exit_code == 23);
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    return 0;
+}
+
+static int scenario_spawn_child(test_state *t) {
+    free(t->json);
+    t->json = fixture_config("spawn_child", t->marker, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0);
+    DWORD child_pid = wait_pid(t->marker);
+    CHECK_T(child_pid);
+    t->child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
+    CHECK_T(t->child && WaitForSingleObject(t->child, 0) == WAIT_TIMEOUT);
+    CHECK_T(sbw_core_stop(t->core, &t->error) == 0 &&
+            WaitForSingleObject(t->child, 2000) == WAIT_OBJECT_0);
+    CloseHandle(t->child);
+    t->child = NULL;
+    CHECK_T(DeleteFileW(t->marker));
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    return 0;
+}
+
+static int scenario_spawn_child_crash(test_state *t) {
+    sbw_core_status status = {0};
+    free(t->json);
+    t->json = fixture_config("spawn_child_crash", t->marker, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0);
+    DWORD child_pid = wait_pid(t->marker);
+    CHECK_T(child_pid);
+    t->child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
+    CHECK_T(t->child);
+    CHECK_T(await_exit(t->core, &status, &t->error) && status.exit_code == 23);
+    CHECK_T(WaitForSingleObject(t->child, 2000) == WAIT_OBJECT_0);
+    CloseHandle(t->child);
+    t->child = NULL;
+    CHECK_T(DeleteFileW(t->marker));
+    CHECK_T(config_count(t->directory, NULL) == 0);
+    return 0;
+}
+
+static int scenario_check_child(test_state *t) {
+    free(t->json);
+    t->json = fixture_config("check_child", t->marker, NULL);
+    CHECK_T(sbw_core_config_check(t->core, t->json, strlen(t->json), NULL, NULL, &t->error) == 0);
+    DWORD child_pid = wait_pid(t->marker);
+    CHECK_T(child_pid);
+    t->child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
+    CHECK_T(!t->child || WaitForSingleObject(t->child, 2000) == WAIT_OBJECT_0);
+    if (t->child) {
+        CloseHandle(t->child);
+        t->child = NULL;
+    }
+    CHECK_T(DeleteFileW(t->marker));
+    return 0;
+}
+
+static int scenario_free_kills_child(test_state *t) {
+    free(t->json);
+    t->json = fixture_config("spawn_child", t->marker, NULL);
+    CHECK_T(sbw_core_start(t->core, t->json, strlen(t->json), NULL, &t->error) == 0);
+    DWORD child_pid = wait_pid(t->marker);
+    CHECK_T(child_pid);
+    t->child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
+    CHECK_T(t->child);
+    sbw_core_free(t->core);
+    t->core = NULL;
+    CHECK_T(WaitForSingleObject(t->child, 2000) == WAIT_OBJECT_0 &&
+            config_count(t->directory, NULL) == 0);
+    CloseHandle(t->child);
+    t->child = NULL;
+    CHECK_T(DeleteFileW(t->marker));
+    return 0;
+}
+
+static int scenario_owner_crash(test_state *t) {
+    t->owner = launch_owner(t->fixture, t->crash_directory, t->marker, t->ready);
+    CHECK_T(t->owner);
+    DWORD primary_pid = wait_pid(t->ready);
+    DWORD child_pid = wait_pid(t->marker);
+    CHECK_T(primary_pid && child_pid);
+    t->primary = OpenProcess(SYNCHRONIZE, FALSE, primary_pid);
+    t->child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
+    CHECK_T(t->primary && t->child && WaitForSingleObject(t->child, 0) == WAIT_TIMEOUT);
+    CHECK_T(TerminateProcess(t->owner, 99) && WaitForSingleObject(t->owner, 2000) == WAIT_OBJECT_0);
+    CloseHandle(t->owner);
+    t->owner = NULL;
+    CHECK_T(WaitForSingleObject(t->primary, 2000) == WAIT_OBJECT_0 &&
+            WaitForSingleObject(t->child, 2000) == WAIT_OBJECT_0);
+    CloseHandle(t->primary);
+    t->primary = NULL;
+    CloseHandle(t->child);
+    t->child = NULL;
+    CHECK_T(config_count(t->crash_directory, NULL) == 1);
+    CHECK_T(write_pid(t->keep, 123));
+    t->options.work_directory = t->crash_directory;
+    t->core = sbw_core_new(&t->options, &t->error);
+    CHECK_T(t->core && config_count(t->crash_directory, NULL) == 0 && read_pid(t->keep) == 123);
+    sbw_core_free(t->core);
+    t->core = NULL;
+    CHECK_T(CreateDirectoryW(t->unsafe, NULL));
+    t->core = sbw_core_new(&t->options, &t->error);
+    CHECK_T(!t->core && !strcmp(t->error.code, "CORE_STORAGE_ERROR"));
+    CHECK_T(GetFileAttributesW(t->unsafe) & FILE_ATTRIBUTE_DIRECTORY);
+    CHECK_T(RemoveDirectoryW(t->unsafe));
+    return 0;
+}
+
+static const struct {
+    const char *name;
+    int (*run)(test_state *);
+} scenarios[] = {
+    {"construct", scenario_construct},
+    {"versions_and_checks", scenario_versions_and_checks},
+    {"check_cache", scenario_check_cache},
+    {"graceful_stop", scenario_graceful_stop},
+    {"slow_graceful", scenario_slow_graceful},
+    {"console_peer", scenario_console_peer},
+    {"config_failures_and_cancel", scenario_config_failures_and_cancel},
+    {"noisy_inherit", scenario_noisy_inherit},
+    {"crash", scenario_crash},
+    {"spawn_child", scenario_spawn_child},
+    {"spawn_child_crash", scenario_spawn_child_crash},
+    {"check_child", scenario_check_child},
+    {"free_kills_child", scenario_free_kills_child},
+    {"owner_crash", scenario_owner_crash},
+};
+
 int wmain(int argc, wchar_t **argv) {
     int helper = sbw_core_signal_helper(argc, argv);
     if (helper >= 0)
         return helper;
     sbw_error error = {0};
-    sbw_core *core = NULL, *duplicate = NULL;
-    wchar_t *root = NULL, *directory = NULL, *marker = NULL, *missing = NULL, *lock = NULL;
-    wchar_t *crash_directory = NULL, *crash_lock = NULL, *ready = NULL, *keep = NULL,
-            *unsafe = NULL;
-    wchar_t *sentinel_ready = NULL, *sentinel_signal = NULL;
-    char *json = NULL;
-    HANDLE cancel = NULL, checker = NULL, leaked = NULL, primary = NULL, child = NULL, owner = NULL;
-    HANDLE sentinel = NULL;
-    check_context context = {0};
+    test_state t = {0};
     int result = 1;
     if (argc == 6 && !wcscmp(argv[1], L"--owner"))
         return owner_mode(argv);
     CHECK(argc == 2);
-    root = temporary_root();
-    CHECK(root);
-    directory = sbw_path_join(root, L"private work");
-    marker = sbw_path_join(root, L"child.pid");
-    missing = sbw_path_join(root, L"missing.exe");
-    lock = sbw_path_join(directory, L"state.lock");
-    crash_directory = sbw_path_join(root, L"crash work");
-    crash_lock = sbw_path_join(crash_directory, L"state.lock");
-    ready = sbw_path_join(root, L"owner-ready.pid");
-    keep = sbw_path_join(crash_directory, L"keep.json");
-    unsafe = sbw_path_join(crash_directory, L"core-00000000000000000000000000000000.json");
-    sentinel_ready = sbw_path_join(root, L"sentinel.ready");
-    sentinel_signal = sbw_path_join(root, L"sentinel.signal");
+    t.fixture = argv[1];
+    t.root = temporary_root();
+    CHECK(t.root);
+    t.directory = sbw_path_join(t.root, L"private work");
+    t.marker = sbw_path_join(t.root, L"child.pid");
+    t.missing = sbw_path_join(t.root, L"missing.exe");
+    t.lock = sbw_path_join(t.directory, L"state.lock");
+    t.crash_directory = sbw_path_join(t.root, L"crash work");
+    t.crash_lock = sbw_path_join(t.crash_directory, L"state.lock");
+    t.ready = sbw_path_join(t.root, L"owner-ready.pid");
+    t.keep = sbw_path_join(t.crash_directory, L"keep.json");
+    t.unsafe = sbw_path_join(t.crash_directory, L"core-00000000000000000000000000000000.json");
+    t.sentinel_ready = sbw_path_join(t.root, L"sentinel.ready");
+    t.sentinel_signal = sbw_path_join(t.root, L"sentinel.signal");
     CHECK(SetConsoleCtrlHandler(parent_control, TRUE));
-    sbw_core_options options = {argv[1], directory, 800, 2000};
-    options.executable = L"relative.exe";
-    CHECK(!sbw_core_new(&options, &error) && !strcmp(error.code, "CORE_INVALID_PATH"));
-    options.executable = missing;
-    CHECK(!sbw_core_new(&options, &error) && !strcmp(error.code, "CORE_UNAVAILABLE"));
-    options.executable = argv[1];
-    core = sbw_core_new(&options, &error);
-    CHECK(core);
-    CHECK(sbw_core_preflight(core, false, &error) == 0);
-    int preflight = sbw_core_preflight(core, true, &error);
-    CHECK(preflight == 0 || !strcmp(error.code, "CORE_ELEVATION_REQUIRED"));
-    duplicate = sbw_core_new(&options, &error);
-    CHECK(!duplicate);
-    CHECK(!DeleteFileW(argv[1]) && GetLastError() == ERROR_SHARING_VIOLATION);
-
-    sbw_core_status status = {0};
-    DWORD exit_code = MAXDWORD;
-    CHECK(sbw_core_version_check(core, "1.14.3", NULL, &error) == 0);
-    memset(&error, 0, sizeof(error));
-    CHECK(sbw_core_version_check(core, "1.14.4", NULL, &error) != 0 &&
-          !strcmp(error.code, "CORE_VERSION_MISMATCH"));
-    CHECK(sbw_core_config_check(core, "{}", 2, NULL, &exit_code, &error) == 0 && exit_code == 0);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.process_running &&
-          !status.has_exit_code);
-    CHECK(config_count(directory, NULL) == 0);
-
-    /* A check cache is exact-byte and single-use, and survives stopping the old
-     * instance. Equivalent JSON with different bytes must be checked again. */
-    free(json);
-    json = fixture_config("count_checks", marker, NULL);
-    CHECK(sbw_core_config_check(core, json, strlen(json), NULL, NULL, &error) == 0 &&
-          read_pid(marker) == 1);
-    CHECK(sbw_core_stop(core, &error) == 0);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && read_pid(marker) == 1);
-    CHECK(sbw_core_stop(core, &error) == 0);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && read_pid(marker) == 2);
-    CHECK(sbw_core_stop(core, &error) == 0);
-    CHECK(sbw_core_config_check(core, json, strlen(json), NULL, NULL, &error) == 0 &&
-          read_pid(marker) == 3);
-    char *changed = sb_asprintf("%s ", json);
-    free(json);
-    json = changed;
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && read_pid(marker) == 4);
-    CHECK(sbw_core_stop(core, &error) == 0);
-    CHECK(sbw_core_config_check(core, json, strlen(json), NULL, NULL, &error) == 0 &&
-          read_pid(marker) == 5);
-    CHECK(sbw_core_config_check(core, "[]", 2, NULL, NULL, &error) != 0);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && read_pid(marker) == 6);
-    CHECK(sbw_core_stop(core, &error) == 0 && DeleteFileW(marker));
-    free(json);
-    json = NULL;
-
-    /* The fixture acknowledges targeted BREAK with exit 42. A second run
-     * ignores it and proves the bounded Job fallback remains available. */
-    json = fixture_config("graceful", marker, NULL);
-    sentinel = launch_sentinel(argv[1], 0, sentinel_ready, sentinel_signal);
-    CHECK(sentinel && wait_pid(sentinel_ready));
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && wait_pid(marker));
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && status.process_running);
-    primary =
-        OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, status.process_id);
-    CHECK(primary && sbw_core_stop(core, &error) == 0);
-    DWORD graceful_code = 0;
-    CHECK(GetExitCodeProcess(primary, &graceful_code) && graceful_code == 42);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.last_stop_forced);
-    CHECK(parent_breaks == 0 && WaitForSingleObject(sentinel, 0) == WAIT_TIMEOUT &&
-          GetFileAttributesW(sentinel_signal) == INVALID_FILE_ATTRIBUTES);
-    CHECK(TerminateProcess(sentinel, 99) && WaitForSingleObject(sentinel, 2000) == WAIT_OBJECT_0);
-    CloseHandle(sentinel);
-    sentinel = NULL;
-    CHECK(DeleteFileW(sentinel_ready));
-    CloseHandle(primary);
-    primary = NULL;
-    CHECK(DeleteFileW(marker));
-    free(json);
-    json = fixture_config("ignore_break", marker, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && wait_pid(marker));
-    ULONGLONG stop_begin = GetTickCount64();
-    CHECK(sbw_core_stop(core, &error) == 0 && GetTickCount64() - stop_begin < 3000);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && status.last_stop_forced);
-    CHECK(DeleteFileW(marker));
-    free(json);
-    json = NULL;
-
-    /* Real adapter teardown can exceed the old 1.5 second graceful allowance. */
-    sbw_core_free(core);
-    options.stop_timeout_ms = 5000;
-    core = sbw_core_new(&options, &error);
-    CHECK(core);
-    json = fixture_config("slow_graceful", marker, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && wait_pid(marker));
-    CHECK(sbw_core_stop(core, &error) == 0);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.last_stop_forced &&
-          status.stop_signal_code == 0);
-    CHECK(DeleteFileW(marker));
-    free(json);
-    json = NULL;
-    sbw_core_free(core);
-    options.stop_timeout_ms = 2000;
-    core = sbw_core_new(&options, &error);
-    CHECK(core);
-
-    /* A third peer attached to the core's console must suppress BREAK entirely;
-     * only the core's own Job is terminated, leaving the outsider untouched. */
-    json = fixture_config("graceful", marker, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0 && wait_pid(marker));
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && status.process_running);
-    sentinel = launch_sentinel(argv[1], status.process_id, sentinel_ready, sentinel_signal);
-    CHECK(sentinel && wait_pid(sentinel_ready));
-    CHECK(sbw_core_stop(core, &error) == 0);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && status.last_stop_forced);
-    CHECK(parent_breaks == 0 && WaitForSingleObject(sentinel, 0) == WAIT_TIMEOUT &&
-          GetFileAttributesW(sentinel_signal) == INVALID_FILE_ATTRIBUTES);
-    CHECK(TerminateProcess(sentinel, 99) && WaitForSingleObject(sentinel, 2000) == WAIT_OBJECT_0);
-    CloseHandle(sentinel);
-    sentinel = NULL;
-    CHECK(DeleteFileW(marker) && DeleteFileW(sentinel_ready));
-    free(json);
-    json = NULL;
-    CHECK(sbw_core_config_check(core, "[]", 2, NULL, NULL, &error) != 0 &&
-          !strcmp(error.code, "CORE_CONFIG_INVALID"));
-    CHECK(sbw_core_config_check(core, "{", 1, NULL, NULL, &error) != 0 &&
-          !strcmp(error.code, "CORE_CONFIG_INVALID"));
-    json = fixture_config("check_fail", NULL, NULL);
-    CHECK(sbw_core_config_check(core, json, strlen(json), NULL, &exit_code, &error) != 0 &&
-          !strcmp(error.code, "CORE_CHECK_FAILED") && exit_code == 17);
-    CHECK(!strstr(error.message, "FIXTURE_SECRET"));
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) != 0 &&
-          !strcmp(error.code, "CORE_CHECK_FAILED"));
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.process_running);
-    free(json);
-    json = fixture_config("check_timeout", NULL, NULL);
-    ULONGLONG before = GetTickCount64();
-    CHECK(sbw_core_config_check(core, json, strlen(json), NULL, &exit_code, &error) != 0 &&
-          !strcmp(error.code, "CORE_CHECK_TIMEOUT") && exit_code == MAXDWORD);
-    CHECK(GetTickCount64() - before < 4000 && config_count(directory, NULL) == 0);
-    cancel = CreateEventW(NULL, TRUE, TRUE, NULL);
-    CHECK(cancel);
-    CHECK(sbw_core_config_check(core, "{}", 2, cancel, NULL, &error) != 0 &&
-          !strcmp(error.code, "CORE_CANCELLED"));
-    CHECK(config_count(directory, NULL) == 0);
-    CHECK(ResetEvent(cancel));
-    context.core = core;
-    context.cancel = cancel;
-    checker = CreateThread(NULL, 0, blocking_check, &context, 0, NULL);
-    CHECK(checker);
-    before = GetTickCount64();
-    while (!config_count(directory, NULL) && GetTickCount64() - before < 600)
-        Sleep(5);
-    CHECK(config_count(directory, NULL) == 1);
-    CHECK(sbw_core_poll(core, &status, &error) != 0 && !strcmp(error.code, "CORE_BUSY"));
-    CHECK(sbw_core_stop(core, &error) != 0 && !strcmp(error.code, "CORE_BUSY"));
-    CHECK(SetEvent(cancel));
-    CHECK(WaitForSingleObject(checker, 4000) == WAIT_OBJECT_0);
-    CloseHandle(checker);
-    checker = NULL;
-    CHECK(context.result != 0 && !strcmp(context.error.code, "CORE_CANCELLED"));
-    CHECK(config_count(directory, NULL) == 0);
-
-    SECURITY_ATTRIBUTES inheritable = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
-    leaked = CreateEventW(&inheritable, TRUE, FALSE, NULL);
-    CHECK(leaked);
-    free(json);
-    json = fixture_config("noisy", NULL, leaked);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && status.process_running &&
-          !status.has_exit_code);
-    primary = OpenProcess(SYNCHRONIZE, FALSE, status.process_id);
-    CHECK(primary);
-    bool denied = false;
-    CHECK(config_count(directory, &denied) == 1 && denied);
-    Sleep(100);
-    CHECK(WaitForSingleObject(leaked, 0) == WAIT_TIMEOUT);
-    CHECK(sbw_core_start(core, "{}", 2, NULL, &error) != 0 &&
-          !strcmp(error.code, "CORE_ALREADY_RUNNING"));
-    CHECK(sbw_core_stop(core, &error) == 0 && WaitForSingleObject(primary, 0) == WAIT_OBJECT_0);
-    CloseHandle(primary);
-    primary = NULL;
-    CHECK(config_count(directory, NULL) == 0);
-    CHECK(sbw_core_poll(core, &status, &error) == 0 && !status.process_running);
-
-    free(json);
-    json = fixture_config("crash", NULL, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0);
-    CHECK(await_exit(core, &status, &error) && status.has_exit_code && status.exit_code == 23);
-    CHECK(config_count(directory, NULL) == 0);
-
-    free(json);
-    json = fixture_config("spawn_child", marker, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0);
-    DWORD child_pid = wait_pid(marker);
-    CHECK(child_pid);
-    child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
-    CHECK(child && WaitForSingleObject(child, 0) == WAIT_TIMEOUT);
-    CHECK(sbw_core_stop(core, &error) == 0 && WaitForSingleObject(child, 2000) == WAIT_OBJECT_0);
-    CloseHandle(child);
-    child = NULL;
-    CHECK(DeleteFileW(marker));
-    CHECK(config_count(directory, NULL) == 0);
-
-    free(json);
-    json = fixture_config("spawn_child_crash", marker, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0);
-    child_pid = wait_pid(marker);
-    CHECK(child_pid);
-    child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
-    CHECK(child);
-    CHECK(await_exit(core, &status, &error) && status.exit_code == 23);
-    CHECK(WaitForSingleObject(child, 2000) == WAIT_OBJECT_0);
-    CloseHandle(child);
-    child = NULL;
-    CHECK(DeleteFileW(marker));
-    CHECK(config_count(directory, NULL) == 0);
-
-    free(json);
-    json = fixture_config("check_child", marker, NULL);
-    CHECK(sbw_core_config_check(core, json, strlen(json), NULL, NULL, &error) == 0);
-    child_pid = wait_pid(marker);
-    CHECK(child_pid);
-    child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
-    CHECK(!child || WaitForSingleObject(child, 2000) == WAIT_OBJECT_0);
-    if (child) {
-        CloseHandle(child);
-        child = NULL;
+    t.options = (sbw_core_options){argv[1], t.directory, 800, 2000};
+    for (size_t i = 0; i < sizeof scenarios / sizeof *scenarios; ++i) {
+        if (scenarios[i].run(&t) != 0) {
+            fprintf(stderr, "core_process_test: scenario '%s' failed\n", scenarios[i].name);
+            goto done;
+        }
     }
-    CHECK(DeleteFileW(marker));
-
-    free(json);
-    json = fixture_config("spawn_child", marker, NULL);
-    CHECK(sbw_core_start(core, json, strlen(json), NULL, &error) == 0);
-    child_pid = wait_pid(marker);
-    CHECK(child_pid);
-    child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
-    CHECK(child);
-    sbw_core_free(core);
-    core = NULL;
-    CHECK(WaitForSingleObject(child, 2000) == WAIT_OBJECT_0 && config_count(directory, NULL) == 0);
-    CloseHandle(child);
-    child = NULL;
-    CHECK(DeleteFileW(marker));
-
-    owner = launch_owner(argv[1], crash_directory, marker, ready);
-    CHECK(owner);
-    DWORD primary_pid = wait_pid(ready);
-    child_pid = wait_pid(marker);
-    CHECK(primary_pid && child_pid);
-    primary = OpenProcess(SYNCHRONIZE, FALSE, primary_pid);
-    child = OpenProcess(SYNCHRONIZE, FALSE, child_pid);
-    CHECK(primary && child && WaitForSingleObject(child, 0) == WAIT_TIMEOUT);
-    CHECK(TerminateProcess(owner, 99) && WaitForSingleObject(owner, 2000) == WAIT_OBJECT_0);
-    CloseHandle(owner);
-    owner = NULL;
-    CHECK(WaitForSingleObject(primary, 2000) == WAIT_OBJECT_0 &&
-          WaitForSingleObject(child, 2000) == WAIT_OBJECT_0);
-    CloseHandle(primary);
-    primary = NULL;
-    CloseHandle(child);
-    child = NULL;
-    CHECK(config_count(crash_directory, NULL) == 1);
-    CHECK(write_pid(keep, 123));
-    options.work_directory = crash_directory;
-    core = sbw_core_new(&options, &error);
-    CHECK(core && config_count(crash_directory, NULL) == 0 && read_pid(keep) == 123);
-    sbw_core_free(core);
-    core = NULL;
-    CHECK(CreateDirectoryW(unsafe, NULL));
-    core = sbw_core_new(&options, &error);
-    CHECK(!core && !strcmp(error.code, "CORE_STORAGE_ERROR"));
-    CHECK(GetFileAttributesW(unsafe) & FILE_ATTRIBUTE_DIRECTORY);
-    CHECK(RemoveDirectoryW(unsafe));
     result = 0;
     puts("core_process_test: passed (dummy processes only; no networking or TUN)");
 done:
-    if (checker) {
-        if (cancel)
-            SetEvent(cancel);
-        if (WaitForSingleObject(checker, 5000) != WAIT_OBJECT_0)
+    if (t.checker) {
+        if (t.cancel)
+            SetEvent(t.cancel);
+        if (WaitForSingleObject(t.checker, 5000) != WAIT_OBJECT_0)
             ExitProcess(2);
-        CloseHandle(checker);
+        CloseHandle(t.checker);
     }
-    sbw_core_free(core);
-    sbw_core_free(duplicate);
-    if (owner) {
-        TerminateProcess(owner, 99);
-        (void)WaitForSingleObject(owner, 2000);
-        CloseHandle(owner);
+    sbw_core_free(t.core);
+    sbw_core_free(t.duplicate);
+    if (t.owner) {
+        TerminateProcess(t.owner, 99);
+        (void)WaitForSingleObject(t.owner, 2000);
+        CloseHandle(t.owner);
     }
-    if (sentinel) {
-        TerminateProcess(sentinel, 99);
-        (void)WaitForSingleObject(sentinel, 2000);
-        CloseHandle(sentinel);
+    if (t.sentinel) {
+        TerminateProcess(t.sentinel, 99);
+        (void)WaitForSingleObject(t.sentinel, 2000);
+        CloseHandle(t.sentinel);
     }
-    if (primary)
-        CloseHandle(primary);
-    if (child)
-        CloseHandle(child);
-    if (leaked)
-        CloseHandle(leaked);
-    if (cancel)
-        CloseHandle(cancel);
-    free(json);
+    if (t.primary)
+        CloseHandle(t.primary);
+    if (t.child)
+        CloseHandle(t.child);
+    if (t.leaked)
+        CloseHandle(t.leaked);
+    if (t.cancel)
+        CloseHandle(t.cancel);
+    free(t.json);
     /* Exact known paths inside our freshly created random temporary directory;
      * no recursive deletion or traversing user-owned directory contents. */
-    if (marker)
-        DeleteFileW(marker);
-    if (ready)
-        DeleteFileW(ready);
-    if (keep)
-        DeleteFileW(keep);
-    if (crash_lock)
-        DeleteFileW(crash_lock);
-    if (unsafe)
-        RemoveDirectoryW(unsafe);
-    if (sentinel_ready)
-        DeleteFileW(sentinel_ready);
-    if (sentinel_signal)
-        DeleteFileW(sentinel_signal);
+    if (t.marker)
+        DeleteFileW(t.marker);
+    if (t.ready)
+        DeleteFileW(t.ready);
+    if (t.keep)
+        DeleteFileW(t.keep);
+    if (t.crash_lock)
+        DeleteFileW(t.crash_lock);
+    if (t.unsafe)
+        RemoveDirectoryW(t.unsafe);
+    if (t.sentinel_ready)
+        DeleteFileW(t.sentinel_ready);
+    if (t.sentinel_signal)
+        DeleteFileW(t.sentinel_signal);
     for (int i = 0; i < 4; ++i) {
         wchar_t name[40];
         swprintf_s(name, 40, L"diagnostic-%d.log", i);
-        if (directory) {
-            wchar_t *path = sbw_path_join(directory, name);
+        if (t.directory) {
+            wchar_t *path = sbw_path_join(t.directory, name);
             DeleteFileW(path);
             free(path);
         }
-        if (crash_directory) {
-            wchar_t *path = sbw_path_join(crash_directory, name);
+        if (t.crash_directory) {
+            wchar_t *path = sbw_path_join(t.crash_directory, name);
             DeleteFileW(path);
             free(path);
         }
     }
-    if (crash_directory)
-        RemoveDirectoryW(crash_directory);
-    if (lock)
-        DeleteFileW(lock);
-    if (directory)
-        RemoveDirectoryW(directory);
-    if (root)
-        RemoveDirectoryW(root);
-    free(lock);
-    free(missing);
-    free(marker);
-    free(directory);
-    free(root);
-    free(crash_directory);
-    free(crash_lock);
-    free(ready);
-    free(keep);
-    free(unsafe);
-    free(sentinel_ready);
-    free(sentinel_signal);
+    if (t.crash_directory)
+        RemoveDirectoryW(t.crash_directory);
+    if (t.lock)
+        DeleteFileW(t.lock);
+    if (t.directory)
+        RemoveDirectoryW(t.directory);
+    if (t.root)
+        RemoveDirectoryW(t.root);
+    free(t.lock);
+    free(t.missing);
+    free(t.marker);
+    free(t.directory);
+    free(t.root);
+    free(t.crash_directory);
+    free(t.crash_lock);
+    free(t.ready);
+    free(t.keep);
+    free(t.unsafe);
+    free(t.sentinel_ready);
+    free(t.sentinel_signal);
     return result;
 }

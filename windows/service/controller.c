@@ -2590,6 +2590,101 @@ static sbj *enrollment_forget_handle(sbw_controller *controller, sbw_error *erro
 done:
     return result;
 }
+/* connection.start/stop; runs under mutation_lock. */
+static sbj *connection_handle(sbw_controller *controller, const char *method, sbw_error *error) {
+    sbj *result = NULL;
+    bool connect = sb_streq(method, "connection.start");
+    sbw_error intent_error = {0};
+    int intended = connection_intent(controller, connect, &intent_error);
+    if (intended != 0 && connect) {
+        if (error)
+            *error = intent_error;
+        goto done;
+    }
+    int changed = connect ? connection_activate(controller, controller->candidate,
+                                                controller->identity, false, error)
+                          : connection_stop(controller, error);
+    if (connect && changed != 0 && !controller->runtime.core_running) {
+        AcquireSRWLockExclusive(&controller->state_lock);
+        sb_windows_recovery_failed(&controller->recovery, GetTickCount64());
+        ReleaseSRWLockExclusive(&controller->state_lock);
+    }
+    if (intended != 0) {
+        if (error)
+            *error = intent_error;
+        changed = -1;
+    }
+    if (changed == 0) {
+        AcquireSRWLockShared(&controller->state_lock);
+        result = runtime_status(controller);
+        ReleaseSRWLockShared(&controller->state_lock);
+    }
+done:
+    return result;
+}
+/* subscriptions.fetch; runs under mutation_lock. */
+static sbj *subscriptions_fetch_handle(sbw_controller *controller, const sbj *params,
+                                       sbw_error *error) {
+    sbj *result = NULL;
+    const char *url = sbj_get_str(params, "url", NULL), *id = sbj_get_str(params, "id", NULL);
+    if (sbj_obj_len(params) != 1 || (!url && !id)) {
+        sbw_fail(error, "INVALID_REQUEST", "Choose a subscription address or ID.");
+        goto done;
+    }
+    if (id) {
+        const sbj *subs = sbj_get(controller->identity, "local_subscriptions");
+        for (size_t i = 0; i < sbj_arr_len(subs); ++i)
+            if (sbj_string_is(sbj_get(sbj_arr_at(subs, i), "id"), id))
+                url = sbj_get_str(sbj_arr_at(subs, i), "url", NULL);
+    }
+    result = sbw_subscription_fetch(url, controller->cancel, error);
+done:
+    return result;
+}
+/* subscriptions.import/refresh; runs under mutation_lock. */
+static sbj *subscriptions_import_handle(sbw_controller *controller, const char *method,
+                                        const sbj *params, sbw_error *error) {
+    sbj *result = NULL, *new_identity = NULL;
+    if (sb_streq(method, "subscriptions.refresh")) {
+        if (sbj_obj_len(params) != 1 || !sbw_json_string(sbj_get(params, "id"), 36, false)) {
+            sbw_fail(error, "INVALID_REQUEST", "Choose one local subscription to refresh.");
+            goto done;
+        }
+        new_identity = sbw_subscriptions_refresh(
+            controller->identity, sbj_get_str(params, "id", ""), controller->cancel, error);
+    } else {
+        sbj *base =
+            controller->identity ? sbj_clone(controller->identity) : sbw_independent_identity();
+        new_identity = sbw_subscriptions_import(base, params, controller->cancel, error);
+        sbj_free(base);
+    }
+    if (new_identity && apply_local_identity(controller, new_identity, error) == 0) {
+        AcquireSRWLockShared(&controller->state_lock);
+        result = config_summary(controller);
+        ReleaseSRWLockShared(&controller->state_lock);
+    } else if (sb_streq(method, "subscriptions.refresh") && controller->identity && error)
+        record_subscription_failure(controller, sbj_get_str(params, "id", ""), error);
+done:
+    sbj_free(new_identity);
+    return result;
+}
+/* subscriptions.save/remove and routing.group_save/remove; runs under mutation_lock. */
+static sbj *identity_change_handle(sbw_controller *controller, const char *method,
+                                   const sbj *params, sbw_error *error) {
+    sbj *result = NULL, *new_identity = NULL;
+    new_identity = !strncmp(method, "routing.", 8)
+                       ? sbw_routing_change(controller->identity, params,
+                                            sb_streq(method, "routing.group_remove"), error)
+                       : sbw_subscriptions_change(controller->identity, params,
+                                                  sb_streq(method, "subscriptions.remove"), error);
+    if (new_identity && apply_local_identity(controller, new_identity, error) == 0) {
+        AcquireSRWLockShared(&controller->state_lock);
+        result = config_summary(controller);
+        ReleaseSRWLockShared(&controller->state_lock);
+    }
+    sbj_free(new_identity);
+    return result;
+}
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params,
                              bool authorized, sbw_error *error) {
     if (!controller || !method) {
@@ -2926,79 +3021,15 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
                      : sbw_route_delay(&controller->active_config, process.process_id,
                                        controller->cancel, params, error);
     } else if (sb_streq(method, "connection.start") || sb_streq(method, "connection.stop")) {
-        bool connect = sb_streq(method, "connection.start");
-        sbw_error intent_error = {0};
-        int intended = connection_intent(controller, connect, &intent_error);
-        if (intended != 0 && connect) {
-            if (error)
-                *error = intent_error;
-            goto done;
-        }
-        int changed = connect ? connection_activate(controller, controller->candidate,
-                                                    controller->identity, false, error)
-                              : connection_stop(controller, error);
-        if (connect && changed != 0 && !controller->runtime.core_running) {
-            AcquireSRWLockExclusive(&controller->state_lock);
-            sb_windows_recovery_failed(&controller->recovery, GetTickCount64());
-            ReleaseSRWLockExclusive(&controller->state_lock);
-        }
-        if (intended != 0) {
-            if (error)
-                *error = intent_error;
-            changed = -1;
-        }
-        if (changed == 0) {
-            AcquireSRWLockShared(&controller->state_lock);
-            result = runtime_status(controller);
-            ReleaseSRWLockShared(&controller->state_lock);
-        }
+        result = connection_handle(controller, method, error);
     } else if (sb_streq(method, "subscriptions.fetch")) {
-        const char *url = sbj_get_str(params, "url", NULL), *id = sbj_get_str(params, "id", NULL);
-        if (sbj_obj_len(params) != 1 || (!url && !id)) {
-            sbw_fail(error, "INVALID_REQUEST", "Choose a subscription address or ID.");
-            goto done;
-        }
-        if (id) {
-            const sbj *subs = sbj_get(controller->identity, "local_subscriptions");
-            for (size_t i = 0; i < sbj_arr_len(subs); ++i)
-                if (sbj_string_is(sbj_get(sbj_arr_at(subs, i), "id"), id))
-                    url = sbj_get_str(sbj_arr_at(subs, i), "url", NULL);
-        }
-        result = sbw_subscription_fetch(url, controller->cancel, error);
+        result = subscriptions_fetch_handle(controller, params, error);
     } else if (sb_streq(method, "subscriptions.import") ||
                sb_streq(method, "subscriptions.refresh")) {
-        if (sb_streq(method, "subscriptions.refresh")) {
-            if (sbj_obj_len(params) != 1 || !sbw_json_string(sbj_get(params, "id"), 36, false)) {
-                sbw_fail(error, "INVALID_REQUEST", "Choose one local subscription to refresh.");
-                goto done;
-            }
-            new_identity = sbw_subscriptions_refresh(
-                controller->identity, sbj_get_str(params, "id", ""), controller->cancel, error);
-        } else {
-            sbj *base =
-                controller->identity ? sbj_clone(controller->identity) : sbw_independent_identity();
-            new_identity = sbw_subscriptions_import(base, params, controller->cancel, error);
-            sbj_free(base);
-        }
-        if (new_identity && apply_local_identity(controller, new_identity, error) == 0) {
-            AcquireSRWLockShared(&controller->state_lock);
-            result = config_summary(controller);
-            ReleaseSRWLockShared(&controller->state_lock);
-        } else if (sb_streq(method, "subscriptions.refresh") && controller->identity && error)
-            record_subscription_failure(controller, sbj_get_str(params, "id", ""), error);
+        result = subscriptions_import_handle(controller, method, params, error);
     } else if (sb_streq(method, "subscriptions.save") || sb_streq(method, "subscriptions.remove") ||
                sb_streq(method, "routing.group_save") || sb_streq(method, "routing.group_remove")) {
-        new_identity =
-            !strncmp(method, "routing.", 8)
-                ? sbw_routing_change(controller->identity, params,
-                                     sb_streq(method, "routing.group_remove"), error)
-                : sbw_subscriptions_change(controller->identity, params,
-                                           sb_streq(method, "subscriptions.remove"), error);
-        if (new_identity && apply_local_identity(controller, new_identity, error) == 0) {
-            AcquireSRWLockShared(&controller->state_lock);
-            result = config_summary(controller);
-            ReleaseSRWLockShared(&controller->state_lock);
-        }
+        result = identity_change_handle(controller, method, params, error);
     } else if (sb_streq(method, "routing.set")) {
         result = routing_set_handle(controller, params, error);
     } else if (sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") ||

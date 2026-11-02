@@ -7,6 +7,17 @@
 #include <string.h>
 
 #define SBA_LIMIT (1024u * 1024u)
+/* Input limits; each bounds attacker-controlled sizes before any work is done. */
+#define SBA_MAX_NESTING 32       /* JSON nesting depth */
+#define SBA_MAX_NODE_TAG 256     /* imported node tag length */
+#define SBA_MAX_TAG 512          /* outbound tag / selected node length */
+#define SBA_MAX_SUB_NODES 256    /* nodes per subscription */
+#define SBA_MAX_SUBSCRIPTIONS 32 /* subscriptions per runtime */
+#define SBA_MAX_OUTBOUNDS 512    /* outbounds after merging subscriptions */
+#define SBA_MAX_ENDPOINTS 32     /* wireguard endpoints */
+#define SBA_MAX_LOCAL_GROUPS 32  /* local domain groups */
+#define SBA_MAX_GROUP_DOMAINS 256 /* domains per local group */
+#define SBA_MAX_RULE_SETS 256    /* route rule sets */
 #ifndef SBA_PLATFORM_PREFIX
 #define SBA_PLATFORM_PREFIX "sb-easy-apple-"
 #endif
@@ -48,7 +59,7 @@ static sbj *parse(const char *raw, size_t max) {
         } else if (*p == '"')
             string = true;
         else if (*p == '{' || *p == '[') {
-            if (++depth > 32)
+            if (++depth > SBA_MAX_NESTING)
                 return NULL;
         } else if (*p == '}' || *p == ']') {
             if (!depth)
@@ -66,7 +77,7 @@ static sbj *parse(const char *raw, size_t max) {
     return json;
 }
 static bool safe_keys(const sbj *value, unsigned depth, bool managed) {
-    if (depth > 32)
+    if (depth > SBA_MAX_NESTING)
         return false;
     if (sbj_is_array(value)) {
         for (size_t i = 0; i < sbj_arr_len(value); ++i)
@@ -131,7 +142,7 @@ static bool node_valid(const sbj *node) {
                      !strcmp(type, "trojan") || !strcmp(type, "hysteria2") || !strcmp(type, "tuic") ||
                      !strcmp(type, "socks") || !strcmp(type, "http");
     const sbj *port = sbj_get(node, "server_port");
-    return supported && sbj_validate_utf8(node, NULL) == 0 && text(sbj_get(node, "tag"), 256, false) &&
+    return supported && sbj_validate_utf8(node, NULL) == 0 && text(sbj_get(node, "tag"), SBA_MAX_NODE_TAG, false) &&
            text(sbj_get(node, "server"), 253, false) && sbj_is_integer(port) && sbj_as_int(port, 0) > 0 &&
            sbj_as_int(port, 0) <= 65535 && safe_keys(node, 0, false);
 }
@@ -191,7 +202,7 @@ char *sba_import_subscription(const char *body, size_t length, char **error) {
         sbj_set_str(node, "tag", item->tag);
         sbj_set_str(node, "server", item->server);
         sbj_set_int(node, "server_port", item->server_port);
-        if (!node_valid(node) || sbj_arr_len(nodes) >= 256) {
+        if (!node_valid(node) || sbj_arr_len(nodes) >= SBA_MAX_SUB_NODES) {
             ++skipped;
             if (sbj_arr_len(warnings) < 128)
                 sbj_arr_push(warnings, sbj_str("Proxy entry: unsupported " SBA_PLATFORM_LABEL " option or node limit"));
@@ -261,7 +272,7 @@ static bool settings_valid(const sbj *settings) {
     if (!sbj_is_object(settings))
         return false;
     const sbj *selected = sbj_get(settings, "selected_tag"), *groups = sbj_get(settings, "local_groups");
-    if (selected && !text(selected, 512, true))
+    if (selected && !text(selected, SBA_MAX_TAG, true))
         return false;
     for (size_t i = 0; i < sbj_obj_len(settings); ++i)
         if (strcmp(sbj_obj_key(settings, i), "selected_tag") &&
@@ -269,7 +280,7 @@ static bool settings_valid(const sbj *settings) {
             return false;
     if (!groups)
         return true;
-    if (!sbj_is_array(groups) || sbj_arr_len(groups) > 32)
+    if (!sbj_is_array(groups) || sbj_arr_len(groups) > SBA_MAX_LOCAL_GROUPS)
         return false;
     sb_strvec ids = {0}, domains = {0};
     bool ok = true;
@@ -278,8 +289,8 @@ static bool settings_valid(const sbj *settings) {
         if (!text(id, 48, false) ||
             strspn(id->v.str.ptr, "abcdefghijklmnopqrstuvwxyz0123456789-") != id->v.str.len ||
             sb_strvec_contains(&ids, id->v.str.ptr) || !text(sbj_get(g, "name"), 128, false) ||
-            !text(sbj_get(g, "outbound"), 512, false) || !sbj_is_array(ds) || !sbj_arr_len(ds) ||
-            sbj_arr_len(ds) > 256) {
+            !text(sbj_get(g, "outbound"), SBA_MAX_TAG, false) || !sbj_is_array(ds) || !sbj_arr_len(ds) ||
+            sbj_arr_len(ds) > SBA_MAX_GROUP_DOMAINS) {
             ok = false;
             break;
         }
@@ -392,7 +403,7 @@ static bool rule_sets_valid(const sbj *root) {
     const sbj *sets = sbj_get(sbj_get(root, "route"), "rule_set");
     if (!sets)
         return true;
-    if (!sbj_is_array(sets) || sbj_arr_len(sets) > 256)
+    if (!sbj_is_array(sets) || sbj_arr_len(sets) > SBA_MAX_RULE_SETS)
         return false;
     for (size_t i = 0; i < sbj_arr_len(sets); ++i) {
         const sbj *rule = sbj_arr_at(sets, i);
@@ -461,7 +472,7 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     sbj *subs = parse(subscriptions ? subscriptions : "[]", SBA_LIMIT),
         *prefs = parse(settings ? settings : "{}", SBA_LIMIT);
     const char *message = "配置无效或包含 " SBA_PLATFORM_LABEL " 不支持的进程、文件、服务或接口选项";
-    if (!sbj_is_object(root) || !sbj_is_array(subs) || sbj_arr_len(subs) > 32 || !settings_valid(prefs) ||
+    if (!sbj_is_object(root) || !sbj_is_array(subs) || sbj_arr_len(subs) > SBA_MAX_SUBSCRIPTIONS || !settings_valid(prefs) ||
         !control_host_valid(control_host))
         goto bad;
     /* OS interface/listener setup is owned by NetworkExtension, not a remote
@@ -485,7 +496,7 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     }
     sbj_del(root, "services");
     const sbj *endpoints = sbj_get(root, "endpoints");
-    if (endpoints && (!sbj_is_array(endpoints) || sbj_arr_len(endpoints) > 32)) {
+    if (endpoints && (!sbj_is_array(endpoints) || sbj_arr_len(endpoints) > SBA_MAX_ENDPOINTS)) {
         goto bad;
     }
     for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
@@ -499,13 +510,13 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         outbounds = sbj_array();
         sbj_set(root, "outbounds", outbounds);
     }
-    if (!sbj_is_array(outbounds) || sbj_arr_len(outbounds) > 512) {
+    if (!sbj_is_array(outbounds) || sbj_arr_len(outbounds) > SBA_MAX_OUTBOUNDS) {
         goto bad;
     }
     for (size_t i = 0; i < sbj_arr_len(outbounds); ++i) {
         const sbj *o = sbj_arr_at(outbounds, i);
         const char *tag = sbj_get_str(o, "tag", "");
-        if (!text(sbj_get(o, "tag"), 512, false) || sb_strvec_contains(&names, tag) ||
+        if (!text(sbj_get(o, "tag"), SBA_MAX_TAG, false) || sb_strvec_contains(&names, tag) ||
             sb_starts_with(tag, SBA_PLATFORM_PREFIX)) {
             goto bad;
         }
@@ -516,12 +527,12 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         const sbj *sub = sbj_arr_at(subs, i), *id = sbj_get(sub, "id"), *nodes = sbj_get(sub, "nodes");
         if (!text(id, 64, false) ||
             strspn(id->v.str.ptr, "abcdefghijklmnopqrstuvwxyz0123456789-") != id->v.str.len ||
-            !sbj_is_array(nodes) || sbj_arr_len(nodes) > 256) {
+            !sbj_is_array(nodes) || sbj_arr_len(nodes) > SBA_MAX_SUB_NODES) {
             goto bad;
         }
         for (size_t j = 0; j < sbj_arr_len(nodes); ++j) {
             const sbj *node = sbj_arr_at(nodes, j);
-            if (!node_valid(node) || sbj_arr_len(outbounds) >= 512) {
+            if (!node_valid(node) || sbj_arr_len(outbounds) >= SBA_MAX_OUTBOUNDS) {
                 goto bad;
             }
             char *tag = sb_asprintf("local-%s/%s", id->v.str.ptr, sbj_get_str(node, "tag", ""));

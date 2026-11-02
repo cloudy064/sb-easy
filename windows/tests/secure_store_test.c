@@ -154,23 +154,137 @@ static bool create_junction(const wchar_t *link, const wchar_t *target) {
     return result;
 }
 
+typedef struct test_state {
+    sbw_error error;
+    sbw_store *store, *other;
+    sbj *state, *loaded;
+    wchar_t *base, *data, *file, *lock, *target, *junction, *nested;
+    wchar_t *application, *console_data, *console_lock;
+    bool created_base;
+    BYTE *bytes;
+    DWORD size;
+} test_state;
+
+static const char legacy_json[] =
+    "{\"version\":1,\"identity\":{\"server\":\"https://example.test/panel\","
+    "\"host_id\":\"device-1\",\"host_name\":\"电脑\",\"agent_token\":\"private-agent-token\","
+    "\"profile_id\":\"default\",\"profile_name\":\"Default\"},\"candidate\":null}";
+static const char damaged[] = "damaged-protected-envelope";
+
+#define CHECK_T(condition)                                                                         \
+    do {                                                                                           \
+        if (!(condition)) {                                                                        \
+            fprintf(stderr, "%s:%d: %s (storage=%s)\n", __FILE__, __LINE__, #condition,            \
+                    t->error.code);                                                                \
+            return 1;                                                                              \
+        }                                                                                          \
+    } while (0)
+
+static int scenario_open_and_lock(test_state *t) {
+    t->store = sbw_secure_store_new(t->data, &t->error);
+    CHECK_T(t->store != NULL);
+    CHECK_T(t->store->load(t->store->context, &t->loaded, &t->error) == 0 && t->loaded == NULL);
+    t->other = sbw_secure_store_new(t->data, &t->error);
+    CHECK_T(t->other == NULL && !strcmp(t->error.code, "STORAGE_ERROR"));
+    return 0;
+}
+
+static int scenario_legacy_load(test_state *t) {
+    CHECK_T(write_legacy_envelope(t->file, legacy_json));
+    CHECK_T(t->store->load(t->store->context, &t->loaded, &t->error) == 0);
+    CHECK_T(sbj_get_int(t->loaded, "version", 0) == 1 &&
+            sbj_string_is(sbj_get(sbj_get(t->loaded, "identity"), "host_name"), "电脑"));
+    sbj_free(t->loaded);
+    t->loaded = NULL;
+    return 0;
+}
+
+static int scenario_save_and_acl(test_state *t) {
+    t->state = sbw_json_parse(legacy_json, strlen(legacy_json), 40, &t->error);
+    CHECK_T(t->state != NULL);
+    sbj_set_str(t->state, "candidate", "private-proxy-password");
+    CHECK_T(t->store->save(t->store->context, t->state, &t->error) == 0);
+    CHECK_T(restricted_acl(t->data) && restricted_acl(t->file) && restricted_acl(t->lock));
+    t->bytes = read_bytes(t->file, &t->size);
+    CHECK_T(t->bytes != NULL && !has_bytes(t->bytes, t->size, "private-agent-token") &&
+            !has_bytes(t->bytes, t->size, "private-proxy-password"));
+    free(t->bytes);
+    t->bytes = NULL;
+    return 0;
+}
+
+static int scenario_reopen_and_update(test_state *t) {
+    sbw_store_free(t->store);
+    t->store = NULL;
+    t->store = sbw_secure_store_new(t->data, &t->error);
+    CHECK_T(t->store != NULL && t->store->load(t->store->context, &t->loaded, &t->error) == 0 &&
+            sbj_equal(t->loaded, t->state));
+    sbj_free(t->loaded);
+    t->loaded = NULL;
+    sbj_set_int(t->state, "version", 2);
+    CHECK_T(t->store->save(t->store->context, t->state, &t->error) == 0);
+    CHECK_T(t->store->load(t->store->context, &t->loaded, &t->error) == 0 &&
+            sbj_get_int(t->loaded, "version", 0) == 2);
+    sbj_free(t->loaded);
+    t->loaded = NULL;
+    CHECK_T(t->store->clear(t->store->context, &t->error) == 0);
+    CHECK_T(t->store->load(t->store->context, &t->loaded, &t->error) == 0 && t->loaded == NULL);
+    return 0;
+}
+
+static int scenario_corruption(test_state *t) {
+    CHECK_T(write_bytes(t->file, damaged, (DWORD)strlen(damaged)));
+    CHECK_T(t->store->load(t->store->context, &t->loaded, &t->error) == -1 &&
+            !strcmp(t->error.code, "STORAGE_CORRUPT"));
+    CHECK_T(t->store->save(t->store->context, t->state, &t->error) == -1 &&
+            !strcmp(t->error.code, "STORAGE_CORRUPT"));
+    CHECK_T(t->store->clear(t->store->context, &t->error) == -1 &&
+            !strcmp(t->error.code, "STORAGE_CORRUPT"));
+    t->bytes = read_bytes(t->file, &t->size);
+    CHECK_T(t->bytes && t->size == strlen(damaged) && !memcmp(t->bytes, damaged, t->size));
+    free(t->bytes);
+    t->bytes = NULL;
+    sbw_store_free(t->store);
+    t->store = NULL;
+    return 0;
+}
+
+static int scenario_junction_and_unc(test_state *t) {
+    CHECK_T(CreateDirectoryW(t->target, NULL));
+    CHECK_T(create_junction(t->junction, t->target));
+    t->other = sbw_secure_store_new(t->nested, &t->error);
+    CHECK_T(t->other == NULL && !strcmp(t->error.code, "UNSAFE_STORAGE_PATH"));
+    wchar_t *uncreated = sbw_path_join(t->target, L"nested");
+    DWORD attributes = GetFileAttributesW(uncreated);
+    free(uncreated);
+    CHECK_T(attributes == INVALID_FILE_ATTRIBUTES);
+    CHECK_T(RemoveDirectoryW(t->junction));
+    t->other = sbw_secure_store_new(L"\\\\server\\share\\state", &t->error);
+    CHECK_T(t->other == NULL && !strcmp(t->error.code, "UNSAFE_STORAGE_PATH"));
+    return 0;
+}
+
+static int scenario_console_data(test_state *t) {
+    t->store = sbw_secure_store_new(t->console_data, &t->error);
+    CHECK_T(t->store != NULL && restricted_acl(t->application) && restricted_acl(t->console_data));
+    return 0;
+}
+
+static const struct {
+    const char *name;
+    int (*run)(test_state *);
+} scenarios[] = {
+    {"open_and_lock", scenario_open_and_lock}, {"legacy_load", scenario_legacy_load},
+    {"save_and_acl", scenario_save_and_acl},   {"reopen_and_update", scenario_reopen_and_update},
+    {"corruption", scenario_corruption},       {"junction_and_unc", scenario_junction_and_unc},
+    {"console_data", scenario_console_data},
+};
+
 int main(void) {
     sbw_error error = {0};
-    sbw_store *store = NULL, *other = NULL;
-    sbj *state = NULL, *loaded = NULL;
+    test_state t = {0};
     wchar_t temporary[1024] = {0}, name[64] = L"sb-easy-store-test-";
-    wchar_t *base = NULL, *data = NULL, *file = NULL, *lock = NULL;
-    wchar_t *target = NULL, *junction = NULL, *nested = NULL;
-    wchar_t *application = NULL, *console_data = NULL, *console_lock = NULL;
-    bool created_base = false;
-    BYTE *bytes = NULL;
-    DWORD size = 0;
     int result = 1;
-    const char legacy_json[] =
-        "{\"version\":1,\"identity\":{\"server\":\"https://example.test/panel\","
-        "\"host_id\":\"device-1\",\"host_name\":\"电脑\",\"agent_token\":\"private-agent-token\","
-        "\"profile_id\":\"default\",\"profile_name\":\"Default\"},\"candidate\":null}";
-    const char damaged[] = "damaged-protected-envelope";
     CHECK(owner_policy());
     DWORD temp_length = GetTempPathW((DWORD)(sizeof(temporary) / sizeof(*temporary)), temporary);
     CHECK(temp_length > 0 && temp_length < sizeof(temporary) / sizeof(*temporary));
@@ -186,117 +300,62 @@ int main(void) {
     }
     /* Cleanup uses only exact children of this freshly created, random directory. */
     CHECK(!wcschr(name, L'\\') && !wcschr(name, L'/'));
-    base = sbw_path_join(temporary, name);
-    CHECK(CreateDirectoryW(base, NULL));
-    created_base = true;
-    data = sbw_path_join(base, L"data");
-    file = sbw_path_join(data, L"device-state.dat");
-    lock = sbw_path_join(data, L"state.lock");
-    target = sbw_path_join(base, L"target");
-    junction = sbw_path_join(base, L"junction");
-    nested = sbw_path_join(junction, L"nested");
-    application = sbw_path_join(base, L"sb-easy");
-    console_data = sbw_path_join(application, L"dev-service");
-    console_lock = sbw_path_join(console_data, L"state.lock");
-    store = sbw_secure_store_new(data, &error);
-    CHECK(store != NULL);
-    CHECK(store->load(store->context, &loaded, &error) == 0 && loaded == NULL);
-    other = sbw_secure_store_new(data, &error);
-    CHECK(other == NULL && !strcmp(error.code, "STORAGE_ERROR"));
-    CHECK(write_legacy_envelope(file, legacy_json));
-    CHECK(store->load(store->context, &loaded, &error) == 0);
-    CHECK(sbj_get_int(loaded, "version", 0) == 1 &&
-          sbj_string_is(sbj_get(sbj_get(loaded, "identity"), "host_name"), "电脑"));
-    sbj_free(loaded);
-    loaded = NULL;
-    state = sbw_json_parse(legacy_json, strlen(legacy_json), 40, &error);
-    CHECK(state != NULL);
-    sbj_set_str(state, "candidate", "private-proxy-password");
-    CHECK(store->save(store->context, state, &error) == 0);
-    CHECK(restricted_acl(data) && restricted_acl(file) && restricted_acl(lock));
-    bytes = read_bytes(file, &size);
-    CHECK(bytes != NULL && !has_bytes(bytes, size, "private-agent-token") &&
-          !has_bytes(bytes, size, "private-proxy-password"));
-    free(bytes);
-    bytes = NULL;
-    sbw_store_free(store);
-    store = NULL;
-    store = sbw_secure_store_new(data, &error);
-    CHECK(store != NULL && store->load(store->context, &loaded, &error) == 0 &&
-          sbj_equal(loaded, state));
-    sbj_free(loaded);
-    loaded = NULL;
-    sbj_set_int(state, "version", 2);
-    CHECK(store->save(store->context, state, &error) == 0);
-    CHECK(store->load(store->context, &loaded, &error) == 0 &&
-          sbj_get_int(loaded, "version", 0) == 2);
-    sbj_free(loaded);
-    loaded = NULL;
-    CHECK(store->clear(store->context, &error) == 0);
-    CHECK(store->load(store->context, &loaded, &error) == 0 && loaded == NULL);
-    CHECK(write_bytes(file, damaged, (DWORD)strlen(damaged)));
-    CHECK(store->load(store->context, &loaded, &error) == -1 &&
-          !strcmp(error.code, "STORAGE_CORRUPT"));
-    CHECK(store->save(store->context, state, &error) == -1 &&
-          !strcmp(error.code, "STORAGE_CORRUPT"));
-    CHECK(store->clear(store->context, &error) == -1 && !strcmp(error.code, "STORAGE_CORRUPT"));
-    bytes = read_bytes(file, &size);
-    CHECK(bytes && size == strlen(damaged) && !memcmp(bytes, damaged, size));
-    free(bytes);
-    bytes = NULL;
-    sbw_store_free(store);
-    store = NULL;
-    CHECK(CreateDirectoryW(target, NULL));
-    CHECK(create_junction(junction, target));
-    other = sbw_secure_store_new(nested, &error);
-    CHECK(other == NULL && !strcmp(error.code, "UNSAFE_STORAGE_PATH"));
-    wchar_t *uncreated = sbw_path_join(target, L"nested");
-    DWORD attributes = GetFileAttributesW(uncreated);
-    free(uncreated);
-    CHECK(attributes == INVALID_FILE_ATTRIBUTES);
-    CHECK(RemoveDirectoryW(junction));
-    other = sbw_secure_store_new(L"\\\\server\\share\\state", &error);
-    CHECK(other == NULL && !strcmp(error.code, "UNSAFE_STORAGE_PATH"));
-    store = sbw_secure_store_new(console_data, &error);
-    CHECK(store != NULL && restricted_acl(application) && restricted_acl(console_data));
+    t.base = sbw_path_join(temporary, name);
+    CHECK(CreateDirectoryW(t.base, NULL));
+    t.created_base = true;
+    t.data = sbw_path_join(t.base, L"data");
+    t.file = sbw_path_join(t.data, L"device-state.dat");
+    t.lock = sbw_path_join(t.data, L"state.lock");
+    t.target = sbw_path_join(t.base, L"target");
+    t.junction = sbw_path_join(t.base, L"junction");
+    t.nested = sbw_path_join(t.junction, L"nested");
+    t.application = sbw_path_join(t.base, L"sb-easy");
+    t.console_data = sbw_path_join(t.application, L"dev-service");
+    t.console_lock = sbw_path_join(t.console_data, L"state.lock");
+    for (size_t i = 0; i < sizeof scenarios / sizeof *scenarios; ++i) {
+        if (scenarios[i].run(&t) != 0) {
+            fprintf(stderr, "secure_store_test: scenario '%s' failed\n", scenarios[i].name);
+            goto done;
+        }
+    }
     puts("C11 secure store: DPAPI compatibility, owner/ACL, atomic persistence, exclusive lock, "
          "corruption and junction tests passed.");
     result = 0;
 done:
-    sbw_store_free(other);
-    sbw_store_free(store);
-    sbj_free(state);
-    sbj_free(loaded);
-    free(bytes);
-    if (created_base) {
+    sbw_store_free(t.other);
+    sbw_store_free(t.store);
+    sbj_free(t.state);
+    sbj_free(t.loaded);
+    free(t.bytes);
+    if (t.created_base) {
         /* No recursive removal and no filesystem-derived list: exact paths only. */
-        if (console_lock)
-            DeleteFileW(console_lock);
-        if (console_data)
-            RemoveDirectoryW(console_data);
-        if (application)
-            RemoveDirectoryW(application);
-        if (file)
-            DeleteFileW(file);
-        if (lock)
-            DeleteFileW(lock);
-        if (data)
-            RemoveDirectoryW(data);
-        if (junction)
-            RemoveDirectoryW(junction);
-        if (target)
-            RemoveDirectoryW(target);
-        RemoveDirectoryW(base);
+        if (t.console_lock)
+            DeleteFileW(t.console_lock);
+        if (t.console_data)
+            RemoveDirectoryW(t.console_data);
+        if (t.application)
+            RemoveDirectoryW(t.application);
+        if (t.file)
+            DeleteFileW(t.file);
+        if (t.lock)
+            DeleteFileW(t.lock);
+        if (t.data)
+            RemoveDirectoryW(t.data);
+        if (t.junction)
+            RemoveDirectoryW(t.junction);
+        if (t.target)
+            RemoveDirectoryW(t.target);
+        RemoveDirectoryW(t.base);
     }
-    free(base);
-    free(data);
-    free(file);
-    free(lock);
-    free(target);
-    free(junction);
-    free(nested);
-    free(application);
-    free(console_data);
-    free(console_lock);
+    free(t.base);
+    free(t.data);
+    free(t.file);
+    free(t.lock);
+    free(t.target);
+    free(t.junction);
+    free(t.nested);
+    free(t.application);
+    free(t.console_data);
+    free(t.console_lock);
     return result;
 }

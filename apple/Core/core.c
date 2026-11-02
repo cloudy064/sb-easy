@@ -408,6 +408,47 @@ static bool rule_sets_valid(const sbj *root) {
     }
     return true;
 }
+/* Sends the control server direct and resolves its name through the bootstrap DNS. */
+static void add_control_host_rules(sbj *rules, sbj *dns_rules, const char *control_host) {
+    int family = control_address_family(control_host);
+    bool ip = family != 0;
+    char *match =
+        ip ? sb_asprintf("%s/%d", control_host, family == AF_INET ? 32 : 128) : sb_strdup(control_host);
+    sbj *rule = sbj_object();
+    sbj_set(rule, ip ? "ip_cidr" : "domain", array_of(match));
+    free(match);
+    sbj_set_str(rule, "outbound", DIRECT);
+    sbj_arr_insert(rules, 0, rule);
+    if (!ip) {
+        rule = sbj_object();
+        sbj_set(rule, "domain", array_of(control_host));
+        sbj_set_str(rule, "server", BOOTSTRAP);
+        sbj_arr_insert(dns_rules, 0, rule);
+    }
+}
+/* Replaces the interface, log and cache sections that NetworkExtension owns. */
+static void set_platform_sections(sbj *root, const char *tun_tag) {
+    sbj *tun = sbj_object(), *inbounds = sbj_array();
+    sbj_set_str(tun, "type", "tun");
+    sbj_set_str(tun, "tag", tun_tag);
+    sbj *addresses = array_of("172.19.0.1/30");
+    sbj_arr_push(addresses, sbj_str("fdfe:dcba:9876::1/126"));
+    sbj_set(tun, "address", addresses);
+    sbj_set_bool(tun, "auto_route", true);
+    sbj_set_bool(tun, "strict_route", true);
+    sbj_set_int(tun, "mtu", 1500);
+    sbj_set_str(tun, "stack", "gvisor");
+    sbj_arr_push(inbounds, tun);
+    sbj_set(root, "inbounds", inbounds);
+    sbj *log = sbj_object();
+    sbj_set_str(log, "level", "warn");
+    sbj_set(root, "log", log);
+    sbj *experimental = sbj_object(), *cache = sbj_object();
+    sbj_set_bool(cache, "enabled", true);
+    sbj_set_str(cache, "path", "cache.db");
+    sbj_set(experimental, "cache_file", cache);
+    sbj_set(root, "experimental", experimental);
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -602,23 +643,8 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         sbj_arr_insert(dns_rules, protected_dns, rule);
         free(dns_tag);
     }
-    if (control_host && *control_host) {
-        int family = control_address_family(control_host);
-        bool ip = family != 0;
-        char *match =
-            ip ? sb_asprintf("%s/%d", control_host, family == AF_INET ? 32 : 128) : sb_strdup(control_host);
-        sbj *rule = sbj_object();
-        sbj_set(rule, ip ? "ip_cidr" : "domain", array_of(match));
-        free(match);
-        sbj_set_str(rule, "outbound", DIRECT);
-        sbj_arr_insert(rules, 0, rule);
-        if (!ip) {
-            rule = sbj_object();
-            sbj_set(rule, "domain", array_of(control_host));
-            sbj_set_str(rule, "server", BOOTSTRAP);
-            sbj_arr_insert(dns_rules, 0, rule);
-        }
-    }
+    if (control_host && *control_host)
+        add_control_host_rules(rules, dns_rules, control_host);
     sbj *hijack = sbj_object();
     sbj_set_str(hijack, "protocol", "dns");
     sbj_set_str(hijack, "action", "hijack-dns");
@@ -627,28 +653,9 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     sbj_set_str(sniff, "action", "sniff");
     sbj_arr_insert(rules, 0, sniff);
     sbj_set_bool(route, "auto_detect_interface", true);
-    sbj *tun = sbj_object(), *inbounds = sbj_array();
-    sbj_set_str(tun, "type", "tun");
-    sbj_set_str(tun, "tag", tun_tag);
+    set_platform_sections(root, tun_tag);
     free(tun_tag);
     tun_tag = NULL;
-    sbj *addresses = array_of("172.19.0.1/30");
-    sbj_arr_push(addresses, sbj_str("fdfe:dcba:9876::1/126"));
-    sbj_set(tun, "address", addresses);
-    sbj_set_bool(tun, "auto_route", true);
-    sbj_set_bool(tun, "strict_route", true);
-    sbj_set_int(tun, "mtu", 1500);
-    sbj_set_str(tun, "stack", "gvisor");
-    sbj_arr_push(inbounds, tun);
-    sbj_set(root, "inbounds", inbounds);
-    sbj *log = sbj_object();
-    sbj_set_str(log, "level", "warn");
-    sbj_set(root, "log", log);
-    sbj *experimental = sbj_object(), *cache = sbj_object();
-    sbj_set_bool(cache, "enabled", true);
-    sbj_set_str(cache, "path", "cache.db");
-    sbj_set(experimental, "cache_file", cache);
-    sbj_set(root, "experimental", experimental);
     char *result = sbj_dump(root, -1);
     sbj_free(root);
     sbj_free(subs);

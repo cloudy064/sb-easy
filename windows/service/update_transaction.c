@@ -372,6 +372,41 @@ int sbw_update_launch_recovery(sbw_error *error) {
     sbw_secure_directory_close(root);
     return result;
 }
+/* True when the job file does not describe this release, version pair or is stale. */
+static bool job_rejected(const sbj *job, const sbw_release *release, bool recover) {
+    return sbj_obj_len(job) != 7 || sbj_get_int(job, "schema", 0) != 1 ||
+           !sbj_is_bool(sbj_get(job, "resume_connected")) ||
+           !sbw_json_string(sbj_get(job, "health_nonce"), 64, false) ||
+           strlen(sbj_get_str(job, "health_nonce", "")) != 64 ||
+           !sbj_string_is(sbj_get(job, "release_id"), release->id) ||
+           !sbj_string_is(sbj_get(job, "previous_version"), SB_EASY_VERSION) ||
+           !sbj_string_is(sbj_get(job, "previous_core_version"), SB_EASY_CORE_VERSION) ||
+           (!recover && ((int64_t)time(NULL) - sbj_get_int(job, "created_at", 0) < 0 ||
+                         (int64_t)time(NULL) - sbj_get_int(job, "created_at", 0) > 300));
+}
+/* The service reported this release healthy and did not roll back. */
+static bool health_confirms(const sbj *health, const sbw_release *release, bool check_core) {
+    return health && sbj_string_is(sbj_get(health, "release_id"), release->id) &&
+           sbj_string_is(sbj_get(health, "version"), release->version) &&
+           (!check_core || sbj_string_is(sbj_get(health, "core_version"), release->core_version)) &&
+           sbj_get_bool(health, "healthy", false) && !sbj_get_bool(health, "rollback", true);
+}
+/* The installed service binary is the one in the guarded install directory and is signed. */
+static bool service_binary_trusted(const wchar_t *install_directory, const wchar_t *binary,
+                                   sbw_error *error) {
+    sbw_directory_guard *installation =
+        sbw_secure_directory_open_readonly(install_directory, error);
+    HANDLE file = installation ? sbw_secure_directory_file(installation, L"sb-easy-service.exe",
+                                                           GENERIC_READ, OPEN_EXISTING, error)
+                               : INVALID_HANDLE_VALUE;
+    bool trusted =
+        file != INVALID_HANDLE_VALUE &&
+        sbw_release_verify_file(binary, file, SB_EASY_PUBLISHER_THUMBPRINT, true, error) == 0;
+    if (file != INVALID_HANDLE_VALUE)
+        CloseHandle(file);
+    sbw_secure_directory_close(installation);
+    return trusted;
+}
 int sbw_update_helper_main(int argc, wchar_t **argv) {
     bool recover = argc == 2 && !wcscmp(argv[1], L"--recover");
     if ((!recover && (argc != 2 || wcscmp(argv[1], L"--apply"))) || !sbw_update_is_system())
@@ -381,8 +416,7 @@ int sbw_update_helper_main(int argc, wchar_t **argv) {
         Sleep(2000);
     sbw_error error = {0}, original = {0};
     wchar_t *data_path = NULL, *binary = NULL, *install_directory = NULL, *package_path = NULL;
-    sbw_directory_guard *root = NULL, *stage = fixed_stage(&data_path, &root, &error), *data = NULL,
-                        *installation = NULL;
+    sbw_directory_guard *root = NULL, *stage = fixed_stage(&data_path, &root, &error), *data = NULL;
     HANDLE transaction = INVALID_HANDLE_VALUE, package = INVALID_HANDLE_VALUE;
     sbj *job = NULL, *journal = NULL;
     sb_buf manifest = {0}, signature = {0};
@@ -409,15 +443,7 @@ int sbw_update_helper_main(int argc, wchar_t **argv) {
         sbw_release_verify_manifest(manifest.p, manifest.len, signature.p, signature.len,
                                     SB_EASY_PUBLISHER_THUMBPRINT, &release, &error) < 0)
         goto terminal;
-    if (sbj_obj_len(job) != 7 || sbj_get_int(job, "schema", 0) != 1 ||
-        !sbj_is_bool(sbj_get(job, "resume_connected")) ||
-        !sbw_json_string(sbj_get(job, "health_nonce"), 64, false) ||
-        strlen(sbj_get_str(job, "health_nonce", "")) != 64 ||
-        !sbj_string_is(sbj_get(job, "release_id"), release.id) ||
-        !sbj_string_is(sbj_get(job, "previous_version"), SB_EASY_VERSION) ||
-        !sbj_string_is(sbj_get(job, "previous_core_version"), SB_EASY_CORE_VERSION) ||
-        (!recover && ((int64_t)time(NULL) - sbj_get_int(job, "created_at", 0) < 0 ||
-                      (int64_t)time(NULL) - sbj_get_int(job, "created_at", 0) > 300))) {
+    if (job_rejected(job, &release, recover)) {
         fail(&error, "UPDATE_JOB_INVALID");
         goto terminal;
     }
@@ -447,10 +473,7 @@ int sbw_update_helper_main(int argc, wchar_t **argv) {
             goto terminal;
         if (!strcmp(installed, release.version)) {
             sbj *health = sbw_update_read_json(stage, L"health.json", false, &error);
-            bool checked = health && sbj_string_is(sbj_get(health, "release_id"), release.id) &&
-                           sbj_string_is(sbj_get(health, "version"), release.version) &&
-                           sbj_get_bool(health, "healthy", false) &&
-                           !sbj_get_bool(health, "rollback", true);
+            bool checked = health_confirms(health, &release, false);
             sbj_free(health);
             binary = service_binary(&error);
             if (!checked || !binary || service_state(true, &error) < 0 ||
@@ -499,19 +522,8 @@ int sbw_update_helper_main(int argc, wchar_t **argv) {
     }
     binary = service_binary(&error);
     install_directory = binary ? parent_path(binary) : NULL;
-    installation =
-        install_directory ? sbw_secure_directory_open_readonly(install_directory, &error) : NULL;
-    HANDLE service_file = installation
-                              ? sbw_secure_directory_file(installation, L"sb-easy-service.exe",
-                                                          GENERIC_READ, OPEN_EXISTING, &error)
-                              : INVALID_HANDLE_VALUE;
-    bool service_trusted = service_file != INVALID_HANDLE_VALUE &&
-                           sbw_release_verify_file(binary, service_file,
-                                                   SB_EASY_PUBLISHER_THUMBPRINT, true, &error) == 0;
-    if (service_file != INVALID_HANDLE_VALUE)
-        CloseHandle(service_file);
-    sbw_secure_directory_close(installation);
-    installation = NULL;
+    bool service_trusted =
+        install_directory && service_binary_trusted(install_directory, binary, &error);
     if (!service_trusted)
         goto terminal;
     package = sbw_secure_directory_file(stage, L"package.msi", GENERIC_READ, OPEN_EXISTING, &error);
@@ -560,11 +572,7 @@ int sbw_update_helper_main(int argc, wchar_t **argv) {
         code == ERROR_SUCCESS_REBOOT_INITIATED) {
         char active[32];
         sbj *health = sbw_update_read_json(stage, L"health.json", false, &error);
-        bool healthy = health && sbj_string_is(sbj_get(health, "release_id"), release.id) &&
-                       sbj_string_is(sbj_get(health, "version"), release.version) &&
-                       sbj_string_is(sbj_get(health, "core_version"), release.core_version) &&
-                       sbj_get_bool(health, "healthy", false) &&
-                       !sbj_get_bool(health, "rollback", true);
+        bool healthy = health_confirms(health, &release, true);
         sbj_free(health);
         if (!healthy || sbw_update_registered_version(active, &error) < 0 ||
             strcmp(active, release.version)) {
@@ -621,7 +629,6 @@ done:
     sbj_free(journal);
     sb_buf_free(&manifest);
     sb_buf_free(&signature);
-    sbw_secure_directory_close(installation);
     sbw_secure_directory_close(data);
     sbw_secure_directory_close(stage);
     sbw_secure_directory_close(root);

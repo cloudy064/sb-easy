@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        mode: [release, sanitizers]
+        mode: [release, sanitizers, tsan]
     steps:
       - uses: actions/checkout@v4
       - name: Install native dependencies
@@ -140,15 +140,21 @@ jobs:
           flags=()
           if [[ '${{ matrix.mode }}' == sanitizers ]]; then
             flags+=('-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' '-DCMAKE_EXE_LINKER_FLAGS=-no-pie')
+          elif [[ '${{ matrix.mode }}' == tsan ]]; then
+            flags+=('-DCMAKE_C_FLAGS=-fsanitize=thread -fno-omit-frame-pointer -fno-pie' '-DCMAKE_EXE_LINKER_FLAGS=-no-pie')
           fi
           cmake -S c -B build/c -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSB_EASY_WARNINGS_AS_ERRORS=ON "${flags[@]}"
       - name: Build
         run: cmake --build build/c --parallel 2
+      - name: Lower ASLR entropy for ThreadSanitizer
+        if: matrix.mode == 'tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
       - name: Test
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ctest --test-dir build/c --output-on-failure --timeout 180 --parallel 2
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/c/tsan.supp:halt_on_error=1
+        run: ctest --test-dir build/c --output-on-failure --timeout 300 --parallel 2
 
   c-embedded:
     name: C agent with embedded sing-box

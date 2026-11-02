@@ -412,6 +412,9 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
                         const char *control_host, char **error) {
     if (error)
         *error = NULL;
+    char *tun_tag = NULL;
+    sb_strvec names = {0};
+    sbj *leafs = NULL;
     sbj *root = source && *source ? parse(source, SBA_LIMIT) : sbj_object();
     bool managed = source && *source;
     sbj *subs = parse(subscriptions ? subscriptions : "[]", SBA_LIMIT),
@@ -423,7 +426,7 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     /* OS interface/listener setup is owned by NetworkExtension, not a remote
      * server config. Remove only those replacement sections before scanning. */
     sbj *old_inbounds = sbj_take(root, "inbounds");
-    char *tun_tag = sb_strdup("sb-easy-tun");
+    tun_tag = sb_strdup("sb-easy-tun");
     for (size_t i = 0; i < sbj_arr_len(old_inbounds); ++i) {
         const sbj *in = sbj_arr_at(old_inbounds, i);
         if (sbj_string_is(sbj_get(in, "type"), "tun") && text(sbj_get(in, "tag"), 128, false)) {
@@ -437,20 +440,17 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     const sbj *services = sbj_get(root, "services");
     if (!safe_keys(root, 0, true) || !rule_sets_valid(root) ||
         (services && (!sbj_is_array(services) || sbj_arr_len(services)))) {
-        free(tun_tag);
         goto bad;
     }
     sbj_del(root, "services");
     const sbj *endpoints = sbj_get(root, "endpoints");
     if (endpoints && (!sbj_is_array(endpoints) || sbj_arr_len(endpoints) > 32)) {
-        free(tun_tag);
         goto bad;
     }
     for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
         if (!sbj_string_is(sbj_get(sbj_arr_at(endpoints, i), "type"), "wireguard") ||
             sbj_get_bool(sbj_arr_at(endpoints, i), "system", false) ||
             sbj_get_int(sbj_arr_at(endpoints, i), "listen_port", 0) != 0) {
-            free(tun_tag);
             goto bad;
         }
     sbj *outbounds = sbj_get(root, "outbounds");
@@ -459,46 +459,33 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         sbj_set(root, "outbounds", outbounds);
     }
     if (!sbj_is_array(outbounds) || sbj_arr_len(outbounds) > 512) {
-        free(tun_tag);
         goto bad;
     }
-    sb_strvec names = {0};
     for (size_t i = 0; i < sbj_arr_len(outbounds); ++i) {
         const sbj *o = sbj_arr_at(outbounds, i);
         const char *tag = sbj_get_str(o, "tag", "");
         if (!text(sbj_get(o, "tag"), 512, false) || sb_strvec_contains(&names, tag) ||
             sb_starts_with(tag, SBA_PLATFORM_PREFIX)) {
-            free(tun_tag);
-            sb_strvec_free(&names);
             goto bad;
         }
         sb_strvec_push(&names, tag);
     }
-    sbj *leafs = sbj_array();
+    leafs = sbj_array();
     for (size_t i = 0; i < sbj_arr_len(subs); ++i) {
         const sbj *sub = sbj_arr_at(subs, i), *id = sbj_get(sub, "id"), *nodes = sbj_get(sub, "nodes");
         if (!text(id, 64, false) ||
             strspn(id->v.str.ptr, "abcdefghijklmnopqrstuvwxyz0123456789-") != id->v.str.len ||
             !sbj_is_array(nodes) || sbj_arr_len(nodes) > 256) {
-            free(tun_tag);
-            sb_strvec_free(&names);
-            sbj_free(leafs);
             goto bad;
         }
         for (size_t j = 0; j < sbj_arr_len(nodes); ++j) {
             const sbj *node = sbj_arr_at(nodes, j);
             if (!node_valid(node) || sbj_arr_len(outbounds) >= 512) {
-                free(tun_tag);
-                sb_strvec_free(&names);
-                sbj_free(leafs);
                 goto bad;
             }
             char *tag = sb_asprintf("local-%s/%s", id->v.str.ptr, sbj_get_str(node, "tag", ""));
             if (sb_strvec_contains(&names, tag)) {
                 free(tag);
-                free(tun_tag);
-                sb_strvec_free(&names);
-                sbj_free(leafs);
                 goto bad;
             }
             sb_strvec_push(&names, tag);
@@ -510,21 +497,18 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         }
     }
     sb_strvec_free(&names);
+    names = (sb_strvec){0};
     sbj *direct = sbj_object();
     sbj_set_str(direct, "type", "direct");
     sbj_set_str(direct, "tag", DIRECT);
     sbj_arr_push(outbounds, direct);
     sbj *route = sbj_get_or_object(root, "route");
     if (!sbj_is_object(route)) {
-        free(tun_tag);
-        sbj_free(leafs);
         goto bad;
     }
     if (!managed) {
         if (!sbj_arr_len(leafs)) {
             message = "独立模式需要至少一个订阅节点";
-            free(tun_tag);
-            sbj_free(leafs);
             goto bad;
         }
         sbj *selector = sbj_object();
@@ -536,13 +520,13 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         sbj_set_str(route, "final", DEFAULT_SELECTOR);
     }
     sbj_free(leafs);
+    leafs = NULL;
     const char *final = sbj_get_str(route, "final", "");
     sbj *final_outbound = outbound_named(outbounds, final);
     if (!final_outbound)
         final_outbound = outbound_named(endpoints, final);
     if (!final_outbound) {
         message = "默认出口不存在";
-        free(tun_tag);
         goto bad;
     }
     const char *selected = sbj_get_str(prefs, "selected_tag", "");
@@ -550,7 +534,6 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         if (!outbound_named(outbounds, selected) ||
             !sbj_string_is(sbj_get(final_outbound, "type"), "selector")) {
             message = "已选择的节点不再可用，请重新选择";
-            free(tun_tag);
             goto bad;
         }
         sbj *candidates = sbj_get(final_outbound, "outbounds");
@@ -564,24 +547,20 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         }
         if (!found) {
             message = "节点不属于默认策略组";
-            free(tun_tag);
             goto bad;
         }
         sbj_set_str(final_outbound, "default", selected);
     }
     sbj *dns = sbj_get_or_object(root, "dns");
     if (!sbj_is_object(dns)) {
-        free(tun_tag);
         goto bad;
     }
     sbj *servers = sbj_get_or_array(dns, "servers");
     if (!sbj_is_array(servers)) {
-        free(tun_tag);
         goto bad;
     }
     for (size_t i = 0; i < sbj_arr_len(servers); ++i)
         if (sb_starts_with(sbj_get_str(sbj_arr_at(servers, i), "tag", ""), SBA_PLATFORM_PREFIX)) {
-            free(tun_tag);
             goto bad;
         }
     sbj_arr_push(servers, dns_server(BOOTSTRAP, DIRECT));
@@ -594,7 +573,6 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     }
     sbj *rules = sbj_get_or_array(route, "rules"), *dns_rules = sbj_get_or_array(dns, "rules");
     if (!sbj_is_array(rules) || !sbj_is_array(dns_rules)) {
-        free(tun_tag);
         goto bad;
     }
     size_t protected_routes = protect_rule_prefix(rules, root, false);
@@ -607,7 +585,6 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         if (!candidate || sbj_string_is(sbj_get(candidate, "type"), "selector") ||
             sbj_string_is(sbj_get(candidate, "type"), "urltest")) {
             message = "本地域名分组的节点已失效";
-            free(tun_tag);
             goto bad;
         }
         sbj *rule = sbj_object();
@@ -654,6 +631,7 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     sbj_set_str(tun, "type", "tun");
     sbj_set_str(tun, "tag", tun_tag);
     free(tun_tag);
+    tun_tag = NULL;
     sbj *addresses = array_of("172.19.0.1/30");
     sbj_arr_push(addresses, sbj_str("fdfe:dcba:9876::1/126"));
     sbj_set(tun, "address", addresses);
@@ -677,6 +655,9 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     sbj_free(prefs);
     return result;
 bad:
+    free(tun_tag);
+    sb_strvec_free(&names);
+    sbj_free(leafs);
     sbj_free(root);
     sbj_free(subs);
     sbj_free(prefs);

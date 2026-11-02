@@ -2156,6 +2156,266 @@ static sbj *httpdebug_dispatch(sbw_controller *c, const char *method, const sbj 
     sbj_set_bool(r, "attached", c->httpdebug_base != NULL);
     return r;
 }
+/* routing.set: switch one service group; runs under mutation_lock. */
+static sbj *routing_set_handle(sbw_controller *controller, const sbj *params, sbw_error *error) {
+    sbj *result = NULL, *new_identity = NULL;
+    if (!controller->identity) {
+        sbw_fail(error, "NOT_ENROLLED", "Enroll this device first.");
+        goto done;
+    }
+    const char *id = sbj_get_str(params, "group", ""), *mode = sbj_get_str(params, "mode", "");
+    const char *node = sbj_get_str(params, "node", "");
+    bool custom = sb_streq(mode, "node"),
+         live = controller->active && controller->runtime.core_running;
+    if (!sbw_json_string(sbj_get(params, "group"), 64, false) ||
+        (!custom && !sb_streq(mode, "server") && !sb_streq(mode, "default")) ||
+        sbj_obj_len(params) != (custom ? 3U : 2U) ||
+        (custom && !sbw_json_string(sbj_get(params, "node"), 512, false)) ||
+        (sb_streq(id, "default") && sb_streq(mode, "default"))) {
+        sbw_fail(error, "INVALID_REQUEST", "Choose a service group and routing mode.");
+        goto done;
+    }
+    const sbj *source = live ? controller->active : controller->candidate;
+    if (!source) {
+        sbw_fail(error, "NO_CANDIDATE", "Download configuration first.");
+        goto done;
+    }
+    sbj *groups = sbw_routing_groups(source, controller->identity);
+    bool found = false, was_automatic = false;
+    for (size_t i = 0; i < sbj_arr_len(groups); ++i)
+        if (sbj_string_is(sbj_get(sbj_arr_at(groups, i), "id"), id)) {
+            found = true;
+            was_automatic = sbj_string_is(sbj_get(sbj_arr_at(groups, i), "mode"), "automatic");
+        }
+    sbj_free(groups);
+    if (!found) {
+        sbw_fail(error, "ROUTING_UNSUPPORTED", "The service group is no longer present.");
+        goto done;
+    }
+    new_identity = sbj_clone(controller->identity);
+    sbj *overrides = sbj_get(new_identity, "windows_routing");
+    if (!overrides) {
+        overrides = sbj_object();
+        sbj_set(new_identity, "windows_routing", overrides);
+    }
+    sbj *pref = sbj_object();
+    sbj_set_str(pref, "mode", mode);
+    if (custom)
+        sbj_set_str(pref, "node", node);
+    sbj_set(overrides, id, pref);
+    if (sb_streq(id, "gpt")) {
+        sbj_set_bool(new_identity, "windows_gpt_use_default", sb_streq(mode, "default"));
+        sbj_del(new_identity, "windows_gpt_outbound");
+        if (custom)
+            sbj_set_str(new_identity, "windows_gpt_outbound", node);
+    }
+    /* Automatic selectors have restricted members. Rebuild their validated
+     * config when returning to a fixed/manual group so future switches can
+     * use the ordinary catalog again. */
+    if (was_automatic) {
+        if (!apply_local_identity(controller, new_identity, error)) {
+            AcquireSRWLockShared(&controller->state_lock);
+            result = config_summary(controller);
+            ReleaseSRWLockShared(&controller->state_lock);
+        }
+        goto done;
+    }
+    sbj *next = sbw_routing_apply(source, new_identity, true, error);
+    if (!next)
+        goto done;
+    sbj *cfg = sbj_parse_cstr(sbj_get_str(next, "content", ""));
+    sbj_free(next);
+    char selector[96];
+    sprintf_s(selector, sizeof(selector), "sb-easy-local-%s", id);
+    char *selected = NULL, *previous = NULL;
+    const sbj *nodes = sbj_get(cfg, "outbounds");
+    for (size_t i = 0; i < sbj_arr_len(nodes); ++i)
+        if (sbj_string_is(sbj_get(sbj_arr_at(nodes, i), "tag"), selector))
+            selected = sb_strdup(sbj_get_str(sbj_arr_at(nodes, i), "default", ""));
+    sbj_free(cfg);
+    if (!selected && !sb_streq(mode, "server")) {
+        sbw_fail(error, "ROUTING_UNSUPPORTED", "This service cannot be safely changed locally.");
+        goto done;
+    }
+    bool switch_live = live && selected;
+    sbw_core_status process = {0};
+    sbj *proxies = NULL;
+    if (switch_live) {
+        if (sbw_core_poll(controller->core, &process, error) != 0 ||
+            sbw_runtime_config_get(&controller->active_config, process.process_id,
+                                   controller->cancel, "/proxies", &proxies, error) != 0) {
+            free(selected);
+            sbj_free(proxies);
+            goto done;
+        }
+        previous =
+            sb_strdup(sbj_get_str(sbj_get(sbj_get(proxies, "proxies"), selector), "now", ""));
+        sbj_free(proxies);
+        if (!*previous) {
+            free(previous);
+            free(selected);
+            sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE",
+                     "Apply the updated configuration once to enable live service switching.");
+            goto done;
+        }
+    }
+    int applied = switch_live
+                      ? sbw_runtime_select_group(&controller->active_config, process.process_id,
+                                                 controller->cancel, selector, selected, error)
+                      : 0;
+    if (applied == 0)
+        applied = save_state(controller, new_identity, controller->candidate, controller->last_good,
+                             error);
+    if (applied != 0) {
+        sbw_error rollback = {0};
+        if (switch_live && sbw_runtime_select_group(&controller->active_config, process.process_id,
+                                                    NULL, selector, previous, &rollback) != 0) {
+            sbw_fail(error, "LIVE_ROUTING_UNCERTAIN",
+                     "The switch could not be rolled back. Check the running node.");
+            AcquireSRWLockExclusive(&controller->state_lock);
+            if (error)
+                controller->runtime_error = *error;
+            ReleaseSRWLockExclusive(&controller->state_lock);
+        }
+        free(previous);
+        free(selected);
+        goto done;
+    }
+    free(previous);
+    free(selected);
+    AcquireSRWLockExclusive(&controller->state_lock);
+    sbj_free(controller->identity);
+    controller->identity = new_identity;
+    new_identity = NULL;
+    free(controller->checked_etag);
+    controller->checked_etag = NULL;
+    controller->checked_valid = false;
+    if (live)
+        memset(&controller->runtime_error, 0, sizeof(controller->runtime_error));
+    result = config_summary(controller);
+    ReleaseSRWLockExclusive(&controller->state_lock);
+done:
+    sbj_free(new_identity);
+    return result;
+}
+/* routing.gpt_default/server/node; runs under mutation_lock. */
+static sbj *routing_gpt_handle(sbw_controller *controller, const char *method, const sbj *params,
+                               sbw_error *error) {
+    sbj *result = NULL, *new_identity = NULL;
+    if (!controller->identity) {
+        sbw_fail(error, "NOT_ENROLLED", "Enroll this device first.");
+        goto done;
+    }
+    bool local = sb_streq(method, "routing.gpt_default");
+    const char *outbound = NULL;
+    if (sb_streq(method, "routing.gpt_node")) {
+        if (sbj_obj_len(params) != 1 || !sbw_json_string(sbj_get(params, "outbound"), 512, false)) {
+            sbw_fail(error, "INVALID_REQUEST", "Choose one valid outbound tag.");
+            goto done;
+        }
+        outbound = sbj_get_str(params, "outbound", "");
+    }
+    bool live = controller->active && controller->runtime.core_running;
+    const sbj *routing_source = live ? controller->active : controller->candidate;
+    if (local || outbound || live) {
+        if (!routing_source) {
+            sbw_fail(error, "NO_CANDIDATE", "Download configuration first.");
+            goto done;
+        }
+        sbj *effective = sbw_routing_snapshot_node(routing_source, local, outbound, error);
+        if (!effective)
+            goto done;
+        const char *content = sbj_get_str(effective, "content", "");
+        sbw_runtime_config adapted = {0};
+        int checked = sbw_runtime_config_prepare(content, strlen(content),
+                                                 sbj_get_str(controller->identity, "server", ""),
+                                                 &adapted, error);
+        if (checked == 0)
+            checked = check_config(controller, &adapted, error);
+        sbw_runtime_config_free(&adapted);
+        sbj_free(effective);
+        if (checked != 0)
+            goto done;
+    }
+    new_identity = sbj_clone(controller->identity);
+    if (sbj_get(new_identity, "windows_routing"))
+        sbj_del(sbj_get(new_identity, "windows_routing"), "gpt");
+    sbj_set_bool(new_identity, "windows_gpt_use_default", local);
+    sbj_del(new_identity, "windows_gpt_outbound");
+    if (outbound)
+        sbj_set_str(new_identity, "windows_gpt_outbound", outbound);
+    char *previous = NULL, *selected = NULL;
+    sbw_core_status process = {0};
+    if (live) {
+        sbj *next = sbw_routing_snapshot_node(controller->active, local, outbound, error);
+        if (!next)
+            goto done;
+        selected = sbw_routing_target(next);
+        sbj_free(next);
+        sbj *proxies = NULL;
+        if (!selected || !*selected) {
+            free(selected);
+            sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE",
+                     "This running configuration has no GPT route.");
+            goto done;
+        }
+        if (sbw_core_poll(controller->core, &process, error) != 0 ||
+            sbw_runtime_config_get(&controller->active_config, process.process_id,
+                                   controller->cancel, "/proxies", &proxies, error) != 0) {
+            free(selected);
+            sbj_free(proxies);
+            goto done;
+        }
+        previous = sb_strdup(
+            sbj_get_str(sbj_get(sbj_get(proxies, "proxies"), SBW_GPT_SELECTOR), "now", ""));
+        sbj_free(proxies);
+        if (!*previous) {
+            free(previous);
+            free(selected);
+            sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE",
+                     "This running configuration has no live GPT group.");
+            goto done;
+        }
+    }
+    int applied = live ? sbw_runtime_select_gpt(&controller->active_config, process.process_id,
+                                                controller->cancel, selected, error)
+                       : 0;
+    if (applied == 0)
+        applied = save_state(controller, new_identity, controller->candidate, controller->last_good,
+                             error);
+    if (applied != 0) {
+        sbw_error rollback_error = {0};
+        if (live && sbw_runtime_select_gpt(&controller->active_config, process.process_id, NULL,
+                                           previous, &rollback_error) != 0) {
+            sbw_fail(error, "LIVE_ROUTING_UNCERTAIN",
+                     "The live switch could not be rolled back. Check the current node before "
+                     "retrying.");
+            AcquireSRWLockExclusive(&controller->state_lock);
+            if (error)
+                controller->runtime_error = *error;
+            ReleaseSRWLockExclusive(&controller->state_lock);
+        }
+        free(previous);
+        free(selected);
+        goto done;
+    }
+    free(previous);
+    free(selected);
+    AcquireSRWLockExclusive(&controller->state_lock);
+    if (live)
+        memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
+    sbj_free(controller->identity);
+    controller->identity = new_identity;
+    new_identity = NULL;
+    free(controller->checked_etag);
+    controller->checked_etag = NULL;
+    controller->checked_valid = false;
+    result = config_summary(controller);
+    ReleaseSRWLockExclusive(&controller->state_lock);
+done:
+    sbj_free(new_identity);
+    return result;
+}
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params,
                              bool authorized, sbw_error *error) {
     if (!controller || !method) {
@@ -2629,256 +2889,10 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
             ReleaseSRWLockShared(&controller->state_lock);
         }
     } else if (sb_streq(method, "routing.set")) {
-        if (!controller->identity) {
-            sbw_fail(error, "NOT_ENROLLED", "Enroll this device first.");
-            goto done;
-        }
-        const char *id = sbj_get_str(params, "group", ""), *mode = sbj_get_str(params, "mode", "");
-        const char *node = sbj_get_str(params, "node", "");
-        bool custom = sb_streq(mode, "node"),
-             live = controller->active && controller->runtime.core_running;
-        if (!sbw_json_string(sbj_get(params, "group"), 64, false) ||
-            (!custom && !sb_streq(mode, "server") && !sb_streq(mode, "default")) ||
-            sbj_obj_len(params) != (custom ? 3U : 2U) ||
-            (custom && !sbw_json_string(sbj_get(params, "node"), 512, false)) ||
-            (sb_streq(id, "default") && sb_streq(mode, "default"))) {
-            sbw_fail(error, "INVALID_REQUEST", "Choose a service group and routing mode.");
-            goto done;
-        }
-        const sbj *source = live ? controller->active : controller->candidate;
-        if (!source) {
-            sbw_fail(error, "NO_CANDIDATE", "Download configuration first.");
-            goto done;
-        }
-        sbj *groups = sbw_routing_groups(source, controller->identity);
-        bool found = false, was_automatic = false;
-        for (size_t i = 0; i < sbj_arr_len(groups); ++i)
-            if (sbj_string_is(sbj_get(sbj_arr_at(groups, i), "id"), id)) {
-                found = true;
-                was_automatic = sbj_string_is(sbj_get(sbj_arr_at(groups, i), "mode"), "automatic");
-            }
-        sbj_free(groups);
-        if (!found) {
-            sbw_fail(error, "ROUTING_UNSUPPORTED", "The service group is no longer present.");
-            goto done;
-        }
-        new_identity = sbj_clone(controller->identity);
-        sbj *overrides = sbj_get(new_identity, "windows_routing");
-        if (!overrides) {
-            overrides = sbj_object();
-            sbj_set(new_identity, "windows_routing", overrides);
-        }
-        sbj *pref = sbj_object();
-        sbj_set_str(pref, "mode", mode);
-        if (custom)
-            sbj_set_str(pref, "node", node);
-        sbj_set(overrides, id, pref);
-        if (sb_streq(id, "gpt")) {
-            sbj_set_bool(new_identity, "windows_gpt_use_default", sb_streq(mode, "default"));
-            sbj_del(new_identity, "windows_gpt_outbound");
-            if (custom)
-                sbj_set_str(new_identity, "windows_gpt_outbound", node);
-        }
-        /* Automatic selectors have restricted members. Rebuild their validated
-         * config when returning to a fixed/manual group so future switches can
-         * use the ordinary catalog again. */
-        if (was_automatic) {
-            if (!apply_local_identity(controller, new_identity, error)) {
-                AcquireSRWLockShared(&controller->state_lock);
-                result = config_summary(controller);
-                ReleaseSRWLockShared(&controller->state_lock);
-            }
-            goto done;
-        }
-        sbj *next = sbw_routing_apply(source, new_identity, true, error);
-        if (!next)
-            goto done;
-        sbj *cfg = sbj_parse_cstr(sbj_get_str(next, "content", ""));
-        sbj_free(next);
-        char selector[96];
-        sprintf_s(selector, sizeof(selector), "sb-easy-local-%s", id);
-        char *selected = NULL, *previous = NULL;
-        const sbj *nodes = sbj_get(cfg, "outbounds");
-        for (size_t i = 0; i < sbj_arr_len(nodes); ++i)
-            if (sbj_string_is(sbj_get(sbj_arr_at(nodes, i), "tag"), selector))
-                selected = sb_strdup(sbj_get_str(sbj_arr_at(nodes, i), "default", ""));
-        sbj_free(cfg);
-        if (!selected && !sb_streq(mode, "server")) {
-            sbw_fail(error, "ROUTING_UNSUPPORTED",
-                     "This service cannot be safely changed locally.");
-            goto done;
-        }
-        bool switch_live = live && selected;
-        sbw_core_status process = {0};
-        sbj *proxies = NULL;
-        if (switch_live) {
-            if (sbw_core_poll(controller->core, &process, error) != 0 ||
-                sbw_runtime_config_get(&controller->active_config, process.process_id,
-                                       controller->cancel, "/proxies", &proxies, error) != 0) {
-                free(selected);
-                sbj_free(proxies);
-                goto done;
-            }
-            previous =
-                sb_strdup(sbj_get_str(sbj_get(sbj_get(proxies, "proxies"), selector), "now", ""));
-            sbj_free(proxies);
-            if (!*previous) {
-                free(previous);
-                free(selected);
-                sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE",
-                         "Apply the updated configuration once to enable live service switching.");
-                goto done;
-            }
-        }
-        int applied = switch_live
-                          ? sbw_runtime_select_group(&controller->active_config, process.process_id,
-                                                     controller->cancel, selector, selected, error)
-                          : 0;
-        if (applied == 0)
-            applied = save_state(controller, new_identity, controller->candidate,
-                                 controller->last_good, error);
-        if (applied != 0) {
-            sbw_error rollback = {0};
-            if (switch_live &&
-                sbw_runtime_select_group(&controller->active_config, process.process_id, NULL,
-                                         selector, previous, &rollback) != 0) {
-                sbw_fail(error, "LIVE_ROUTING_UNCERTAIN",
-                         "The switch could not be rolled back. Check the running node.");
-                AcquireSRWLockExclusive(&controller->state_lock);
-                if (error)
-                    controller->runtime_error = *error;
-                ReleaseSRWLockExclusive(&controller->state_lock);
-            }
-            free(previous);
-            free(selected);
-            goto done;
-        }
-        free(previous);
-        free(selected);
-        AcquireSRWLockExclusive(&controller->state_lock);
-        sbj_free(controller->identity);
-        controller->identity = new_identity;
-        new_identity = NULL;
-        free(controller->checked_etag);
-        controller->checked_etag = NULL;
-        controller->checked_valid = false;
-        if (live)
-            memset(&controller->runtime_error, 0, sizeof(controller->runtime_error));
-        result = config_summary(controller);
-        ReleaseSRWLockExclusive(&controller->state_lock);
+        result = routing_set_handle(controller, params, error);
     } else if (sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") ||
                sb_streq(method, "routing.gpt_node")) {
-        if (!controller->identity) {
-            sbw_fail(error, "NOT_ENROLLED", "Enroll this device first.");
-            goto done;
-        }
-        bool local = sb_streq(method, "routing.gpt_default");
-        const char *outbound = NULL;
-        if (sb_streq(method, "routing.gpt_node")) {
-            if (sbj_obj_len(params) != 1 ||
-                !sbw_json_string(sbj_get(params, "outbound"), 512, false)) {
-                sbw_fail(error, "INVALID_REQUEST", "Choose one valid outbound tag.");
-                goto done;
-            }
-            outbound = sbj_get_str(params, "outbound", "");
-        }
-        bool live = controller->active && controller->runtime.core_running;
-        const sbj *routing_source = live ? controller->active : controller->candidate;
-        if (local || outbound || live) {
-            if (!routing_source) {
-                sbw_fail(error, "NO_CANDIDATE", "Download configuration first.");
-                goto done;
-            }
-            sbj *effective = sbw_routing_snapshot_node(routing_source, local, outbound, error);
-            if (!effective)
-                goto done;
-            const char *content = sbj_get_str(effective, "content", "");
-            sbw_runtime_config adapted = {0};
-            int checked = sbw_runtime_config_prepare(
-                content, strlen(content), sbj_get_str(controller->identity, "server", ""), &adapted,
-                error);
-            if (checked == 0)
-                checked = check_config(controller, &adapted, error);
-            sbw_runtime_config_free(&adapted);
-            sbj_free(effective);
-            if (checked != 0)
-                goto done;
-        }
-        new_identity = sbj_clone(controller->identity);
-        if (sbj_get(new_identity, "windows_routing"))
-            sbj_del(sbj_get(new_identity, "windows_routing"), "gpt");
-        sbj_set_bool(new_identity, "windows_gpt_use_default", local);
-        sbj_del(new_identity, "windows_gpt_outbound");
-        if (outbound)
-            sbj_set_str(new_identity, "windows_gpt_outbound", outbound);
-        char *previous = NULL, *selected = NULL;
-        sbw_core_status process = {0};
-        if (live) {
-            sbj *next = sbw_routing_snapshot_node(controller->active, local, outbound, error);
-            if (!next)
-                goto done;
-            selected = sbw_routing_target(next);
-            sbj_free(next);
-            sbj *proxies = NULL;
-            if (!selected || !*selected) {
-                free(selected);
-                sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE",
-                         "This running configuration has no GPT route.");
-                goto done;
-            }
-            if (sbw_core_poll(controller->core, &process, error) != 0 ||
-                sbw_runtime_config_get(&controller->active_config, process.process_id,
-                                       controller->cancel, "/proxies", &proxies, error) != 0) {
-                free(selected);
-                sbj_free(proxies);
-                goto done;
-            }
-            previous = sb_strdup(
-                sbj_get_str(sbj_get(sbj_get(proxies, "proxies"), SBW_GPT_SELECTOR), "now", ""));
-            sbj_free(proxies);
-            if (!*previous) {
-                free(previous);
-                free(selected);
-                sbw_fail(error, "LIVE_ROUTING_UNAVAILABLE",
-                         "This running configuration has no live GPT group.");
-                goto done;
-            }
-        }
-        int applied = live ? sbw_runtime_select_gpt(&controller->active_config, process.process_id,
-                                                    controller->cancel, selected, error)
-                           : 0;
-        if (applied == 0)
-            applied = save_state(controller, new_identity, controller->candidate,
-                                 controller->last_good, error);
-        if (applied != 0) {
-            sbw_error rollback_error = {0};
-            if (live && sbw_runtime_select_gpt(&controller->active_config, process.process_id, NULL,
-                                               previous, &rollback_error) != 0) {
-                sbw_fail(error, "LIVE_ROUTING_UNCERTAIN",
-                         "The live switch could not be rolled back. Check the current node before "
-                         "retrying.");
-                AcquireSRWLockExclusive(&controller->state_lock);
-                if (error)
-                    controller->runtime_error = *error;
-                ReleaseSRWLockExclusive(&controller->state_lock);
-            }
-            free(previous);
-            free(selected);
-            goto done;
-        }
-        free(previous);
-        free(selected);
-        AcquireSRWLockExclusive(&controller->state_lock);
-        if (live)
-            memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
-        sbj_free(controller->identity);
-        controller->identity = new_identity;
-        new_identity = NULL;
-        free(controller->checked_etag);
-        controller->checked_etag = NULL;
-        controller->checked_valid = false;
-        result = config_summary(controller);
-        ReleaseSRWLockExclusive(&controller->state_lock);
+        result = routing_gpt_handle(controller, method, params, error);
     } else if (is_apply) {
         const sbj *uri = sbj_get(params, "uri");
         if (sbj_obj_len(params) != 1 || !sbw_json_string(uri, 16384, false)) {

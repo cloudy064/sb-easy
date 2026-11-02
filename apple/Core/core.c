@@ -531,6 +531,46 @@ static bool endpoints_valid(const sbj *endpoints) {
         }
     return true;
 }
+/* Registers existing outbound tags, then appends every subscription node as local-<id>/<tag>.
+ * Leaf tags are collected into leafs. The caller owns names and leafs on failure. */
+static bool merge_subscription_nodes(const sbj *subs, sbj *outbounds, sb_strvec *names,
+                                     sbj *leafs) {
+    for (size_t i = 0; i < sbj_arr_len(outbounds); ++i) {
+        const sbj *o = sbj_arr_at(outbounds, i);
+        const char *tag = sbj_get_str(o, "tag", "");
+        if (!text(sbj_get(o, "tag"), SBA_MAX_TAG, false) || sb_strvec_contains(names, tag) ||
+            sb_starts_with(tag, SBA_PLATFORM_PREFIX)) {
+            return false;
+        }
+        sb_strvec_push(names, tag);
+    }
+    for (size_t i = 0; i < sbj_arr_len(subs); ++i) {
+        const sbj *sub = sbj_arr_at(subs, i), *id = sbj_get(sub, "id"), *nodes = sbj_get(sub, "nodes");
+        if (!text(id, 64, false) ||
+            strspn(id->v.str.ptr, "abcdefghijklmnopqrstuvwxyz0123456789-") != id->v.str.len ||
+            !sbj_is_array(nodes) || sbj_arr_len(nodes) > SBA_MAX_SUB_NODES) {
+            return false;
+        }
+        for (size_t j = 0; j < sbj_arr_len(nodes); ++j) {
+            const sbj *node = sbj_arr_at(nodes, j);
+            if (!node_valid(node) || sbj_arr_len(outbounds) >= SBA_MAX_OUTBOUNDS) {
+                return false;
+            }
+            char *tag = sb_asprintf("local-%s/%s", id->v.str.ptr, sbj_get_str(node, "tag", ""));
+            if (sb_strvec_contains(names, tag)) {
+                free(tag);
+                return false;
+            }
+            sb_strvec_push(names, tag);
+            sbj *copy = sbj_clone(node);
+            sbj_set_str(copy, "tag", tag);
+            sbj_arr_push(outbounds, copy);
+            sbj_arr_push(leafs, sbj_str(tag));
+            free(tag);
+        }
+    }
+    return true;
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -577,41 +617,9 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     if (!sbj_is_array(outbounds) || sbj_arr_len(outbounds) > SBA_MAX_OUTBOUNDS) {
         goto bad;
     }
-    for (size_t i = 0; i < sbj_arr_len(outbounds); ++i) {
-        const sbj *o = sbj_arr_at(outbounds, i);
-        const char *tag = sbj_get_str(o, "tag", "");
-        if (!text(sbj_get(o, "tag"), SBA_MAX_TAG, false) || sb_strvec_contains(&names, tag) ||
-            sb_starts_with(tag, SBA_PLATFORM_PREFIX)) {
-            goto bad;
-        }
-        sb_strvec_push(&names, tag);
-    }
     leafs = sbj_array();
-    for (size_t i = 0; i < sbj_arr_len(subs); ++i) {
-        const sbj *sub = sbj_arr_at(subs, i), *id = sbj_get(sub, "id"), *nodes = sbj_get(sub, "nodes");
-        if (!text(id, 64, false) ||
-            strspn(id->v.str.ptr, "abcdefghijklmnopqrstuvwxyz0123456789-") != id->v.str.len ||
-            !sbj_is_array(nodes) || sbj_arr_len(nodes) > SBA_MAX_SUB_NODES) {
-            goto bad;
-        }
-        for (size_t j = 0; j < sbj_arr_len(nodes); ++j) {
-            const sbj *node = sbj_arr_at(nodes, j);
-            if (!node_valid(node) || sbj_arr_len(outbounds) >= SBA_MAX_OUTBOUNDS) {
-                goto bad;
-            }
-            char *tag = sb_asprintf("local-%s/%s", id->v.str.ptr, sbj_get_str(node, "tag", ""));
-            if (sb_strvec_contains(&names, tag)) {
-                free(tag);
-                goto bad;
-            }
-            sb_strvec_push(&names, tag);
-            sbj *copy = sbj_clone(node);
-            sbj_set_str(copy, "tag", tag);
-            sbj_arr_push(outbounds, copy);
-            sbj_arr_push(leafs, sbj_str(tag));
-            free(tag);
-        }
-    }
+    if (!merge_subscription_nodes(subs, outbounds, &names, leafs))
+        goto bad;
     sb_strvec_free(&names);
     names = (sb_strvec){0};
     sbj *direct = sbj_object();

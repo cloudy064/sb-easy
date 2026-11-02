@@ -571,6 +571,22 @@ static bool merge_subscription_nodes(const sbj *subs, sbj *outbounds, sb_strvec 
     }
     return true;
 }
+/* Adds the bootstrap DNS server; standalone mode also gets a remote DNS through the selector. */
+static bool add_dns_servers(sbj *route, sbj *dns, sbj *servers, bool managed) {
+    for (size_t i = 0; i < sbj_arr_len(servers); ++i)
+        if (sb_starts_with(sbj_get_str(sbj_arr_at(servers, i), "tag", ""), SBA_PLATFORM_PREFIX)) {
+            return false;
+        }
+    sbj_arr_push(servers, dns_server(BOOTSTRAP, DIRECT));
+    if (!sbj_get(route, "default_domain_resolver"))
+        sbj_set_str(route, "default_domain_resolver", BOOTSTRAP);
+    if (!managed) {
+        sbj_arr_push(servers, dns_server(REMOTE_DNS, DEFAULT_SELECTOR));
+        sbj_set_str(dns, "final", REMOTE_DNS);
+        sbj_set_str(dns, "strategy", "prefer_ipv4");
+    }
+    return true;
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -663,18 +679,8 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     if (!sbj_is_array(servers)) {
         goto bad;
     }
-    for (size_t i = 0; i < sbj_arr_len(servers); ++i)
-        if (sb_starts_with(sbj_get_str(sbj_arr_at(servers, i), "tag", ""), SBA_PLATFORM_PREFIX)) {
-            goto bad;
-        }
-    sbj_arr_push(servers, dns_server(BOOTSTRAP, DIRECT));
-    if (!sbj_get(route, "default_domain_resolver"))
-        sbj_set_str(route, "default_domain_resolver", BOOTSTRAP);
-    if (!managed) {
-        sbj_arr_push(servers, dns_server(REMOTE_DNS, DEFAULT_SELECTOR));
-        sbj_set_str(dns, "final", REMOTE_DNS);
-        sbj_set_str(dns, "strategy", "prefer_ipv4");
-    }
+    if (!add_dns_servers(route, dns, servers, managed))
+        goto bad;
     sbj *rules = sbj_get_or_array(route, "rules"), *dns_rules = sbj_get_or_array(dns, "rules");
     if (!sbj_is_array(rules) || !sbj_is_array(dns_rules)) {
         goto bad;

@@ -141,6 +141,94 @@ static char *base64_body(const char *body, size_t length) {
     sb_buf_free(&normalized);
     return decoded;
 }
+static sbj *node_from_import(const sb_parsed_node *item) {
+    sbj *node = sbj_clone(item->protocol_config);
+    sbj_set_str(node, "type", item->node_type);
+    sbj_set_str(node, "tag", item->tag);
+    sbj_set_str(node, "server", item->server);
+    sbj_set_int(node, "server_port", item->server_port);
+    return node;
+}
+/* sing-box JSON: an outbound array or an object holding one. False when neither. */
+static bool import_json_nodes(const char *start, sbj *nodes, sbj *warnings, size_t *skipped) {
+    sbj *json = sbw_json_parse(start, strlen(start), 32, NULL);
+    const sbj *outbounds = sbj_is_array(json) ? json : sbj_get(json, "outbounds");
+    if (!sbj_is_array(outbounds)) {
+        sbj_free(json);
+        return false;
+    }
+    for (size_t i = 0; i < sbj_arr_len(outbounds); ++i) {
+        const sbj *node = sbj_arr_at(outbounds, i);
+        if (builtin(node))
+            continue;
+        if (sbj_arr_len(nodes) >= 256 || !append_node(nodes, sbj_clone(node), warnings, i + 1))
+            ++*skipped;
+    }
+    if (sbj_is_object(json) &&
+        (sbj_has(json, "route") || sbj_has(json, "dns") || sbj_has(json, "inbounds")))
+        warning(warnings, 0, "routing_dns_and_inbounds_not_imported");
+    sbj_free(json);
+    return true;
+}
+/* Clash YAML proxies list. False when the importer rejects the document. */
+static bool import_yaml_nodes(const char *start, sbj *nodes, sbj *warnings, size_t *skipped) {
+    sb_proxy_import imported;
+    sb_err ignored = {0};
+    if (sb_parse_subscription_report(start, strlen(start), &imported, &ignored)) {
+        sb_proxy_import_free(&imported);
+        return false;
+    }
+    for (size_t i = 0; i < imported.nodes.len; ++i) {
+        sbj *node = node_from_import(&imported.nodes.items[i]);
+        if (sbj_arr_len(nodes) >= 256) {
+            sbj_free(node);
+            ++*skipped;
+        } else if (!append_node(nodes, node, warnings, i + 1))
+            ++*skipped;
+    }
+    for (size_t i = 0; i < imported.skipped.len; ++i) {
+        ++*skipped;
+        warning(warnings, 0, "unsupported_yaml_entry");
+    }
+    warning(warnings, 0, "routing_dns_and_scripts_not_imported");
+    sb_proxy_import_free(&imported);
+    return true;
+}
+/* One share link per line; blank lines and # or // comments are ignored. Modifies start. */
+static void import_uri_lines(char *start, sbj *nodes, sbj *warnings, size_t *skipped) {
+    char *line = start;
+    size_t position = 0;
+    while (line && *line) {
+        ++position;
+        char *next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        while (*line == ' ' || *line == '\t' || *line == '\r')
+            ++line;
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\r' || line[n - 1] == ' ' || line[n - 1] == '\t'))
+            line[--n] = 0;
+        if (n && *line != '#' && strncmp(line, "//", 2)) {
+            sbj *node = NULL;
+            sb_proxy_import imported;
+            sb_err ignored = {0};
+            if (!sb_parse_subscription_report(line, n, &imported, &ignored) &&
+                imported.nodes.len == 1)
+                node = node_from_import(&imported.nodes.items[0]);
+            sb_proxy_import_free(&imported);
+            if (!node) {
+                ++*skipped;
+                warning(warnings, position, "unsupported_uri_or_invalid_parameters");
+            } else if (sbj_arr_len(nodes) >= 256) {
+                sbj_free(node);
+                ++*skipped;
+                warning(warnings, position, "node_limit_reached");
+            } else if (!append_node(nodes, node, warnings, position))
+                ++*skipped;
+        }
+        line = next;
+    }
+}
 sbj *sbw_subscription_parse(const char *body, size_t length, sbw_error *error) {
     if (!body || !length || length > 256U * 1024U || memchr(body, 0, length) ||
         !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, body, (int)length, NULL, 0))
@@ -162,93 +250,14 @@ sbj *sbw_subscription_parse(const char *body, size_t length, sbw_error *error) {
     size_t skipped = 0;
     if (*start == '{' || *start == '[') {
         format = "sing-box-json";
-        sbj *json = sbw_json_parse(start, strlen(start), 32, NULL);
-        const sbj *outbounds = sbj_is_array(json) ? json : sbj_get(json, "outbounds");
-        if (!sbj_is_array(outbounds)) {
-            sbj_free(json);
+        if (!import_json_nodes(start, nodes, warnings, &skipped))
             goto parse_failed;
-        }
-        for (size_t i = 0; i < sbj_arr_len(outbounds); ++i) {
-            const sbj *node = sbj_arr_at(outbounds, i);
-            if (builtin(node))
-                continue;
-            if (sbj_arr_len(nodes) >= 256 || !append_node(nodes, sbj_clone(node), warnings, i + 1))
-                ++skipped;
-        }
-        if (sbj_is_object(json) &&
-            (sbj_has(json, "route") || sbj_has(json, "dns") || sbj_has(json, "inbounds")))
-            warning(warnings, 0, "routing_dns_and_inbounds_not_imported");
-        sbj_free(json);
     } else if (strstr(start, "proxies:")) {
         format = "clash-yaml";
-        sb_proxy_import imported;
-        sb_err ignored = {0};
-        int rc = sb_parse_subscription_report(start, strlen(start), &imported, &ignored);
-        if (rc) {
-            sb_proxy_import_free(&imported);
+        if (!import_yaml_nodes(start, nodes, warnings, &skipped))
             goto parse_failed;
-        }
-        for (size_t i = 0; i < imported.nodes.len; ++i) {
-            const sb_parsed_node *item = &imported.nodes.items[i];
-            sbj *node = sbj_clone(item->protocol_config);
-            sbj_set_str(node, "type", item->node_type);
-            sbj_set_str(node, "tag", item->tag);
-            sbj_set_str(node, "server", item->server);
-            sbj_set_int(node, "server_port", item->server_port);
-            if (sbj_arr_len(nodes) >= 256) {
-                sbj_free(node);
-                ++skipped;
-            } else if (!append_node(nodes, node, warnings, i + 1))
-                ++skipped;
-        }
-        for (size_t i = 0; i < imported.skipped.len; ++i) {
-            ++skipped;
-            warning(warnings, 0, "unsupported_yaml_entry");
-        }
-        warning(warnings, 0, "routing_dns_and_scripts_not_imported");
-        sb_proxy_import_free(&imported);
-    } else {
-        char *line = start;
-        size_t position = 0;
-        while (line && *line) {
-            ++position;
-            char *next = strchr(line, '\n');
-            if (next)
-                *next++ = 0;
-            while (*line == ' ' || *line == '\t' || *line == '\r')
-                ++line;
-            size_t n = strlen(line);
-            while (n && (line[n - 1] == '\r' || line[n - 1] == ' ' || line[n - 1] == '\t'))
-                line[--n] = 0;
-            if (n && *line != '#' && strncmp(line, "//", 2)) {
-                sbj *node = NULL;
-                if (!node) {
-                    sb_proxy_import imported;
-                    sb_err ignored = {0};
-                    if (!sb_parse_subscription_report(line, n, &imported, &ignored) &&
-                        imported.nodes.len == 1) {
-                        const sb_parsed_node *item = &imported.nodes.items[0];
-                        node = sbj_clone(item->protocol_config);
-                        sbj_set_str(node, "type", item->node_type);
-                        sbj_set_str(node, "tag", item->tag);
-                        sbj_set_str(node, "server", item->server);
-                        sbj_set_int(node, "server_port", item->server_port);
-                    }
-                    sb_proxy_import_free(&imported);
-                }
-                if (!node) {
-                    ++skipped;
-                    warning(warnings, position, "unsupported_uri_or_invalid_parameters");
-                } else if (sbj_arr_len(nodes) >= 256) {
-                    sbj_free(node);
-                    ++skipped;
-                    warning(warnings, position, "node_limit_reached");
-                } else if (!append_node(nodes, node, warnings, position))
-                    ++skipped;
-            }
-            line = next;
-        }
-    }
+    } else
+        import_uri_lines(start, nodes, warnings, &skipped);
     if (!sbj_arr_len(nodes))
         goto parse_failed;
     sbj *result = sbj_object(), *report = sbj_object();

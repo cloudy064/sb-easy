@@ -2786,6 +2786,31 @@ static sbj *traffic_handle(sbw_controller *controller, const char *method, sbw_e
     sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
     return result;
 }
+/* Methods that take parameters; every other method must be called with an empty object. */
+static bool method_accepts_params(const char *method) {
+    static const char *const prefixes[] = {"updates.", "preferences.", "subscriptions.",
+                                           "extensions.", "capture."};
+    static const char *const names[] = {
+        "enrollment.apply",
+        "mode.set",
+        "management.settings.set",
+        "routing.health.set",
+        "routing.automatic.set",
+        "routing.group_save",
+        "routing.group_remove",
+        "routing.probe",
+        "routing.delay",
+        "routing.gpt_node",
+        "routing.set",
+    };
+    for (size_t i = 0; i < sizeof prefixes / sizeof *prefixes; ++i)
+        if (!strncmp(method, prefixes[i], strlen(prefixes[i])))
+            return true;
+    for (size_t i = 0; i < sizeof names / sizeof *names; ++i)
+        if (sb_streq(method, names[i]))
+            return true;
+    return false;
+}
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params,
                              bool authorized, sbw_error *error) {
     if (!controller || !method) {
@@ -2834,15 +2859,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         return result;
     }
     bool is_apply = strcmp(method, "enrollment.apply") == 0;
-    if (!sbj_is_object(params) ||
-        (!is_apply && strncmp(method, "updates.", 8) && strncmp(method, "preferences.", 12) &&
-         strncmp(method, "subscriptions.", 14) && strncmp(method, "extensions.", 11) &&
-         !sb_streq(method, "mode.set") && !sb_streq(method, "management.settings.set") &&
-         !sb_streq(method, "routing.health.set") && !sb_streq(method, "routing.automatic.set") &&
-         !sb_streq(method, "routing.group_save") && !sb_streq(method, "routing.group_remove") &&
-         !sb_streq(method, "routing.probe") && !sb_streq(method, "routing.delay") &&
-         !sb_streq(method, "routing.gpt_node") && !sb_streq(method, "routing.set") &&
-         strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
+    if (!sbj_is_object(params) || (!method_accepts_params(method) && sbj_obj_len(params) != 0)) {
         sbw_fail(error, "INVALID_REQUEST", "This operation expects object params.");
         return NULL;
     }

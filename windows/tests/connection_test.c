@@ -103,56 +103,43 @@ static DWORD WINAPI start_worker(void *context) {
     return 0;
 }
 
-int wmain(int argc, wchar_t **argv) {
-    int helper = sbw_core_signal_helper(argc, argv);
-    if (helper >= 0)
-        return helper;
-    CHECK(argc == 2);
-    wchar_t temporary[32768], name[128];
-    DWORD length = GetTempPathW(32768, temporary);
-    CHECK(length && length < 32768);
-    CHECK(swprintf_s(name, 128, L"sb-easy-connection-%lu-%llu", GetCurrentProcessId(),
-                     (unsigned long long)GetTickCount64()) > 0);
-    wchar_t *directory = sbw_path_join(temporary, name);
-    CHECK(GetFileAttributesW(directory) == INVALID_FILE_ATTRIBUTES &&
-          GetLastError() == ERROR_FILE_NOT_FOUND);
-    wchar_t gate_name[160];
-    CHECK(swprintf_s(gate_name, 160, L"Local\\%ls", name) > 0);
-    HANDLE health_gate = CreateEventW(NULL, TRUE, FALSE, gate_name);
-    CHECK(health_gate && GetLastError() != ERROR_ALREADY_EXISTS);
-    char *gate_utf8 = sbw_utf8(gate_name, NULL);
-    CHECK(gate_utf8);
-    sbj *gated_config = sbj_object();
-    sbj_set_str(gated_config, "health_event", gate_utf8);
-    free(gate_utf8);
-    char *gated_json = sbj_dump(gated_config, -1);
-    sbj_free(gated_config);
+typedef struct test_state {
+    const wchar_t *fixture;
+    wchar_t *directory;
+    HANDLE health_gate;
+    char *gated_json;
     test_data data;
-    test_data_init(&data);
-    sbw_controller *controller = test_controller(&data, NULL);
-    error_call(controller, "connection.start", false, "FORBIDDEN");
-    error_call(controller, "connection.stop", false, "FORBIDDEN");
-    error_call(controller, "connection.start", true, "NOT_ENROLLED");
-    enroll(controller);
-    error_call(controller, "connection.start", true, "NO_CANDIDATE");
-    download(controller, &data, "good-1", gated_json);
-    free(gated_json);
-    error_call(controller, "connection.start", true, "CORE_UNAVAILABLE");
-    sbw_core *core = attach_core(controller, argv[1], directory);
-    sbj *result = call(controller, "status.get", false);
+    sbw_controller *controller;
+    sbw_core *core;
+} test_state;
+
+static void scenario_preconditions(test_state *s) {
+    error_call(s->controller, "connection.start", false, "FORBIDDEN");
+    error_call(s->controller, "connection.stop", false, "FORBIDDEN");
+    error_call(s->controller, "connection.start", true, "NOT_ENROLLED");
+    enroll(s->controller);
+    error_call(s->controller, "connection.start", true, "NO_CANDIDATE");
+    download(s->controller, &s->data, "good-1", s->gated_json);
+    free(s->gated_json);
+    s->gated_json = NULL;
+    error_call(s->controller, "connection.start", true, "CORE_UNAVAILABLE");
+    s->core = attach_core(s->controller, s->fixture, s->directory);
+    sbj *result = call(s->controller, "status.get", false);
     expect_state(result, "STOPPED", NULL, NULL);
     CHECK(sbj_get_bool(result, "connection_available", false));
     sbj_free(result);
+}
 
+static void scenario_delayed_start_and_stop(test_state *s) {
     /* Delayed loopback readiness makes it observable that process creation
      * alone cannot publish an active configuration or a healthy running core. */
-    start_task task = {controller, NULL, {0}};
+    start_task task = {s->controller, NULL, {0}};
     HANDLE thread = CreateThread(NULL, 0, start_worker, &task, 0, NULL);
     CHECK(thread);
     bool saw_starting = false;
     ULONGLONG deadline = GetTickCount64() + 3000;
     while (WaitForSingleObject(thread, 0) == WAIT_TIMEOUT && GetTickCount64() < deadline) {
-        result = call(controller, "status.get", false);
+        sbj *result = call(s->controller, "status.get", false);
         if (sb_streq(sbj_get_str(result, "phase", ""), "STARTING")) {
             expect_state(result, "STARTING", NULL, NULL);
             saw_starting = true;
@@ -163,9 +150,9 @@ int wmain(int argc, wchar_t **argv) {
         Sleep(5);
     }
     CHECK(saw_starting);
-    error_call(controller, "connection.start", true, "BUSY");
-    error_call(controller, "connection.stop", true, "BUSY");
-    CHECK(SetEvent(health_gate));
+    error_call(s->controller, "connection.start", true, "BUSY");
+    error_call(s->controller, "connection.stop", true, "BUSY");
+    CHECK(SetEvent(s->health_gate));
     CHECK(WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0);
     CloseHandle(thread);
     if (!task.result)
@@ -173,135 +160,189 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(task.result);
     expect_state(task.result, "RUNNING", "good-1", "good-1");
     sbj_free(task.result);
-    expect_last_good(&data, "good-1");
-    sbw_core_status process = core_status(core);
+    expect_last_good(&s->data, "good-1");
+    sbw_core_status process = core_status(s->core);
     CHECK(process.process_running && process.process_id);
     DWORD original_pid = process.process_id;
-    result = call(controller, "connection.start", true);
+    sbj *result = call(s->controller, "connection.start", true);
     expect_state(result, "RUNNING", "good-1", "good-1");
     sbj_free(result);
-    error_call(controller, "routing.gpt_default", true, "GPT_OUTBOUND_UNAVAILABLE");
-    error_call(controller, "routing.gpt_server", true, "LIVE_ROUTING_UNAVAILABLE");
-    CHECK(core_status(core).process_id == original_pid); /* Identical config is idempotent. */
-    result = call(controller, "connection.stop", true);
+    error_call(s->controller, "routing.gpt_default", true, "GPT_OUTBOUND_UNAVAILABLE");
+    error_call(s->controller, "routing.gpt_server", true, "LIVE_ROUTING_UNAVAILABLE");
+    CHECK(core_status(s->core).process_id == original_pid); /* Identical config is idempotent. */
+    result = call(s->controller, "connection.stop", true);
     expect_state(result, "STOPPED", NULL, "good-1");
     sbj_free(result);
-    process = core_status(core);
+    process = core_status(s->core);
     CHECK(!process.process_running && !process.last_stop_forced);
-    expect_last_good(&data, "good-1");
+    expect_last_good(&s->data, "good-1");
+}
 
-    sbw_controller_free(controller);
-    controller = test_controller(&data, NULL);
-    core = attach_core(controller, argv[1], directory);
-    result = call(controller, "status.get", false);
+static void scenario_restart_and_rejected_candidates(test_state *s) {
+    sbw_controller_free(s->controller);
+    s->controller = test_controller(&s->data, NULL);
+    s->core = attach_core(s->controller, s->fixture, s->directory);
+    sbj *result = call(s->controller, "status.get", false);
     expect_state(result, "STOPPED", NULL, "good-1");
     sbj_free(result);
-    result = call(controller, "connection.start", true);
+    result = call(s->controller, "connection.start", true);
     expect_state(result, "RUNNING", "good-1", "good-1");
     sbj_free(result);
-    original_pid = core_status(core).process_id;
-    download(controller, &data, "bad-check", "{\"mode\":\"check_fail\"}");
-    result = call(controller, "status.get", false);
+    DWORD original_pid = core_status(s->core).process_id;
+    download(s->controller, &s->data, "bad-check", "{\"mode\":\"check_fail\"}");
+    result = call(s->controller, "status.get", false);
     expect_state(result, "RUNNING", "good-1", "good-1");
     sbj_free(result);
-    CHECK(core_status(core).process_id == original_pid);
-    sbj *saved = sbj_clone(data.saved);
-    error_call(controller, "connection.start", true, "CORE_CHECK_FAILED");
-    CHECK(core_status(core).process_id == original_pid && sbj_equal(saved, data.saved));
+    CHECK(core_status(s->core).process_id == original_pid);
+    sbj *saved = sbj_clone(s->data.saved);
+    error_call(s->controller, "connection.start", true, "CORE_CHECK_FAILED");
+    CHECK(core_status(s->core).process_id == original_pid && sbj_equal(saved, s->data.saved));
     sbj_free(saved);
-    result = call(controller, "status.get", false);
+    result = call(s->controller, "status.get", false);
     expect_state(result, "RUNNING", "good-1", "good-1");
     sbj_free(result);
 
-    download(controller, &data, "bad-health", "{\"mode\":\"health_fail\"}");
-    saved = sbj_clone(data.saved);
-    error_call(controller, "connection.start", true, "ROLLED_BACK");
-    CHECK(sbj_equal(saved, data.saved));
+    download(s->controller, &s->data, "bad-health", "{\"mode\":\"health_fail\"}");
+    saved = sbj_clone(s->data.saved);
+    error_call(s->controller, "connection.start", true, "ROLLED_BACK");
+    CHECK(sbj_equal(saved, s->data.saved));
     sbj_free(saved);
-    expect_last_good(&data, "good-1");
-    result = call(controller, "status.get", false);
+    expect_last_good(&s->data, "good-1");
+    result = call(s->controller, "status.get", false);
     expect_state(result, "RUNNING", "good-1", "good-1");
     CHECK(sb_streq(sbj_get_str(sbj_get(result, "runtime_error"), "code", ""), "ROLLED_BACK"));
     sbj_free(result);
-    process = core_status(core);
+    sbw_core_status process = core_status(s->core);
     CHECK(process.process_running && process.process_id != original_pid);
+}
 
-    download(controller, &data, "good-2", "{\"mode\":\"good\"}");
-    saved = sbj_clone(data.saved);
-    original_pid = core_status(core).process_id;
+static void scenario_durable_activation(test_state *s) {
+    download(s->controller, &s->data, "good-2", "{\"mode\":\"good\"}");
+    sbj *saved = sbj_clone(s->data.saved);
+    DWORD original_pid = core_status(s->core).process_id;
     /* Intent must be durable before changing the running core. */
-    data.fail_write = true;
-    error_call(controller, "connection.start", true, "STORAGE_ERROR");
-    CHECK(core_status(core).process_id == original_pid && sbj_equal(saved, data.saved));
-    data.fail_write = false;
+    s->data.fail_write = true;
+    error_call(s->controller, "connection.start", true, "STORAGE_ERROR");
+    CHECK(core_status(s->core).process_id == original_pid && sbj_equal(saved, s->data.saved));
+    s->data.fail_write = false;
     /* Fail the healthy candidate's activation commit, after intent was saved. */
-    data.fail_activation_etag = "good-2";
-    error_call(controller, "connection.start", true, "ROLLED_BACK");
-    CHECK(data.activation_write_failures == 1 && sbj_equal(saved, data.saved));
+    s->data.fail_activation_etag = "good-2";
+    error_call(s->controller, "connection.start", true, "ROLLED_BACK");
+    CHECK(s->data.activation_write_failures == 1 && sbj_equal(saved, s->data.saved));
     sbj_free(saved);
-    data.fail_activation_etag = NULL;
-    result = call(controller, "status.get", false);
+    s->data.fail_activation_etag = NULL;
+    sbj *result = call(s->controller, "status.get", false);
     expect_state(result, "RUNNING", "good-1", "good-1");
     sbj_free(result);
-    expect_last_good(&data, "good-1");
-    result = call(controller, "connection.start", true);
+    expect_last_good(&s->data, "good-1");
+    result = call(s->controller, "connection.start", true);
     expect_state(result, "RUNNING", "good-2", "good-2");
     CHECK(!sbj_get(result, "runtime_error"));
     sbj_free(result);
-    expect_last_good(&data, "good-2");
+    expect_last_good(&s->data, "good-2");
+}
 
-    download(controller, &data, "crashing", "{\"mode\":\"crash\"}");
-    result = call(controller, "connection.start", true);
+static void scenario_crash_and_forget(test_state *s) {
+    download(s->controller, &s->data, "crashing", "{\"mode\":\"crash\"}");
+    sbj *result = call(s->controller, "connection.start", true);
     expect_state(result, "RUNNING", "crashing", "crashing");
     sbj_free(result);
-    process = core_status(core);
+    sbw_core_status process = core_status(s->core);
     HANDLE crashed = OpenProcess(SYNCHRONIZE, FALSE, process.process_id);
     CHECK(crashed);
     CHECK(WaitForSingleObject(crashed, 5000) == WAIT_OBJECT_0);
     CloseHandle(crashed);
-    sbw_controller_poll(controller);
-    result = call(controller, "status.get", false);
+    sbw_controller_poll(s->controller);
+    result = call(s->controller, "status.get", false);
     expect_state(result, "DEGRADED", NULL, "crashing");
     CHECK(sb_streq(sbj_get_str(sbj_get(result, "runtime_error"), "code", ""), "CORE_EXITED"));
     sbj_free(result);
-    result = call(controller, "connection.stop", true);
+    result = call(s->controller, "connection.stop", true);
     expect_state(result, "STOPPED", NULL, "crashing");
     sbj_free(result);
-    result = call(controller, "enrollment.forget", true);
-    CHECK(!sbj_get_bool(result, "enrolled", true) && !data.saved);
+    result = call(s->controller, "enrollment.forget", true);
+    CHECK(!sbj_get_bool(result, "enrolled", true) && !s->data.saved);
     sbj_free(result);
+}
 
+static void scenario_first_activation_failure(test_state *s) {
     /* Without a previous good version, a failed durable activation must leave
      * neither a running child nor an invented active/last-good revision. */
-    enroll(controller);
-    download(controller, &data, "first-unsaved", "{}");
-    saved = sbj_clone(data.saved);
+    enroll(s->controller);
+    download(s->controller, &s->data, "first-unsaved", "{}");
+    sbj *saved = sbj_clone(s->data.saved);
     sbj_set_bool(sbj_get(saved, "management"), "manual_disconnect", false);
-    data.fail_activation_etag = "first-unsaved";
-    error_call(controller, "connection.start", true, "STORAGE_ERROR");
-    CHECK(data.activation_write_failures == 2 && sbj_equal(saved, data.saved));
+    s->data.fail_activation_etag = "first-unsaved";
+    error_call(s->controller, "connection.start", true, "STORAGE_ERROR");
+    CHECK(s->data.activation_write_failures == 2 && sbj_equal(saved, s->data.saved));
     sbj_free(saved);
-    data.fail_activation_etag = NULL;
-    result = call(controller, "status.get", false);
+    s->data.fail_activation_etag = NULL;
+    sbj *result = call(s->controller, "status.get", false);
     expect_state(result, "DEGRADED", NULL, NULL);
     sbj_free(result);
-    CHECK(!core_status(core).process_running);
-    result = call(controller, "connection.stop", true);
+    CHECK(!core_status(s->core).process_running);
+    result = call(s->controller, "connection.stop", true);
     expect_state(result, "STOPPED", NULL, NULL);
     sbj_free(result);
-    sbw_controller_free(controller);
-    test_data_free(&data);
-    CloseHandle(health_gate);
-    wchar_t *lock = sbw_path_join(directory, L"state.lock");
-    test_remove_diagnostics(directory);
+}
+
+static const struct {
+    const char *name;
+    void (*run)(test_state *);
+} scenarios[] = {
+    {"preconditions", scenario_preconditions},
+    {"delayed_start_and_stop", scenario_delayed_start_and_stop},
+    {"restart_and_rejected_candidates", scenario_restart_and_rejected_candidates},
+    {"durable_activation", scenario_durable_activation},
+    {"crash_and_forget", scenario_crash_and_forget},
+    {"first_activation_failure", scenario_first_activation_failure},
+};
+
+int wmain(int argc, wchar_t **argv) {
+    int helper = sbw_core_signal_helper(argc, argv);
+    if (helper >= 0)
+        return helper;
+    CHECK(argc == 2);
+    wchar_t temporary[32768], name[128];
+    DWORD length = GetTempPathW(32768, temporary);
+    CHECK(length && length < 32768);
+    CHECK(swprintf_s(name, 128, L"sb-easy-connection-%lu-%llu", GetCurrentProcessId(),
+                     (unsigned long long)GetTickCount64()) > 0);
+    test_state state = {0};
+    test_state *s = &state;
+    s->fixture = argv[1];
+    s->directory = sbw_path_join(temporary, name);
+    CHECK(GetFileAttributesW(s->directory) == INVALID_FILE_ATTRIBUTES &&
+          GetLastError() == ERROR_FILE_NOT_FOUND);
+    wchar_t gate_name[160];
+    CHECK(swprintf_s(gate_name, 160, L"Local\\%ls", name) > 0);
+    s->health_gate = CreateEventW(NULL, TRUE, FALSE, gate_name);
+    CHECK(s->health_gate && GetLastError() != ERROR_ALREADY_EXISTS);
+    char *gate_utf8 = sbw_utf8(gate_name, NULL);
+    CHECK(gate_utf8);
+    sbj *gated_config = sbj_object();
+    sbj_set_str(gated_config, "health_event", gate_utf8);
+    free(gate_utf8);
+    s->gated_json = sbj_dump(gated_config, -1);
+    sbj_free(gated_config);
+    test_data_init(&s->data);
+    s->controller = test_controller(&s->data, NULL);
+    for (size_t i = 0; i < sizeof scenarios / sizeof *scenarios; ++i)
+        scenarios[i].run(s);
+
+    sbw_controller_free(s->controller);
+    test_data_free(&s->data);
+    CloseHandle(s->health_gate);
+    wchar_t *lock = sbw_path_join(s->directory, L"state.lock");
+    test_remove_diagnostics(s->directory);
     CHECK(DeleteFileW(lock));
-    wchar_t *traffic_file = sbw_path_join(directory, L"device-state.dat");
+    wchar_t *traffic_file = sbw_path_join(s->directory, L"device-state.dat");
     DeleteFileW(traffic_file);
     free(traffic_file);
-    test_remove_capture_dirs(directory);
-    CHECK(RemoveDirectoryW(directory));
+    test_remove_capture_dirs(s->directory);
+    CHECK(RemoveDirectoryW(s->directory));
     free(lock);
-    free(directory);
+    free(s->directory);
     puts("C11 connection controller: local health, activation, stop, persistence, replacement, "
          "rollback, crash and redaction passed.");
     return 0;

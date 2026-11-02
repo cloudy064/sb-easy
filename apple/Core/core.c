@@ -487,6 +487,37 @@ static bool select_default_node(const sbj *prefs, sbj *outbounds, sbj *final_out
     }
     return true;
 }
+/* Adds the user-defined domain groups ahead of the managed rules, each with its own DNS server. */
+static bool add_local_group_rules(const sbj *prefs, sbj *outbounds, sbj *rules, sbj *dns_rules,
+                                  sbj *servers, size_t protected_routes, size_t protected_dns,
+                                  const char **message) {
+    const sbj *groups = sbj_get(prefs, "local_groups");
+    for (size_t i = sbj_arr_len(groups); i > 0; --i) {
+        const sbj *g = sbj_arr_at(groups, i - 1);
+        const char *target = sbj_get_str(g, "outbound", "");
+        sbj *candidate = outbound_named(outbounds, target);
+        if (!candidate || sbj_string_is(sbj_get(candidate, "type"), "selector") ||
+            sbj_string_is(sbj_get(candidate, "type"), "urltest")) {
+            *message = "本地域名分组的节点已失效";
+            return false;
+        }
+        sbj *rule = sbj_object();
+        sbj_set(rule, "domain_suffix", sbj_clone(sbj_get(g, "domains")));
+        sbj_set_str(rule, "outbound", target);
+        sbj_arr_insert(rules, protected_routes, rule);
+        char *dns_tag = sb_asprintf(SBA_PLATFORM_PREFIX "group-%s", sbj_get_str(g, "id", ""));
+        sbj_arr_push(servers, dns_server(dns_tag,
+                                       sbj_string_is(sbj_get(candidate, "type"), "direct")
+                                           ? NULL
+                                           : target));
+        rule = sbj_object();
+        sbj_set(rule, "domain_suffix", sbj_clone(sbj_get(g, "domains")));
+        sbj_set_str(rule, "server", dns_tag);
+        sbj_arr_insert(dns_rules, protected_dns, rule);
+        free(dns_tag);
+    }
+    return true;
+}
 char *sba_build_runtime(const char *source, const char *subscriptions, const char *settings,
                         const char *control_host, char **error) {
     if (error)
@@ -636,31 +667,9 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
     }
     size_t protected_routes = protect_rule_prefix(rules, root, false);
     size_t protected_dns = protect_rule_prefix(dns_rules, root, true);
-    const sbj *groups = sbj_get(prefs, "local_groups");
-    for (size_t i = sbj_arr_len(groups); i > 0; --i) {
-        const sbj *g = sbj_arr_at(groups, i - 1);
-        const char *target = sbj_get_str(g, "outbound", "");
-        sbj *candidate = outbound_named(outbounds, target);
-        if (!candidate || sbj_string_is(sbj_get(candidate, "type"), "selector") ||
-            sbj_string_is(sbj_get(candidate, "type"), "urltest")) {
-            message = "本地域名分组的节点已失效";
-            goto bad;
-        }
-        sbj *rule = sbj_object();
-        sbj_set(rule, "domain_suffix", sbj_clone(sbj_get(g, "domains")));
-        sbj_set_str(rule, "outbound", target);
-        sbj_arr_insert(rules, protected_routes, rule);
-        char *dns_tag = sb_asprintf(SBA_PLATFORM_PREFIX "group-%s", sbj_get_str(g, "id", ""));
-        sbj_arr_push(servers, dns_server(dns_tag,
-                                       sbj_string_is(sbj_get(candidate, "type"), "direct")
-                                           ? NULL
-                                           : target));
-        rule = sbj_object();
-        sbj_set(rule, "domain_suffix", sbj_clone(sbj_get(g, "domains")));
-        sbj_set_str(rule, "server", dns_tag);
-        sbj_arr_insert(dns_rules, protected_dns, rule);
-        free(dns_tag);
-    }
+    if (!add_local_group_rules(prefs, outbounds, rules, dns_rules, servers, protected_routes,
+                               protected_dns, &message))
+        goto bad;
     if (control_host && *control_host)
         add_control_host_rules(rules, dns_rules, control_host);
     sbj *hijack = sbj_object();

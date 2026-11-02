@@ -135,6 +135,63 @@ static bool decimal(const char *text, uint64_t *value) {
     return true;
 }
 
+/* Lower-case DNS name: 1-253 chars, labels of 1-63 alphanumerics or inner hyphens. */
+static bool valid_dns_host(const char *host) {
+    size_t length = strlen(host);
+    if (!length || length > 253 || host[0] == '.' || host[length - 1] == '.')
+        return false;
+    size_t start = 0;
+    for (size_t i = 0; i <= length; ++i) {
+        if (host[i] && !ascii_alnum((unsigned char)host[i]) && host[i] != '-' && host[i] != '.')
+            return false;
+        if (!host[i] || host[i] == '.') {
+            if (i == start || i - start > 63 || host[start] == '-' || host[i - 1] == '-')
+                return false;
+            start = i + 1;
+        }
+    }
+    return true;
+}
+/* Canonicalises the path segments of path_storage into canonical (modified in place).
+ * Returns 0 on success, 1 for an invalid path, -1 when error was already set. */
+static int canonical_path(char *path_storage, sb_buf *canonical, sbw_error *error) {
+    size_t path_length = strlen(path_storage);
+    while (path_length && path_storage[path_length - 1] == '/')
+        path_storage[--path_length] = 0;
+    char *path = path_storage;
+    while (*path) {
+        if (*path++ != '/')
+            return 1;
+        char *next = strchr(path, '/');
+        if (next)
+            *next = 0;
+        char *segment = percent_decode(path, false, "invalid_server", error);
+        if (!segment)
+            return -1;
+        if (!*segment || !strcmp(segment, ".") || !strcmp(segment, "..") ||
+            strpbrk(segment, "/\\%?#")) {
+            free(segment);
+            return 1;
+        }
+        sb_buf_putc(canonical, '/');
+        static const char digits[] = "0123456789ABCDEF";
+        for (const unsigned char *c = (const unsigned char *)segment; *c; ++c) {
+            if (ascii_alnum(*c) || strchr("-_.~:@!$&'()*+,;=", *c))
+                sb_buf_putc(canonical, (char)*c);
+            else {
+                sb_buf_putc(canonical, '%');
+                sb_buf_putc(canonical, digits[*c >> 4]);
+                sb_buf_putc(canonical, digits[*c & 15]);
+            }
+        }
+        free(segment);
+        if (!next)
+            break;
+        *next = '/';
+        path = next;
+    }
+    return 0;
+}
 static int parse_server(const char *input, server_address *out, sbw_error *error) {
     memset(out, 0, sizeof(*out));
     if (!input)
@@ -192,19 +249,8 @@ static int parse_server(const char *input, server_address *out, sbw_error *error
         }
         host = sb_strdup(authority);
         lower_ascii(host);
-        size_t length = strlen(host);
-        if (!length || length > 253 || host[0] == '.' || host[length - 1] == '.')
+        if (!valid_dns_host(host))
             goto invalid;
-        size_t start = 0;
-        for (size_t i = 0; i <= length; ++i) {
-            if (host[i] && !ascii_alnum((unsigned char)host[i]) && host[i] != '-' && host[i] != '.')
-                goto invalid;
-            if (!host[i] || host[i] == '.') {
-                if (i == start || i - start > 63 || host[start] == '-' || host[i - 1] == '-')
-                    goto invalid;
-                start = i + 1;
-            }
-        }
         sb_buf_printf(&origin, "%s://%s", raw, host);
     }
     uint64_t parsed_port = out->secure ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
@@ -219,41 +265,11 @@ static int parse_server(const char *input, server_address *out, sbw_error *error
     out->host = sbw_wide(host, error);
     if (!out->host)
         goto invalid;
-    size_t path_length = strlen(path_storage);
-    while (path_length && path_storage[path_length - 1] == '/')
-        path_storage[--path_length] = 0;
-    char *path = path_storage;
-    while (*path) {
-        if (*path++ != '/')
-            goto invalid;
-        char *next = strchr(path, '/');
-        if (next)
-            *next = 0;
-        char *segment = percent_decode(path, false, "invalid_server", error);
-        if (!segment)
-            goto done;
-        if (!*segment || !strcmp(segment, ".") || !strcmp(segment, "..") ||
-            strpbrk(segment, "/\\%?#")) {
-            free(segment);
-            goto invalid;
-        }
-        sb_buf_putc(&canonical, '/');
-        static const char digits[] = "0123456789ABCDEF";
-        for (const unsigned char *c = (const unsigned char *)segment; *c; ++c) {
-            if (ascii_alnum(*c) || strchr("-_.~:@!$&'()*+,;=", *c))
-                sb_buf_putc(&canonical, (char)*c);
-            else {
-                sb_buf_putc(&canonical, '%');
-                sb_buf_putc(&canonical, digits[*c >> 4]);
-                sb_buf_putc(&canonical, digits[*c & 15]);
-            }
-        }
-        free(segment);
-        if (!next)
-            break;
-        *next = '/';
-        path = next;
-    }
+    int path_status = canonical_path(path_storage, &canonical, error);
+    if (path_status > 0)
+        goto invalid;
+    if (path_status < 0)
+        goto done;
     out->prefix = sbw_wide(canonical.p ? canonical.p : "", error);
     if (!out->prefix)
         goto invalid;

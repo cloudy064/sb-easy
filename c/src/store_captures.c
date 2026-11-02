@@ -79,7 +79,7 @@ char *sb_store_get_capture(sb_store *s, const char *host_id, const char *digest,
             sbq_bind_text(q.st, 1, host_id);
             sbq_bind_text(q.st, 2, digest);
             int rc = sbq_step_row(q.st, err);
-            if (rc == 1) { *len = (size_t)sqlite3_column_bytes(q.st, 0); out = sb_xmalloc(*len); memcpy(out, sqlite3_column_blob(q.st, 0), *len); }
+            if (rc == 1) { *len = (size_t)sqlite3_column_bytes(q.st, 0); out = sb_xmalloc(*len); if (*len) memcpy(out, sqlite3_column_blob(q.st, 0), *len); }
             else if (rc == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Capture not found");
         }
     }

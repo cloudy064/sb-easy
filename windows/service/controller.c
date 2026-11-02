@@ -2416,6 +2416,180 @@ done:
     sbj_free(new_identity);
     return result;
 }
+/* updates.*: check, download, install, cancel, recover and health; runs under mutation_lock. */
+static sbj *updates_handle(sbw_controller *controller, const char *method, const sbj *params,
+                           sbw_error *error) {
+    sbj *result = NULL;
+    int updated = -1;
+    if (!strcmp(method, "updates.check") && sbj_obj_len(params) == 1 &&
+        sbw_json_string(sbj_get(params, "manifest_url"), 4096, false))
+        updated =
+            sbw_updater_check(controller->updater, sbj_get_str(params, "manifest_url", ""), error);
+    else if ((!strcmp(method, "updates.download") || !strcmp(method, "updates.install")) &&
+             sbj_obj_len(params) == 1 &&
+             sbw_json_string(sbj_get(params, "release_id"), 64, false)) {
+        updated =
+            !strcmp(method, "updates.download")
+                ? sbw_updater_download(controller->updater, sbj_get_str(params, "release_id", ""),
+                                       error)
+                : sbw_updater_install(controller->updater, sbj_get_str(params, "release_id", ""),
+                                      controller->runtime.core_running, error);
+    } else if (!strcmp(method, "updates.cancel") && !sbj_obj_len(params))
+        updated = sbw_updater_cancel(controller->updater, error);
+    else if (!strcmp(method, "updates.recover") && !sbj_obj_len(params))
+        updated = sbw_updater_recover(controller->updater, error);
+    else if (!strcmp(method, "updates.health") && sbj_obj_len(params) == 2 &&
+             sbj_is_bool(sbj_get(params, "rollback")) &&
+             sbw_json_string(sbj_get(params, "nonce"), 64, false)) {
+        bool rollback = sbj_get_bool(params, "rollback", false), resume = false;
+        updated = sbw_updater_health_parameters(
+            controller->updater, sbj_get_str(params, "nonce", ""), rollback, &resume, error);
+        if (!updated)
+            updated = sbw_core_version_check(controller->core, SB_EASY_CORE_VERSION,
+                                             controller->cancel, error);
+        const sbj *source = controller->last_good ? controller->last_good : controller->candidate;
+        const sbj *identity =
+            source == controller->last_good ? sbj_get(source, "local_identity") : NULL;
+        if (!identity)
+            identity = controller->identity;
+        if (!updated && source) {
+            sbw_runtime_config adapted = {0};
+            updated = prepare_with_identity(identity, source, &adapted, error);
+            if (!updated)
+                updated = check_config(controller, &adapted, error);
+            sbw_runtime_config_free(&adapted);
+        }
+        if (!updated && resume) {
+            if (!source || !identity)
+                updated = sbw_fail(error, "UPDATE_HEALTH_FAILED",
+                                   "The previous connected configuration is unavailable.");
+            else {
+                updated = connection_activate(controller, source, identity, false, error);
+                if (!updated) {
+                    AcquireSRWLockExclusive(&controller->state_lock);
+                    sb_windows_recovery_request(&controller->recovery, true, GetTickCount64());
+                    ReleaseSRWLockExclusive(&controller->state_lock);
+                }
+            }
+        }
+        if (!updated)
+            updated = sbw_updater_health_record(controller->updater, rollback, error);
+        if (!updated) {
+            result = sbj_object();
+            sbj_set_bool(result, "healthy", true);
+            sbj_set_str(result, "version", SB_EASY_VERSION);
+        }
+    } else
+        sbw_fail(error, "INVALID_REQUEST", "Invalid update operation or parameters.");
+    if (!updated && !result)
+        result = sbw_updater_status(controller->updater);
+    return result;
+}
+/* enrollment.apply: redeem a registration URI and persist the identity; runs under mutation_lock.
+ */
+static sbj *enrollment_apply_handle(sbw_controller *controller, const sbj *params,
+                                    sbw_error *error) {
+    sbj *result = NULL, *new_identity = NULL;
+    sbw_enrollment_target target = {0};
+    const sbj *uri = sbj_get(params, "uri");
+    if (sbj_obj_len(params) != 1 || !sbw_json_string(uri, 16384, false)) {
+        sbw_fail(error, "INVALID_REQUEST", "Enrollment expects one registration URI.");
+        goto done;
+    }
+    if (sbw_identity_is_independent(controller->identity)) {
+        sbw_fail(error, "INDEPENDENT_MODE", "Switch to managed mode before enrolling a device.");
+        goto done;
+    }
+    if (controller->identity) {
+        sbw_fail(error, "ALREADY_ENROLLED",
+                 "Forget the stopped device before enrolling another device.");
+        goto done;
+    }
+    if (sbw_parse_enrollment_uri(uri->v.str.ptr, &target, error) != 0 ||
+        controller->remote->enroll(controller->remote->context, &target, controller->cancel,
+                                   &new_identity, error) != 0)
+        goto done;
+    if (!identity_valid(new_identity)) {
+        sbw_fail(error, "INVALID_RESPONSE", "The server returned invalid device information.");
+        goto done;
+    }
+    sbj_del(new_identity, "windows_gpt_use_default");
+    sbj_del(new_identity, "windows_gpt_outbound");
+    sbj_del(new_identity, "windows_routing");
+    sbj_del(new_identity, "local_subscriptions");
+    sbj_del(new_identity, "windows_local_groups");
+    /* A redeemed single-use identity must be saved even during shutdown. */
+    if (save_state(controller, new_identity, NULL, NULL, error) != 0)
+        goto done;
+    AcquireSRWLockExclusive(&controller->state_lock);
+    controller->identity = new_identity;
+    new_identity = NULL;
+    sbj_free(controller->candidate);
+    controller->candidate = NULL;
+    sbj_free(controller->last_good);
+    controller->last_good = NULL;
+    memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
+    free(controller->checked_etag);
+    controller->checked_etag = NULL;
+    controller->checked_valid = false;
+    if (controller->core)
+        memset(&controller->core_error, 0, sizeof controller->core_error);
+    sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_ENROLL);
+    result = enrollment_status(controller);
+    ReleaseSRWLockExclusive(&controller->state_lock);
+done:
+    sbj_free(new_identity);
+    sbw_enrollment_target_free(&target);
+    return result;
+}
+/* enrollment.forget: clear the stopped device identity; runs under mutation_lock. */
+static sbj *enrollment_forget_handle(sbw_controller *controller, sbw_error *error) {
+    sbj *result = NULL;
+    if (controller->runtime.phase != SB_WINDOWS_STOPPED) {
+        sbw_fail(error, "INVALID_STATE", "Only a stopped enrolled device can be forgotten.");
+        goto done;
+    }
+    if (sbw_identity_is_independent(controller->identity)) {
+        sbw_fail(error, "INDEPENDENT_MODE", "Independent mode has no device enrollment to forget.");
+        goto done;
+    }
+    if (controller->independent_archive) {
+        sbj *saved = persisted_state(controller, NULL, NULL, NULL);
+        sbj_set_null(saved, "managed_archive");
+        sbj_set(saved, "command_receipts", sbj_array());
+        int stored = controller->store->save(controller->store->context, saved, error);
+        sbj_free(saved);
+        if (stored != 0)
+            goto done;
+    } else if (controller->store->clear(controller->store->context, error) != 0)
+        goto done;
+    capture_upload_join(controller);
+    sbw_capture_free(controller->capture);
+    controller->capture = NULL;
+    AcquireSRWLockExclusive(&controller->state_lock);
+    sbj_free(controller->managed_archive);
+    controller->managed_archive = NULL;
+    sbj_free(controller->identity);
+    controller->identity = NULL;
+    sbj_free(controller->candidate);
+    controller->candidate = NULL;
+    sbj_free(controller->last_good);
+    controller->last_good = NULL;
+    memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
+    free(controller->checked_etag);
+    controller->checked_etag = NULL;
+    controller->checked_valid = false;
+    if (controller->core)
+        memset(&controller->core_error, 0, sizeof controller->core_error);
+    sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_FORGET);
+    sb_windows_recovery_request(&controller->recovery, false, GetTickCount64());
+    sbj_free(controller->command_receipts);
+    controller->command_receipts = sbj_array();
+    result = enrollment_status(controller);
+    ReleaseSRWLockExclusive(&controller->state_lock);
+done:
+    return result;
+}
 sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, const sbj *params,
                              bool authorized, sbw_error *error) {
     if (!controller || !method) {
@@ -2687,70 +2861,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         goto done;
     observe_core(controller, false);
     if (!strncmp(method, "updates.", 8)) {
-        int updated = -1;
-        if (!strcmp(method, "updates.check") && sbj_obj_len(params) == 1 &&
-            sbw_json_string(sbj_get(params, "manifest_url"), 4096, false))
-            updated = sbw_updater_check(controller->updater,
-                                        sbj_get_str(params, "manifest_url", ""), error);
-        else if ((!strcmp(method, "updates.download") || !strcmp(method, "updates.install")) &&
-                 sbj_obj_len(params) == 1 &&
-                 sbw_json_string(sbj_get(params, "release_id"), 64, false)) {
-            updated = !strcmp(method, "updates.download")
-                          ? sbw_updater_download(controller->updater,
-                                                 sbj_get_str(params, "release_id", ""), error)
-                          : sbw_updater_install(controller->updater,
-                                                sbj_get_str(params, "release_id", ""),
-                                                controller->runtime.core_running, error);
-        } else if (!strcmp(method, "updates.cancel") && !sbj_obj_len(params))
-            updated = sbw_updater_cancel(controller->updater, error);
-        else if (!strcmp(method, "updates.recover") && !sbj_obj_len(params))
-            updated = sbw_updater_recover(controller->updater, error);
-        else if (!strcmp(method, "updates.health") && sbj_obj_len(params) == 2 &&
-                 sbj_is_bool(sbj_get(params, "rollback")) &&
-                 sbw_json_string(sbj_get(params, "nonce"), 64, false)) {
-            bool rollback = sbj_get_bool(params, "rollback", false), resume = false;
-            updated = sbw_updater_health_parameters(
-                controller->updater, sbj_get_str(params, "nonce", ""), rollback, &resume, error);
-            if (!updated)
-                updated = sbw_core_version_check(controller->core, SB_EASY_CORE_VERSION,
-                                                 controller->cancel, error);
-            const sbj *source =
-                controller->last_good ? controller->last_good : controller->candidate;
-            const sbj *identity =
-                source == controller->last_good ? sbj_get(source, "local_identity") : NULL;
-            if (!identity)
-                identity = controller->identity;
-            if (!updated && source) {
-                sbw_runtime_config adapted = {0};
-                updated = prepare_with_identity(identity, source, &adapted, error);
-                if (!updated)
-                    updated = check_config(controller, &adapted, error);
-                sbw_runtime_config_free(&adapted);
-            }
-            if (!updated && resume) {
-                if (!source || !identity)
-                    updated = sbw_fail(error, "UPDATE_HEALTH_FAILED",
-                                       "The previous connected configuration is unavailable.");
-                else {
-                    updated = connection_activate(controller, source, identity, false, error);
-                    if (!updated) {
-                        AcquireSRWLockExclusive(&controller->state_lock);
-                        sb_windows_recovery_request(&controller->recovery, true, GetTickCount64());
-                        ReleaseSRWLockExclusive(&controller->state_lock);
-                    }
-                }
-            }
-            if (!updated)
-                updated = sbw_updater_health_record(controller->updater, rollback, error);
-            if (!updated) {
-                result = sbj_object();
-                sbj_set_bool(result, "healthy", true);
-                sbj_set_str(result, "version", SB_EASY_VERSION);
-            }
-        } else
-            sbw_fail(error, "INVALID_REQUEST", "Invalid update operation or parameters.");
-        if (!updated && !result)
-            result = sbw_updater_status(controller->updater);
+        result = updates_handle(controller, method, params, error);
     } else if (!strncmp(method, "preferences.", 12)) {
         result = preferences_dispatch(controller, method, params, error);
     } else if (sb_streq(method, "mode.set")) {
@@ -2894,97 +3005,9 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
                sb_streq(method, "routing.gpt_node")) {
         result = routing_gpt_handle(controller, method, params, error);
     } else if (is_apply) {
-        const sbj *uri = sbj_get(params, "uri");
-        if (sbj_obj_len(params) != 1 || !sbw_json_string(uri, 16384, false)) {
-            sbw_fail(error, "INVALID_REQUEST", "Enrollment expects one registration URI.");
-            goto done;
-        }
-        if (sbw_identity_is_independent(controller->identity)) {
-            sbw_fail(error, "INDEPENDENT_MODE",
-                     "Switch to managed mode before enrolling a device.");
-            goto done;
-        }
-        if (controller->identity) {
-            sbw_fail(error, "ALREADY_ENROLLED",
-                     "Forget the stopped device before enrolling another device.");
-            goto done;
-        }
-        if (sbw_parse_enrollment_uri(uri->v.str.ptr, &target, error) != 0 ||
-            controller->remote->enroll(controller->remote->context, &target, controller->cancel,
-                                       &new_identity, error) != 0)
-            goto done;
-        if (!identity_valid(new_identity)) {
-            sbw_fail(error, "INVALID_RESPONSE", "The server returned invalid device information.");
-            goto done;
-        }
-        sbj_del(new_identity, "windows_gpt_use_default");
-        sbj_del(new_identity, "windows_gpt_outbound");
-        sbj_del(new_identity, "windows_routing");
-        sbj_del(new_identity, "local_subscriptions");
-        sbj_del(new_identity, "windows_local_groups");
-        /* A redeemed single-use identity must be saved even during shutdown. */
-        if (save_state(controller, new_identity, NULL, NULL, error) != 0)
-            goto done;
-        AcquireSRWLockExclusive(&controller->state_lock);
-        controller->identity = new_identity;
-        new_identity = NULL;
-        sbj_free(controller->candidate);
-        controller->candidate = NULL;
-        sbj_free(controller->last_good);
-        controller->last_good = NULL;
-        memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
-        free(controller->checked_etag);
-        controller->checked_etag = NULL;
-        controller->checked_valid = false;
-        if (controller->core)
-            memset(&controller->core_error, 0, sizeof controller->core_error);
-        sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_ENROLL);
-        result = enrollment_status(controller);
-        ReleaseSRWLockExclusive(&controller->state_lock);
+        result = enrollment_apply_handle(controller, params, error);
     } else if (sb_streq(method, "enrollment.forget")) {
-        if (controller->runtime.phase != SB_WINDOWS_STOPPED) {
-            sbw_fail(error, "INVALID_STATE", "Only a stopped enrolled device can be forgotten.");
-            goto done;
-        }
-        if (sbw_identity_is_independent(controller->identity)) {
-            sbw_fail(error, "INDEPENDENT_MODE",
-                     "Independent mode has no device enrollment to forget.");
-            goto done;
-        }
-        if (controller->independent_archive) {
-            sbj *saved = persisted_state(controller, NULL, NULL, NULL);
-            sbj_set_null(saved, "managed_archive");
-            sbj_set(saved, "command_receipts", sbj_array());
-            int stored = controller->store->save(controller->store->context, saved, error);
-            sbj_free(saved);
-            if (stored != 0)
-                goto done;
-        } else if (controller->store->clear(controller->store->context, error) != 0)
-            goto done;
-        capture_upload_join(controller);
-        sbw_capture_free(controller->capture);
-        controller->capture = NULL;
-        AcquireSRWLockExclusive(&controller->state_lock);
-        sbj_free(controller->managed_archive);
-        controller->managed_archive = NULL;
-        sbj_free(controller->identity);
-        controller->identity = NULL;
-        sbj_free(controller->candidate);
-        controller->candidate = NULL;
-        sbj_free(controller->last_good);
-        controller->last_good = NULL;
-        memset(&controller->runtime_error, 0, sizeof controller->runtime_error);
-        free(controller->checked_etag);
-        controller->checked_etag = NULL;
-        controller->checked_valid = false;
-        if (controller->core)
-            memset(&controller->core_error, 0, sizeof controller->core_error);
-        sb_windows_runtime_apply(&controller->runtime, SB_WINDOWS_FORGET);
-        sb_windows_recovery_request(&controller->recovery, false, GetTickCount64());
-        sbj_free(controller->command_receipts);
-        controller->command_receipts = sbj_array();
-        result = enrollment_status(controller);
-        ReleaseSRWLockExclusive(&controller->state_lock);
+        result = enrollment_forget_handle(controller, error);
     } else if (sb_streq(method, "config.validate")) {
         if (!controller->candidate) {
             sbw_fail(error, "NO_CANDIDATE",

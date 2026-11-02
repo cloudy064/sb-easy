@@ -462,21 +462,38 @@ bool sbw_is_mutating_method(const char *method) {
     if (sb_streq(method, "httpdebug.start") || sb_streq(method, "httpdebug.attach") ||
         sb_streq(method, "httpdebug.stop"))
         return true;
-    return sb_streq(method, "mode.set") || sb_streq(method, "management.settings.set") ||
-           sb_streq(method, "routing.group_save") || sb_streq(method, "routing.group_remove") ||
-           sb_streq(method, "routing.probe") || sb_streq(method, "routing.delay") ||
-           sb_streq(method, "extensions.install") || sb_streq(method, "extensions.change") ||
-           sb_streq(method, "extensions.catalog_update") ||
-           sb_streq(method, "extensions.rollback") ||
-           (sb_streq(method, "subscriptions.fetch") || sb_streq(method, "subscriptions.save") ||
-            sb_streq(method, "subscriptions.remove") || sb_streq(method, "subscriptions.import") ||
-            sb_streq(method, "subscriptions.refresh")) ||
-           sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") ||
-           sb_streq(method, "routing.gpt_server") || sb_streq(method, "routing.gpt_node") ||
-           sb_streq(method, "routing.set") || sb_streq(method, "enrollment.apply") ||
-           sb_streq(method, "enrollment.forget") || sb_streq(method, "config.refresh") ||
-           sb_streq(method, "config.validate") || sb_streq(method, "connection.start") ||
-           sb_streq(method, "connection.stop");
+    static const char *const mutating[] = {
+        "mode.set",
+        "management.settings.set",
+        "routing.group_save",
+        "routing.group_remove",
+        "routing.probe",
+        "routing.delay",
+        "extensions.install",
+        "extensions.change",
+        "extensions.catalog_update",
+        "extensions.rollback",
+        "subscriptions.fetch",
+        "subscriptions.save",
+        "subscriptions.remove",
+        "subscriptions.import",
+        "subscriptions.refresh",
+        "traffic.clear",
+        "routing.gpt_default",
+        "routing.gpt_server",
+        "routing.gpt_node",
+        "routing.set",
+        "enrollment.apply",
+        "enrollment.forget",
+        "config.refresh",
+        "config.validate",
+        "connection.start",
+        "connection.stop",
+    };
+    for (size_t i = 0; i < sizeof mutating / sizeof *mutating; ++i)
+        if (sb_streq(method, mutating[i]))
+            return true;
+    return false;
 }
 static bool ready(sbw_controller *controller, sbw_error *error) {
     if (!controller->startup_error.code[0])

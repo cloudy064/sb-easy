@@ -1,12 +1,9 @@
 #include "sbeasy/agent_config.hpp"
 
+#include <algorithm>
 #include <cstddef>
-#include <filesystem>
-#include <fstream>
 #include <stdexcept>
 #include <string>
-
-#include "sbeasy/atomic_file.hpp"
 
 namespace sbeasy {
 namespace {
@@ -73,12 +70,55 @@ outbound_overrides_from_json(const json& value) {
     return overrides;
 }
 
+[[nodiscard]] std::size_t inject_lan_compatibility(json& config) {
+    auto& route = config["route"];
+    if (route.is_null()) {
+        route = json::object();
+    }
+    if (!route.is_object()) {
+        throw std::invalid_argument("LAN compatibility requires a route object");
+    }
+    auto& rules = route["rules"];
+    if (rules.is_null()) {
+        rules = json::array();
+    }
+    if (!rules.is_array()) {
+        throw std::invalid_argument(
+            "LAN compatibility requires a route rules array");
+    }
+    const bool present = std::ranges::any_of(rules, [](const json& rule) {
+        if (!rule.is_object() || rule.value("outbound", std::string{}) !=
+                                     "direct") {
+            return false;
+        }
+        const auto ranges = rule.find("ip_cidr");
+        return ranges != rule.end() && ranges->is_array() &&
+               std::ranges::any_of(*ranges, [](const json& range) {
+                   return range.is_string() &&
+                          (range == "224.0.0.0/4" || range == "ff00::/8");
+               });
+    });
+    if (present) {
+        return 0U;
+    }
+    rules.insert(rules.begin(),
+                 json{{"ip_cidr",
+                       json::array({"224.0.0.0/4", "ff00::/8"})},
+                      {"outbound", "direct"}});
+    return 1U;
+}
+
 } // namespace
 
 std::string prepare_agent_config(std::string_view body,
                                  const AgentConfigTransformOptions& options) {
     if (!options.local_proxy_egress) {
-        return std::string{body};
+        if (!options.lan_compatibility) {
+            return std::string{body};
+        }
+        auto config = json::parse(body);
+        return inject_lan_compatibility(config) == 0U ? std::string{body}
+                                                       : config.dump(2);
     }
 
     auto config = json::parse(body);
@@ -91,7 +131,9 @@ std::string prepare_agent_config(std::string_view body,
         }
     }
 
-    std::size_t changes = 0U;
+    std::size_t changes = options.lan_compatibility
+                              ? inject_lan_compatibility(config)
+                              : 0U;
     std::map<std::string, std::string> renamed_outbounds;
     const auto outbounds = config.find("outbounds");
     if (outbounds != config.end() && outbounds->is_array()) {
@@ -264,6 +306,7 @@ agent_config_transform_options_to_json(const AgentConfigTransformOptions& option
     }
     return {
         {"local_proxy_egress", options.local_proxy_egress},
+        {"lan_compatibility", options.lan_compatibility},
         {"default_proxy_outbound", options.default_proxy_outbound.has_value()
                                        ? json(*options.default_proxy_outbound)
                                        : json(nullptr)},
@@ -284,6 +327,13 @@ agent_config_transform_options_from_json(const nlohmann::json& value,
             throw std::invalid_argument("local_proxy_egress must be a boolean");
         }
         options.local_proxy_egress = found->get<bool>();
+    }
+    if (const auto found = value.find("lan_compatibility");
+        found != value.end()) {
+        if (!found->is_boolean()) {
+            throw std::invalid_argument("lan_compatibility must be a boolean");
+        }
+        options.lan_compatibility = found->get<bool>();
     }
     if (const auto found = value.find("default_proxy_outbound"); found != value.end()) {
         if (found->is_null()) {
@@ -308,30 +358,6 @@ agent_config_transform_options_from_json(const nlohmann::json& value,
         options.outbound_overrides = outbound_overrides_from_json(*found);
     }
     return options;
-}
-
-AgentConfigTransformOptions
-load_agent_config_transform_options(const std::filesystem::path& path,
-                                    const AgentConfigTransformOptions& defaults) {
-    std::ifstream input{path, std::ios::binary};
-    if (!input) {
-        if (!std::filesystem::exists(path)) {
-            return defaults;
-        }
-        throw std::runtime_error("cannot read agent settings: " + path.string());
-    }
-    try {
-        return agent_config_transform_options_from_json(json::parse(input), defaults);
-    } catch (const std::exception& error) {
-        throw std::invalid_argument("invalid agent settings " + path.string() + ": " +
-                                    error.what());
-    }
-}
-
-void save_agent_config_transform_options(const std::filesystem::path& path,
-                                         const AgentConfigTransformOptions& options) {
-    atomic_replace_file(path,
-                        agent_config_transform_options_to_json(options).dump(2) + '\n');
 }
 
 } // namespace sbeasy

@@ -1,0 +1,12 @@
+Microsoft Edge WebView2 Runtime
+===============================
+
+The sb-easy setup contains Microsoft's Evergreen bootstrapper and invokes it
+only when the WebView2 Runtime is absent. The Runtime remains a separately
+installed Microsoft component and is not removed with sb-easy.
+
+WebView2 distribution documentation:
+https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+
+Microsoft Edge WebView2 terms:
+https://www.microsoft.com/software-download/webview2

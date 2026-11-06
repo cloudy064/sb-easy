@@ -1,6 +1,5 @@
 #pragma once
 
-#include <filesystem>
 #include <map>
 #include <optional>
 #include <string>
@@ -12,6 +11,7 @@ namespace sbeasy {
 
 struct AgentConfigTransformOptions {
     bool local_proxy_egress{true};
+    bool lan_compatibility{false};
     std::map<std::string, std::string> outbound_server_overrides;
     std::map<std::string, nlohmann::json> outbound_overrides;
     std::optional<std::string> default_proxy_outbound;
@@ -34,15 +34,5 @@ agent_config_transform_options_to_json(const AgentConfigTransformOptions& option
 /// supported value.
 [[nodiscard]] AgentConfigTransformOptions agent_config_transform_options_from_json(
     const nlohmann::json& value, const AgentConfigTransformOptions& defaults = {});
-
-/// Loads persisted settings, returning the supplied defaults when the file does
-/// not exist.
-[[nodiscard]] AgentConfigTransformOptions
-load_agent_config_transform_options(const std::filesystem::path& path,
-                                    const AgentConfigTransformOptions& defaults = {});
-
-/// Persists a complete settings object using an atomic replacement.
-void save_agent_config_transform_options(const std::filesystem::path& path,
-                                         const AgentConfigTransformOptions& options);
 
 } // namespace sbeasy

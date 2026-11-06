@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="sb-easy"
+           Manufacturer="sb-easy"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="{B667CE8F-AB0B-4F59-B4FA-1B5B4DC95CB5}"
+           Language="1033"
+           Scope="perMachine"
+           InstallerVersion="500">
+    <SummaryInformation Description="sb-easy Windows client"
+                        Manufacturer="sb-easy" />
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of sb-easy is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPPRODUCTICON" Value="SbEasyIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/cloudy064/sb-easy" />
+    <Property Id="INSTALL_STARTUP_SHORTCUT" Value="0" Secure="yes" />
+    <Property Id="REMOVE_USER_DATA" Value="0" Secure="yes" />
+    <Property Id="SB_EASY_DATA_DIR">
+      <RegistrySearch Id="FindRememberedDataDirectory"
+                      Root="HKLM"
+                      Key="Software\sb-easy"
+                      Name="DataDirectory"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+
+    <Icon Id="SbEasyIcon" SourceFile="$(var.RuntimeDir)\sb-easy.exe" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="sb-easy">
+        <Component Id="DesktopApplication" Guid="{9114386A-7F7E-48FB-BEBA-C57D53A20BCE}" Bitness="always64">
+          <File Id="UiExecutable" Source="$(var.RuntimeDir)\sb-easy.exe" KeyPath="yes">
+            <Shortcut Id="StartMenuShortcut"
+                      Directory="ApplicationProgramsFolder"
+                      Name="sb-easy"
+                      Description="Open sb-easy"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Advertise="yes" />
+          </File>
+          <RegistryValue Root="HKLM"
+                         Key="Software\Classes\sbeasy"
+                         Value="URL:sb-easy Enrollment Protocol"
+                         Type="string" />
+          <RegistryValue Root="HKLM"
+                         Key="Software\Classes\sbeasy"
+                         Name="URL Protocol"
+                         Value=""
+                         Type="string" />
+          <RegistryValue Root="HKLM"
+                         Key="Software\Classes\sbeasy\DefaultIcon"
+                         Value="[#UiExecutable],0"
+                         Type="string" />
+          <RegistryValue Root="HKLM"
+                         Key="Software\Classes\sbeasy\shell\open\command"
+                         Value="&quot;[#UiExecutable]&quot; &quot;%1&quot;"
+                         Type="string" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder"
+                        Directory="ApplicationProgramsFolder"
+                        On="uninstall" />
+        </Component>
+
+        <Component Id="ServiceApplication" Guid="{42B4DAFB-A5BC-4B07-8C8F-DE45BAC54608}" Bitness="always64">
+          <File Id="ServiceExecutable"
+                Source="$(var.RuntimeDir)\sb-easy-service.exe"
+                KeyPath="yes" />
+          <ServiceInstall Id="SbEasyServiceInstall"
+                          Name="sb-easy"
+                          DisplayName="sb-easy VPN Service"
+                          Description="Manages sb-easy enrollment, policy sync, and the embedded tunnel core."
+                          Type="ownProcess"
+                          Start="auto"
+                          ErrorControl="normal"
+                          Account="LocalSystem" />
+          <ServiceControl Id="SbEasyServiceControl"
+                          Name="sb-easy"
+                          Start="install"
+                          Stop="both"
+                          Remove="uninstall"
+                          Wait="yes" />
+        </Component>
+
+        <Component Id="RuntimePayload" Guid="{A91F3B89-60C1-4937-AE1C-F49E077BE8D6}" Bitness="always64">
+          <File Id="RuntimeMetadata" Source="$(var.RuntimeDir)\windows-runtime.json" KeyPath="yes" />
+        </Component>
+
+        <Directory Id="UiDirectory" Name="ui">
+          <Component Id="UiIndex" Guid="{5C45553B-CED6-44D2-AA37-F1B9C6FC55C3}" Bitness="always64">
+            <File Id="UiIndexFile" Source="$(var.RuntimeDir)\ui\index.html" KeyPath="yes" />
+          </Component>
+          <Directory Id="UiAssetsDirectory" Name="assets">
+            <Component Id="UiAssets" Guid="{F10D84B0-79D2-432B-A531-7DF633608500}" Bitness="always64">
+              <File Id="UiJavascript" Source="$(var.RuntimeDir)\ui\assets\app.js" KeyPath="yes" />
+              <File Id="UiStylesheet" Source="$(var.RuntimeDir)\ui\assets\app.css" />
+            </Component>
+          </Directory>
+        </Directory>
+
+        <Directory Id="LicensesDirectory" Name="licenses">
+          <Component Id="ThirdPartyLicenseAssets" Guid="{E4ED7E72-EF35-48C1-9A25-1AC5D50A4482}" Bitness="always64">
+            <File Id="ThirdPartyNotices" Source="$(var.RuntimeDir)\licenses\THIRD-PARTY-NOTICES.txt" KeyPath="yes" />
+            <File Id="SingBoxLicense" Source="$(var.RuntimeDir)\licenses\sing-box-LICENSE.txt" />
+            <File Id="Gpl3License" Source="$(var.RuntimeDir)\licenses\GPL-3.0.txt" />
+            <File Id="WintunLicense" Source="$(var.RuntimeDir)\licenses\Wintun-LICENSE.txt" />
+            <File Id="WebViewSdkLicense" Source="$(var.RuntimeDir)\licenses\WebView2-SDK-LICENSE.txt" />
+            <File Id="WebViewSdkNotice" Source="$(var.RuntimeDir)\licenses\WebView2-SDK-NOTICE.txt" />
+            <File Id="WebViewRuntimeNotice" Source="$(var.RuntimeDir)\licenses\WebView2-RUNTIME-NOTICE.txt" />
+            <File Id="SqliteNotice" Source="$(var.RuntimeDir)\licenses\SQLite-PUBLIC-DOMAIN.txt" />
+            <File Id="NlohmannLicense" Source="$(var.RuntimeDir)\licenses\nlohmann-json-LICENSE.txt" />
+            <File Id="VueLicense" Source="$(var.RuntimeDir)\licenses\Vue-LICENSE.txt" />
+            <File Id="JsQrLicense" Source="$(var.RuntimeDir)\licenses\jsQR-LICENSE.txt" />
+            <File Id="WixLicense" Source="$(var.RuntimeDir)\licenses\WiX-MS-RL.txt" />
+          </Component>
+        </Directory>
+
+        <Component Id="InstallerState" Guid="{3FD98C48-0F7E-40E3-AD6D-2DFE62CFC4CE}" Bitness="always64">
+          <RegistryValue Root="HKLM"
+                         Key="Software\sb-easy"
+                         Name="DataDirectory"
+                         Value="[CommonAppDataFolder]sb-easy"
+                         Type="string"
+                         KeyPath="yes" />
+          <util:RemoveFolderEx Id="RemoveSbEasyData"
+                               Property="SB_EASY_DATA_DIR"
+                               On="uninstall"
+                               Condition="REMOVE_USER_DATA = 1" />
+        </Component>
+
+        <Component Id="StartupShortcut"
+                   Guid="{CEF7E356-1754-4814-B067-369840509A90}"
+                   Bitness="always64"
+                   Condition="INSTALL_STARTUP_SHORTCUT = 1">
+          <Shortcut Id="LogonShortcut"
+                    Directory="StartupFolder"
+                    Name="sb-easy"
+                    Description="Start sb-easy when signing in"
+                    Target="[INSTALLFOLDER]sb-easy.exe"
+                    WorkingDirectory="INSTALLFOLDER" />
+          <RegistryValue Root="HKCU"
+                         Key="Software\sb-easy"
+                         Name="StartupShortcut"
+                         Value="1"
+                         Type="integer"
+                         KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="sb-easy" />
+    </StandardDirectory>
+    <StandardDirectory Id="StartupFolder" />
+
+    <CustomAction Id="ConfigureSbEasyService"
+                  FileRef="ServiceExecutable"
+                  ExeCommand="--configure"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="ConfigureSbEasyService"
+              After="InstallServices"
+              Condition="NOT (REMOVE = &quot;ALL&quot;)" />
+    </InstallExecuteSequence>
+
+    <Feature Id="MainFeature" Title="sb-easy" Level="1">
+      <ComponentRef Id="DesktopApplication" />
+      <ComponentRef Id="ServiceApplication" />
+      <ComponentRef Id="RuntimePayload" />
+      <ComponentRef Id="UiIndex" />
+      <ComponentRef Id="UiAssets" />
+      <ComponentRef Id="ThirdPartyLicenseAssets" />
+      <ComponentRef Id="InstallerState" />
+      <ComponentRef Id="StartupShortcut" />
+    </Feature>
+  </Package>
+</Wix>

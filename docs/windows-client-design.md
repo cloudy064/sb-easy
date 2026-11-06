@@ -6,9 +6,27 @@ Decision date: 2026-08-04
 
 Initial target: Windows 10 22H2 and Windows 11, x64
 
+Implementation checkpoint (2026-11-06): **W4 installer validation in progress**.
+W1-W3 implementation and W4 packaging are present. The local MSVC Release build passes
+with `/W4 /WX`, and all four CTest suites pass (portable runtime, setup launcher,
+Windows platform, and prepared sing-box integration). Burn startup/layout and
+MSI administrative extraction also pass without installing the product.
+
+The installer fixes include correct multi-string environment copying in the
+launcher, the `SERVICE_START` right required to configure service restart
+actions, and a complete ZIP containing both setup executables. The launcher
+regression test rejects the old binary's unbounded memory growth. IPC tests use
+their own named pipes so an already-running installation cannot affect results.
+
+W4/W5 exit conditions remain open: signed builds, clean Windows 10/11 VM install,
+repair, upgrade, uninstall/data cleanup, and network/suspend-resume acceptance.
+Include the Windows Installed Apps maintenance entry point in that matrix: it
+may invoke the cached Burn executable directly rather than the setup launcher.
+The current ZIP is an unsigned development build, not a validated release.
+
 ## 1. Decision
 
-The Windows client will use two processes delivered by one installer:
+The Windows client delivers two first-party executables in one installer:
 
 1. `sb-easy-service.exe`: an auto-start Windows Service that owns enrollment,
    configuration sync, sing-box, Wintun, runtime state, logs, telemetry, and
@@ -16,6 +34,11 @@ The Windows client will use two processes delivered by one installer:
 2. `sb-easy.exe`: an unelevated desktop and system-tray application that owns
    presentation only and communicates with the service over an ACL-protected
    local named pipe.
+
+The pinned upstream networking runtime is embedded in the Service PE. Windows
+cannot start a PE executable or load Wintun directly from resource memory, so
+the Service verifies and atomically materializes both files under its protected
+`%ProgramData%` state, then supervises the private sing-box child process.
 
 Although there are two processes, the product remains one **sb-easy device**.
 The control plane must not introduce a separate Windows authorization model or
@@ -37,7 +60,7 @@ a separate Windows device collection.
 │  enrollment · sync · rollback · telemetry · local database   │
 │             │                    │                           │
 │             ▼                    └──────► sb-easy control plane│
-│  sing-box.exe + wintun.dll                                   │
+│  PE resources ──verify/extract──► protected sing-box + Wintun│
 │  local Clash API on 127.0.0.1 with a random secret           │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -222,8 +245,15 @@ machine-wide networking. Hardening requirements are:
 ### 5.2 `sing-box.exe`
 
 The initial release pins sing-box 1.13.12, matching the server and Android core.
-The official Windows x64 binary and official `wintun.dll` are bundled and
-checksum-pinned.
+The official Windows x64 binary and official `wintun.dll` are checksum-pinned
+and embedded as `RCDATA` resources in `sb-easy-service.exe` by MSVC's resource
+compiler. They are not separate MSI components and do not appear in the
+Program Files installation directory.
+
+At Service startup, the embedded bytes are checked against pinned binary
+SHA-256 digests and atomically materialized under
+`%ProgramData%\sb-easy\runtime`, whose DACL admits only LocalSystem and
+administrators. Existing files are reused only after the same digest check.
 
 The child process is placed in a Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The service redirects stdout/stderr to
@@ -577,6 +607,10 @@ Windows build prerequisites:
 - a repository-pinned WiX Toolset version;
 - WebView2 SDK restored from a pinned package version.
 
+The Windows build does not use GCC, MinGW, cgo, or WSL. sing-box is consumed as
+the checksum-pinned upstream Windows artifact because its Go implementation
+cannot be compiled into an MSVC C++ library.
+
 Third-party artifacts must be version- and checksum-pinned. The build must not
 download an unversioned “latest” sing-box or Wintun binary.
 
@@ -609,7 +643,7 @@ against test doubles without POSIX headers.
 - implement Service Control Manager integration and `--console` mode;
 - implement DPAPI storage, atomic config files, WinHTTP, process supervision,
   Job Objects, logs, and the named-pipe server;
-- bundle and start sing-box/Wintun;
+- embed, verify, materialize, and start sing-box/Wintun;
 - support enrollment, sync, start/stop, rollback, status, and telemetry.
 
 Exit condition: a fresh Windows VM can enroll and maintain a working TUN without
@@ -653,6 +687,9 @@ The first Windows release is complete only when all of the following are true:
 
 - one installer produces one visible sb-easy application and one background
   service;
+- the MSI installs no separate `sing-box.exe` or `wintun.dll` component; both
+  are embedded in the Service PE and materialized only in protected runtime
+  state;
 - installation is the only normal workflow requiring UAC;
 - Windows enrolls through the same Devices flow as Android and native agents;
 - closing the UI does not stop an active connection;

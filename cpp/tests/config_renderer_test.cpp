@@ -91,7 +91,7 @@ SB_EASY_TEST("URLTest interval has a compatible idle timeout") {
                           "URLTest interval must not exceed its idle timeout");
 }
 
-SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
+SB_EASY_TEST("interactive clients with proxy selection expose a selector group") {
     sbeasy::RenderRequest request;
     request.profile = {
         {"dns",
@@ -107,8 +107,11 @@ SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
     };
     request.nodes = {shadowsocks("hk"), shadowsocks("us")};
     request.host_context = {
-        {"id", "phone"},
-        {"capabilities", {{"platform", "android"}}},
+        {"id", "windows-device"},
+        {"capabilities",
+         {{"platform", "windows"},
+          {"interactive_client", true},
+          {"supports_proxy_selection", true}}},
     };
 
     const sbeasy::ConfigRenderer renderer;
@@ -119,21 +122,21 @@ SB_EASY_TEST("Android managed rendering exposes a selectable proxy group") {
                               selector["outbounds"] ==
                                   nlohmann::json::array(
                                       {"auto", "hk", "us", "direct"}),
-                          "Android configs should include auto and manual selection");
+                          "interactive configs should include auto and manual selection");
     sbeasy::test::require(config["route"]["final"] == "Proxy",
-                          "Android traffic should enter the selector group");
+                          "interactive traffic should enter the selector group");
     sbeasy::test::require(config["dns"]["servers"][1]["detour"] == "Proxy",
-                          "secure DNS should follow the Android selector group");
+                          "secure DNS should follow the interactive selector group");
     sbeasy::test::require(
         config["route"]["rules"].size() == 4U &&
             config["route"]["rules"][2]["rule_set"] ==
                 nlohmann::json::array({"geosite-cn"}) &&
             config["route"]["rules"][3]["rule_set"] ==
                 nlohmann::json::array({"geoip-cn"}),
-        "Android managed configs should direct private and mainland traffic");
+        "interactive managed configs should direct private and mainland traffic");
 }
 
-SB_EASY_TEST("Android DNS follows a renamed selector when Proxy is a node tag") {
+SB_EASY_TEST("interactive DNS follows a renamed selector when Proxy is a node tag") {
     sbeasy::RenderRequest request;
     request.profile = {
         {"dns",
@@ -147,7 +150,12 @@ SB_EASY_TEST("Android DNS follows a renamed selector when Proxy is a node tag") 
         {"route", {{"final", "Proxy"}}},
     };
     request.nodes = {shadowsocks("Proxy")};
-    request.host_context = {{"capabilities", {{"platform", "android"}}}};
+    request.host_context = {
+        {"capabilities",
+         {{"platform", "android"},
+          {"interactive_client", true},
+          {"supports_proxy_selection", true}}},
+    };
 
     const sbeasy::ConfigRenderer renderer;
     const auto config = renderer.render(request);
@@ -155,6 +163,20 @@ SB_EASY_TEST("Android DNS follows a renamed selector when Proxy is a node tag") 
                               config["dns"]["servers"][0]["detour"] ==
                                   "Proxy group",
                           "DNS detour must target the generated selector tag");
+}
+
+SB_EASY_TEST("platform labels alone do not enable interactive rendering") {
+    sbeasy::RenderRequest request;
+    request.profile = {{"route", {{"final", "Proxy"}}}};
+    request.nodes = {shadowsocks("hk")};
+    request.host_context = {{"capabilities", {{"platform", "android"}}}};
+
+    const sbeasy::ConfigRenderer renderer;
+    const auto config = renderer.render(request);
+    sbeasy::test::require(
+        config["outbounds"].back()["tag"] == "direct" &&
+            config["route"]["final"] == "auto",
+        "server rendering must use explicit capability flags, not platform names");
 }
 
 SB_EASY_TEST("generated rules cannot reference unknown outbounds") {

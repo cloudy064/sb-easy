@@ -1,0 +1,4 @@
+#pragma once
+
+#define SB_EASY_RESOURCE_SING_BOX 301
+#define SB_EASY_RESOURCE_WINTUN 302

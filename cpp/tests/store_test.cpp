@@ -102,7 +102,7 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
     const TemporaryDatabase database;
     sbeasy::Store store{database.path(), migration_directory()};
 
-    sbeasy::test::require(store.database().applied_migration_count() == 11,
+    sbeasy::test::require(store.database().applied_migration_count() == 12,
                           "all canonical migrations should be recorded");
     const auto managed_device = store.find_profile("android-client");
     sbeasy::test::require(managed_device.has_value() &&
@@ -116,7 +116,7 @@ SB_EASY_TEST("SQLite runner applies the canonical migrations idempotently") {
                           "the shared device profile should not expose a "
                           "platform-specific name and must use mobile-safe DNS");
     store.database().migrate(migration_directory());
-    sbeasy::test::require(store.database().applied_migration_count() == 11,
+    sbeasy::test::require(store.database().applied_migration_count() == 12,
                           "re-running migrations must be idempotent");
 }
 
@@ -355,7 +355,9 @@ SB_EASY_TEST("device enrollment codes are platform-neutral, expiring, and single
          {"install_id", "store-contract"},
          {"hostname", "contract-device"},
          {"architecture", "x86_64"},
-         {"os", "Linux"}});
+         {"os", "Linux"},
+         {"interactive_client", true},
+         {"supports_proxy_selection", true}});
     sbeasy::test::require(redeemed.host_id == created.id &&
                               redeemed.agent_token == created.agent_token &&
                               redeemed.profile_id == "android-client",
@@ -366,7 +368,11 @@ SB_EASY_TEST("device enrollment codes are platform-neutral, expiring, and single
                               reloaded->capabilities.at("install_id") ==
                                   "store-contract" &&
                               reloaded->capabilities.at("hostname") ==
-                                  "contract-device",
+                                  "contract-device" &&
+                              reloaded->capabilities.at("interactive_client") ==
+                                  true &&
+                              reloaded->capabilities.at(
+                                  "supports_proxy_selection") == true,
                           "redemption should preserve device-supplied metadata");
     sbeasy::test::require_throws<sbeasy::ValidationError>(
         [&] {
@@ -374,6 +380,22 @@ SB_EASY_TEST("device enrollment codes are platform-neutral, expiring, and single
                 enrollment.code, nlohmann::json::object()));
         },
         "redeemed enrollment codes must reject replay");
+
+    sbeasy::Host legacy_android;
+    legacy_android.name = "Legacy Android";
+    legacy_android.profile_id = "android-client";
+    legacy_android.capabilities = {{"runs_singbox", true}};
+    const auto legacy_created = store.create_host(std::move(legacy_android));
+    const auto legacy_code = store.create_agent_enrollment(legacy_created.id);
+    static_cast<void>(store.redeem_agent_enrollment(
+        legacy_code.code, {{"platform", "android"}}));
+    const auto legacy_reloaded = store.find_host(legacy_created.id);
+    sbeasy::test::require(
+        legacy_reloaded.has_value() &&
+            legacy_reloaded->capabilities.at("interactive_client") == true &&
+            legacy_reloaded->capabilities.at("supports_proxy_selection") == true &&
+            legacy_reloaded->capabilities.at("embedded_wireguard") == true,
+        "legacy Android enrollment should materialize explicit capabilities");
 
     const auto expired = store.create_agent_enrollment(created.id);
     store.database().execute("UPDATE agent_enrollments SET expires_at = "

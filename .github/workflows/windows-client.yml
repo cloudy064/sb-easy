@@ -1,0 +1,117 @@
+name: Windows client
+
+on:
+  push:
+    branches: [master, "feat/**", "rewrite/**"]
+    paths:
+      - ".github/workflows/windows-client.yml"
+      - "cpp/**"
+      - "migrations/**"
+      - "scripts/build-windows-installer.ps1"
+      - "scripts/prepare-windows-runtime.ps1"
+      - "scripts/test-windows-installer.ps1"
+      - "scripts/test-windows-installer-payload.ps1"
+      - "scripts/test-windows-setup-launcher.ps1"
+      - "windows/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - ".github/workflows/windows-client.yml"
+      - "cpp/**"
+      - "migrations/**"
+      - "scripts/build-windows-installer.ps1"
+      - "scripts/prepare-windows-runtime.ps1"
+      - "scripts/test-windows-installer.ps1"
+      - "scripts/test-windows-installer-payload.ps1"
+      - "scripts/test-windows-setup-launcher.ps1"
+      - "windows/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-client-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-package:
+    name: MSVC build, tests, and unsigned installer
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: windows/ui/package-lock.json
+
+      - name: Restore Windows UI dependencies
+        working-directory: windows/ui
+        run: npm ci
+
+      - name: Audit Windows UI dependencies
+        working-directory: windows/ui
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Configure MSVC x64 build
+        run: >-
+          cmake -S cpp -B build/cpp-windows
+          -G "Visual Studio 17 2022" -A x64
+          -DSB_EASY_WINDOWS_ONLY=ON
+          -DSB_EASY_BUILD_WINDOWS_CLIENT=ON
+          -DSB_EASY_BUILD_WINDOWS_UI=ON
+          -DSB_EASY_WINDOWS_INTEGRATION_TESTS=ON
+          -DSB_EASY_BUILD_WINDOWS_INSTALLER=ON
+          -DSB_EASY_WARNINGS_AS_ERRORS=ON
+
+      - name: Build client and installer with MSVC
+        run: >-
+          cmake --build build/cpp-windows --config Release --parallel 2
+          --target sb-easy-windows-installer
+
+      - name: Build Windows test executables
+        run: >-
+          cmake --build build/cpp-windows --config Release --parallel 2
+          --target sb-easy-agent-runtime-tests sb-easy-windows-tests
+          sb-easy-windows-singbox-integration-tests
+
+      - name: Run native tests
+        run: ctest --test-dir build/cpp-windows -C Release --output-on-failure
+
+      - name: Revalidate installer tables, bundle, signatures, and checksums
+        shell: pwsh
+        run: >-
+          ./scripts/test-windows-installer.ps1
+          -ReleaseDirectory ./build/cpp-windows/windows-release
+
+      - name: Extract and validate MSI administrative image
+        shell: pwsh
+        run: >-
+          ./scripts/test-windows-installer-payload.ps1
+          -ReleaseDirectory ./build/cpp-windows/windows-release
+
+      - name: Require explicit unsigned-development marker
+        shell: pwsh
+        run: |
+          $release = Resolve-Path ./build/cpp-windows/windows-release
+          $marker = Join-Path $release 'DEVELOPMENT-UNSIGNED.txt'
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+            throw 'CI must not publish an unmarked unsigned installer.'
+          }
+          $metadata = Get-Content -Raw (Join-Path $release 'windows-release-metadata.json') |
+            ConvertFrom-Json
+          if ($metadata.signed) {
+            throw 'The untrusted CI build unexpectedly reports a signed release.'
+          }
+
+      - name: Upload unsigned validation artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-client-development-unsigned-${{ github.sha }}
+          path: build/cpp-windows/windows-release/
+          if-no-files-found: error
+          retention-days: 7

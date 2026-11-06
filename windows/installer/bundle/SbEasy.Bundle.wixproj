@@ -1,0 +1,22 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <OutputName>sb-easy-windows-setup-x64</OutputName>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.0.0</ProductVersion>
+    <MsiPath Condition="'$(MsiPath)' == ''">$(MSBuildThisFileDirectory)..\msi\bin\x64\Release\sb-easy-windows-x64.msi</MsiPath>
+    <WebViewBootstrapperPath Condition="'$(WebViewBootstrapperPath)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\windows-installer-cache\MicrosoftEdgeWebview2Setup.exe</WebViewBootstrapperPath>
+    <ThemePath>$(MSBuildThisFileDirectory)Theme.xml</ThemePath>
+    <LocalizationPath>$(MSBuildThisFileDirectory)Theme.en-us.wxl</LocalizationPath>
+    <DefineConstants>MsiPath=$(MsiPath);ProductVersion=$(ProductVersion);WebViewBootstrapperPath=$(WebViewBootstrapperPath);ThemePath=$(ThemePath);LocalizationPath=$(LocalizationPath)</DefineConstants>
+    <SuppressPdbOutput>true</SuppressPdbOutput>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+    <Content Include="Theme.xml" />
+    <Content Include="Theme.en-us.wxl" />
+  </ItemGroup>
+</Project>

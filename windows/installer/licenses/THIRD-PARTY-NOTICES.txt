@@ -1,0 +1,54 @@
+sb-easy Windows client - third-party notices
+============================================
+
+This file identifies third-party software contained in, statically linked
+into, or used to produce the Windows distribution. The corresponding license
+texts are installed in the licenses directory and published beside the setup
+artifacts.
+
+sing-box 1.13.12
+  Copyright (C) 2022 nekohasekai and contributors.
+  License: GNU General Public License v3.0 or later, plus the upstream naming
+  notice. The official Windows executable is embedded as a PE resource in
+  sb-easy-service.exe, materialized under protected service state, and supervised
+  as a private child process. The exact upstream source archive and its SHA-256
+  checksum are published beside the installer.
+  Source: https://github.com/SagerNet/sing-box/tree/v1.13.12
+
+Wintun 0.14.1 prebuilt binary
+  Copyright (C) 2018-2021 WireGuard LLC. All Rights Reserved.
+  License: Wintun Prebuilt Binaries License. sb-easy distributes the official
+  signed wintun.dll unchanged beside software that consumes its permitted API.
+  Source: https://www.wintun.net/
+
+Microsoft WebView2 SDK 1.0.4078.44 and Evergreen Runtime bootstrapper
+  Copyright (C) Microsoft Corporation.
+  The SDK loader is distributed under its package license and notices. The
+  Evergreen Runtime bootstrapper is redistributed under the Microsoft Edge
+  WebView2 Runtime distribution terms and installs the Runtime only when it is
+  absent.
+  Information: https://developer.microsoft.com/microsoft-edge/webview2/
+
+SQLite 3.50.1
+  SQLite is in the public domain. See SQLite-PUBLIC-DOMAIN.txt.
+
+nlohmann/json 3.12.0
+  Copyright (c) 2013-2025 Niels Lohmann.
+  License: MIT.
+
+Vue 3.5.38
+  Copyright (c) 2018-present Yuxi (Evan) You and contributors.
+  License: MIT.
+
+jsQR 1.4.0
+  Copyright (c) 2017 Cozmo and contributors.
+  License: Apache License 2.0.
+
+WiX Toolset 5.0.2
+  Copyright (c) .NET Foundation and contributors.
+  License: Microsoft Reciprocal License (MS-RL). The exact upstream source
+  archive and its SHA-256 checksum are published beside the installer because
+  the Burn engine is included in the setup executable.
+
+Vite 6.4.3, TypeScript 5.7.3, and vue-tsc 2.2.12 are pinned build tools; they
+are not installed as standalone programs by this distribution.

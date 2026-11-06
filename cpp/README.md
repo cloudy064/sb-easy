@@ -47,10 +47,168 @@ do not depend on framework types.
 cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cpp \
   --target sb-easy-cpp sb-easy-cpp-server sb-easy-cpp-agent \
-           sb-easy-core-tests sb-easy-http-tests sb-easy-agent-tests \
+           sb-easy-agent-runtime-tests sb-easy-core-tests \
+           sb-easy-http-tests sb-easy-agent-tests \
            sb-easy-agent-ui-tests -j
 ctest --test-dir build/cpp --output-on-failure
 ```
+
+The agent state machine is built as the platform-neutral
+`sb-easy::agent-runtime` library. It depends on injected HTTP, process, storage,
+clock, platform-metadata, core-control, and local-observability interfaces; the
+Linux executable supplies POSIX/Drogon adapters. A focused build verifies this
+boundary with in-memory doubles and does not compile any POSIX source:
+
+```sh
+cmake -S cpp -B build/cpp-portable \
+  -DSB_EASY_PORTABLE_ONLY=ON -DSB_EASY_WARNINGS_AS_ERRORS=ON
+cmake --build build/cpp-portable --target sb-easy-agent-runtime-tests
+ctest --test-dir build/cpp-portable --output-on-failure
+```
+
+## Windows Service and desktop client
+
+The W2-W4 Windows targets are a native C++20 Windows Service plus an unelevated
+Win32/WebView2 desktop application. MSVC's resource compiler embeds the pinned
+official sing-box 1.13.12 executable and Wintun DLL in the Service PE; they are
+not separate MSI components. At startup the Service verifies their binary
+SHA-256 digests, materializes them under protected `%ProgramData%` state, and
+supervises sing-box in a kill-on-close Job Object. The targets are built without the
+POSIX agent, Drogon, OpenSSL, or the management-server targets. Node.js 20 or
+newer builds the packaged Vue assets. From a Visual Studio Developer
+PowerShell:
+
+```powershell
+cmake -S cpp -B build/cpp-windows -G "NMake Makefiles" `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DSB_EASY_WINDOWS_ONLY=ON `
+  -DSB_EASY_BUILD_WINDOWS_CLIENT=ON `
+  -DSB_EASY_BUILD_WINDOWS_UI=ON `
+  -DSB_EASY_WARNINGS_AS_ERRORS=ON
+cmake --build build/cpp-windows --target `
+  sb-easy-service sb-easy sb-easy-setup sb-easy-stage-windows-ui `
+  sb-easy-windows-tests sb-easy-agent-runtime-tests
+ctest --test-dir build/cpp-windows --output-on-failure
+```
+
+Prepare the pinned runtime beside `sb-easy-service.exe` with:
+
+```powershell
+cmake --build build/cpp-windows --target sb-easy-prepare-windows-runtime
+```
+
+That target downloads the pinned sing-box 1.13.12 Windows x64 and Wintun 0.14.1
+archives, verifies their SHA-256 digests and the Wintun Authenticode signature,
+and writes `windows-runtime.json` containing reproducible artifact metadata.
+The Service build then embeds the verified files with `rc.exe`. It never
+resolves a `latest` URL and uses no GCC, MinGW, cgo, or WSL toolchain.
+
+For elevated development, the Service supports console mode and first-use
+enrollment:
+
+```powershell
+build/cpp-windows/sb-easy-service.exe --console `
+  --enroll https://panel.example.com '<single-use-code>'
+```
+
+`sb-easy-service.exe --install` remains a development-only registration path.
+The WiX MSI is the production lifecycle owner: it creates the delayed-start
+LocalSystem service, invokes the fixed `--configure` SCM action before first
+start, applies the unrestricted service SID and 5/15/60-second recovery policy,
+and synchronously stops/removes the service for upgrades and uninstall.
+
+Service state is rooted at `%ProgramData%\sb-easy` with a protected DACL.
+`credential.dat` is additionally encrypted with machine-scope DPAPI. The
+service is the only owner of the Agent token, generated configurations,
+sing-box child process, Wintun, and the loopback Clash API secret. Local UI clients use the
+versioned `\\.\pipe\sb-easy-control-v1` protocol; the pipe denies Network,
+admits local interactive users, and revalidates the client PID/session or
+administrator token on every sensitive mutation. Configuration returned over
+IPC is recursively redacted.
+
+`sb-easy.exe` is the single-instance desktop shell. It hosts only the staged
+`ui` directory at `https://app.sbeasy.local`, blocks other navigation and
+subresource requests, disables browser chrome/developer features, and forwards
+only an explicit RPC allowlist to the Service. Closing the window hides it to
+the notification area by default; the current user's HKCU preferences can also
+enable logon launch, minimize-to-tray, or exit-on-close. “Exit UI” does not stop
+sing-box. The protocol activation
+handler (registered by the W4 installer), paste/link enrollment, QR images from
+disk or clipboard, all six client pages,
+effective proxy selection, actual route correlation, local daily route
+statistics, redacted config, log export, and explicit diagnostic upload are
+available without opening a terminal. Service-owned settings include connect at
+boot, strict DNS, bounded LAN multicast compatibility, and one-to-ten retained
+service log files.
+
+The WebView2 SDK is checksum-pinned at `1.0.4078.44` and linked through the
+static loader. The WiX bootstrapper detects the machine and current-user
+Evergreen registrations and chains the pinned, Microsoft-signed Runtime
+bootstrapper only when both are absent. A development machine running the
+unpackaged executable must already have the Runtime. Windows route
+aggregates use the pinned SQLite `3.50.1` amalgamation and remain local in
+`%ProgramData%\sb-easy\runtime.db` for 90 days, bounded to 100,000 rows.
+Successful configuration activation advances a persisted policy generation so
+otherwise-identical aggregates from different rule sets are not merged.
+
+Build W4 installer assets after preparing the native runtime and staged UI:
+
+```powershell
+pwsh -NoProfile -File scripts/build-windows-installer.ps1 `
+  -RuntimeDirectory build/cpp-windows `
+  -DependencyDirectory build/cpp-windows/_deps `
+  -OutputDirectory build/windows-release `
+  -ProductVersion 1.0.0
+```
+
+Alternatively configure with `-DSB_EASY_BUILD_WINDOWS_INSTALLER=ON` and build
+the `sb-easy-windows-installer` target. WiX, the WebView2 bootstrapper, sing-box
+source, Wintun, and their checksums are fixed in the script. The script runs
+MSI ICE validation, checks the Burn and BootstrapperApplication manifests,
+executes a quiet layout startup smoke test, verifies the embedded Microsoft
+signature, publishes exact sing-box and WiX source archives, license texts,
+reproducible metadata, and `SHA256SUMS`.
+
+Distribute `sb-easy-windows-x64.zip` with the external `SHA256SUMS`. Users must
+extract the full ZIP and run `sb-easy-windows-setup-x64.exe`, keeping its companion
+`sb-easy-windows-bootstrapper.exe` in the same directory. The launcher alone is
+not a complete installer. The ZIP also contains the MSI for managed deployment,
+installation instructions, metadata, licenses, corresponding source archives,
+and the unsigned-development marker when applicable. Managed deployment through
+the MSI requires WebView2 to be available already.
+
+Launcher regression checks cover environment-block handling and argument
+forwarding. The non-installing layout smoke test launches the distributed entry
+point with a 60-second timeout and checks Burn startup and completion. These
+checks are separate from the installation, repair, and uninstall acceptance
+tests on a disposable Windows VM.
+
+Without `-CertificateThumbprint <SHA1>`, outputs are explicitly marked
+`DEVELOPMENT-UNSIGNED` and are not production-ready. With a certificate, the
+script signs the two first-party executables before MSI creation, signs the MSI,
+then follows WiX's
+detach/sign/reattach/final-sign sequence for Burn. Installation,
+repair, upgrade, uninstall, route/DNS restoration, and optional data deletion
+must be exercised by `scripts/test-windows-installer-lifecycle.ps1` on a clean
+disposable Windows VM before publishing.
+
+`.github/workflows/windows-client.yml` provides the non-privileged Windows CI
+gate on `windows-2022`: it restores the locked UI dependencies, audits them,
+builds the x64 client with MSVC `/W4 /WX`, runs all native and prepared-runtime
+integration tests, inspects and starts the MSI/Burn bundle in non-installing
+layout mode, and extracts an MSI administrative image to prove that its CAB
+payload is readable.
+The uploaded CI artifact is deliberately named and marked as an unsigned
+development build. It is not a substitute for the signed Windows 10 22H2 and
+Windows 11 disposable-VM acceptance matrix required by W5.
+
+The prepared-runtime tests also exercise invalid-candidate preservation,
+authenticated loopback-only APIs, automatic rotation of an occupied persisted
+local port, and local core recovery while the control plane is unreachable. The
+disposable-VM lifecycle script force-terminates the Service once and requires
+SCM recovery before continuing with repair and uninstall. Physical/virtual
+network transitions and suspend/resume remain VM acceptance gates rather than
+being inferred from unit-test results.
 
 Dependencies are pinned and fetched by CMake:
 

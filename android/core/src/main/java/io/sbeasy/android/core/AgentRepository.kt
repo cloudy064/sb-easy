@@ -40,7 +40,12 @@ class AgentRepository internal constructor(
                     .put("app_version", appVersion)
                     .put("core_version", coreVersion)
                     .put("install_id", installId)
-                    .put("model", "${Build.MANUFACTURER} ${Build.MODEL}".trim()),
+                    .put("model", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                    .put("interactive_client", true)
+                    .put("supports_proxy_selection", true)
+                    .put("supports_local_route_stats", true)
+                    .put("supports_diagnostic_upload", true)
+                    .put("embedded_wireguard", true),
             )
             secureStore.save(enrollment)
             mutableState.value = mutableState.value.copy(enrollment = enrollment)

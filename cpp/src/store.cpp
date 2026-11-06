@@ -1461,6 +1461,27 @@ Store::redeem_agent_enrollment(const std::string& code,
             capabilities[key] = *found;
         }
     }
+    // Released Android clients predate explicit capability flags. Normalize
+    // their platform metadata at enrollment so the renderer itself remains
+    // capability-driven. Migration 012 covers devices enrolled before upgrade.
+    if (device.value("platform", std::string{}) == "android") {
+        for (const auto* key : {"interactive_client", "supports_proxy_selection",
+                                "supports_local_route_stats",
+                                "supports_diagnostic_upload",
+                                "embedded_wireguard"}) {
+            if (!device.contains(key)) {
+                capabilities[key] = true;
+            }
+        }
+    }
+    for (const auto* key : {"interactive_client", "supports_proxy_selection",
+                            "supports_local_route_stats",
+                            "supports_diagnostic_upload", "embedded_wireguard"}) {
+        const auto found = device.find(key);
+        if (found != device.end() && found->is_boolean()) {
+            capabilities[key] = *found;
+        }
+    }
 
     sqlite::Statement redeem{
         database_.handle_,

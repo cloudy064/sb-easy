@@ -9,19 +9,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include "sbeasy/agent_http.hpp"
+
 namespace sbeasy {
 
 struct AgentClientOptions {
     std::string server;
     std::string token;
     std::chrono::milliseconds timeout{15'000};
-};
-
-struct AgentConfigResponse {
-    bool modified{false};
-    std::string etag;
-    std::string body;
-    std::string rule_source{"profile"};
 };
 
 struct DeviceEnrollmentOptions {
@@ -45,12 +40,7 @@ struct DeviceCredential {
 /// should be persisted locally instead of exposed in installation commands.
 [[nodiscard]] DeviceCredential enroll_device(DeviceEnrollmentOptions options);
 
-struct AgentCommand {
-    std::string id;
-    std::string command;
-};
-
-class AgentClient final {
+class AgentClient final : public AgentHttp {
   public:
     explicit AgentClient(AgentClientOptions options);
     ~AgentClient();
@@ -61,14 +51,17 @@ class AgentClient final {
     AgentClient& operator=(AgentClient&&) noexcept;
 
     [[nodiscard]] AgentConfigResponse
-    poll_config(const std::optional<std::string>& etag = std::nullopt);
-    [[nodiscard]] std::vector<AgentCommand> pending_commands();
+    poll_config(const std::optional<std::string>& etag = std::nullopt) override;
+    [[nodiscard]] std::vector<AgentCommand> pending_commands() override;
     void acknowledge_command(const std::string& id, bool success,
-                             const std::optional<std::string>& result);
+                             const std::optional<std::string>& result) override;
     void report_status(const std::string& version, const std::optional<bool>& running,
-                       const std::optional<std::string>& etag);
-    void report_telemetry(const nlohmann::json& telemetry);
-    [[nodiscard]] std::size_t report_proxy_latencies(const nlohmann::json& results);
+                       const std::optional<std::string>& etag) override;
+    void report_telemetry(const nlohmann::json& telemetry) override;
+    [[nodiscard]] std::size_t
+    report_proxy_latencies(const nlohmann::json& results) override;
+    [[nodiscard]] std::string
+    upload_diagnostics(const nlohmann::json& report) override;
 
   private:
     class Impl;

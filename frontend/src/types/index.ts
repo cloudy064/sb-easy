@@ -28,10 +28,18 @@ export interface HostCapabilities {
   is_wg_hub: boolean
   is_self: boolean
   platform?: string
+  architecture?: string
+  os?: string
   app_version?: string
+  agent_version?: string
   core_version?: string
   install_id?: string
   model?: string
+  interactive_client?: boolean
+  supports_proxy_selection?: boolean
+  supports_local_route_stats?: boolean
+  supports_diagnostic_upload?: boolean
+  embedded_wireguard?: boolean
 }
 
 export interface AgentEnrollment {

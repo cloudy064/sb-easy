@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Bundle Name="sb-easy"
+          Manufacturer="sb-easy"
+          Version="$(var.ProductVersion)"
+          UpgradeCode="{E7532A8F-C8FB-46A5-A2F3-3DEB4A8828EE}"
+          Compressed="yes">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"
+                                               LicenseUrl=""
+                                               ThemeFile="$(var.ThemePath)"
+                                               LocalizationFile="$(var.LocalizationPath)"
+                                               ShowVersion="yes"
+                                               SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Variable Name="InstallStartupShortcut"
+              Type="numeric"
+              Value="0"
+              Persisted="yes"
+              bal:Overridable="yes" />
+    <Variable Name="RemoveUserData"
+              Type="numeric"
+              Value="0"
+              bal:Overridable="yes" />
+
+    <util:RegistrySearch Id="FindWebView2Machine"
+                         Variable="WebView2MachineVersion"
+                         Root="HKLM"
+                         Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                         Value="pv"
+                         Result="value"
+                         Bitness="always64" />
+    <util:RegistrySearch Id="FindWebView2User"
+                         Variable="WebView2UserVersion"
+                         Root="HKCU"
+                         Key="Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                         Value="pv"
+                         Result="value" />
+
+    <Chain>
+      <ExePackage Id="WebView2Evergreen"
+                  SourceFile="$(var.WebViewBootstrapperPath)"
+                  DisplayName="Microsoft Edge WebView2 Runtime"
+                  Description="Microsoft Edge WebView2 Evergreen Runtime"
+                  InstallArguments="/silent /install"
+                  RepairArguments="/silent /install"
+                  DetectCondition="(WebView2MachineVersion AND WebView2MachineVersion &lt;&gt; &quot;0.0.0.0&quot;) OR (WebView2UserVersion AND WebView2UserVersion &lt;&gt; &quot;0.0.0.0&quot;)"
+                  PerMachine="yes"
+                  Permanent="yes"
+                  Vital="yes"
+                  Compressed="yes" />
+      <MsiPackage Id="SbEasyMsi"
+                  SourceFile="$(var.MsiPath)"
+                  Visible="no"
+                  Vital="yes"
+                  Compressed="yes">
+        <MsiProperty Name="INSTALL_STARTUP_SHORTCUT" Value="[InstallStartupShortcut]" />
+        <MsiProperty Name="REMOVE_USER_DATA" Value="[RemoveUserData]" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

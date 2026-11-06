@@ -31,6 +31,7 @@
 #include "sbeasy/agent_clash.hpp"
 #include "sbeasy/agent_client.hpp"
 #include "sbeasy/agent_config.hpp"
+#include "sbeasy/agent_config_storage.hpp"
 #include "sbeasy/atomic_file.hpp"
 #include "sbeasy/http_server.hpp"
 #include "sbeasy/store.hpp"
@@ -299,6 +300,16 @@ void run_config_transform_contract() {
     require(sbeasy::prepare_agent_config(input.dump(), disabled) == input.dump(),
             "disabled local egress must preserve the panel response byte-for-byte");
 
+    auto lan_only = disabled;
+    lan_only.lan_compatibility = true;
+    const auto lan_config = nlohmann::json::parse(
+        sbeasy::prepare_agent_config(input.dump(), lan_only));
+    require(lan_config.at("route").at("rules").front().at("ip_cidr") ==
+                    nlohmann::json::array({"224.0.0.0/4", "ff00::/8"}) &&
+                lan_config.at("route").at("rules").front().at("outbound") ==
+                    "direct",
+            "LAN compatibility should add only a local multicast direct rule");
+
     auto invalid_default = options;
     invalid_default.default_proxy_outbound = "missing-node";
     bool rejected = false;
@@ -378,6 +389,8 @@ void run_contract() {
                 {"agent_version", "sb-easy-cpp-agent/test"},
                 {"hostname", "agent-client-contract"},
                 {"architecture", "x86_64"},
+                {"interactive_client", false},
+                {"supports_proxy_selection", false},
             },
         .timeout = std::chrono::seconds{2},
     });
@@ -385,7 +398,9 @@ void run_contract() {
             "native agents should redeem the shared device enrollment endpoint");
     const auto enrolled = store->find_host(created.id);
     require(enrolled.has_value() && enrolled->capabilities.at("platform") == "linux" &&
-                enrolled->capabilities.at("hostname") == "agent-client-contract",
+                enrolled->capabilities.at("hostname") == "agent-client-contract" &&
+                enrolled->capabilities.at("interactive_client") == false &&
+                enrolled->capabilities.at("supports_proxy_selection") == false,
             "native enrollment should persist its own platform metadata");
 
     sbeasy::AgentClient client({

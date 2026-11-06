@@ -287,4 +287,13 @@ std::size_t AgentClient::report_proxy_latencies(const nlohmann::json& results) {
     return response.at("updated").get<std::size_t>();
 }
 
+std::string AgentClient::upload_diagnostics(const nlohmann::json& report) {
+    if (!report.is_object()) {
+        throw std::invalid_argument("agent diagnostic report must be an object");
+    }
+    const auto response = Impl::require_success_json(implementation_->send(
+        drogon::Post, "/api/agent/diagnostics", report));
+    return response.at("report_id").get<std::string>();
+}
+
 } // namespace sbeasy

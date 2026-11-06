@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "sb/auth.h"
+#include "sb/tailscale.h"
 #include "sqlite_internal.h"
 
 struct sb_store {
@@ -203,6 +204,7 @@ void sb_host_init(sb_host *h) {
     h->name = sb_strdup("");
     h->agent_token = sb_strdup("");
     h->capabilities = sbj_object();
+    h->tailscale = sbj_object();
     h->clash_secret = sb_strdup("");
     h->enabled = true;
     h->created_at = sb_strdup("");
@@ -213,6 +215,7 @@ void sb_host_free(sb_host *h) {
     free(h->name);
     free(h->agent_token);
     sbj_free(h->capabilities);
+    sbj_free(h->tailscale);
     free(h->profile_id);
     free(h->wg_address);
     free(h->wg_public_key);
@@ -232,6 +235,7 @@ void sb_host_copy(sb_host *dst, const sb_host *src) {
     dst->name_len = src->name_len;
     dst->agent_token = sb_strdup(S(src->agent_token));
     dst->capabilities = src->capabilities ? sbj_clone(src->capabilities) : sbj_object();
+    dst->tailscale = src->tailscale ? sbj_clone(src->tailscale) : sbj_object();
     dst->profile_id = sb_strndup(src->profile_id, src->profile_id_len);
     dst->profile_id_len = src->profile_id_len;
     dst->wg_address = sb_strndup(src->wg_address, src->wg_address_len);
@@ -256,6 +260,7 @@ sbj *sb_host_to_json(const sb_host *h) {
     sbj_set_str(v, "id", S(h->id));
     sbj_set(v, "name", sbj_strn(S(h->name), h->name_len));
     sbj_set(v, "capabilities", h->capabilities ? sbj_clone(h->capabilities) : sbj_null());
+    sbj_set(v, "tailscale", sb_tailscale_public(h->tailscale));
     sbj_set(v, "profile_id", h->profile_id ? sbj_strn(h->profile_id, h->profile_id_len) : sbj_null());
     sbj_set(v, "wg_address", h->wg_address ? sbj_strn(h->wg_address, h->wg_address_len) : sbj_null());
     sbj_set(v, "wg_public_key", h->wg_public_key ? sbj_strn(h->wg_public_key, h->wg_public_key_len) : sbj_null());
@@ -612,6 +617,9 @@ static void read_host(sqlite3_stmt *st, sb_host *h) {
     h->created_at = sbq_text(st, 13);
     h->updated_at = sbq_text(st, 14);
     h->assigned_outbounds = (size_t)sbq_int(st, 15);
+    char *tailscale = sbq_text(st, 16);
+    h->tailscale = parse_object_or_empty(tailscale);
+    free(tailscale);
 }
 
 static void read_host_command(sqlite3_stmt *st, sb_host_command *c) {
@@ -739,7 +747,7 @@ static char *new_agent_token(void) {
     "       h.wg_address, h.wg_public_key, h.wg_endpoint, h.clash_api,\n"              \
     "       h.clash_secret, h.last_seen, h.singbox_state, h.enabled,\n"                \
     "       h.created_at, h.updated_at,\n"                                             \
-    "       (SELECT COUNT(*) FROM host_outbounds o WHERE o.host_id = h.id)\n"          \
+    "       (SELECT COUNT(*) FROM host_outbounds o WHERE o.host_id = h.id), h.tailscale\n" \
     "FROM hosts h\n"
 
 #define WIREGUARD_PEER_SELECT                                                          \
@@ -1967,6 +1975,10 @@ int sb_store_find_host(sb_store *s, const char *id, sb_host *out, sb_err *err) {
 int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err *err) {
     if ((!host->name || host->name_len == 0) || !sbj_is_object(host->capabilities))
         return sb_fail(err, SB_ERR_VALIDATION, "Host name and object capabilities are required");
+    if (sb_tailscale_validate(host->tailscale, err) != 0) return -1;
+    const sbj *runs_singbox = sbj_get(host->capabilities, "runs_singbox");
+    if (sb_tailscale_enabled(host->tailscale) && sbj_is_bool(runs_singbox) && !runs_singbox->v.b)
+        return sb_fail(err, SB_ERR_VALIDATION, "Tailscale requires runs_singbox to be enabled");
     char *id = sb_str_empty(host->id) ? sb_uuid_v4() : sb_strdup(host->id);
     char *token = sb_str_empty(host->agent_token) ? new_agent_token() : sb_strdup(host->agent_token);
     const char *profile_id = host->profile_id ? host->profile_id : "default";
@@ -1977,9 +1989,9 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
                                    "INSERT INTO hosts "
                                    "(id, name, agent_token, capabilities, profile_id, wg_address, "
                                    "wg_public_key, wg_endpoint, clash_api, clash_secret, last_seen, "
-                                   "singbox_state, enabled, created_at, updated_at) "
+                                   "singbox_state, enabled, created_at, updated_at, tailscale) "
                                    "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
-                                   "?13, datetime('now'), datetime('now'))",
+                                   "?13, datetime('now'), datetime('now'), ?14)",
                                    err);
     if (st) {
         sbq_bind_text(st, 1, id);
@@ -1996,6 +2008,7 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         sbq_bind_text(st, 11, host->last_seen);
         sbq_bind_text(st, 12, host->singbox_state);
         sbq_bind_bool(st, 13, host->enabled);
+        if (bound == 0) bound = bind_dump(st, 14, host->tailscale, err);
         if (exec_bound(st, bound, err) == 0) rc = reload_host(h, id, out, err);
     }
     UNLOCK(s);
@@ -2007,6 +2020,10 @@ int sb_store_create_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
 int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err *err) {
     if (sb_str_empty(host->id) || (!host->name || host->name_len == 0) || !sbj_is_object(host->capabilities))
         return sb_fail(err, SB_ERR_VALIDATION, "Host id, name, and object capabilities are required");
+    if (sb_tailscale_validate(host->tailscale, err) != 0) return -1;
+    const sbj *runs_singbox = sbj_get(host->capabilities, "runs_singbox");
+    if (sb_tailscale_enabled(host->tailscale) && sbj_is_bool(runs_singbox) && !runs_singbox->v.b)
+        return sb_fail(err, SB_ERR_VALIDATION, "Tailscale requires runs_singbox to be enabled");
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
@@ -2014,7 +2031,7 @@ int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
                                    "UPDATE hosts SET name = ?1, capabilities = ?2, profile_id = ?3, "
                                    "wg_address = ?4, wg_public_key = ?5, wg_endpoint = ?6, "
                                    "clash_api = ?7, clash_secret = ?8, enabled = ?9, "
-                                   "updated_at = datetime('now') WHERE id = ?10",
+                                   "tailscale = ?11, updated_at = datetime('now') WHERE id = ?10",
                                    err);
     if (st) {
         int bound = sbq_bind_text_n(st, 1, host->name, host->name_len, err);
@@ -2027,6 +2044,7 @@ int sb_store_update_host(sb_store *s, const sb_host *host, sb_host *out, sb_err 
         if (bound == 0) bound = sbq_bind_text_n(st, 8, host->clash_secret, host->clash_secret_len, err);
         sbq_bind_bool(st, 9, host->enabled);
         sbq_bind_text(st, 10, host->id);
+        if (bound == 0) bound = bind_dump(st, 11, host->tailscale, err);
         if (exec_bound(st, bound, err) == 0) {
             if (sqlite3_changes(h) == 0)
                 sb_fail(err, SB_ERR_NOT_FOUND, "Host not found");
@@ -3216,13 +3234,13 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
     sb_config_profile_init(&profile);
     sb_proxy_node_vec nodes = {0};
     char *profile_id = NULL;
-    sbj *capabilities = NULL;
+    sbj *capabilities = NULL, *tailscale = NULL;
     sqlite3_stmt *host = NULL;
     LOCK(s);
     sqlite3 *h = H(s);
     host = sbq_prepare(h,
                        "SELECT id, name, capabilities, profile_id, clash_api, "
-                       "clash_secret FROM hosts WHERE id = ?1",
+                       "clash_secret, tailscale FROM hosts WHERE id = ?1",
                        err);
     if (!host) goto done;
     sbq_bind_text(host, 1, S(host_id));
@@ -3256,6 +3274,8 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
 
     capabilities = parse_object_col(host, 2, "host capabilities", err);
     if (!capabilities) goto done;
+    tailscale = parse_object_col(host, 6, "host tailscale", err);
+    if (!tailscale) goto done;
 
     sb_render_request_free(out);
     sb_render_request_init(out);
@@ -3283,6 +3303,7 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
         out->rule_script_len = profile.rule_script_len;
     }
 
+    if (sb_tailscale_render(out, tailscale, host_id, err) != 0) goto done;
     const sbj *endpoints = sbj_get(out->profile, "endpoints");
     const sbj *endpoint;
     SBJ_ARR_FOREACH(endpoints, i, endpoint) {
@@ -3295,6 +3316,7 @@ done:
     UNLOCK(s);
     free(profile_id);
     sbj_free(capabilities);
+    sbj_free(tailscale);
     sb_proxy_node_vec_free(&nodes);
     sb_config_profile_free(&profile);
     return rc;

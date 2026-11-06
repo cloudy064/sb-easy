@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import client from '../api/client'
-import type { Host, ConfigProfile, HostCapabilities, AgentEnrollment } from '../types'
+import type { Host, ConfigProfile, HostCapabilities, AgentEnrollment, TailscaleUpdate } from '../types'
 
 export interface CreateHostBody {
   name: string
@@ -11,7 +11,10 @@ export interface CreateHostBody {
   wg_endpoint?: string
   clash_api?: string
   clash_secret?: string
+  tailscale?: TailscaleUpdate
 }
+
+export type UpdateHostBody = Omit<Partial<Host>, 'tailscale'> & { tailscale?: TailscaleUpdate }
 
 export const useHostsStore = defineStore('hosts', () => {
   const hosts = ref<Host[]>([])
@@ -77,7 +80,7 @@ export const useHostsStore = defineStore('hosts', () => {
     return data
   }
 
-  async function updateHost(id: string, body: Partial<Host>) {
+  async function updateHost(id: string, body: UpdateHostBody) {
     const { data } = await client.put(`/hosts/${id}`, body)
     const idx = hosts.value.findIndex(h => h.id === id)
     if (idx >= 0) hosts.value[idx] = { ...hosts.value[idx], ...data }

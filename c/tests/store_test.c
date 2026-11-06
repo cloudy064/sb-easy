@@ -11,6 +11,7 @@
 #include "sb/config_renderer.h"
 #include "sb/proxy_parser.h"
 #include "sb/store.h"
+#include "sb/tailscale.h"
 #include "test.h"
 
 typedef struct {
@@ -150,7 +151,7 @@ TEST(sqlite_runner_applies_canonical_migrations_idempotently) {
     sb_store *s = open_store(&t);
     REQUIRE(s);
     sb_err err = {0};
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 18);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
     sb_config_profile p;
     sb_config_profile_init(&p);
     REQUIRE(sb_store_find_profile(s, "android-client", &p, &err) == 1);
@@ -160,7 +161,7 @@ TEST(sqlite_runner_applies_canonical_migrations_idempotently) {
               "bootstrap-dns");
     sb_config_profile_free(&p);
     CHECK_EQ_INT(sb_database_migrate(sb_store_database(s), migrations(), &err), 0);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 18);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
     sb_store_free(s);
     temp_db_free(&t);
 }
@@ -1166,12 +1167,12 @@ TEST(migration_runner_edge_cases) {
     sb_store *s = sb_store_open(t.path, dir, &err);
     if (!s) fprintf(stderr, "open: %s\n", err.msg);
     REQUIRE(s);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 18);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
     sb_store_free(s);
     remove_migration_dir(dir);
 
     /* a failing migration is rolled back and not recorded */
-    const char *bad_names[] = {"19_add_things.sql"};
+    const char *bad_names[] = {"20_add_things.sql"};
     const char *bad_sql[] = {"CREATE TABLE later_things (id TEXT);\nBOGUS STATEMENT;\n"};
     dir = make_migration_dir(bad_names, bad_sql, 1);
     CHECK(sb_store_open(t.path, dir, &err) == NULL);
@@ -1179,12 +1180,12 @@ TEST(migration_runner_edge_cases) {
     remove_migration_dir(dir);
     s = sb_store_open(t.path, migrations(), &err);
     REQUIRE(s);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 18);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
     CHECK_EQ_INT(sb_database_execute(sb_store_database(s), "SELECT * FROM later_things", &err), -1);
     sb_store_free(s);
 
     /* description and non-transactional migrations */
-    const char *nt_names[] = {"19_no_tx.sql"};
+    const char *nt_names[] = {"20_no_tx.sql"};
     const char *nt_sql[] = {"-- no-transaction\nSELECT 1;\n"};
     dir = make_migration_dir(nt_names, nt_sql, 1);
     CHECK(sb_store_open(t.path, dir, &err) == NULL);
@@ -1205,15 +1206,15 @@ TEST(migration_runner_edge_cases) {
     remove_migration_dir(dir);
 
     /* a new migration is applied with the SQLx description (underscores -> spaces) */
-    const char *ok_names[] = {"19_add_more_things.sql"};
+    const char *ok_names[] = {"20_add_more_things.sql"};
     const char *ok_sql[] = {"CREATE TABLE more_things (id TEXT);\n"};
     dir = make_migration_dir(ok_names, ok_sql, 1);
     s = sb_store_open(t.path, dir, &err);
     REQUIRE(s);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
     CHECK_EQ_INT(sb_database_execute(sb_store_database(s),
                                      "CREATE TEMP TABLE probe AS SELECT description FROM _sqlx_migrations "
-                                     "WHERE version = 19 AND description = 'add more things'",
+                                     "WHERE version = 20 AND description = 'add more things'",
                                      &err),
                  0);
     sb_store_free(s);
@@ -1421,4 +1422,85 @@ TEST(subscription_bytes_survive_copy_updates_and_backup) {
     sb_subscription_free(&updated);
     sb_store_free(s);
     temp_db_free(&t);
+}
+
+TEST(tailscale_persists_private_keys_and_renders_self_without_script_disclosure) {
+    temp_db t;
+    sb_store *s = open_store(&t);
+    REQUIRE(s);
+    sb_err err = {0};
+    sb_host host, saved;
+    sb_host_init(&host); sb_host_init(&saved);
+    REQUIRE(sb_store_find_host(s, "self", &host, &err) == 1);
+    sbj *settings = sbj_parse_cstr("{\"enabled\":true,\"auth_key\":\"tskey-auth-store-secret\","
+        "\"accept_routes\":true,\"route_cidrs\":[\"192.168.44.0/24\"]}");
+    REQUIRE(sb_tailscale_update(&host.tailscale, settings, &err) == 0);
+    REQUIRE(sb_store_update_host(s, &host, &saved, &err) == 0);
+    sbj_free(settings);
+    CHECK_STR(sbj_get_str(saved.tailscale, "auth_key", ""), "tskey-auth-store-secret");
+    sbj *public = sb_host_to_json(&saved);
+    CHECK(!sbj_has(sbj_get(public, "tailscale"), "auth_key"));
+    CHECK(sbj_get_bool(sbj_get(public, "tailscale"), "has_auth_key", false));
+    sbj_free(public);
+    sb_host_free(&host); sb_host_free(&saved);
+    sb_store_free(s);
+    s = sb_store_open(t.path, migrations(), &err);
+    REQUIRE(s);
+    sb_config_profile profile, profile_saved;
+    sb_config_profile_init(&profile); sb_config_profile_init(&profile_saved);
+    REQUIRE(sb_store_find_profile(s, "default", &profile, &err) == 1);
+    sb_str_set(&profile.rule_script,
+        "function buildRules(context) {"
+        " if (JSON.stringify(context).includes('tskey-auth-store-secret')) throw new Error('key leaked');"
+        " return [{domain_suffix:['example.com'], outbound:'sb-easy-tailscale'}]; }");
+    profile.rule_script_len = strlen(profile.rule_script);
+    profile.rule_script_enabled = true;
+    REQUIRE(sb_store_update_profile(s, &profile, &profile_saved, &err) == 0);
+    sb_config_renderer renderer;
+    REQUIRE(sb_config_renderer_init(&renderer, NULL, &err) == 0);
+    for (int mode = 0; mode < 2; ++mode) {
+        profile.mode = mode == 0 ? SB_PROFILE_MANAGED : SB_PROFILE_FULL;
+        REQUIRE(sb_store_update_profile(s, &profile, &profile_saved, &err) == 0);
+        sb_render_request request;
+        sb_render_request_init(&request);
+        REQUIRE(sb_store_render_request_for_host(s, "self", &request, &err) == 0);
+        CHECK_EQ_INT(request.nodes.len, 0);
+        CHECK(!sbj_has(request.host_context, "tailscale"));
+        sbj *rendered = sb_config_renderer_render(&renderer, &request, &err);
+        if (!rendered) fprintf(stderr, "tailscale render: %s\n", err.msg);
+        REQUIRE(rendered);
+        const sbj *endpoint = sbj_arr_at(sbj_get(rendered, "endpoints"), 0);
+        CHECK_STR(sbj_get_str(endpoint, "auth_key", ""), "tskey-auth-store-secret");
+        const sbj *rules = sbj_get(sbj_get(rendered, "route"), "rules");
+        CHECK_EQ_INT(sbj_arr_len(rules), 4);
+        CHECK_STR(sbj_get_str(sbj_arr_at(rules, 0), "inbound", ""), "sb-easy-tailscale");
+        CHECK_STR(sbj_get_str(sbj_arr_at(rules, 1), "outbound", ""), "sb-easy-tailscale");
+        CHECK_STR(sbj_get_str(sbj_arr_at(rules, 3), "outbound", ""), "sb-easy-tailscale");
+        const sbj *outbounds = sbj_get(rendered, "outbounds"), *outbound;
+        bool transport_found = false;
+        SBJ_ARR_FOREACH(outbounds, i, outbound) {
+            CHECK(!sbj_string_is(sbj_get(outbound, "type"), "urltest"));
+            if (sbj_string_is(sbj_get(outbound, "tag"), "sb-easy-tailscale-direct")) {
+                transport_found = true;
+                CHECK(sbj_string_is(sbj_get(outbound, "type"), "direct"));
+            }
+        }
+        CHECK(transport_found);
+        const char *export_path = getenv("SB_TAILSCALE_TEST_CONFIG");
+        if (mode == 0 && export_path && *export_path) {
+            char *fixture = sbj_dump(rendered, 2);
+            CHECK_EQ_INT(sb_write_file(export_path, fixture, strlen(fixture)), 0);
+            free(fixture);
+        }
+        sbj_free(rendered); sb_render_request_free(&request);
+    }
+    sb_config_profile_free(&profile); sb_config_profile_free(&profile_saved);
+    sb_host_init(&host); sb_host_init(&saved);
+    REQUIRE(sb_store_find_host(s, "self", &host, &err) == 1);
+    sbj_set(host.tailscale, "route_cidrs", sbj_str("invalid"));
+    CHECK(sb_store_update_host(s, &host, &saved, &err) == -1);
+    REQUIRE(sb_store_find_host(s, "self", &saved, &err) == 1);
+    CHECK(sbj_is_array(sbj_get(saved.tailscale, "route_cidrs")));
+    sb_host_free(&host); sb_host_free(&saved);
+    sb_store_free(s); temp_db_free(&t);
 }

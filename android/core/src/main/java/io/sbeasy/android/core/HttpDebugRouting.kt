@@ -41,7 +41,11 @@ object HttpDebugRouting {
         val quic = JSONObject(match.toString()).put("network", "udp").put("port", 443).put("action", "reject")
         val capture = JSONObject(match.toString()).put("network", "tcp").put("port", JSONArray(listOf(80, 443)))
             .put("action", "route").put("outbound", "sb-httpdebug-engine")
-        fun protected(rule: JSONObject): Boolean = rule.optString("action") in setOf("sniff", "hijack-dns", "resolve") ||
+        fun endpointIngress(rule: JSONObject): Boolean = rule.optString("inbound") in endpoints ||
+            (0 until (rule.optJSONArray("inbound")?.length() ?: 0)).any {
+                rule.getJSONArray("inbound").optString(it) in endpoints
+            }
+        fun protected(rule: JSONObject): Boolean = endpointIngress(rule) || rule.optString("action") in setOf("sniff", "hijack-dns", "resolve") ||
             rule.has("package_name") || rule.has("process_name") || rule.has("process_path") ||
             rule.has("ip_is_private") || rule.has("ip_cidr") || rule.optString("outbound") in endpoints ||
             (rule.optString("outbound") == "direct" && rule.has("domain"))

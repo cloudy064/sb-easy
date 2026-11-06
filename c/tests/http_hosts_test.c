@@ -1730,3 +1730,64 @@ TEST(apple_native_clients_receive_embedded_managed_network) {
     }
     sb_test_server_stop(&t);
 }
+
+TEST(tailscale_http_keys_and_embedded_wireguard_switch) {
+    sb_test_server t;
+    REQUIRE(sb_test_server_start(&t) == 0);
+    char *id = create_host(&t, "{\"name\":\"Tailnet phone\",\"capabilities\":{\"platform\":\"android\"},"
+        "\"tailscale\":{\"enabled\":true,\"auth_key\":\"tskey-auth-http-secret\",\"hostname\":\"tailnet-phone\"}}");
+    REQUIRE(id);
+    char *token = host_token(&t, id);
+    char *path = sb_asprintf("/api/hosts/%s", id);
+    sb_test_response r = call(&t, "GET", path, NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK(!jpath(r.json, "tailscale.auth_key"));
+    CHECK_EQ_INT(jbool(r.json, "tailscale.has_auth_key"), 1);
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", path, "{\"capabilities\":{\"runs_singbox\":false}}");
+    CHECK_EQ_INT(r.status, 400);
+    sb_test_response_free(&r);
+    r = call(&t, "PUT", path, "{\"tailscale\":{\"hostname\":\"renamed\"}}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jbool(r.json, "tailscale.has_auth_key"), 1);
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jlen(r.json, "endpoints"), 1);
+    CHECK_STR(jstr(r.json, "endpoints.0.type"), "tailscale");
+    CHECK_STR(jstr(r.json, "endpoints.0.auth_key"), "tskey-auth-http-secret");
+    CHECK_STR(jstr(r.json, "endpoints.0.hostname"), "renamed");
+    CHECK(!jpath(r.json, "experimental.clash_api"));
+    CHECK_STR(jstr(r.json, "route.rules.1.inbound"), "sb-easy-tailscale");
+    CHECK_STR(jstr(r.json, "route.rules.2.outbound"), "sb-easy-tailscale");
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(peer_count(&t), 0);
+    sb_host host;
+    sb_host_init(&host);
+    CHECK(find_host(&t, id, &host) == 1);
+    CHECK(host.wg_address == NULL);
+    sb_host_free(&host);
+    r = call(&t, "PUT", path, "{\"tailscale\":{\"enabled\":false,\"auth_key\":\"\"}}");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jbool(r.json, "tailscale.has_auth_key"), 0);
+    sb_test_response_free(&r);
+    r = call_as(&t, token, "GET", "/api/agent/config", NULL);
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_STR(jstr(r.json, "endpoints.0.type"), "wireguard");
+    sb_test_response_free(&r);
+    CHECK_EQ_INT(peer_count(&t), 1);
+    r = call(&t, "PUT", path, "{\"name\":\"Rejected name\",\"tailscale\":{\"route_cidrs\":[\"bad\"]}}");
+    CHECK_EQ_INT(r.status, 400);
+    sb_test_response_free(&r);
+    r = call(&t, "GET", path, NULL);
+    CHECK_STR(jstr(r.json, "name"), "Tailnet phone");
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts", "{\"name\":\"bad\",\"tailscale\":{\"enabled\":\"yes\"}}");
+    CHECK_EQ_INT(r.status, 400);
+    sb_test_response_free(&r);
+    r = call(&t, "POST", "/api/hosts", "{\"name\":\"not a core\",\"capabilities\":{\"runs_singbox\":false},\"tailscale\":{\"enabled\":true}}");
+    CHECK_EQ_INT(r.status, 400);
+    sb_test_response_free(&r);
+    free(path); free(token); free(id);
+    sb_test_server_stop(&t);
+}

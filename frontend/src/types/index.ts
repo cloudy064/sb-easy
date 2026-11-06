@@ -43,6 +43,19 @@ export interface AgentEnrollment {
   qr_svg: string
 }
 
+export interface HostTailscale {
+  enabled?: boolean
+  hostname?: string
+  control_url?: string
+  has_auth_key?: boolean
+  accept_routes?: boolean
+  route_cidrs?: string[]
+  advertise_routes?: string[]
+  advertise_exit_node?: boolean
+}
+
+export type TailscaleUpdate = Omit<HostTailscale, 'has_auth_key'> & { auth_key?: string }
+
 export interface Host {
   access?: { operate: boolean }
   id: string
@@ -53,6 +66,7 @@ export interface Host {
   wg_public_key: string | null
   wg_endpoint: string | null
   clash_api: string | null
+  tailscale?: HostTailscale
   last_seen: string | null
   singbox_state: string | null
   enabled: boolean

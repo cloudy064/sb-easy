@@ -36,7 +36,7 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(YAML REQUIRED IMPORTED_TARGET yaml-0.1)
 
-# ---- third-party C sources (pinned, same versions as the C++ build) ----
+# ---- third-party C sources (pinned) ----
 FetchContent_Declare(qrcodegen
     GIT_REPOSITORY https://github.com/nayuki/QR-Code-generator.git
     GIT_TAG v1.8.0 GIT_SHALLOW TRUE)
@@ -87,8 +87,8 @@ target_include_directories(sb_argon2
     PRIVATE ${argon2_source_SOURCE_DIR}/src)
 target_link_libraries(sb_argon2 PRIVATE Threads::Threads)
 
-# civetweb: plain HTTP + WebSocket (TLS terminates at the reverse proxy, as
-# with the Drogon build). Compiled as a static library from its single source.
+# civetweb: plain HTTP + WebSocket (TLS terminates at the reverse proxy).
+# Compiled as a static library from its single source.
 add_library(sb_civetweb STATIC ${civetweb_SOURCE_DIR}/src/civetweb.c)
 target_include_directories(sb_civetweb PUBLIC ${civetweb_SOURCE_DIR}/include)
 target_compile_definitions(sb_civetweb PUBLIC

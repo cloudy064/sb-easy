@@ -3,8 +3,9 @@
 The C11 control plane and Linux agent replace the C++ implementation. Vue,
 Svelte, Android, the SQLite migrations and the official Go sing-box engine
 are shared with the existing system. New server and agent features, fixes and
-tests are maintained in `c/`. The old `cpp/` and Rust `backend/` implementations
-remain as historical references only, outside primary CI and release builds.
+tests are maintained in `c/`. The old C++ implementation and its comparison
+tools have been removed; Git history preserves them. Rust `backend/` remains
+an archived reference outside primary CI and release builds.
 
 The current service development version is **1.1.0**, read from
 [`config/client-releases.json`](../config/client-releases.json). HTTP status,
@@ -126,9 +127,7 @@ agent container and automatically restores it if the health/proxy checks fail.
 It also migrates the stopped engine's rule cache to `agent-data/sing-box-cache`
 and mounts it at `/var/lib/sing-box`, so replacing the container retains cached
 rule sets. Later data backups include this directory.
-Historical deployments used `DOCKERFILE=cpp/Dockerfile.unified`; this archived
-implementation does not receive current fixes. Use a previously validated C
-image for rollback during new deployments.
+Use a previously validated C image for rollback during new deployments.
 
 For the established central bridge-network deployment, load the tested panel
 image, update the effective Compose image, then run on the central host:
@@ -159,16 +158,6 @@ checks enabled QuickJS scripts retain the rule. It covers all profiles rather
 than relying on per-node edits. Offline nodes receive the change when they
 reconnect. Existing conflicting local overrides need to be removed during
 migration. Roll back using `--rollback /private/claude-route-before.json`.
-
-For historical migration comparisons only, the following optional tool compares
-a private database snapshot against an archived C++ binary (reports hashes, not
-proxy credentials). This is not a current CI or release requirement:
-
-```sh
-python3 c/tools/verify_database.py --database /private/snapshot.db \
-  --c-server build/c/sb-easy-c-server --cpp-server build/cpp/sb-easy-cpp-server \
-  --check-claude-route
-```
 
 ## Packet capture uploads
 

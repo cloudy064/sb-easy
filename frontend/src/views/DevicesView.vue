@@ -46,6 +46,7 @@
               </template>
               <template v-else>
                 <span v-if="d.is_self" class="kind-badge kind-self">SELF</span>
+                <span v-if="d.tailscale?.enabled" class="kind-badge kind-tailscale">TAILSCALE</span>
                 <span v-if="d.config_drift" class="badge badge-red" style="margin-left:0.4rem" :title="t('hosts.drift.hint')">{{ t('hosts.drift') }}</span>
               </template>
             </h3>
@@ -173,6 +174,8 @@
                 <option v-for="profile in hostsStore.profiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
               </select>
             </div>
+            <TailscaleSettings v-model="deviceTailscale" />
+            <p v-if="deviceSaveError" class="text-sm enrollment-error" role="alert">{{ deviceSaveError }}</p>
             <div class="modal-actions">
               <button type="button" class="btn-secondary" @click="closeEnrollment">{{ t('action.cancel') }}</button>
               <button type="submit" class="btn-primary" :disabled="deviceCreating">
@@ -370,6 +373,9 @@ import { useAuthStore } from '../stores/auth'
 import { useHostsStore } from '../stores/hosts'
 import { useWireGuardStore } from '../stores/wireguard'
 import HostManageModal from '../components/HostManageModal.vue'
+import TailscaleSettings from '../components/TailscaleSettings.vue'
+import { tailscaleForm, tailscaleUpdate } from '../lib/tailscale'
+import { isAxiosError } from 'axios'
 import client from '../api/client'
 import { serverTimestampAgeMs } from '../api/time'
 import type { AgentEnrollment, Host, WireGuardPeer } from '../types'
@@ -418,6 +424,8 @@ const showEnrollment = ref(false)
 const deviceName = ref('')
 const deviceProfileId = ref('android-client')
 const deviceCreating = ref(false)
+const deviceTailscale = ref(tailscaleForm())
+const deviceSaveError = ref('')
 const deviceEnrollment = ref<AgentEnrollment | null>(null)
 const deviceHostId = ref<string | null>(null)
 const editTarget = ref<WireGuardPeer | null>(null)
@@ -448,6 +456,8 @@ const qrWireGuardPeer = computed<WireGuardPeer | null>(() => {
 async function openEnrollment(initialName = '') {
   if (hostsStore.profiles.length === 0) await hostsStore.fetchProfiles()
   deviceName.value = initialName
+  deviceTailscale.value = tailscaleForm()
+  deviceSaveError.value = ''
   deviceProfileId.value = hostsStore.profiles.some((profile) => profile.id === 'android-client')
     ? 'android-client'
     : (hostsStore.profiles[0]?.id ?? 'default')
@@ -460,20 +470,26 @@ function closeEnrollment() {
   deviceEnrollment.value = null
   deviceName.value = ''
   deviceHostId.value = null
+  deviceTailscale.value = tailscaleForm()
+  deviceSaveError.value = ''
 }
 function resetEnrollment() {
   deviceEnrollment.value = null
   deviceName.value = ''
   deviceHostId.value = null
+  deviceTailscale.value = tailscaleForm()
+  deviceSaveError.value = ''
 }
 async function createDeviceEnrollment() {
   if (!deviceName.value || deviceCreating.value) return
   deviceCreating.value = true
+  deviceSaveError.value = ''
   try {
     if (!deviceHostId.value) {
       const host = await hostsStore.createHost({
         name: deviceName.value,
         profile_id: deviceProfileId.value,
+        tailscale: tailscaleUpdate(deviceTailscale.value),
         capabilities: {
           runs_singbox: true,
           is_wg_member: false,
@@ -482,10 +498,19 @@ async function createDeviceEnrollment() {
         },
       })
       deviceHostId.value = host.id
+    } else {
+      await hostsStore.updateHost(deviceHostId.value, {
+        name: deviceName.value,
+        profile_id: deviceProfileId.value,
+        tailscale: tailscaleUpdate(deviceTailscale.value),
+      })
     }
     deviceEnrollment.value = await hostsStore.createEnrollment(deviceHostId.value)
+    deviceTailscale.value.auth_key = ''
   } catch (error) {
-    notify(error instanceof Error ? error.message : t('device.enroll.failed'), false)
+    deviceSaveError.value = isAxiosError(error) && typeof error.response?.data?.error === 'string'
+      ? error.response.data.error
+      : error instanceof Error ? error.message : t('device.enroll.failed')
   } finally {
     deviceCreating.value = false
   }
@@ -769,6 +794,8 @@ function formatBytes(b: number) {
 }
 .kind-wg { background: #e8f0fe; color: #3c6ea8; }
 .kind-self { background: var(--paper-border); color: var(--ink-secondary); }
+.kind-tailscale { background: var(--accent-subtle); color: var(--accent); }
+.enrollment-error { color: var(--bad); margin: .75rem 0; }
 
 .online-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.35rem; vertical-align: middle; }
 .online-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }

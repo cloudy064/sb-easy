@@ -9,6 +9,19 @@
 #include "sb/agent_config.h"
 #include "sb/atomic_file.h"
 
+TEST(agent_ui_config_redacts_nested_tailscale_credentials) {
+    sbj *config = sbj_parse_cstr("{\"endpoints\":[{\"type\":\"tailscale\",\"auth_key\":\"fixture-auth\",\"hostname\":\"office\"}],\"outbounds\":[{\"password\":\"fixture-password\"}]}");
+    REQUIRE(config);
+    sbj *copy = sbj_clone(config);
+    sb_agent_config_redact(copy);
+    CHECK_STR(sbj_get_str(sbj_arr_at(sbj_get(copy, "endpoints"), 0), "auth_key", ""), "[redacted]");
+    CHECK_STR(sbj_get_str(sbj_arr_at(sbj_get(copy, "endpoints"), 0), "hostname", ""), "office");
+    CHECK_STR(sbj_get_str(sbj_arr_at(sbj_get(copy, "outbounds"), 0), "password", ""), "[redacted]");
+    CHECK_STR(sbj_get_str(sbj_arr_at(sbj_get(config, "endpoints"), 0), "auth_key", ""), "fixture-auth");
+    sbj_free(copy);
+    sbj_free(config);
+}
+
 static char *make_temp_dir(void) {
     char *path = sb_strdup("/tmp/sb-easy-atomic-XXXXXX");
     if (!mkdtemp(path)) abort();

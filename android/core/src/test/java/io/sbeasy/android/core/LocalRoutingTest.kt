@@ -9,6 +9,33 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalRoutingTest {
+    @Test
+    fun tailscaleUsesStablePrivateStateAndPreservesManagedRoutes() {
+        val source = JSONObject(base).put("endpoints", JSONArray().put(JSONObject()
+            .put("type", "tailscale").put("tag", "tailnet").put("auth_key", "fixture-auth")
+            .put("state_directory", "/remote/path").put("system_interface", true)
+            .put("taildrop_directory", "/remote/drop").put("ssh_server", JSONObject().put("enabled", true))))
+        source.getJSONObject("route").getJSONArray("rules").put(JSONObject()
+            .put("ip_cidr", JSONArray().put("100.64.0.0/10")).put("outbound", "tailnet"))
+        source.getJSONObject("route").getJSONArray("rules").put(JSONObject()
+            .put("inbound", JSONArray().put("tailnet")).put("outbound", "direct"))
+        val raw = source.toString()
+        val policy = LocalRouting.defaults(raw)
+        val result = LocalRouting.render(raw, policy).content
+        val endpoint = JSONObject(result).getJSONArray("endpoints").getJSONObject(0)
+        assertTrue(endpoint.getString("state_directory").matches(Regex("tailscale/[0-9a-f]{64}")))
+        assertFalse(endpoint.getBoolean("system_interface"))
+        assertFalse(endpoint.has("taildrop_directory"))
+        assertFalse(endpoint.has("ssh_server"))
+        assertEquals("fixture-auth", endpoint.getString("auth_key"))
+        assertTrue(result.contains("100.64.0.0/10"))
+        val routes = JSONObject(result).getJSONObject("route").getJSONArray("rules")
+        assertEquals("tailnet", routes.getJSONObject(0).getJSONArray("inbound").getString(0))
+        assertFalse(result.contains("/remote/"))
+        val again = JSONObject(LocalRouting.render(raw, policy).content).getJSONArray("endpoints").getJSONObject(0)
+        assertEquals(endpoint.getString("state_directory"), again.getString("state_directory"))
+    }
+
     private val base = """
         {
           "log":{"level":"debug"},

@@ -8,6 +8,10 @@ int main(void) {
     CHECK(strstr(safe, "i/o timeout")); free(safe);
     safe = sbw_diagnostics_redact("Authorization: Basic unknown-credential", config);
     CHECK(!strstr(safe, "unknown-credential")); free(safe);
+    safe = sbw_diagnostics_redact("auth_key=unknown-tailnet-credential", config);
+    CHECK(!strstr(safe, "unknown-tailnet-credential")); free(safe);
+    safe = sbw_diagnostics_redact("failed with tskey-auth-fixture-key", config);
+    CHECK(!strstr(safe, "tskey-auth-fixture-key")); free(safe);
     safe = sbw_diagnostics_redact("GET https://example.com/path?code=one-time-value", config);
     CHECK(!strstr(safe, "one-time-value") && strstr(safe, "example.com")); free(safe);
     safe = sbw_diagnostics_redact("DNS api.openai.com outbound/http[Tokyo]: unexpected status: 407", config);

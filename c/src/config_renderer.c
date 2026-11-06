@@ -584,6 +584,18 @@ sbj *sb_config_renderer_render(const sb_config_renderer *renderer,
         render_managed(request, config, &managed_has_proxy, err) != 0)
         goto fail;
 
+    if (sbj_arr_len(request->network_outbounds)) {
+        sbj *outbounds = sbj_get(config, "outbounds");
+        if (outbounds && !sbj_is_array(outbounds)) {
+            sb_fail(err, SB_ERR_VALIDATION, "Network transports require profile.outbounds to be an array");
+            goto fail;
+        }
+        outbounds = sbj_get_or_array(config, "outbounds");
+        const sbj *outbound;
+        SBJ_ARR_FOREACH(request->network_outbounds, i, outbound)
+            sbj_arr_push(outbounds, sbj_clone(outbound));
+    }
+
     if (request->rule_script && request->rule_script_len > 0 &&
         render_rule_script(renderer, request, config, err) != 0)
         goto fail;

@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=sb-easy-singbox-go-mod-glibc \
         -modfile /tmp/sb-easy-bridge-overlay.mod \
         -buildmode=c-archive \
         -trimpath \
-        -tags 'with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
+        -tags 'with_gvisor,with_quic,with_wireguard,with_tailscale,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
         -ldflags "-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${SINGBOX_VERSION}" \
         -o /out/libsb_easy_singbox.a \
         ./cmd/sb-easy-bridge \
@@ -44,7 +44,7 @@ FROM singbox-bridge-builder AS singbox-bridge-tests
 RUN --network=none --mount=type=cache,target=/go/pkg/mod,id=sb-easy-singbox-go-mod-glibc \
     --mount=type=cache,target=/root/.cache/go-build,id=sb-easy-singbox-go-build-glibc \
     CGO_ENABLED=1 GOTOOLCHAIN=local go test -race -count=1 \
-        -modfile /tmp/sb-easy-bridge-overlay.mod -tags with_clash_api ./cmd/sb-easy-bridge
+        -modfile /tmp/sb-easy-bridge-overlay.mod -tags with_gvisor,with_tailscale,with_clash_api ./cmd/sb-easy-bridge
 
 # ===== Stage 1: Build C server and polling agent =====
 FROM ${C_IMAGE} AS backend-builder

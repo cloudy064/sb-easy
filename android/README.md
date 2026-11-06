@@ -456,7 +456,7 @@ testing. There is no option to disable TLS certificate verification.
 ## Verification
 
 The checked-in project is covered by Kotlin config-inspection tests, Android
-lint, APK signing/ABI inspection, C++ enrollment/rendering/HTTP contract tests,
+lint, APK signing/ABI inspection, C enrollment/rendering/HTTP contract tests,
 and an end-to-end preflight that feeds a rendered Android profile to sing-box
 1.14.3 `check`. A physical Android device remains necessary for the final VPN,
 network-switch, Doze, and vendor-ROM acceptance pass.

@@ -14,8 +14,9 @@ For this machine's Docker Agent, proxy ports, TUN routing and read-only
 diagnostics, see [local runtime notes](docs/local-runtime.md).
 The default `master` branch contains the C11 server and Linux agent.
 The server, Linux agent and Windows native application are maintained in C11.
-The old `cpp/` and Rust `backend/` directories are historical references only;
-they receive no new features and are excluded from primary CI and release builds.
+The historical C++ implementation has been removed; it remains available in Git
+history. The Rust `backend/` directory is an archived reference only and is
+excluded from primary CI and release builds.
 
 The current source targets the C server/agent **1.1.0**, Android **1.4.0 (29)**,
 Windows **0.7.0**, Linux Desktop **0.1.0**, and macOS/iOS/tvOS **0.1.0 (1)**,
@@ -49,6 +50,9 @@ tracks the subsequent work and remaining native-device and publication checks.
 - Managed sing-box: in-process lifecycle, reload-on-change and recovery; Clash
   API exposed for live monitoring.
 - WireGuard hub + clients (keys, QR, quota, expiry); optional host mesh.
+- Optional per-host Tailscale private networking through the existing sing-box
+  engine, with subnet routes and persistent node identities. See the
+  [Tailscale trial and comparison guide](docs/tailscale.md).
 - Separate proxy users with SS2022 device credentials, self-service subscription
   links and shared quotas across nodes. Short leases enforce byte limits,
   expiry and revocation in the embedded data plane; see

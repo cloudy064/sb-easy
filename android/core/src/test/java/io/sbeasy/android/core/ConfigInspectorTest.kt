@@ -13,6 +13,7 @@ class ConfigInspectorTest {
             {
               "dns": {"servers": [{"tag": "dns"}]},
               "inbounds": [{"type": "tun"}],
+              "endpoints": [{"type": "tailscale", "auth_key": "fixture-tailnet"}],
               "outbounds": [
                 {"type": "shadowsocks", "tag": "Tokyo", "password": "secret"},
                 {"type": "direct", "tag": "direct"}
@@ -32,5 +33,6 @@ class ConfigInspectorTest {
         assertTrue(summary.routeRules.single().contains("Tokyo"))
         assertTrue(summary.sanitizedJson.contains("password"))
         assertFalse(summary.sanitizedJson.contains("secret"))
+        assertFalse(summary.sanitizedJson.contains("fixture-tailnet"))
     }
 }

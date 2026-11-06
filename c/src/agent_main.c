@@ -1283,6 +1283,7 @@ static sbj *ui_config(void *user, sb_err *err) {
     if (found == 0) return sbj_object();
     sbj *config = parse_json(contents, len, err);
     free(contents);
+    sb_agent_config_redact(config);
     return config;
 }
 

@@ -299,7 +299,7 @@ static void name_lost(GDBusConnection* connection, const char* name, void* data)
 int main(int argc, char** argv) {
     umask(0077);
     service s = {0};
-    const char* directory = "/run/sb-easy-desktop";
+    const char* directory = "/var/lib/sb-easy-desktop";
     if (argc == 3 && !strcmp(argv[1], "--session-test")) {
         if (!geteuid()) {
             fputs("Session test mode must never run as root\n", stderr);

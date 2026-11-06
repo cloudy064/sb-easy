@@ -6,7 +6,7 @@ import org.json.JSONObject
 object ConfigInspector {
     private val sensitiveKeys = setOf(
         "password", "uuid", "private_key", "pre_shared_key", "secret", "token",
-        "auth", "authorization", "client_secret",
+        "auth", "auth_key", "authorization", "client_secret",
     )
 
     fun inspect(content: String): ConfigSummary {

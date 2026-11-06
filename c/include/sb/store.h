@@ -117,6 +117,7 @@ typedef struct {
     char *id, *name, *agent_token;
     size_t name_len;
     sbj *capabilities; /* object */
+    sbj *tailscale; /* validated object; auth_key is private */
     char *profile_id, *wg_address, *wg_public_key, *wg_endpoint, *clash_api; /* nullable */
     size_t profile_id_len, wg_address_len, wg_public_key_len, wg_endpoint_len;
     size_t clash_api_len, clash_secret_len;
@@ -129,7 +130,7 @@ typedef struct {
 void sb_host_init(sb_host *h);
 void sb_host_free(sb_host *h);
 void sb_host_copy(sb_host *dst, const sb_host *src);
-/* Public host representation. Agent and Clash secrets are deliberately omitted. */
+/* Public host representation. Agent, Clash and Tailscale secrets are omitted. */
 sbj *sb_host_to_json(const sb_host *h);
 SB_VEC_TYPE(sb_host_vec, sb_host);
 sb_host *sb_host_vec_push(sb_host_vec *v);

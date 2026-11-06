@@ -1,6 +1,9 @@
 # Repository and local runtime guidance
 
-- Active server/agent implementation: `c/`. `cpp/` is archived reference code.
+- Active server/agent implementation: `c/`; Windows native code: `windows/`.
+  Both are C11. The historical `cpp/` tree has been removed; do not recreate it
+  or use an old C++ branch as the basis for new work. Verify the current branch
+  and build entry points before making changes.
 - Before diagnosing this machine, read `docs/local-runtime.md` and run
   `python3 scripts/check-local-runtime.py`. The documented snapshot is not a
   substitute for checking the current container and generated configuration.

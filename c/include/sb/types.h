@@ -54,6 +54,7 @@ typedef struct {
     sbj *host_context;          /* object */
     sbj *external_route_tags; /* array of byte strings */
     sbj *priority_route_rules;  /* array */
+    sbj *network_outbounds;     /* array; server-owned transports, excluded from proxy groups */
     char *control_plane_server; /* "" when unset */
     char *rule_script;          /* NULL == std::nullopt */
     size_t rule_script_len;     /* exact byte length when present */

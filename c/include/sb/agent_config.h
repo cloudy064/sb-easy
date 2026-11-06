@@ -40,6 +40,9 @@ void sb_agent_config_options_copy(sb_agent_config_options *dst,
 char *sb_prepare_agent_config(const char *body, size_t len,
                               const sb_agent_config_options *options, sb_err *err);
 
+/* Redact credentials recursively in a local UI copy, never the active config. */
+void sb_agent_config_redact(sbj *config);
+
 /* Serializes the node-local transform settings used by the Agent UI. */
 sbj *sb_agent_config_options_to_json(const sb_agent_config_options *options);
 

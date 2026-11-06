@@ -136,6 +136,7 @@ void sb_render_request_init(sb_render_request *r) {
     r->profile = sbj_object();
     r->host_context = sbj_object();
     r->priority_route_rules = sbj_array();
+    r->network_outbounds = sbj_array();
     r->external_route_tags = sbj_array();
     r->control_plane_server = sb_strdup("");
     r->clash_controller = sb_strdup("");
@@ -148,6 +149,7 @@ void sb_render_request_free(sb_render_request *r) {
     sbj_free(r->host_context);
     sbj_free(r->external_route_tags);
     sbj_free(r->priority_route_rules);
+    sbj_free(r->network_outbounds);
     free(r->control_plane_server);
     free(r->rule_script);
     free(r->clash_controller);

@@ -6,6 +6,24 @@
 
 #include "sb/atomic_file.h"
 
+void sb_agent_config_redact(sbj *config) {
+    if (sbj_is_array(config)) {
+        for (size_t i = 0; i < sbj_arr_len(config); ++i)
+            sb_agent_config_redact(sbj_arr_at(config, i));
+    } else if (sbj_is_object(config)) {
+        static const char *keys[] = {"auth_key", "password", "private_key", "pre_shared_key",
+            "preshared_key", "secret", "token", "agent_token", "uuid", "authorization"};
+        for (size_t i = 0; i < sbj_obj_len(config); ++i) {
+            const char *key = sbj_obj_key(config, i);
+            bool sensitive = false;
+            for (size_t j = 0; j < sizeof keys / sizeof *keys; ++j)
+                if (strcmp(key, keys[j]) == 0) sensitive = true;
+            if (sensitive) sbj_set_str(config, key, "[redacted]");
+            else sb_agent_config_redact(sbj_obj_val(config, i));
+        }
+    }
+}
+
 void sb_agent_config_options_init(sb_agent_config_options *o) {
     o->local_proxy_egress = true;
     o->outbound_server_overrides = sbj_object();

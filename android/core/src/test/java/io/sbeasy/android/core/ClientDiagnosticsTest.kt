@@ -14,11 +14,13 @@ class ClientDiagnosticsTest {
             sbeasy://enroll?server=https%3A%2F%2Fpanel&code=enroll-code
             vmess://userinfo@example.com:443
             PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+            {"auth_key":"fixture-tailnet"}
+            Failed to use tskey-auth-fixture-value
         """.trimIndent()
 
         val redacted = redactDiagnosticText(raw)
 
-        listOf("token-value", "secret-value", "uuid-value", "bearer-value", "enroll-code", "userinfo")
+        listOf("token-value", "secret-value", "uuid-value", "bearer-value", "enroll-code", "userinfo", "fixture-tailnet", "tskey-auth-fixture-value")
             .forEach { secret -> assertFalse(redacted.contains(secret)) }
         assertTrue(redacted.contains("***"))
         assertTrue(redacted.contains("example.com:443"))

@@ -12,6 +12,8 @@ Group=root
 RuntimeDirectory=sb-easy-desktop
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=restart
+StateDirectory=sb-easy-desktop
+StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure
 RestartSec=2
@@ -33,7 +35,7 @@ LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 DevicePolicy=closed
 DeviceAllow=/dev/net/tun rw
-ReadWritePaths=/run/sb-easy-desktop /proc/sys/net/ipv4/conf
+ReadWritePaths=/run/sb-easy-desktop /var/lib/sb-easy-desktop /proc/sys/net/ipv4/conf
 LimitCORE=0
 MemoryMax=1G
 Environment=GOMEMLIMIT=768MiB

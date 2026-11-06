@@ -207,12 +207,14 @@ internal fun redactDiagnosticText(raw: String): String {
     value = QUERY_SECRET.replace(value) { match -> "${match.groupValues[1]}***" }
     value = URI_USER_INFO.replace(value) { match -> "${match.groupValues[1]}***@" }
     value = WIREGUARD_PRIVATE_KEY.replace(value) { match -> "${match.groupValues[1]}***" }
+    value = TAILSCALE_AUTH_KEY.replace(value, "***")
     return value
 }
 
 private val JSON_SECRET = Regex(
-    "(?i)(\\\"(?:agent_token|token|password|secret|private_key|preshared_key|uuid)\\\"\\s*:\\s*\\\")[^\\\"]*(\\\")",
+    "(?i)(\\\"(?:agent_token|token|password|secret|private_key|preshared_key|auth_key|uuid)\\\"\\s*:\\s*\\\")[^\\\"]*(\\\")",
 )
+private val TAILSCALE_AUTH_KEY = Regex("tskey-[A-Za-z0-9_-]+")
 private val AUTHORIZATION = Regex("(?i)(authorization\\s*[:=]\\s*bearer\\s+)[^\\s,;]+")
 private val QUERY_SECRET = Regex("(?i)([?&](?:code|token|secret)=)[^&#\\s]+")
 private val URI_USER_INFO = Regex("([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\\s]+@")

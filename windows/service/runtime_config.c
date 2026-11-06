@@ -210,7 +210,29 @@ static int adapt_endpoints(sbj *candidate, sbw_error *error) {
     if (endpoints && !sbj_is_array(endpoints)) return fail(error, "RUNTIME_CONFIG_INVALID");
     for (size_t i = 0; i < sbj_arr_len(endpoints); ++i) {
         sbj *endpoint = sbj_arr_at(endpoints, i);
-        if (!sbj_is_object(endpoint) || !sbj_string_is(sbj_get(endpoint, "type"), "wireguard"))
+        if (!sbj_is_object(endpoint))
+            return fail(error, "RUNTIME_CONFIG_UNSUPPORTED");
+        if (sbj_string_is(sbj_get(endpoint, "type"), "tailscale")) {
+            const char *tag = sbj_get_str(endpoint, "tag", "");
+            if (!*tag || strlen(tag) > 512) return fail(error, "RUNTIME_CONFIG_UNSUPPORTED");
+            unsigned char hash[32];
+            if (BCryptHash(BCRYPT_SHA256_ALG_HANDLE, NULL, 0, (PUCHAR)tag,
+                (ULONG)strlen(tag), hash, sizeof hash) < 0) return fail(error, "RUNTIME_RESOURCE_ERROR");
+            char path[80] = "tailscale/";
+            for (size_t j = 0; j < sizeof hash; ++j)
+                (void)sprintf_s(path + 10 + j * 2, sizeof path - 10 - j * 2, "%02x", hash[j]);
+            /* Relative to the protected, persistent core-work directory. A
+             * remote config cannot redirect machine identity storage. */
+            sbj_set_str(endpoint, "state_directory", path);
+            sbj_set_bool(endpoint, "system_interface", false);
+            sbj_del(endpoint, "system_interface_name");
+            sbj_del(endpoint, "system_interface_mtu");
+            sbj_del(endpoint, "taildrop_directory");
+            sbj_del(endpoint, "ssh_server");
+            adapt_dialers(endpoint);
+            continue;
+        }
+        if (!sbj_string_is(sbj_get(endpoint, "type"), "wireguard"))
             return fail(error, "RUNTIME_CONFIG_UNSUPPORTED");
         /* Managed WireGuard is inside sing-box, independent of a desktop WG
          * service. Preserve keys, peers, addresses and server-owned routes. */

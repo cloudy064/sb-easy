@@ -2,9 +2,9 @@
 
 `c/` is the authoritative production C11 server and Linux agent implementation.
 Windows native code is also C11, in `windows/`. Implement new native features,
-fixes and tests in C; do not introduce C++ or mirror changes into `cpp/` or the
-Rust `backend/`. Those directories are historical references only, excluded
-from primary CI and release builds.
+fixes and tests in C; do not introduce C++ or mirror changes into the archived
+Rust `backend/`. The historical `cpp/` tree has been removed and is available
+only in Git history. Rust is excluded from primary CI and release builds.
 
 The current C implementation, its tests and the documented public contracts
 define behavior. Preserve existing HTTP paths, payloads and status codes,

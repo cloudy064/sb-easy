@@ -65,5 +65,20 @@ class HttpDebugRoutingTest {
         assertTrue(runCatching { HttpDebugRouting.apply(overlaid, listOf("example.com"), secret) }.isFailure)
     }
 
+    @Test fun incomingTailnetTrafficPrecedesTheAdvertisedSubnetRoute() {
+        val root = JSONObject(source)
+        root.getJSONArray("endpoints").put(JSONObject().put("type", "tailscale").put("tag", "tailnet"))
+        val rules = JSONArray()
+            .put(JSONObject().put("inbound", JSONArray().put("tailnet")).put("outbound", "direct"))
+            .put(JSONObject().put("ip_cidr", JSONArray().put("192.168.40.0/24")).put("outbound", "tailnet"))
+        objects(root.getJSONObject("route").getJSONArray("rules")).forEach(rules::put)
+        root.getJSONObject("route").put("rules", rules)
+        val result = objects(JSONObject(HttpDebugRouting.apply(root.toString(), listOf("example.com"), secret))
+            .getJSONObject("route").getJSONArray("rules"))
+        val ingress = result.indexOfFirst { it.optJSONArray("inbound")?.optString(0) == "tailnet" }
+        val subnet = result.indexOfFirst { it.optString("outbound") == "tailnet" }
+        assertTrue(ingress >= 0 && subnet > ingress)
+    }
+
     private fun objects(array: JSONArray) = (0 until array.length()).map { array.getJSONObject(it) }
 }

@@ -1,4 +1,4 @@
-/* sb-easy: the unified image binary. cpp/Dockerfile.unified installs the
+/* sb-easy: the unified image binary. c/Dockerfile.unified installs the
  * agent executable as /usr/local/bin/sb-easy (the image ENTRYPOINT). */
 #include "agent_main_internal.h"
 

@@ -7,6 +7,7 @@
           <span class="online-dot" :class="online ? 'on' : 'off'"></span>
           {{ host?.name || id }}
           <span v-if="isSelf" class="kind-badge kind-self">SELF</span>
+          <span v-if="host?.tailscale?.enabled" class="kind-badge kind-tailscale">TAILSCALE</span>
         </h2>
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ host?.wg_address || '' }} · {{ statusText }}</p>
       </div>
@@ -364,6 +365,7 @@ function notify(m: string) { toast.value = m; setTimeout(() => (toast.value = ''
 .online-dot.off { background: #cbc4b8; }
 .kind-badge { font-family: var(--font-mono); font-size: 0.55rem; font-weight: 700; padding: 0.1rem 0.38rem; border-radius: 4px; margin-left: 0.4rem; vertical-align: middle; }
 .kind-self { background: var(--paper-border); color: var(--ink-secondary); }
+.kind-tailscale { background: var(--accent-subtle); color: var(--accent); }
 
 .tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--paper-border); margin: 0.5rem 0 1.25rem; }
 .tab { background: none; border: none; padding: 0.5rem 0.9rem; font-size: 0.85rem; color: var(--ink-secondary); border-bottom: 2px solid transparent; cursor: pointer; }

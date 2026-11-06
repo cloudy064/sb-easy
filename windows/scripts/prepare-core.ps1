@@ -44,6 +44,9 @@ try {
     if ($LASTEXITCODE -ne 0 -or $reported[0] -ne "sing-box version $version") {
         throw 'The verified core did not report the pinned version.'
     }
+    if (($reported -join "`n") -notmatch '\bwith_tailscale\b') {
+        throw 'The verified core lacks the Tailscale feature required by managed private networks.'
+    }
     # Keep a complete previous bundle for rollback. Never replace individual
     # DLL/EXE files across versions or continue after a locked-file failure.
     if (Test-Path -LiteralPath $coreDir) {

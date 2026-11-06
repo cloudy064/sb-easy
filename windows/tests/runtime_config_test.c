@@ -151,6 +151,17 @@ int wmain(int argc, wchar_t **argv) {
     CHECK(sb_streq(sbj_as_str(sbj_arr_at(sbj_get(endpoint, "address"), 0), ""), "10.59.32.3/32"));
     CHECK(sb_streq(sbj_get_str(sbj_arr_at(sbj_get(sbj_get(value, "route"), "rules"), 2), "outbound", ""), "network"));
     sbj_free(value); value = NULL; sbw_runtime_config_free(&other);
+    const char ts[] = "{\"endpoints\":[{\"type\":\"tailscale\",\"tag\":\"sb-easy-tailscale\",\"auth_key\":\"fixture-auth\",\"state_directory\":\"C:/remote/state\",\"system_interface\":true,\"taildrop_directory\":\"C:/remote/drop\",\"ssh_server\":{\"enabled\":true}}],\"route\":{\"rules\":[{\"ip_cidr\":[\"100.64.0.0/10\"],\"outbound\":\"sb-easy-tailscale\"}]}}";
+    CHECK(sbw_runtime_config_prepare(ts, strlen(ts), "https://panel.example.test", &other, &error) == 0);
+    value = sbj_parse_cstr(other.json);
+    const sbj *tailscale = sbj_arr_at(sbj_get(value, "endpoints"), 0);
+    const char *state_path = sbj_get_str(tailscale, "state_directory", "");
+    CHECK(!strncmp(state_path, "tailscale/", 10) && strlen(state_path) == 74);
+    CHECK(!strstr(other.json, "C:/remote") && !sbj_get_bool(tailscale, "system_interface", true));
+    CHECK(!sbj_has(tailscale, "taildrop_directory") && !sbj_has(tailscale, "ssh_server"));
+    CHECK(sbj_string_is(sbj_get(tailscale, "auth_key"), "fixture-auth"));
+    CHECK(strstr(other.json, "100.64.0.0/10"));
+    sbj_free(value); value = NULL; sbw_runtime_config_free(&other);
     const char candidate[] = "{\"mode\":\"fixture\",\"inbounds\":[{\"type\":\"tun\",\"address\":[\"172.30.0.1/30\"],\"auto_route\":false,\"strict_route\":true,\"auto_redirect\":true,\"include_uid\":[1000]}],\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\",\"bind_interface\":\"eth0\"}],\"route\":{\"default_interface\":\"eth0\",\"rules\":[{\"outbound\":\"direct\"}]},\"log\":{\"output\":\"C:/sensitive/log\"},\"ntp\":{\"enabled\":true},\"experimental\":{\"cache_file\":{\"enabled\":true,\"path\":\"C:/sensitive/db\"},\"debug\":{},\"clash_api\":{\"external_controller\":\"0.0.0.0:9090\",\"secret\":\"old-secret\",\"external_ui\":\"C:/sensitive/ui\",\"external_ui_download_url\":\"https://bad.example/ui.zip\"}}}";
     CHECK(sbw_runtime_config_prepare(candidate, strlen(candidate), "https://control.example/prefix", &config, &error) == 0);
     CHECK(config.has_tun && !config.auto_route && !wcscmp(config.interface_name, L"sb-easy"));

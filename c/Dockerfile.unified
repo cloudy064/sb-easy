@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=sb-easy-singbox-go-mod-glibc \
         -modfile /tmp/sb-easy-bridge-overlay.mod \
         -buildmode=c-archive \
         -trimpath \
-        -tags 'with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
+        -tags 'with_gvisor,with_quic,with_wireguard,with_tailscale,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
         -ldflags "-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${SINGBOX_VERSION}" \
         -o /out/libsb_easy_singbox.a \
         ./cmd/sb-easy-bridge \

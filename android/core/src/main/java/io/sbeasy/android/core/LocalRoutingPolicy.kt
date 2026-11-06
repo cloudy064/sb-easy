@@ -212,6 +212,19 @@ object LocalRouting {
     fun render(content: String, policy: LocalRoutingPolicy, controlPlaneServer: String = "", includeGeoRules: Boolean = true): LocalRoutingResult {
         validate(policy)
         val root = JSONObject(content)
+        objects(root.optJSONArray("endpoints")).filter { it.optString("type") == "tailscale" }
+            .forEach { endpoint ->
+                val tag = endpoint.optString("tag")
+                require(tag.isNotBlank() && tag.length <= 512) { "Tailscale 节点缺少有效标签" }
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(tag.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+                // Libbox resolves relative state under filesDir (BasePath),
+                // never external storage or a path supplied by the panel.
+                endpoint.put("state_directory", "tailscale/$digest")
+                endpoint.put("system_interface", false)
+                listOf("system_interface_name", "system_interface_mtu", "taildrop_directory", "ssh_server")
+                    .forEach(endpoint::remove)
+            }
         // Android's mixed stack still sends TCP through the vendor kernel. Use
         // libbox's userspace TCP/UDP stack consistently across Wi-Fi handovers.
         objects(root.optJSONArray("inbounds")).filter { it.optString("type") == "tun" }
@@ -278,7 +291,12 @@ object LocalRouting {
         val endpointTags = objects(root.optJSONArray("endpoints")).map { it.optString("tag") }.toSet()
         val proxyRouteTags = objects(outbounds).filter { it.optString("type") !in setOf("direct", "block", "dns") }
             .map { it.optString("tag") }.toSet()
+        fun endpointIngress(rule: JSONObject): Boolean = rule.optString("inbound") in endpointTags ||
+            strings(rule.optJSONArray("inbound")).any { it in endpointTags }
         val rules = JSONArray()
+        // Incoming tailnet traffic must reach local services before destination
+        // routes send that same subnet back into the tailnet.
+        originalRules.filter(::endpointIngress).forEach(rules::put)
         // Sniff and DNS hijacking must run before domain routes. Preserve management tunnels.
         originalRules.filter { it.optString("action") in setOf("sniff", "hijack-dns", "resolve") }
             .forEach(rules::put)
@@ -292,7 +310,7 @@ object LocalRouting {
             val host = if (key == "ip_cidr") "$controlHost/${if (controlHost.contains(':')) 128 else 32}" else controlHost
             rules.put(JSONObject().put(key, JSONArray(listOf(host))).put("outbound", "direct"))
         }
-        originalRules.filter { it.optString("outbound") in endpointTags }.forEach(rules::put)
+        originalRules.filter { !endpointIngress(it) && it.optString("outbound") in endpointTags }.forEach(rules::put)
         // Management and explicit private-network tunnels stay reachable before application rules.
         // Separate application/domain rules express OR; putting both in one rule would mean AND.
         policy.groups.forEach { group ->
@@ -309,7 +327,7 @@ object LocalRouting {
         // Client groups supersede centrally pinned proxy exits. Keep other direct,
         // reject and special rules, including nested logical rules, as provisioned.
         originalRules.filter { rule ->
-            rule.optString("action") !in setOf("sniff", "hijack-dns", "resolve") &&
+            !endpointIngress(rule) && rule.optString("action") !in setOf("sniff", "hijack-dns", "resolve") &&
                 rule.optString("outbound") !in endpointTags &&
                 rule.optString("outbound") !in proxyRouteTags &&
                 (!rule.has("outbound") || rule.optString("outbound") in usedTags)

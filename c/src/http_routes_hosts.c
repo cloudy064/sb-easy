@@ -15,6 +15,7 @@
 #include "sb/config_renderer.h"
 #include "sb/script_engine.h"
 #include "sb/types.h"
+#include "sb/tailscale.h"
 #include "sb/wireguard.h"
 #include "sb/observability.h"
 #include "sb/proxy_users.h"
@@ -293,6 +294,8 @@ static int handle_delete_profile(sb_http_req *req, sb_http_resp *resp, sb_err *e
 
 /* host_from_create_request(): `host` must be freshly initialised. */
 static int host_from_create_request(const sbj *body, sb_host *host, sb_err *err) {
+    const sbj *tailscale = sbj_get(body, "tailscale");
+    if (tailscale && sb_tailscale_update(&host->tailscale, tailscale, err) != 0) return -1;
     if (!sb_json_required_string(body, "name", err)) return -1;
     const sbj *name = sbj_get(body, "name");
     sb_str_setn(&host->name, name->v.str.ptr, name->v.str.len);
@@ -331,6 +334,8 @@ static int host_from_create_request(const sbj *body, sb_host *host, sb_err *err)
 
 /* host_from_update_request(): updates `host` in place. */
 static int host_from_update_request(sb_host *host, const sbj *body, sb_err *err) {
+    const sbj *tailscale = sbj_get(body, "tailscale");
+    if (tailscale && sb_tailscale_update(&host->tailscale, tailscale, err) != 0) return -1;
     const sbj *name = sbj_get(body, "name");
     if (name && !sbj_is_null(name)) {
         if (!sbj_is_string(name) || name->v.str.len == 0)
@@ -533,7 +538,7 @@ static int managed_render_request(sb_http_server *srv, sb_host *host, bool provi
                                   const char *control_plane_server, sb_render_request *out, sb_err *err) {
     bool embedded = false;
     if (uses_embedded_managed_network(host, &embedded, err) != 0) return -1;
-    if (embedded && provision_network_identity && !host->wg_address) {
+    if (embedded && !sb_tailscale_enabled(host->tailscale) && provision_network_identity && !host->wg_address) {
         sb_host provisioned;
         sb_host_init(&provisioned);
         if (sb_wireguard_provision_host(srv->wireguard, host, false, &provisioned, err) != 0) {
@@ -556,6 +561,8 @@ static int managed_render_request(sb_http_server *srv, sb_host *host, bool provi
     out->clash_controller_len = 0;
     sbj *experimental = sbj_get(out->profile, "experimental");
     if (sbj_is_object(experimental)) sbj_del(experimental, "clash_api");
+
+    if (sb_tailscale_enabled(host->tailscale)) return 0;
 
     sbj *endpoint = NULL;
     int found = sb_wireguard_client_endpoint(srv->wireguard, host, &endpoint, err);
@@ -772,6 +779,12 @@ static int handle_host_config(sb_http_req *req, sb_http_resp *resp, sb_err *err)
     if (managed_render_request(srv, &host, false, srv->enrollment_server, &request, err) != 0) goto done;
     sbj *config = render_config(&request, err);
     if (!config) goto done;
+    if (!req->claims || !sb_streq(req->claims->role, "admin")) {
+        sbj *endpoints = sbj_get(config, "endpoints"), *endpoint;
+        SBJ_ARR_FOREACH(endpoints, i, endpoint)
+            if (sbj_string_is(sbj_get(endpoint, "type"), "tailscale"))
+                sbj_del(endpoint, "auth_key");
+    }
     sb_resp_json(resp, 200, config);
     rc = 0;
 done:

@@ -34,7 +34,7 @@ PY_COPY
     cd -- "$source_dir"
     python3 "$repo_dir/singbox-bridge/prepare-overlay.py" --output "$output_dir/bridge-overlay.json"
     CGO_ENABLED=1 go build -modfile "$output_dir/bridge-overlay.mod" -buildmode=c-archive -trimpath \
-        -tags 'with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
+        -tags 'with_gvisor,with_quic,with_wireguard,with_tailscale,with_utls,with_clash_api,netgo,osusergo,badlinkname,tfogo_checklinkname0' \
         -ldflags "-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=$version" \
         -o "$output_dir/libsb_easy_singbox.a" ./cmd/sb-easy-bridge
 )

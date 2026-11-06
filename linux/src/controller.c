@@ -476,7 +476,11 @@ static int execute(job* j, sbj** result, sb_err* err) {
             sbl_vault_close(&c->vault);
             return -1;
         }
-        if (sbl_runtime_init(&c->runtime, c->runtime_dir, err)) {
+        /* Node identity must outlive logout/reboot, unlike XDG_RUNTIME_DIR. */
+        char* core_directory = sb_asprintf("%s/core", c->data_dir);
+        int runtime_result = sbl_runtime_init(&c->runtime, core_directory, err);
+        free(core_directory);
+        if (runtime_result) {
             sbj_free(c->state);
             c->state = NULL;
             sbl_vault_close(&c->vault);

@@ -42,7 +42,8 @@ char *sbw_diagnostics_redact(const char *line, const sbj *config) {
     char lower[LINE_LIMIT]; size_t length = strlen(out);
     for (size_t i = 0; i <= length; ++i) lower[i] = out[i] >= 'A' && out[i] <= 'Z' ? (char)(out[i] + ('a' - 'A')) : out[i];
     if (strstr(lower, "authorization") || strstr(lower, "bearer ") || strstr(lower, "basic ") ||
-        strstr(lower, "password") || strstr(lower, "secret") || strstr(lower, "private_key") || strstr(lower, "cookie:") ||
+        strstr(lower, "password") || strstr(lower, "secret") || strstr(lower, "private_key") || strstr(lower, "auth_key") ||
+        strstr(lower, "tskey-") || strstr(lower, "cookie:") ||
         strstr(lower, "token=") || (strstr(lower, "://") && strchr(lower, '@'))) {
         sbw_secret_free(out); return sb_strdup("[credential-bearing core line omitted]");
     }

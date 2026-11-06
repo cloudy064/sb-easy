@@ -23,6 +23,10 @@ static bool protected_rule(const sbj* rule, sbj* root, bool dns) {
                                   sbj_get_str(rule, "server", ""));
         target = sbj_get_str(server, "detour", "");
     }
+    const sbj* endpoints = sbj_get(root, "endpoints");
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
+        if (contains_text(sbj_get(rule, "inbound"), sbj_get_str(sbj_arr_at(endpoints, i), "tag", "")))
+            return true;
     return strcmp(sbj_get_str(rule, "action", "route"), "route") ||
            sbj_get(rule, "domain") || sbj_get(rule, "ip_cidr") ||
            sbj_get(rule, "source_ip_cidr") || sbj_get(rule, "ip_is_private") ||

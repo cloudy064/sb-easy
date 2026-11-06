@@ -25,6 +25,8 @@
           <p class="text-xs text-muted" style="margin-top:-0.4rem">{{ t('hosts.endpoint.hint') }}</p>
         </div>
 
+        <TailscaleSettings v-model="tailscale" />
+
         <!-- Proxy assignment (existing hosts only) -->
         <div v-if="!isCreate" class="section-block">
           <h4>{{ t('hosts.proxies') }}</h4>
@@ -55,6 +57,7 @@
         </div>
       </div>
 
+      <p v-if="saveError" class="save-error" role="alert">{{ saveError }}</p>
       <div class="modal-actions hm-actions">
         <div class="flex-center gap-2">
           <button v-if="!isCreate && host && host.capabilities.is_wg_member && host.wg_address" class="btn-ghost btn-sm" @click="store.downloadWgConfig(host)">{{ t('hosts.wgconfig') }}</button>
@@ -62,7 +65,7 @@
         </div>
         <div class="flex-center gap-2">
           <button class="btn-secondary" @click="$emit('close')">{{ t('action.close') }}</button>
-          <button class="btn-primary" @click="save">{{ isCreate ? t('hosts.create') : t('action.save') }}</button>
+          <button class="btn-primary" :disabled="saving" @click="save">{{ isCreate ? t('hosts.create') : t('action.save') }}</button>
         </div>
       </div>
     </div>
@@ -71,6 +74,9 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { isAxiosError } from 'axios'
+import TailscaleSettings from './TailscaleSettings.vue'
+import { tailscaleForm, tailscaleUpdate } from '../lib/tailscale'
 import { useI18n } from '../composables/i18n'
 import { useHostsStore } from '../stores/hosts'
 import { useProxyNodesStore } from '../stores/proxyNodes'
@@ -87,6 +93,9 @@ const isCreate = computed(() => !props.host)
 const selectedNodes = ref<string[]>([])
 const installCommand = ref('')
 const copied = ref(false)
+const saving = ref(false)
+const saveError = ref('')
+const tailscale = ref(tailscaleForm(props.host?.tailscale))
 
 const f = ref({
   name: props.host?.name ?? '',
@@ -106,27 +115,49 @@ onMounted(async () => {
 })
 
 async function save() {
-  if (isCreate.value) {
-    await store.createHost({
-      name: f.value.name,
-      profile_id: f.value.profile_id,
-      capabilities: { ...f.value.caps },
-      wg_address: f.value.wg_address || undefined,
-      wg_endpoint: f.value.wg_endpoint || undefined,
-      clash_api: f.value.clash_api || undefined,
-    })
-  } else if (props.host) {
-    const caps = { ...props.host.capabilities, ...f.value.caps }
-    await store.updateHost(props.host.id, {
-      name: f.value.name,
-      profile_id: f.value.profile_id,
-      capabilities: caps,
-      wg_endpoint: f.value.wg_endpoint,
-      clash_api: f.value.clash_api,
-    } as any)
-    await store.fetchHosts()
+  if (saving.value) return
+  saveError.value = ''
+  if (!f.value.name.trim()) {
+    saveError.value = t('hosts.name.required')
+    return
   }
-  emit('saved')
+  if (tailscale.value.enabled && !f.value.caps.runs_singbox) {
+    saveError.value = t('tailscale.requires_singbox')
+    return
+  }
+  saving.value = true
+  try {
+    if (isCreate.value) {
+      await store.createHost({
+        name: f.value.name.trim(),
+        profile_id: f.value.profile_id,
+        capabilities: { ...f.value.caps },
+        wg_address: f.value.wg_address || undefined,
+        wg_endpoint: f.value.wg_endpoint || undefined,
+        clash_api: f.value.clash_api || undefined,
+        tailscale: tailscaleUpdate(tailscale.value),
+      })
+    } else if (props.host) {
+      const caps = { ...props.host.capabilities, ...f.value.caps }
+      await store.updateHost(props.host.id, {
+        name: f.value.name.trim(),
+        profile_id: f.value.profile_id,
+        capabilities: caps,
+        wg_endpoint: f.value.wg_endpoint,
+        clash_api: f.value.clash_api,
+        tailscale: tailscaleUpdate(tailscale.value),
+      })
+      await store.fetchHosts()
+    }
+    tailscale.value.auth_key = ''
+    emit('saved')
+  } catch (error) {
+    saveError.value = isAxiosError(error) && typeof error.response?.data?.error === 'string'
+      ? error.response.data.error
+      : error instanceof Error ? error.message : t('hosts.save.failed')
+  } finally {
+    saving.value = false
+  }
 }
 
 async function saveOutbounds() {
@@ -172,4 +203,5 @@ async function doDelete() {
 .proxy-pick-item:hover { background: var(--paper-bg); }
 .proxy-pick-item input { width: auto; }
 .hm-actions { display: flex; justify-content: space-between; align-items: center; }
+.save-error { color: var(--bad); background: var(--bad-bg); padding: .65rem; border-radius: var(--radius-sm); font-size: .82rem; }
 </style>

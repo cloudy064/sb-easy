@@ -37,7 +37,8 @@ alone does not prove that every destination works.
 
 Use `c/Dockerfile.unified` for current Agent builds. For deployment, use its
 runtime image, which supplies runtime libraries. Exported artifacts are not
-necessarily portable to arbitrary host distributions. `cpp/` is historical.
+necessarily portable to arbitrary host distributions. The historical `cpp/`
+source tree has been removed; use `c/` for all server and Agent builds.
 
 On 2026-10-26 the old `dist/agent-static`, static Agent tarball,
 `dist/sb-easy-unified-glibc`, and `build/cpp{,-gcc,-clang}` outputs were moved

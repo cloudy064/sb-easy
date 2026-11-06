@@ -372,7 +372,11 @@ static bool protected_rule(const sbj *rule, const sbj *root, bool dns_rule) {
             outbound_named(sbj_get(sbj_get(root, "dns"), "servers"), sbj_get_str(rule, "server", ""));
         target = sbj_get_str(server, "detour", "");
     }
-    if (outbound_named(sbj_get(root, "endpoints"), target))
+    const sbj *endpoints = sbj_get(root, "endpoints");
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
+        if (has_text(sbj_get(rule, "inbound"), sbj_get_str(sbj_arr_at(endpoints, i), "tag", "")))
+            return true;
+    if (outbound_named(endpoints, target))
         return true;
     return strcmp(action, "route") || sbj_get(rule, "ip_cidr") || sbj_get(rule, "source_ip_cidr") ||
            sbj_get(rule, "ip_is_private") || sbj_get(rule, "domain") || sbj_get(rule, "type") ||
@@ -446,13 +450,35 @@ char *sba_build_runtime(const char *source, const char *subscriptions, const cha
         free(tun_tag);
         goto bad;
     }
-    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
-        if (!sbj_string_is(sbj_get(sbj_arr_at(endpoints, i), "type"), "wireguard") ||
-            sbj_get_bool(sbj_arr_at(endpoints, i), "system", false) ||
-            sbj_get_int(sbj_arr_at(endpoints, i), "listen_port", 0) != 0) {
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i) {
+        sbj *endpoint = sbj_arr_at(endpoints, i);
+        if (sbj_string_is(sbj_get(endpoint, "type"), "tailscale")) {
+            if (!text(sbj_get(endpoint, "tag"), 512, false)) {
+                free(tun_tag);
+                goto bad;
+            }
+            const char *tag = sbj_get_str(endpoint, "tag", "");
+            char *digest = sb_sha256_hex(tag, strlen(tag));
+            char *path = sb_asprintf("tailscale/%s", digest);
+            free(digest);
+            /* Libbox resolves this under its private BasePath. Linux desktop
+             * resolves it beside its private runtime config in the bridge. */
+            sbj_set_str(endpoint, "state_directory", path);
+            free(path);
+            sbj_set_bool(endpoint, "system_interface", false);
+            sbj_del(endpoint, "system_interface_name");
+            sbj_del(endpoint, "system_interface_mtu");
+            sbj_del(endpoint, "taildrop_directory");
+            sbj_del(endpoint, "ssh_server");
+            continue;
+        }
+        if (!sbj_string_is(sbj_get(endpoint, "type"), "wireguard") ||
+            sbj_get_bool(endpoint, "system", false) ||
+            sbj_get_int(endpoint, "listen_port", 0) != 0) {
             free(tun_tag);
             goto bad;
         }
+    }
     sbj *outbounds = sbj_get(root, "outbounds");
     if (!outbounds) {
         outbounds = sbj_array();

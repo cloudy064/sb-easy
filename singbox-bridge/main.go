@@ -8,7 +8,6 @@ import "C"
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
 	"unsafe"
 
@@ -83,7 +82,7 @@ func errorCString(err error) *C.char {
 }
 
 func createInstance(configPath string) (*box.Box, context.CancelFunc, error) {
-	content, err := os.ReadFile(configPath)
+	content, err := readRuntimeConfig(configPath)
 	if err != nil {
 		return nil, nil, E.Cause(err, "read config")
 	}
@@ -156,7 +155,7 @@ func startRuntime(configPath string) error {
 			operationCancel()
 		}
 	}()
-	content, err := os.ReadFile(configPath)
+	content, err := readRuntimeConfig(configPath)
 	if err != nil {
 		return E.Cause(err, "read config")
 	}
@@ -203,7 +202,7 @@ func reloadRuntime(configPath string) error {
 
 	// Construct the replacement before stopping the current engine so schema and
 	// initialization errors cannot interrupt a healthy runtime.
-	content, err := os.ReadFile(configPath)
+	content, err := readRuntimeConfig(configPath)
 	if err != nil {
 		return E.Cause(err, "read config")
 	}

@@ -14,9 +14,10 @@ if ($Version -notmatch '^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]
 $parts = $Version.Split('.') | ForEach-Object { [int]$_ }
 if ($parts[0] -gt 255 -or $parts[1] -gt 255 -or $parts[2] -gt 65535) { throw 'Version exceeds Windows Installer limits.' }
 $Payload = (Resolve-Path -LiteralPath $Payload).Path
-foreach ($name in @('sb-easy.exe', 'sb-easy-service.exe', 'sb-easy-update.exe', 'WebView2Loader.dll', 'ui\index.html')) {
+foreach ($name in @('sb-easy.exe', 'sb-easy-service.exe', 'sb-easy-update.exe', 'ui\index.html')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Payload $name))) { throw "Missing package payload: $name" }
 }
+if (Test-Path -LiteralPath (Join-Path $Payload 'WebView2Loader.dll')) { throw 'The web-only package must not include the retired WebView2 loader.' }
 $output = Join-Path $repoRoot "build\sb-easy-$Version-windows-x64.msi"
 & $WixPath build (Join-Path $repoRoot 'windows\installer\Package.wxs') -arch x64 `
     -ext WixToolset.UI.wixext/5.0.2 -d "Payload=$Payload" -d "Version=$Version" -o $output -wx

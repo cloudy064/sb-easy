@@ -4,7 +4,7 @@
   <Package Name="sb-easy" Manufacturer="sb-easy" Version="$(Version)"
            UpgradeCode="78E985E7-0CDC-4782-B1EA-52DCE6B3E544"
            Scope="perMachine" InstallerVersion="500" Language="1033">
-    <SummaryInformation Description="sb-easy Windows desktop and background service" />
+    <SummaryInformation Description="sb-easy background service and local web management tray" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of sb-easy is already installed."
                   Schedule="afterInstallInitialize" />
     <CustomAction Id="RemoveLeakProtection" FileRef="ServiceExe" ExeCommand="--disable-kill-switch"
@@ -22,13 +22,6 @@
     <Icon Id="SbEasyIcon" SourceFile="$(Payload)\sb-easy.ico" />
     <Property Id="ARPPRODUCTICON" Value="SbEasyIcon" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/cloudy064/sb-easy" />
-    <Property Id="WEBVIEW2_MACHINE">
-      <RegistrySearch Id="WebViewMachine" Root="HKLM" Bitness="always32"
-        Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
-        Name="pv" Type="raw" />
-    </Property>
-    <Launch Condition="Installed OR (WEBVIEW2_MACHINE AND WEBVIEW2_MACHINE &lt;&gt; &quot;0.0.0.0&quot;)"
-      Message="Install Microsoft Edge WebView2 Evergreen Runtime (for all users) first: https://go.microsoft.com/fwlink/p/?LinkId=2124703" />
     <Property Id="WINDOWS_BUILD">
       <RegistrySearch Id="WindowsBuild" Root="HKLM" Bitness="always64"
         Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion" Name="CurrentBuildNumber" Type="raw" />
@@ -37,13 +30,24 @@
       Message="sb-easy requires 64-bit Windows 10 or later." />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="sb-easy">
+        <!-- Repair the public application root on upgrades from versions whose
+             private plugin store incorrectly restricted its parent directory.
+             Protected private stores retain their own separate DACL. -->
+        <Component Id="ApplicationDirectoryAccess" Guid="9C0E777A-E222-43F1-90B6-C4AA593C80DF">
+          <CreateFolder>
+            <PermissionEx Id="ApplicationReadExecute" Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
+          </CreateFolder>
+        </Component>
+        <!-- Retain the component/file identity for upgrades from the old GUI. -->
         <Component Id="DesktopExecutable" Guid="*">
           <File Id="DesktopExe" Source="$(Payload)\sb-easy.exe" KeyPath="yes">
             <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="sb-easy"
                       Advertise="yes" Icon="SbEasyIcon" IconIndex="0" WorkingDirectory="INSTALLFOLDER" />
-            <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="sb-easy"
-                      Advertise="yes" Icon="SbEasyIcon" IconIndex="0" WorkingDirectory="INSTALLFOLDER" />
           </File>
+        </Component>
+        <Component Id="TrayAutoStart" Guid="*">
+          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+            Name="sb-easy" Type="string" Value="&quot;[INSTALLFOLDER]sb-easy.exe&quot; --background" KeyPath="yes" />
         </Component>
         <Component Id="ServiceExecutable" Guid="*">
           <File Id="ServiceExe" Source="$(Payload)\sb-easy-service.exe" KeyPath="yes" />
@@ -56,9 +60,10 @@
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
-    <StandardDirectory Id="DesktopFolder" />
     <Feature Id="Complete" Title="sb-easy" Level="1">
+      <ComponentRef Id="ApplicationDirectoryAccess" />
       <ComponentRef Id="DesktopExecutable" />
+      <ComponentRef Id="TrayAutoStart" />
       <ComponentRef Id="ServiceExecutable" />
       <Files Directory="INSTALLFOLDER" Include="$(Payload)\**">
         <Exclude Files="$(Payload)\sb-easy.exe" />

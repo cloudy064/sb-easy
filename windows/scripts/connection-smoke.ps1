@@ -2,7 +2,7 @@ param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$Tun,
     [switch]$SlowRules,
-    [switch]$Dashboard
+    [Alias('Telemetry')][switch]$IncludeTelemetry
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Path $testDir | Out-Null
 $pipeId = 'sb-easy-connection-smoke-' + [guid]::NewGuid().ToString('N')
 $pipeName = '\\.\pipe\' + $pipeId
 $dataDir = Join-Path $testDir 'state'
-$service = $null; $fixture = $null; $connected = $false; $streamProbe = $null; $desktop = $null
+$service = $null; $fixture = $null; $connected = $false; $streamProbe = $null
 $adapterName = 'sb-easy-test-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
 function Read-PipeBytes($Stream, [byte[]]$Buffer) {
     $offset = 0
@@ -88,7 +88,7 @@ try {
     $serialized = $telemetry | ConvertTo-Json -Depth 15 -Compress
     if ($serialized -match 'Bearer |external_controller|fixture-private-token|fixture-private-password') { throw 'Runtime snapshot leaked private data.' }
     Write-Output 'PASS: config catalog revisions and real core upload/download counters returned through the C service.'
-    if ($Dashboard) {
+    if ($IncludeTelemetry) {
         $streamProbe = Start-Process -FilePath (Get-Command curl.exe).Source -ArgumentList @('--silent','--show-error','--max-time','90','--noproxy','never-bypass.invalid','--proxy',"socks5h://127.0.0.1:$proxyPort",'--output','NUL',"$origin/connection-stream") -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $testDir 'stream-error.log')
         $deadline = [DateTime]::UtcNow.AddSeconds(5)
         do {
@@ -103,36 +103,11 @@ try {
         if (-not $logs.lines.Count -or ($logs.lines -join "`n") -match 'fixture-private-password|fixture-private-token') { throw 'Log projection unavailable or leaked credentials.' }
         $cleared = Invoke-TestRpc 'traffic.clear'
         if ($cleared.upload -ne 0 -or $cleared.download -ne 0 -or $cleared.rows.Count -ne 0) { throw 'Traffic clear did not reset cumulative totals.' }
-        # No GUI or runtime.snapshot RPC during this interval: only the service monitor collects.
+        # No browser or runtime.snapshot RPC during this interval: only the service monitor collects.
         Start-Sleep -Milliseconds 2500
         $background = Invoke-TestRpc 'traffic.snapshot'
-        if ($background.download -le 0 -or $background.rows.Count -le 0) { throw 'Traffic collection depended on an open GUI.' }
-        Write-Output 'PASS: background collection without GUI, reset of a live connection, attribution and sanitized log RPC.'
-        $desktopExe = Join-Path $buildDir 'sb-easy.exe'
-        $views = @(
-            @{page='overview';theme='light';width='1120';name='overview-light'},
-            @{page='overview';theme='dark';width='1120';name='overview-dark'},
-            @{page='statistics';theme='light';width='1120';name='statistics'},
-            @{page='statistics';theme='dark';width='760';name='statistics-narrow'},
-            @{page='logs';theme='dark';width='1120';name='logs'},
-            @{page='capture';theme='light';width='1120';name='capture'},
-            @{page='capture';theme='dark';width='760';name='capture-narrow'},
-            @{page='proxies';theme='light';width='1120';name='proxies'},
-            @{page='connections';theme='dark';width='1120';name='connections'},
-            @{page='profiles';theme='light';width='1120';name='profiles'},
-            @{page='rules';theme='light';width='1120';name='rules'},
-            @{page='diagnostics';theme='light';width='1120';name='diagnostics'},
-            @{page='activity';theme='light';width='1120';name='activity'},
-            @{page='settings';theme='dark';width='760';name='settings-narrow'},
-            @{page='connections';theme='light';width='760';name='connections-narrow'}
-        )
-        foreach ($view in $views) {
-            $screenshot = Join-Path $testDir ($view.name + '.png')
-            [string[]]$arguments = @('--pipe-name',$pipeName,'--smoke-test',('"'+$screenshot+'"'),'--expect-enrolled','--expect-running','--smoke-page',$view.page,'--smoke-theme',$view.theme,'--smoke-width',$view.width)
-            $desktop = Start-Process -FilePath $desktopExe -ArgumentList $arguments -PassThru -WindowStyle Hidden
-            if (-not $desktop.WaitForExit(35000) -or $desktop.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $screenshot)) { throw "Dashboard view $($view.name) failed. See $testDir" }
-            Write-Output "PASS: real core telemetry, native navigation, theme and no overflow: $screenshot"
-        }
+        if ($background.download -le 0 -or $background.rows.Count -le 0) { throw 'Traffic collection depended on an open browser.' }
+        Write-Output 'PASS: background collection without browser, reset of a live connection, attribution and sanitized log RPC.'
         if (-not $streamProbe.HasExited) { Stop-Process -Id $streamProbe.Id -Force; $streamProbe.WaitForExit() }
     }
     $stopped = Invoke-TestRpc 'connection.stop'
@@ -246,7 +221,6 @@ try {
     }
     Write-Output "Connection acceptance artifacts: $testDir"
 } finally {
-    if ($desktop -and -not $desktop.HasExited) { Stop-Process -Id $desktop.Id -Force }
     if ($streamProbe -and -not $streamProbe.HasExited) { Stop-Process -Id $streamProbe.Id -Force }
     if ($connected -and $service -and -not $service.HasExited) {
         try { $null = Invoke-TestRpc 'connection.stop' } catch { Write-Warning 'The isolated core required service shutdown after a stop error.' }

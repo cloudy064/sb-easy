@@ -156,7 +156,6 @@ unsafe:
 
 static int pin_directories(secure_store *store, sbw_error *error) {
     size_t length = wcslen(store->directory);
-    size_t parent_end = (size_t)(wcsrchr(store->directory, L'\\') - store->directory);
     wchar_t *current = wide_copy(store->directory);
     /* Each pinned prefix removes FILE_SHARE_DELETE so ancestors cannot be
      * renamed or replaced between subsequent no-follow opens. */
@@ -170,9 +169,12 @@ static int pin_directories(secure_store *store, sbw_error *error) {
             free(current);
             return storage_fail(error, "STORAGE_ERROR");
         }
-        const wchar_t *component = wcsrchr(current, L'\\') + 1;
-        bool managed = !store->readonly && (i == length ||
-            (i == parent_end && CompareStringOrdinal(component, -1, L"sb-easy", -1, TRUE) == CSTR_EQUAL));
+        /* Only the requested private directory belongs to this store. A
+         * parent named sb-easy may be the public Program Files installation
+         * containing .plugin-trust; hardening that parent denies the normal
+         * user's tray access to its executable and web assets. Newly created
+         * private ancestors already receive security at CreateDirectoryW. */
+        bool managed = !store->readonly && i == length;
         HANDLE directory = CreateFileW(current, FILE_READ_ATTRIBUTES | (managed ? READ_CONTROL | WRITE_DAC : 0),
             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);

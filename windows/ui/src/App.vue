@@ -17,14 +17,14 @@ import LogsView from './components/LogsView.vue'
 import type { ExtensionId, ExtensionInfo } from './lib/protocol'
 import { bytes, rates, shortVersion, nodeKind } from './lib/dashboard'
 import brandMark from '../../../assets/branding/sb-easy-mark-v2.svg'
-import { BridgeError, findNativeTransport, NativeBridge } from './lib/bridge'
+import { BridgeError, findLocalTransport, NativeBridge } from './lib/bridge'
 import { previewEnrollment } from './lib/enrollment'
 import { configStage } from './lib/config'
 import { connectionActions, runtimeDetail } from './lib/connection'
 import type { HealthPolicy, SubscriptionImport, ManagementSettings, LocalRoutingGroup, ConfigSummary, EnrollmentResult, HelloResult, Method, StatusResult, ConfigInspection, RuntimeSnapshot } from './lib/protocol'
 
 type ConnectionState = 'checking' | 'online' | 'offline' | 'host_missing'
-const bridge = new NativeBridge(findNativeTransport())
+const bridge = new NativeBridge(findLocalTransport())
 type Page = 'connections' | 'logs' | 'rules' | 'extensions' | 'http-debug' | 'capture' | 'statistics' | 'network-tools' | 'overview' | 'proxies' | 'profiles' | 'activity' | 'settings' | 'diagnostics'
 const page = ref<Page>('overview')
 const toolsOpen = ref(false)
@@ -169,7 +169,7 @@ const phaseLabels: Record<string, string> = {
 }
 
 const stateLabel = computed(() => {
-  if (connection.value === 'host_missing') return '原生宿主不可用'
+  if (connection.value === 'host_missing') return '请从托盘打开网页'
   if (connection.value === 'checking') return '正在检查服务'
   if (connection.value === 'offline') return '服务不可用'
   if (deviceStateError.value) return '本地设备状态不可用'
@@ -180,7 +180,7 @@ const serviceLabel = computed(() => ({
   checking: '正在检查', online: '已连接', offline: '离线', host_missing: '不可用',
 })[connection.value])
 const stateDetail = computed(() => {
-  if (connection.value === 'host_missing') return '当前页面未连接 Windows 原生宿主。请通过 sb-easy 桌面程序打开，浏览器预览无法访问本机服务。'
+  if (connection.value === 'host_missing') return '右键点击 Windows 通知区域的 sb-easy 图标，选择“打开网页管理”。该入口会为当前浏览器标签页建立本机管理会话。'
   if (connection.value === 'checking') return '正在准备本地后台并读取设备状态，首次打开可能需要几秒。'
   if (connection.value === 'offline') return '本地后台暂未就绪。刷新状态会尝试自动恢复，具体原因见下方提示。'
   if (deviceStateError.value) return '本地设备资料无法读取，已有文件保持原样。请先修复存储问题；此时不能重新注册或覆盖设备状态。'
@@ -703,7 +703,7 @@ onBeforeUnmount(() => {
         <section class="diagnostics-card" aria-labelledby="diagnostics-title">
           <div class="section-heading"><h2 id="diagnostics-title">连接状态</h2><span>最近检查 {{ checkedTime }}</span></div>
           <dl class="diagnostic-list">
-            <div><dt>原生宿主</dt><dd>{{ bridge.available ? 'WebView2 通信桥已就绪' : '未检测到原生通信桥' }}</dd></div>
+            <div><dt>本机管理会话</dt><dd>{{ bridge.available ? '已建立本机会话' : '请从托盘打开网页' }}</dd></div>
             <div><dt>本机服务</dt><dd>{{ serviceLabel }}</dd></div>
             <div><dt>协议版本</dt><dd>{{ hello ? `v${hello.protocol_version}` : '尚未协商' }}</dd></div>
             <div><dt>服务版本</dt><dd>{{ hello?.service_version ?? '尚未读取' }}</dd></div>

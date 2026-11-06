@@ -10,7 +10,7 @@
     "dev": "vite --host 127.0.0.1",
     "check": "vue-tsc --noEmit",
     "build": "npm run check && vite build",
-    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/bridge.test.js .test-build/tests/enrollment.test.js .test-build/tests/dashboard.test.js .test-build/tests/traffic.test.js .test-build/tests/subscriptions.test.js",
+    "test": "tsc -p tsconfig.tests.json && node --test .test-build/tests/bridge.test.js .test-build/tests/local-http.test.js .test-build/tests/extensions.test.js .test-build/tests/enrollment.test.js .test-build/tests/dashboard.test.js .test-build/tests/traffic.test.js .test-build/tests/subscriptions.test.js",
     "preview": "vite preview --host 127.0.0.1",
     "build:capture": "vite build --config vite.capture.config.ts",
     "build:plugins": "vite build --config vite.plugins.config.ts --mode statistics && vite build --config vite.plugins.config.ts --mode network-tools && vite build --config vite.plugins.config.ts --mode http-debug"

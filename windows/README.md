@@ -1,6 +1,66 @@
-# sb-easy Windows development preview
+# sb-easy Windows service and local web management
 
-## 0.7.0 unsigned development preview
+## 0.8.0: browser management with a lightweight tray
+
+The native implementation remains C11. The standalone WebView2 desktop window
+has been removed. The MSI installs the background service, the sing-box core,
+browser assets and a small `sb-easy.exe` tray launcher; WebView2 is not required.
+
+Open **sb-easy** from the Start menu, or choose **打开网页** from the tray menu.
+The default browser opens the management page for **this machine's service**,
+not the central sb-easy panel. Enrollment, subscriptions, connection control,
+configuration and diagnostics use the existing service APIs. The tray starts
+quietly at logon; `sb-easy.exe --background` does not open a browser.
+Closing a browser tab leaves both the tray and service running. **退出托盘**
+closes the local web endpoint but leaves the service and its connection running.
+
+The tray binds only to `127.0.0.1` on an automatically selected port. It passes
+a random session token to the browser in the URL fragment, which is removed by
+the page and retained only in that tab's session storage. RPC calls require the
+token and the exact local Origin/Host. The browser adapter runs as the signed-in
+user and retains the named-pipe server identity checks. It does not expose a
+LAN management port or pass Agent credentials in the browser URL. After the
+tray restarts, reopen the page from the tray to obtain its new session.
+
+### Installation and upgrades
+
+Install the **0.8.0 MSI** with administrator rights. An upgrade replaces the old
+desktop host with the tray/web launcher, removes its packaged WebView2 loader
+and desktop shortcut, and preserves `%ProgramData%\sb-easy` device data. The
+background service is restarted during installation. The Start menu shortcut
+opens local web management; the service remains automatic and independent of
+the browser. A shared Microsoft WebView2 installation is left alone because
+other applications may use it.
+
+Do not uninstall the old MSI first just to remove its window: the old product
+contains both the desktop host and the service. Upgrade it in place. A normal
+full MSI uninstall still removes the service and tray, while retaining device
+data for reinstall.
+
+### Build and package
+
+From PowerShell with Visual Studio C tools, Python 3.10+, OpenSSL and Node.js:
+
+```powershell
+./windows/scripts/build.ps1
+./windows/scripts/smoke.ps1
+./windows/scripts/package.ps1 -Msi -IncludeCore -WixPath ./build/wix/wix.exe
+```
+
+WiX 5.0.2 and its `WixToolset.UI.wixext/5.0.2` extension are required to package
+the service installer. The result is `build/sb-easy-0.8.0-windows-x64.msi`, plus
+a portable ZIP. `windows/ui` is now browser UI source, also shared by optional
+plugin bundles; it is not a WebView2 desktop client. The native HTTP tests cover
+authorization, foreign-origin rejection, file boundaries and RPC transport.
+The MSI lifecycle smoke test must run on a clean disposable Windows machine;
+it refuses to touch an existing installation or device data.
+
+## Historical 0.7.0 desktop preview notes
+
+The following records the previously published WebView2 preview. Its desktop
+window, WebView2 setup and screenshot smoke instructions do not apply to 0.8.0.
+
+### 0.7.0 unsigned development preview
 
 The application version comes from `development.windows.version` in
 [`config/client-releases.json`](../config/client-releases.json); the core version
@@ -189,15 +249,13 @@ and OpenSSL generate isolated test signatures for the native plugin storage and
 sandbox tests. They are build dependencies and are not required by the base
 desktop application.
 
-Install WebView2 Evergreen Runtime to run the desktop. The SDK is restored
-automatically at its pinned version; the Runtime is not pinned or bundled.
+Use a current browser for local management; no WebView2 SDK or Runtime is required.
 
 From a normal PowerShell at the repository root:
 
 ```powershell
 ./windows/scripts/build.ps1
 ./windows/scripts/smoke.ps1
-./windows/scripts/enrollment-smoke.ps1
 ```
 
 The build script initializes the x64 developer environment, restores locked
@@ -213,10 +271,8 @@ the service:
 
 ```powershell
 ./windows/scripts/prepare-core.ps1
-./windows/scripts/enrollment-smoke.ps1 -ValidateCore
-./windows/scripts/enrollment-smoke.ps1 -ConnectCore
 ./windows/scripts/connection-smoke.ps1
-./windows/scripts/connection-smoke.ps1 -Dashboard
+./windows/scripts/connection-smoke.ps1 -Telemetry
 ```
 
 The preparation script reads `config/runtime-versions.json` (or the packaged
@@ -368,41 +424,21 @@ terminated, the Job Object ends its child processes and the next startup safely
 removes matching owned temporary files. Residual files remain ACL-protected until
 that startup.
 
-`smoke.ps1` starts isolated hidden processes with a random local pipe/data directory,
-verifies real UI requests, captures the rendered WebView2 to
-`build/windows-smoke-*/desktop.png`, checks the 760px window for horizontal
-overflow, then stops its service and verifies the offline UI. It stops only
-the processes it created. This check requires an available WebView2 Runtime.
-`startup-smoke.ps1` launches only the desktop with an isolated test pipe and state,
-checks that it starts the real hidden backend, verifies a second UI reuses the
-same PID, and verifies recovery after that backend exits. All screenshots and
-count-only receipts stay under `build/windows-startup-smoke-*/`. Test-only custom
-pipes do not start a backend unless explicitly opted in, preserving offline tests.
-
-`enrollment-smoke.ps1` also starts a loopback-only HTTP fixture with synthetic
-credentials. It fills the actual GUI registration form, downloads a candidate,
-terminates/restarts its isolated service, restores the persisted state and verifies
-a conditional refresh receives HTTP 304. Screenshots and count-only receipts are
-saved under `build/windows-enrollment-smoke-*/`. It does not use a production panel.
-With `-ValidateCore`, it also requests an actual core check through the GUI and
-verifies that the candidate stays inactive. With `-ConnectCore`, it exercises
-actual-core start, active revision and disconnect through WebView2 before and
-after the service restart. These are non-TUN configurations.
-Adding `-AutoStartService` makes both GUI launches start/recover their own hidden
-backend rather than starting a service manually. Use
-`./windows/scripts/enrollment-smoke.ps1 -ConnectCore -AutoStartService` to cover
-desktop-only startup through registration, real core start/stop and DPAPI recovery.
+`smoke.ps1` starts isolated hidden processes with a random local pipe/data directory.
+It verifies packaged web assets and authenticated HTTP calls through the verified
+named pipe to the real service, then verifies the disconnected response after
+stopping that isolated service. Count-only JSON receipts stay under
+`build/windows-smoke-*/`; the installed service is never touched.
+The retired WebView2 startup/enrollment screenshot scripts have been removed.
 
 `connection-smoke.ps1` uses an isolated pipe, state directory and loopback control
 plane. It starts the prepared real core, sends an HTTP request through its SOCKS
 listener, then verifies stop clears the active revision and closes the listener.
 In an unelevated session it also checks that a TUN candidate cannot start.
 Artifacts are kept in `build/windows-connection-smoke-*/`.
-`-Dashboard` adds a real streamed loopback request through SOCKS and captures all
-seven dashboard pages in the native WebView2 host, including explicit light/dark
-themes and 760px layouts. It requires real telemetry and timed samples before
-capture, checks overflow, and stops only its own processes. This fixture produces
-actual core traffic; it does not inject fake UI counters or contact a production panel.
+`-Telemetry` adds a real streamed loopback request through SOCKS and checks
+live runtime counters. It stops only its own processes, does not inject fake UI
+counters and does not contact a production panel.
 The opt-in `-Tun` variant requires elevated PowerShell and creates a uniquely named
 TUN with only the isolated `198.18.255.0/30` test route; it checks that route disappears
 on stop. It is not a full default-route, DNS-leak or internet acceptance test.

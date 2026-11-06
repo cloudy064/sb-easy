@@ -5,17 +5,11 @@
   of code from nlohmann/json under the MIT license. The retained notice is
   `licenses/sbj-grisu2-MIT.txt`; upstream source and license:
   <https://github.com/nlohmann/json/tree/v3.12.0>.
-- **Microsoft.Web.WebView2 SDK 1.0.4258.31**, Microsoft's WebView2 SDK license:
-  <https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4258.31>.
-  The pinned NuGet package restored under the build directory contains the
-  authoritative license and notices. The C host uses C COM interfaces and links
-  the loader import library; `WebView2Loader.dll` ships beside `sb-easy.exe`.
 - **Vue 3**, MIT license: <https://github.com/vuejs/core/blob/main/LICENSE>.
   Exact frontend dependency versions are recorded in `ui/package-lock.json`.
 
-The WebView2 SDK archive is SHA-256 pinned in `CMakeLists.txt`. The WebView2
-Evergreen Runtime is installed separately and receives its own updates. There is
-no separate C++ JSON library in the Windows build.
+The local management interface runs in the user's browser. No WebView2 SDK,
+loader or runtime is bundled or required. Native service and tray code use C11.
 
 The optional `scripts/prepare-core.ps1` downloads the official **sing-box 1.14.3 Windows x64**
 archive directly from its upstream release and verifies the pinned SHA-256

@@ -40,7 +40,7 @@ jobs:
         run: python extensions/http-debug/tests/worker_smoke.py build/http-debug/sb-easy-http-debug.exe
 
   windows:
-    name: Windows C11 desktop preview (x64)
+    name: Windows C11 service and local web (x64)
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -63,9 +63,12 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: windows/ui/package-lock.json
-      - name: Build UI, native service and desktop; run tests
+      - name: Build web assets, native service and tray; run tests
         shell: pwsh
         run: ./windows/scripts/build.ps1
+      - name: Verify local web transport against an isolated service
+        shell: pwsh
+        run: ./windows/scripts/smoke.ps1
       - name: Reject untrusted or tampered release manifests
         shell: pwsh
         run: ./windows/tests/release_signing_test.ps1
@@ -92,12 +95,6 @@ jobs:
       - name: Verify MSI install, upgrade, repair, downgrade rejection and uninstall
         shell: pwsh
         run: |
-          $runtime = Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue
-          if (-not $runtime.pv -or $runtime.pv -eq '0.0.0.0') {
-            Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile build/WebView2Setup.exe
-            $setup = Start-Process ./build/WebView2Setup.exe -ArgumentList '/silent /install' -Wait -PassThru
-            if ($setup.ExitCode -ne 0) { throw 'WebView2 Runtime installation failed' }
-          }
           ./windows/scripts/installer-smoke.ps1 -Msi build/sb-easy-${{ steps.app_version.outputs.windows }}-windows-x64.msi -PreviousMsi build/sb-easy-0.3.99-windows-x64.msi
       - uses: actions/upload-artifact@v4
         with:

@@ -4,6 +4,7 @@
 #include <bcrypt.h>
 #include <wincrypt.h>
 #include <winioctl.h>
+#include <sddl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,39 @@ static bool restricted_acl(const wchar_t *path) {
              IsWellKnownSid(&ace->SidStart, WinAuthenticatedUserSid) || IsWellKnownSid(&ace->SidStart, WinInteractiveSid)))
             result = false;
     }
+    LocalFree(descriptor);
+    return result;
+}
+
+static wchar_t *directory_acl(const wchar_t *path) {
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    wchar_t *text = NULL;
+    if (GetNamedSecurityInfoW((wchar_t *)path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        NULL, NULL, NULL, NULL, &descriptor) == ERROR_SUCCESS)
+        (void)ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION, &text, NULL);
+    if (descriptor) LocalFree(descriptor);
+    return text;
+}
+
+static bool add_public_read_access(const wchar_t *path) {
+    BYTE users[SECURITY_MAX_SID_SIZE];
+    DWORD size = sizeof(users);
+    if (!CreateWellKnownSid(WinBuiltinUsersSid, NULL, users, &size)) return false;
+    PACL before = NULL, after = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    bool result = false;
+    if (GetNamedSecurityInfoW((wchar_t *)path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        NULL, NULL, &before, NULL, &descriptor) != ERROR_SUCCESS) return false;
+    EXPLICIT_ACCESSW entry = {0};
+    entry.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+    entry.grfAccessMode = GRANT_ACCESS;
+    entry.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    BuildTrusteeWithSidW(&entry.Trustee, users);
+    if (SetEntriesInAclW(1, &entry, before, &after) == ERROR_SUCCESS)
+        result = SetNamedSecurityInfoW((wchar_t *)path, SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION, NULL, NULL, after, NULL) == ERROR_SUCCESS;
+    if (after) LocalFree(after);
     LocalFree(descriptor);
     return result;
 }
@@ -129,6 +163,8 @@ int main(void) {
     wchar_t *base = NULL, *data = NULL, *file = NULL, *lock = NULL;
     wchar_t *target = NULL, *junction = NULL, *nested = NULL;
     wchar_t *application = NULL, *console_data = NULL, *console_lock = NULL;
+    wchar_t *public_container = NULL, *public_application = NULL, *trust = NULL, *trust_lock = NULL;
+    wchar_t *before_acl = NULL, *after_acl = NULL;
     bool created_base = false;
     BYTE *bytes = NULL;
     DWORD size = 0;
@@ -163,6 +199,10 @@ int main(void) {
     application = sbw_path_join(base, L"sb-easy");
     console_data = sbw_path_join(application, L"dev-service");
     console_lock = sbw_path_join(console_data, L"state.lock");
+    public_container = sbw_path_join(base, L"public-install");
+    public_application = sbw_path_join(public_container, L"sb-easy");
+    trust = sbw_path_join(public_application, L".plugin-trust");
+    trust_lock = sbw_path_join(trust, L"state.lock");
     store = sbw_secure_store_new(data, &error);
     CHECK(store != NULL);
     CHECK(store->load(store->context, &loaded, &error) == 0 && loaded == NULL);
@@ -212,6 +252,17 @@ int main(void) {
     CHECK(other == NULL && !strcmp(error.code, "UNSAFE_STORAGE_PATH"));
     store = sbw_secure_store_new(console_data, &error);
     CHECK(store != NULL && restricted_acl(application) && restricted_acl(console_data));
+    sbw_store_free(store); store = NULL;
+    /* Opening private plugin state must preserve the public installation's
+     * read/execute ACL, while protecting the private child independently. */
+    CHECK(CreateDirectoryW(public_container, NULL) && CreateDirectoryW(public_application, NULL));
+    CHECK(add_public_read_access(public_application));
+    before_acl = directory_acl(public_application);
+    CHECK(before_acl != NULL);
+    store = sbw_secure_store_new(trust, &error);
+    CHECK(store != NULL && restricted_acl(trust) && restricted_acl(trust_lock));
+    after_acl = directory_acl(public_application);
+    CHECK(after_acl && !wcscmp(before_acl, after_acl));
     puts("C11 secure store: DPAPI compatibility, owner/ACL, atomic persistence, exclusive lock, corruption and junction tests passed.");
     result = 0;
 done:
@@ -225,6 +276,10 @@ done:
         if (console_lock) DeleteFileW(console_lock);
         if (console_data) RemoveDirectoryW(console_data);
         if (application) RemoveDirectoryW(application);
+        if (trust_lock) DeleteFileW(trust_lock);
+        if (trust) RemoveDirectoryW(trust);
+        if (public_application) RemoveDirectoryW(public_application);
+        if (public_container) RemoveDirectoryW(public_container);
         if (file) DeleteFileW(file);
         if (lock) DeleteFileW(lock);
         if (data) RemoveDirectoryW(data);
@@ -234,5 +289,8 @@ done:
     }
     free(base); free(data); free(file); free(lock); free(target); free(junction); free(nested);
     free(application); free(console_data); free(console_lock);
+    free(public_container); free(public_application); free(trust); free(trust_lock);
+    if (before_acl) LocalFree(before_acl);
+    if (after_acl) LocalFree(after_acl);
     return result;
 }

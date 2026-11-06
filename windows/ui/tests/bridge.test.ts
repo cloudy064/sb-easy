@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { BridgeError, findNativeTransport, NativeBridge, type HostMessage, type WebViewTransport } from '../src/lib/bridge.js'
+import { BridgeError, findLocalTransport, NativeBridge, type HostMessage, type RpcTransport } from '../src/lib/bridge.js'
 import { validParams, validResult } from '../src/lib/protocol.js'
 import { configStage } from '../src/lib/config.js'
 import { connectionActions, runtimeDetail } from '../src/lib/connection.js'
@@ -102,7 +102,7 @@ test('extension commands require known identities and explicit lifecycle actions
   assert.equal(validResult('extensions.catalog', { items: [{ ...catalogItem, revoked: 'no' }] }), false)
 })
 
-class TestTransport implements WebViewTransport {
+class TestTransport implements RpcTransport {
   messages: Array<{ id: string; version: number; method: string; params: object }> = []
   listeners = new Set<(event: HostMessage) => void>()
   failSend = false
@@ -147,9 +147,8 @@ test('IPv6 evidence remains optional for older services and rejects misleading v
 })
 const codeIs = (code: string) => (error: unknown) => error instanceof BridgeError && error.code === code
 
-test('browser preview has no native fallback or fabricated service response', async () => {
-  assert.equal(findNativeTransport({}), undefined)
-  assert.equal(findNativeTransport({ chrome: { webview: { postMessage: true } } }), undefined)
+test('a page without a local session has no fabricated service response', async () => {
+  assert.equal(findLocalTransport(), undefined)
   const bridge = new NativeBridge(undefined)
   assert.equal(bridge.available, false)
   await assert.rejects(bridge.request('protocol.hello'), codeIs('host_unavailable'))
@@ -158,7 +157,6 @@ test('browser preview has no native fallback or fabricated service response', as
 
 test('requests use protocol v1 and correlate out-of-order responses', async () => {
   const transport = new TestTransport()
-  assert.equal(findNativeTransport({ chrome: { webview: transport } }), transport)
   const bridge = new NativeBridge(transport)
   const first = bridge.request('protocol.hello')
   const second = bridge.request('status.get')

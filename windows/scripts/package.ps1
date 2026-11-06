@@ -29,9 +29,9 @@ foreach ($name in @('sb-easy.exe', 'sb-easy-service.exe', 'sb-easy-update.exe'))
 if ($TrustedRelease -and ($builtPublisher.publisher_thumbprint -ne $CertificateThumbprint -or $builtPublisher.version -ne $version)) { throw 'Rebuild with the trusted publisher thumbprint and manifest version before signing this release.' }
 $stage = Join-Path $buildRoot ('windows-package-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $stage | Out-Null
-# Explicitly package only our preview and its UI dependencies. The optional
+# Explicitly package the service, lightweight tray and browser assets. The optional
 # sing-box release is obtained separately using its pinned official archive.
-foreach ($name in @('sb-easy.exe', 'sb-easy-service.exe', 'sb-easy-update.exe', 'WebView2Loader.dll')) {
+foreach ($name in @('sb-easy.exe', 'sb-easy-service.exe', 'sb-easy-update.exe')) {
     Copy-Item -LiteralPath (Join-Path $binaryRoot $name) -Destination $stage
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'windows\assets\sb-easy.ico') -Destination $stage
@@ -39,10 +39,10 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'config\runtime-versions.json') -Des
 Copy-Item -LiteralPath (Join-Path $repoRoot 'config\client-releases.json') -Destination (Join-Path $stage 'client-releases.json')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'windows\ui\dist') -Destination (Join-Path $stage 'ui') -Recurse
 New-Item -ItemType Directory -Path (Join-Path $stage 'licenses'),(Join-Path $stage 'scripts') | Out-Null
-foreach ($name in @('sbj-grisu2-MIT.txt', 'webview2.txt', 'webview2-notice.txt', 'vue.txt', 'tldts.txt', 'tldts-core.txt', 'yaml.txt', 'libyaml.txt')) {
+foreach ($name in @('sbj-grisu2-MIT.txt', 'vue.txt', 'tldts.txt', 'tldts-core.txt', 'yaml.txt', 'libyaml.txt')) {
     Copy-Item -LiteralPath (Join-Path $binaryRoot "licenses\$name") -Destination (Join-Path $stage 'licenses')
 }
-foreach ($name in @('README.md', 'THIRD_PARTY_NOTICES.md', 'TESTING-0.5.0.txt', 'TESTING-0.6.0.txt', 'TESTING-0.6.1.txt', 'ANDROID-PARITY.md')) {
+foreach ($name in @('README.md', 'THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "windows\$name") -Destination $stage
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prepare-core.ps1') -Destination (Join-Path $stage 'scripts')

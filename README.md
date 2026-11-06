@@ -19,7 +19,7 @@ history. The Rust `backend/` directory is an archived reference only and is
 excluded from primary CI and release builds.
 
 The current source targets the C server/agent **1.1.0**, Android **1.4.0 (29)**,
-Windows **0.7.0**, Linux Desktop **0.1.0**, and macOS/iOS/tvOS **0.1.0 (1)**,
+Windows **0.8.0** (service, tray and local browser UI), Linux Desktop **0.1.0**, and macOS/iOS/tvOS **0.1.0 (1)**,
 using sing-box **1.14.3**.
 The [1.1.0 development preview](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) provides Android 1.4.0 test-signed APKs,
 Windows 0.7.0 unsigned ZIP/MSI packages and a Linux Desktop 0.1.0 unsigned Debian 12 amd64 DEB,

@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$Msi,
     [Parameter(Mandatory)][string]$PreviousMsi,
-    [switch]$WaitForDesktopCheck
+    [Alias('WaitForDesktopCheck')][switch]$WaitForWebCheck
 )
 # Run on a disposable Windows machine, elevated. Never replace an existing
 # installation or inspect/remove an existing device store.
@@ -31,15 +31,28 @@ function Invoke-Msi([string]$Name, [string[]]$Arguments, [int[]]$Expected = @(0)
     $receipt.checks += $Name
 }
 function Assert-Installed {
+    param([switch]$Legacy)
     $service = Get-CimInstance Win32_Service -Filter "Name='sb-easy'"
     if (-not $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'Auto' -or
         $service.StartName -ne 'LocalSystem' -or $service.PathName -ne ('"' + (Join-Path $installDir 'sb-easy-service.exe') + '"')) {
         throw 'Installed service identity/startup did not match the MSI contract.'
     }
-    foreach ($file in @('sb-easy.exe', 'sb-easy-service.exe', 'WebView2Loader.dll', 'ui\index.html', 'core\sing-box.exe', 'core\LICENSE')) {
+    foreach ($file in @('sb-easy.exe', 'sb-easy-service.exe', 'ui\index.html', 'core\sing-box.exe', 'core\LICENSE')) {
         if (-not (Test-Path -LiteralPath (Join-Path $installDir $file))) { throw "Missing installed file: $file" }
     }
-    foreach ($folder in @([Environment]::GetFolderPath('CommonDesktopDirectory'), [Environment]::GetFolderPath('CommonPrograms'))) {
+    if (-not $Legacy) {
+        if (Test-Path -LiteralPath (Join-Path $installDir 'WebView2Loader.dll')) { throw 'Retired WebView2 payload is still installed.' }
+        if (Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'sb-easy.lnk')) { throw 'The retired graphical client desktop shortcut remains.' }
+        $run = Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'sb-easy'
+        if ($run -ne ('"' + (Join-Path $installDir 'sb-easy.exe') + '" --background')) { throw 'Tray logon registration is missing or incorrect.' }
+        $users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+        $userRules = @((Get-Acl -LiteralPath $installDir).Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]) -eq $users -and $_.AccessControlType -eq 'Allow' })
+        $readExecute = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+        if (-not ($userRules | Where-Object { ($_.FileSystemRights -band $readExecute) -eq $readExecute })) { throw 'Ordinary users cannot read and execute the installed tray/web assets.' }
+        # File write/append/attributes, child deletion, DELETE, WRITE_DAC and WRITE_OWNER.
+        if ($userRules | Where-Object { ([int]$_.FileSystemRights -band 0x000D0156) -ne 0 }) { throw 'Ordinary users must not be able to modify the installed application.' }
+    }
+    foreach ($folder in @([Environment]::GetFolderPath('CommonPrograms'))) {
         if (-not (Test-Path -LiteralPath (Join-Path $folder 'sb-easy.lnk'))) { throw "Missing shortcut in $folder" }
     }
     $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'sb-easy-control-v1', [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
@@ -71,7 +84,8 @@ function Assert-Installed {
 try {
     Invoke-Msi 'install-previous' @('/i', ('"' + $PreviousMsi + '"'))
     $installedMsi = $PreviousMsi
-    Assert-Installed
+    $previousVersion = [version](([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $installDir 'sb-easy-service.exe')).ProductVersion -split '-')[0])
+    Assert-Installed -Legacy:($previousVersion -lt [version]'0.8.0')
     $marker = Join-Path $dataDir 'installer-smoke-retention.txt'
     'installer smoke data retention' | Set-Content -LiteralPath $marker
     Invoke-Msi 'upgrade' @('/i', ('"' + $Msi + '"'))
@@ -83,15 +97,15 @@ try {
     Assert-Installed
     Invoke-Msi 'reject-downgrade' @('/i', ('"' + $PreviousMsi + '"')) @(1603, 1638)
     Assert-Installed
-    if ($WaitForDesktopCheck) {
-        # An unelevated caller can now exercise the installed WebView2 host.
-        $testDir | Set-Content -LiteralPath (Join-Path $repoRoot 'build\installer-desktop-ready.txt')
+    if ($WaitForWebCheck) {
+        # An unelevated caller can now exercise the installed local web tray.
+        $testDir | Set-Content -LiteralPath (Join-Path $repoRoot 'build\installer-web-ready.txt')
         $deadline = [DateTime]::UtcNow.AddSeconds(90)
-        while (-not (Test-Path -LiteralPath (Join-Path $testDir 'desktop-passed.txt'))) {
-            if ([DateTime]::UtcNow -gt $deadline) { throw 'Unelevated desktop check timed out.' }
+        while (-not (Test-Path -LiteralPath (Join-Path $testDir 'web-passed.txt'))) {
+            if ([DateTime]::UtcNow -gt $deadline) { throw 'Unelevated web check timed out.' }
             Start-Sleep -Milliseconds 250
         }
-        $receipt.checks += 'unelevated-desktop'
+        $receipt.checks += 'unelevated-web'
     }
     Invoke-Msi 'uninstall' @('/x', ('"' + $Msi + '"'))
     $installedMsi = $null
@@ -100,6 +114,9 @@ try {
     }
     foreach ($folder in @([Environment]::GetFolderPath('CommonDesktopDirectory'), [Environment]::GetFolderPath('CommonPrograms'))) {
         if (Test-Path -LiteralPath (Join-Path $folder 'sb-easy.lnk')) { throw 'Uninstall left a shortcut behind.' }
+    }
+    if (Get-ItemPropertyValue -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'sb-easy' -ErrorAction SilentlyContinue) {
+        throw 'Uninstall left the tray logon entry behind.'
     }
     if (-not (Test-Path -LiteralPath $marker)) { throw 'Uninstall deleted retained device data.' }
     $receipt.checks += 'data-retained'

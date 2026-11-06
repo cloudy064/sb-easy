@@ -48,7 +48,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(SB_EASY_BUILD_STATISTICS_EXTENSION "Build the optional statistics worker" OFF)
 option(SB_EASY_BUILD_CAPTURE_EXTENSION "Build the optional capture extension" OFF)
-option(SB_EASY_BUILD_DESKTOP "Build the WebView2 desktop shell" ON)
+option(SB_EASY_BUILD_TRAY "Build the native tray and local web host" ON)
 option(SB_EASY_WARNINGS_AS_ERRORS "Treat project warnings as errors" ON)
 set(SB_EASY_PUBLISHER_THUMBPRINT "" CACHE STRING "Trusted Authenticode publisher certificate SHA-1 thumbprint")
 if(NOT SB_EASY_PUBLISHER_THUMBPRINT STREQUAL "")
@@ -136,7 +136,7 @@ if(SB_EASY_BUILD_STATISTICS_EXTENSION)
 endif()
 
 # Keep subscription parsing in the service so scheduled refresh continues
-# while the WebView is closed. Pin the parser dependency for reproducible builds.
+# while the browser is closed. Pin the parser dependency for reproducible builds.
 include(FetchContent)
 FetchContent_Declare(sb_windows_libyaml
     URL https://github.com/yaml/libyaml/releases/download/0.2.5/yaml-0.2.5.tar.gz
@@ -192,46 +192,37 @@ add_executable(sb-easy-update service/update_main.c ui-host/app.rc)
 target_link_libraries(sb-easy-update PRIVATE sb_windows_controller)
 sb_windows_target(sb-easy-update)
 
-if(SB_EASY_BUILD_DESKTOP)
-    # NuGet SDK only: the separately installed Evergreen Runtime remains updateable.
-    set(webview_version "1.0.4258.31")
-    set(webview_archive "${CMAKE_BINARY_DIR}/_deps/webview2-${webview_version}.zip")
-    set(webview_root "${CMAKE_BINARY_DIR}/_deps/webview2-${webview_version}")
-    file(DOWNLOAD
-        "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/${webview_version}/microsoft.web.webview2.${webview_version}.nupkg"
-        "${webview_archive}"
-        EXPECTED_HASH SHA256=56f7f4b8bf9aee4b8efefbbdd4f67d5f74ebd1b100ed0806da71bf76af481aa9
-        TLS_VERIFY ON)
-    if(NOT EXISTS "${webview_root}/build/native/include/WebView2.h")
-        file(ARCHIVE_EXTRACT INPUT "${webview_archive}" DESTINATION "${webview_root}")
-    endif()
-    add_library(sb_webview2 INTERFACE)
-    target_include_directories(sb_webview2 SYSTEM INTERFACE "${webview_root}/build/native/include")
-    target_link_libraries(sb_webview2 INTERFACE "${webview_root}/build/native/x64/WebView2Loader.dll.lib")
-
-    add_executable(sb-easy WIN32 ui-host/app.rc ui-host/main.c ui-host/pipe_client.c ui-host/server_identity.c ui-host/service_start.c ui-host/webview_guids.c ui-host/app.manifest)
-    target_link_libraries(sb-easy PRIVATE sb_webview2 sb_windows_common
-        user32 shell32 ole32 shlwapi version advapi32 uuid crypt32)
+if(SB_EASY_BUILD_TRAY)
+    add_executable(sb-easy WIN32 ui-host/app.rc ui-host/main.c ui-host/pipe_client.c
+        ui-host/server_identity.c ui-host/service_start.c ui-host/local_web.c
+        ui-host/tray_bridge.c ui-host/tray_smoke.c ui-host/app.manifest)
+    target_link_libraries(sb-easy PRIVATE sb_windows_common
+        user32 shell32 ole32 version advapi32 uuid crypt32 ws2_32 bcrypt winhttp)
     sb_windows_target(sb-easy)
     # Refresh packaged assets on every build, including UI-only changes.
     add_custom_target(sb_windows_ui_assets ALL
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ui/dist" "$<TARGET_FILE_DIR:sb-easy>/ui"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:sb-easy>/licenses"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/licenses/sbj-grisu2-MIT.txt" "$<TARGET_FILE_DIR:sb-easy>/licenses/sbj-grisu2-MIT.txt"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${webview_root}/build/native/x64/WebView2Loader.dll" "$<TARGET_FILE_DIR:sb-easy>/WebView2Loader.dll"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${webview_root}/LICENSE.txt" "$<TARGET_FILE_DIR:sb-easy>/licenses/webview2.txt"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${webview_root}/NOTICE.txt" "$<TARGET_FILE_DIR:sb-easy>/licenses/webview2-notice.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/vue/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/vue.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/README.md" "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md" "$<TARGET_FILE_DIR:sb-easy>"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/tldts/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/tldts.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/tldts-core/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/tldts-core.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/ui/node_modules/yaml/LICENSE" "$<TARGET_FILE_DIR:sb-easy>/licenses/yaml.txt"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${sb_windows_libyaml_SOURCE_DIR}/License" "$<TARGET_FILE_DIR:sb-easy>/licenses/libyaml.txt"
-        COMMENT "Copying packaged desktop UI (run npm ci && npm run build in windows/ui first)")
+        COMMENT "Copying packaged local web UI (run npm ci && npm run build in windows/ui first)")
     add_dependencies(sb-easy sb_windows_ui_assets)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(windows_local_web_test tests/local_web_test.c ui-host/local_web.c)
+    target_link_libraries(windows_local_web_test PRIVATE sb_windows_common ws2_32 bcrypt)
+    sb_windows_target(windows_local_web_test)
+    add_test(NAME windows_local_web COMMAND windows_local_web_test)
+    add_executable(windows_tray_test tests/tray_test.c ui-host/tray_bridge.c)
+    target_link_libraries(windows_tray_test PRIVATE sb_windows_common)
+    sb_windows_target(windows_tray_test)
+    add_test(NAME windows_tray COMMAND windows_tray_test)
     add_executable(windows_release_trust_test tests/release_trust_test.c)
     target_link_libraries(windows_release_trust_test PRIVATE sb_windows_controller)
     sb_windows_target(windows_release_trust_test)

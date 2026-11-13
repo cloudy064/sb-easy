@@ -28,7 +28,10 @@ class AgentRepository internal constructor(
     private val standaloneRoutingStore: RoutingStorage,
     private val subscriptionStore: SubscriptionStorage,
     private val subscriptionFetcher: SubscriptionSource = SubscriptionFetcher(),
+    syncStorage: ConfigSyncStorage? = null,
+    private val platformStorage: PlatformConfigurationStorage? = null,
 ) {
+    private val managedSync = syncStorage?.let { ManagedConfigSync(it, client) }
     private val syncMutex = Mutex()
     private val healthMutex = Mutex()
     private val mutableHealth = MutableStateFlow(HealthSnapshot())
@@ -39,6 +42,7 @@ class AgentRepository internal constructor(
     private val configStore get() = if (mode == ClientMode.STANDALONE) standaloneConfigStore else managedConfigStore
     private val routingStore get() = if (mode == ClientMode.STANDALONE) standaloneRoutingStore else managedRoutingStore
     private val initialEnrollment = if (mode == ClientMode.MANAGED) secureStore.load() else null
+    private var managedSelections = platformStorage?.selectors() ?: JSONObject()
     private val mutableSubscriptions = MutableStateFlow(subscriptionStore.load())
     val subscriptions: StateFlow<List<LocalSubscription>> = mutableSubscriptions.asStateFlow()
     private val storedPolicy = routingStore.load()
@@ -57,7 +61,8 @@ class AgentRepository internal constructor(
             mode = mode,
             enrollment = initialEnrollment,
             config = configStore.active()?.let { base ->
-                base.copy(content = LocalRouting.render(base.content, requireNotNull(localPolicy), initialEnrollment?.server.orEmpty(), mode == ClientMode.MANAGED).content)
+                val rendered = LocalRouting.render(base.content, requireNotNull(localPolicy), initialEnrollment?.server.orEmpty(), mode == ClientMode.MANAGED).content
+                base.copy(content = if (mode == ClientMode.MANAGED) applyManagedSelections(rendered, managedSelections) else rendered)
             },
         ),
     )
@@ -106,10 +111,32 @@ class AgentRepository internal constructor(
             check(mode == ClientMode.MANAGED) { "客户端模式已变化，请重试" }
             val enrollment = requireNotNull(mutableState.value.enrollment) { "设备尚未注册" }
             mutableState.value = mutableState.value.copy(syncPhase = SyncPhase.SYNCING, lastError = null)
+            var restoreCapture: JSONObject? = null
             try {
                 val active = configStore.active()
+                val serverState = withContext(Dispatchers.IO) { managedSync?.synchronize(enrollment, localPolicy, legacyPlatformSettings()) }
+                val serverPolicy = serverState?.let { managedSync!!.policy(it) }
+                val serverSettings = serverState?.getJSONObject("agent_settings")
+                val selectors = if (serverSettings == null) managedSelections else
+                    if (serverSettings.has("android_selectors")) serverSettings.getJSONObject("android_selectors") else JSONObject()
+                val previousCapture = platformStorage?.captureTemplate()
+                val desiredCapture = if (serverSettings != null && previousCapture != null) {
+                    val values = ConfigMergePatch.apply(captureTemplate(CaptureConfig()),
+                        if (serverSettings.has("android_capture")) serverSettings.getJSONObject("android_capture") else JSONObject())
+                    // Unknown future fields stay in the server snapshot; runtime comparison uses understood fields.
+                    captureTemplate(CaptureConfig.parse(values.put("enabled", false).put("auto_upload", false).toString()))
+                } else previousCapture
+                val captureChanged = !ConfigMergePatch.equal(previousCapture, desiredCapture)
                 when (val result = withContext(Dispatchers.IO) {
-                    client.fetchConfig(enrollment, active?.etag, force)
+                    if (serverState == null) client.fetchConfig(enrollment, active?.etag, force)
+                    else ConfigFetchResult.Updated(ManagedConfig(
+                        content = serverState.getJSONObject("config").toString(),
+                        etag = serverState.getString("etag"),
+                        ruleSource = serverState.optString("rule_source", "profile"),
+                        profileId = serverState.optString("profile_id", "default"),
+                        profileName = serverState.optString("profile_name", "Default"),
+                        syncedAtMillis = System.currentTimeMillis(),
+                    ))
                 }) {
                     ConfigFetchResult.NotModified -> {
                         if (active != null) {
@@ -131,13 +158,22 @@ class AgentRepository internal constructor(
                     }
                     is ConfigFetchResult.Updated -> {
                         require(result.config.etag.isNotBlank()) { "服务器配置缺少 ETag" }
-                        configStore.saveCandidate(result.config)
                         val previousPolicy = localPolicy
-                        val policy = LocalRouting.migrateProvisionedDefaults(
+                        val policy = serverPolicy ?: LocalRouting.migrateProvisionedDefaults(
                             result.config.content, previousPolicy ?: LocalRouting.defaults(result.config.content),
                         )
-                        val effective = effectiveConfig(result.config, policy)
+                        if (!force && active?.etag == result.config.etag && policy == previousPolicy &&
+                            ConfigMergePatch.equal(selectors, managedSelections) && !captureChanged) {
+                            mutableState.value = mutableState.value.copy(syncPhase = SyncPhase.CURRENT)
+                            return@withLock false
+                        }
+                        configStore.saveCandidate(result.config)
+                        val effective = effectiveConfig(result.config, policy, selectors)
                         val control = RuntimeBridge.control
+                        if (captureChanged && desiredCapture != null) {
+                            restoreCapture = previousCapture
+                            withContext(Dispatchers.IO) { platformStorage?.saveCaptureTemplate(desiredCapture) }
+                        }
                         if (control != null) {
                             control.applyConfiguration(effective)
                         } else {
@@ -148,10 +184,14 @@ class AgentRepository internal constructor(
                             if (!policyPersisted || policy != previousPolicy) {
                                 withContext(Dispatchers.IO) { routingStore.save(policy) }
                             }
-                            withContext(Dispatchers.IO) { configStore.promoteCandidate() }
+                            withContext(Dispatchers.IO) {
+                                if (serverState != null) platformStorage?.saveSelectors(selectors)
+                                configStore.promoteCandidate()
+                            }
                         } catch (error: Throwable) {
                             withContext(Dispatchers.IO) {
                                 runCatching { if (previousPolicy == null) routingStore.clear() else routingStore.save(previousPolicy) }
+                                runCatching { platformStorage?.saveSelectors(managedSelections) }
                             }
                             active?.let { previous ->
                                 if (control != null) runCatching { control.applyConfiguration(effectiveConfig(previous)) }
@@ -160,6 +200,8 @@ class AgentRepository internal constructor(
                         }
                         policyPersisted = true
                         localPolicy = policy
+                        managedSelections = JSONObject(selectors.toString())
+                        restoreCapture = null
                         publishRouting(promoted, policy)
                         // Route observations describe one concrete generated config.
                         // Do not mix historical decisions from an older rule set with
@@ -175,6 +217,10 @@ class AgentRepository internal constructor(
                     }
                 }
             } catch (error: Throwable) {
+                restoreCapture?.let { previous ->
+                    withContext(NonCancellable + Dispatchers.IO) { runCatching { platformStorage?.saveCaptureTemplate(previous) } }
+                    configStore.active()?.let { active -> runCatching { RuntimeBridge.control?.applyConfiguration(effectiveConfig(active)) } }
+                }
                 mutableState.value = mutableState.value.copy(
                     config = configStore.active()?.let { effectiveConfig(it) },
                     syncPhase = SyncPhase.ERROR,
@@ -328,10 +374,46 @@ class AgentRepository internal constructor(
             )
             updateLocalRoutingLocked(updated.copy(presetRevision = maxOf(1, updated.presetRevision),
                 health = if (outboundTag == LocalRouting.AUTOMATIC) updated.health.copy(enabled = true) else updated.health))
+        } else if (managedConfigurationIsServerOwned()) {
+            val base = requireNotNull(configStore.active()) { "请先同步配置" }
+            val enrollment = requireNotNull(mutableState.value.enrollment)
+            require(groupTag in managedSelectorDefaults(effectiveConfig(base).content)) { "代理组已失效，请重新同步" }
+            val previous = JSONObject(managedSelections.toString())
+            val choices = JSONObject(previous.toString()).put(groupTag, outboundTag)
+            val rendered = effectiveConfig(base, localPolicy, choices)
+            withContext(Dispatchers.IO) { requireNotNull(RuntimeBridge.validator) { "sing-box 核心尚未初始化" }.validate(rendered.content) }
+            val oldSelection = RuntimeObservability.groups.value.firstOrNull { it.tag == groupTag }?.selected ?:
+                managedSelectorDefaults(effectiveConfig(base).content)[groupTag]
+            val runtime = RuntimeBridge.control
+            try {
+                runtime?.selectOutbound(groupTag, outboundTag)
+                withContext(Dispatchers.IO) {
+                    managedSync?.queueSettings(enrollment, JSONObject().put("android_selectors", choices))
+                    platformStorage?.saveSelectors(choices)
+                }
+            } catch (error: Throwable) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { managedSync?.queueSettings(enrollment, JSONObject().put("android_selectors", if (previous.length() == 0) JSONObject.NULL else previous)) }
+                    runCatching { platformStorage?.saveSelectors(previous) }
+                }
+                oldSelection?.let { runCatching { runtime?.selectOutbound(groupTag, it) } }
+                throw error
+            }
+            managedSelections = choices
+            mutableState.value = mutableState.value.copy(config = rendered, lastError = null)
+            RuntimeObservability.markSelection(groupTag, outboundTag)
+            VpnRuntimeState.configurationChanged(rendered)
         } else {
             requireNotNull(RuntimeBridge.control) { "VPN 未运行" }.selectOutbound(groupTag, outboundTag)
             RuntimeObservability.markSelection(groupTag, outboundTag)
         }
+    }
+
+    suspend fun resolveConfigurationConflict(keepLocal: Boolean) {
+        syncMutex.withLock {
+            managedSync?.resolve(requireNotNull(mutableState.value.enrollment), keepLocal)
+        }
+        syncConfiguration(force = true)
     }
 
     suspend fun updateLocalRouting(policy: LocalRoutingPolicy) = syncMutex.withLock {
@@ -361,8 +443,14 @@ class AgentRepository internal constructor(
                 if (selectionOnly) changedSelections.forEach { (tag, selection) -> control.selectOutbound(tag, selection) }
                 else control.applyConfiguration(rendered)
             }
-            withContext(Dispatchers.IO) { routingStore.save(policy) }
+            withContext(Dispatchers.IO) {
+                routingStore.save(policy)
+                if (mode == ClientMode.MANAGED) mutableState.value.enrollment?.let { managedSync?.queue(it, policy, base.content) }
+            }
         } catch (error: Throwable) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { localPolicy?.let { routingStore.save(it) } ?: routingStore.clear() }
+            }
             if (control != null) {
                 if (selectionOnly) changedSelections.keys.forEach { tag ->
                     previousSnapshot.selections[tag]?.let { selection -> runCatching { control.selectOutbound(tag, selection) } }
@@ -500,7 +588,18 @@ class AgentRepository internal constructor(
         withContext(Dispatchers.IO) { PacketCapture.validateFilter(next.bpf) }
         val previous = PacketCapture.config()
         withContext(Dispatchers.IO) { PacketCapture.save(next) }
-        try { RuntimeBridge.control?.restart() }
+        try {
+            RuntimeBridge.control?.restart()
+            if (mode == ClientMode.MANAGED) mutableState.value.enrollment?.let { enrollment ->
+                withContext(Dispatchers.IO) {
+                    val shape = captureTemplate(CaptureConfig())
+                    val delta = ConfigMergePatch.diff(shape, captureTemplate(next))
+                    val old = managedSync?.settings(enrollment)?.optJSONObject("android_capture") ?: JSONObject()
+                    val retained = ConfigMergePatch.replaceKnown(old, shape, delta)
+                    managedSync?.queueSettings(enrollment, JSONObject().put("android_capture", if (retained.length() == 0) JSONObject.NULL else retained))
+                }
+            }
+        }
         catch (error: Throwable) {
             withContext(Dispatchers.IO) { PacketCapture.save(previous) }
             runCatching { RuntimeBridge.control?.restart() }
@@ -532,6 +631,9 @@ class AgentRepository internal constructor(
         PacketCapture.endSession()
         HttpDebug.release()
         secureStore.clear()
+        managedSync?.clear()
+        managedSelections = JSONObject()
+        platformStorage?.saveSelectors(managedSelections)
         configStore.clear()
         routingStore.clear()
         localPolicy = null
@@ -734,6 +836,10 @@ class AgentRepository internal constructor(
                 if (next.managedRouting == null) managedRoutingStore.clear() else managedRoutingStore.save(next.managedRouting)
                 if (nextBase == null) standaloneConfigStore.clear()
                 else { standaloneConfigStore.saveCandidate(nextBase); standaloneConfigStore.promoteCandidate() }
+                val managedBase = managedConfigStore.active()
+                val enrolled = secureStore.load()
+                if (managedBase != null && enrolled != null) managedSync?.queue(enrolled,
+                    next.managedRouting ?: LocalRouting.defaults(managedBase.content), managedBase.content)
             } catch (failure: Throwable) {
                 runCatching { subscriptionStore.save(oldSubscriptions) }
                 runCatching { if (oldStandalone == null) standaloneRoutingStore.clear() else standaloneRoutingStore.save(oldStandalone) }
@@ -796,13 +902,24 @@ class AgentRepository internal constructor(
 
     fun activeConfig(): ManagedConfig? = mutableState.value.config
 
-    private fun effectiveConfig(base: ManagedConfig, policy: LocalRoutingPolicy? = localPolicy): ManagedConfig =
-        base.copy(content = LocalRouting.render(
-            base.content,
-            policy ?: LocalRouting.defaults(base.content),
-            mutableState.value.enrollment?.server.orEmpty(),
-            mode == ClientMode.MANAGED,
-        ).content)
+    fun managedConfigurationIsServerOwned(): Boolean = mode == ClientMode.MANAGED &&
+        mutableState.value.enrollment?.let { managedSync?.settings(it) != null } == true
+
+    private fun legacyPlatformSettings(): JSONObject = JSONObject().also { settings ->
+        platformStorage?.let { platform ->
+            val selections = platform.legacySelectors()
+            if (selections.length() != 0) settings.put("android_selectors", selections)
+            val capture = ConfigMergePatch.diff(captureTemplate(CaptureConfig()), platform.captureTemplate())
+            if (capture.length() != 0) settings.put("android_capture", capture)
+        }
+    }
+
+    private fun effectiveConfig(base: ManagedConfig, policy: LocalRoutingPolicy? = localPolicy,
+                                selections: JSONObject = managedSelections): ManagedConfig {
+        val content = LocalRouting.render(base.content, policy ?: LocalRouting.defaults(base.content),
+            mutableState.value.enrollment?.server.orEmpty(), mode == ClientMode.MANAGED).content
+        return base.copy(content = if (mode == ClientMode.MANAGED) applyManagedSelections(content, selections) else content)
+    }
 
     private fun publishRouting(base: ManagedConfig, policy: LocalRoutingPolicy) {
         mutableRouting.value = LocalRouting.render(base.content, policy, mutableState.value.enrollment?.server.orEmpty(), mode == ClientMode.MANAGED).snapshot

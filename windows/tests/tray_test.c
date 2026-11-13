@@ -7,6 +7,11 @@ int main(void) {
     sbj *request = sbw_tray_request(body, sizeof body - 1, &error);
     CHECK(request && sbj_string_is(sbj_get(request, "method"), "status.get"));
     sbj_free(request);
+    const char resolve[] = "{\"version\":1,\"id\":\"resolve\",\"method\":\"config.resolve\",\"params\":{\"keep_local\":true}}";
+    request = sbw_tray_request(resolve, sizeof resolve - 1, &error);
+    CHECK(request && sbj_string_is(sbj_get(request, "method"), "config.resolve"));
+    CHECK(sbj_get_bool(sbj_get(request, "params"), "keep_local", false));
+    sbj_free(request);
     const char unknown[] = "{\"version\":1,\"id\":\"test\",\"method\":\"shell.execute\",\"params\":{}}";
     CHECK(!sbw_tray_request(unknown, sizeof unknown - 1, &error));
     CHECK(!strcmp(error.code, "NOT_IMPLEMENTED"));

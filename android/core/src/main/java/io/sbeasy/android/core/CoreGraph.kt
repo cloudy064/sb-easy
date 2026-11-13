@@ -37,6 +37,8 @@ object CoreGraph {
                 AtomicConfigStore(application, "standalone-config"),
                 LocalRoutingStore(application, "standalone-routing.json"),
                 LocalSubscriptionStore(application),
+                syncStorage = AtomicConfigSyncStore(application),
+                platformStorage = PlatformConfigurationStore(application),
             )
             initialized = true
         }

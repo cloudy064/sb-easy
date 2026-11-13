@@ -26,6 +26,8 @@
 #include "sb/agent_clash.h"
 #include "sb/agent_client.h"
 #include "sb/agent_config.h"
+#include "sb/agent_sync.h"
+#include "sb/config_etag.h"
 #include "sb/agent_ui.h"
 #include "sb/atomic_file.h"
 #include "sb/http_client.h"
@@ -747,6 +749,9 @@ typedef struct {
     bool validate_config;
     sb_singbox_supervisor *supervisor;
     sb_agent_client *client;
+    sb_agent_sync *config_sync;
+    char *applied_state_hash;
+    bool selector_reconcile_pending;
     sb_agent_client *proxy_client;
     sb_proxy_runtime *proxy_runtime;
     int64_t proxy_capability_due_ms;
@@ -770,6 +775,8 @@ static void runtime_free(agent_runtime *rt) {
     sb_agent_client_free(rt->proxy_client);
     sb_agent_clash_free(rt->clash);
     sb_agent_client_free(rt->client);
+    sb_agent_sync_free(rt->config_sync);
+    free(rt->applied_state_hash);
     sb_singbox_supervisor_free(rt->supervisor); /* stops a managed child */
     if (rt->has_transform_options) sb_agent_config_options_free(&rt->transform_options);
     sb_strvec_free(&rt->reload_command);
@@ -831,13 +838,34 @@ static int runtime_init(agent_runtime *rt, sb_err *err) {
         goto fail;
     rt->validate_config = environment_flag("SINGBOX_VALIDATE_CONFIG", true);
     {
-        sb_agent_config_options defaults;
-        if (transform_options(&defaults, err) != 0) goto fail;
-        int rc = sb_agent_config_options_load(rt->settings_path, &defaults,
-                                              &rt->transform_options, err);
-        sb_agent_config_options_free(&defaults);
-        if (rc != 0) goto fail;
+        char *identity = sb_asprintf("%s\n%s", rt->identity.server, rt->identity.token);
+        char *scope = sb_sha256_hex(identity, strlen(identity)); free(identity);
+        char *name = sb_asprintf("agent-config-sync-%.16s.json", scope);
+        char *path = path_beside(rt->config_path, name); free(name);
+        bool cached = sb_file_exists(path);
+        if (cached) {
+            sb_agent_config_options_init(&rt->transform_options);
+            rt->transform_options.local_proxy_egress = false;
+        } else {
+            sb_agent_config_options defaults;
+            if (transform_options(&defaults, err)) { free(path); free(scope); goto fail; }
+            int rc = sb_agent_config_options_load(rt->settings_path, &defaults, &rt->transform_options, err);
+            sb_agent_config_options_free(&defaults);
+            if (rc) { free(path); free(scope); goto fail; }
+        }
         rt->has_transform_options = true;
+        /* A previous settings file or explicit environment override is a
+         * one-time migration source, never a second configuration authority. */
+        bool explicit_settings = sb_file_exists(rt->settings_path) ||
+            sbj_arr_len(rt->transform_options.local_route_rules) > 0;
+        const char *names[] = {"SINGBOX_LOCAL_PROXY_EGRESS", "SINGBOX_OUTBOUND_SERVER_OVERRIDES",
+            "SINGBOX_OUTBOUND_OVERRIDE_FILE", "SINGBOX_DEFAULT_PROXY_OUTBOUND", "SINGBOX_LOCAL_ROUTE_RULES_FILE"};
+        for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i)
+            if (*environment(names[i], "")) explicit_settings = true;
+        sbj *legacy = !cached && explicit_settings ? sb_agent_config_options_to_json(&rt->transform_options) : NULL;
+        rt->config_sync = sb_agent_sync_new(path, scope, legacy, err);
+        free(path); free(scope); sbj_free(legacy);
+        if (!rt->config_sync) goto fail;
     }
     {
         sb_singbox_supervisor_options options;
@@ -936,7 +964,10 @@ typedef struct {
 
 static queued_actions take_queued_actions(agent_runtime *rt) {
     pthread_mutex_lock(&rt->state_mutex);
-    if (rt->refresh_requested) sb_str_set(&rt->last_etag, NULL);
+    if (rt->refresh_requested) {
+        sb_str_set(&rt->last_etag, NULL);
+        free(rt->applied_state_hash); rt->applied_state_hash = NULL;
+    }
     queued_actions actions = {rt->reload_requested, rt->restart_requested};
     rt->refresh_requested = false;
     rt->reload_requested = false;
@@ -1130,20 +1161,186 @@ static int run_commands(agent_runtime *rt, sb_err *err) {
     return rc;
 }
 
+static int confirmed_options(const sbj *settings, sb_agent_config_options *options, sb_err *err) {
+    sb_agent_config_options defaults;
+    sb_agent_config_options_init(&defaults);
+    defaults.local_proxy_egress = false;
+    int rc = sb_agent_config_options_from_json(settings, &defaults, options, err);
+    sb_agent_config_options_free(&defaults);
+    if (rc) return rc;
+    const sbj *selections = sbj_get(settings, "selector_selections");
+    if (selections) {
+        if (!sbj_is_object(selections)) { sb_agent_config_options_free(options); return sb_fail(err, SB_ERR_VALIDATION, "selector_selections must be an object"); }
+        const char *tag; const sbj *selection;
+        SBJ_OBJ_FOREACH(selections, i, tag, selection) {
+            if (!*tag || !sbj_is_string(selection) || !selection->v.str.len) {
+                sb_agent_config_options_free(options); return sb_fail(err, SB_ERR_VALIDATION, "selector_selections must map group names to node names");
+            }
+        }
+    }
+    return 0;
+}
+
+/* sing-box restores cached selector choices before reading selector.default.
+ * Apply the desired defaults through its runtime API after (re)configuration,
+ * including a reset to inherited defaults. Startup/API failures retry without
+ * another reload, so an external core gets time to become ready. */
+static int reconcile_selectors(agent_runtime *rt, sb_err *err) {
+    if (!rt->selector_reconcile_pending) return 0;
+    char *text = NULL; size_t length = 0;
+    if (read_existing(rt->config_path, &text, &length, err) <= 0) return sb_fail(err, SB_ERR_IO, "Installed configuration is unavailable for selector synchronization");
+    sbj *config = parse_json(text, length, err); free(text);
+    if (!config) return -1;
+    const sbj *outbound;
+    SBJ_ARR_FOREACH(sbj_get(config, "outbounds"), i, outbound) {
+        if (!sbj_string_is(sbj_get(outbound, "type"), "selector")) continue;
+        const char *group = sbj_get_str(outbound, "tag", "");
+        const sbj *first = sbj_arr_at(sbj_get(outbound, "outbounds"), 0);
+        const char *selection = sbj_get_str(outbound, "default", sbj_as_str(first, ""));
+        sb_err live_error = {0};
+        sbj *result = sb_agent_clash_select_proxy(rt->clash, group, selection, &live_error);
+        if (!result) {
+            sbj_free(config);
+            return sb_fail(err, SB_ERR_UPSTREAM, "Configuration installed; selector synchronization pending: %s", live_error.msg);
+        }
+        sbj_free(result);
+    }
+    sbj_free(config); rt->selector_reconcile_pending = false;
+    return 0;
+}
+
+static int apply_confirmed_state(agent_runtime *rt, const sbj *snapshot, sb_err *err) {
+    if (sbj_get_int(snapshot, "base_version", 0) == 0) return 0;
+    const sbj *settings = sbj_get(snapshot, "server_agent_settings");
+    sbj *input = sbj_clone(sbj_get(snapshot, "config"));
+    sbj *signature = sbj_object();
+    sbj_set(signature, "config", sbj_clone(input));
+    sbj_set(signature, "settings", sbj_clone(settings));
+    char *text = sbj_dump(signature, -1); sbj_free(signature);
+    char *hash = sb_sha256_hex(text, strlen(text)); free(text);
+    if (rt->applied_state_hash && strcmp(hash, rt->applied_state_hash) == 0) {
+        set_rule_source(rt, sbj_get_str(snapshot, "rule_source", "profile"));
+        const char *etag = sbj_get_str(snapshot, "etag", "");
+        if (*etag) set_etag(rt, etag);
+        free(hash); sbj_free(input); return reconcile_selectors(rt, err);
+    }
+    sb_agent_config_options options;
+    if (confirmed_options(settings, &options, err)) { free(hash); sbj_free(input); return -1; }
+    const sbj *selections = sbj_get(settings, "selector_selections");
+    sbj *outbounds = sbj_get(input, "outbounds");
+    const char *group; const sbj *selection;
+    SBJ_OBJ_FOREACH(selections, i, group, selection) {
+        bool matched = false;
+        sbj *outbound;
+        SBJ_ARR_FOREACH(outbounds, j, outbound) {
+            if (!sbj_string_is(sbj_get(outbound, "tag"), group)) continue;
+            const sbj *candidate;
+            if (sbj_string_is(sbj_get(outbound, "type"), "selector")) {
+                SBJ_ARR_FOREACH(sbj_get(outbound, "outbounds"), k, candidate) {
+                    if (sbj_equal(candidate, selection)) matched = true;
+                }
+            }
+            if (matched) sbj_set(outbound, "default", sbj_clone(selection));
+        }
+        if (!matched) {
+            sb_agent_config_options_free(&options); sbj_free(input); free(hash);
+            return sb_fail(err, SB_ERR_VALIDATION, "Saved selector choice is absent from the current server configuration");
+        }
+    }
+    pthread_mutex_lock(&rt->state_mutex);
+    sb_agent_config_options previous;
+    sb_agent_config_options_copy(&previous, &rt->transform_options);
+    sb_agent_config_options_free(&rt->transform_options); rt->transform_options = options;
+    pthread_mutex_unlock(&rt->state_mutex);
+    sb_agent_config_response response = {0};
+    response.modified = true;
+    response.body = sbj_dump(input, 2); sbj_free(input);
+    response.etag = sb_strdup(sbj_get_str(snapshot, "etag", ""));
+    if (!*response.etag) { free(response.etag); response.etag = sb_config_etag(rt->identity.host_id, response.body, ""); }
+    response.rule_source = sb_strdup(sbj_get_str(snapshot, "rule_source", "profile"));
+    int rc = apply_config(rt, &response, err);
+    sb_agent_config_response_free(&response);
+    if (rc) {
+        pthread_mutex_lock(&rt->state_mutex);
+        sb_agent_config_options_free(&rt->transform_options); rt->transform_options = previous;
+        pthread_mutex_unlock(&rt->state_mutex);
+        free(hash);
+    } else {
+        sb_agent_config_options_free(&previous);
+        free(rt->applied_state_hash); rt->applied_state_hash = hash;
+        rt->selector_reconcile_pending = true;
+        rc = reconcile_selectors(rt, err);
+    }
+    return rc;
+}
+
+/* Network I/O never holds state_mutex. Acknowledgement preserves edits queued
+ * while a PUT is in flight, and rebases only that local successor request. */
+static int sync_configuration(agent_runtime *rt, sb_err *err) {
+    sbj *state = sb_agent_client_config_state(rt->client, NULL, err);
+    int network_rc = state ? 0 : -1;
+    sb_err network_error = *err;
+    pthread_mutex_lock(&rt->state_mutex);
+    if (state && sb_agent_sync_observe(rt->config_sync, state, err)) {
+        pthread_mutex_unlock(&rt->state_mutex); sbj_free(state); return -1;
+    }
+    sbj *snapshot = sb_agent_sync_snapshot(rt->config_sync);
+    sbj *request = state ? sb_agent_sync_request(rt->config_sync) : NULL;
+    pthread_mutex_unlock(&rt->state_mutex);
+    sbj_free(state);
+    if (network_rc && network_error.code == SB_ERR_NOT_FOUND && sbj_get_int(snapshot, "base_version", 0) == 0) {
+        /* Rolling upgrades retain the old pull protocol until a server has
+         * successfully supplied the new authoritative state once. */
+        sbj_free(snapshot);
+        char *etag = copy_etag(rt); sb_agent_config_response response;
+        int rc = sb_agent_client_poll_config(rt->client, etag, &response, err); free(etag);
+        if (!rc) {
+            if (response.modified) rc = apply_config(rt, &response, err);
+            else set_rule_source(rt, response.rule_source);
+            sb_agent_config_response_free(&response);
+        }
+        return rc;
+    }
+    if (request) {
+        sbj *ack = sb_agent_client_config_state(rt->client, request, err);
+        network_rc = ack ? 0 : -1; network_error = *err;
+        if (ack) {
+            pthread_mutex_lock(&rt->state_mutex);
+            int rc = sb_agent_sync_acknowledge(rt->config_sync, request, ack, err);
+            pthread_mutex_unlock(&rt->state_mutex);
+            sbj_free(ack);
+            if (rc) { sbj_free(snapshot); sbj_free(request); return -1; }
+        } else if (network_error.code == SB_ERR_CONFLICT) {
+            sb_err refresh_error = {0};
+            sbj *latest = sb_agent_client_config_state(rt->client, NULL, &refresh_error);
+            if (latest) {
+                pthread_mutex_lock(&rt->state_mutex);
+                int rc = sb_agent_sync_observe(rt->config_sync, latest, &refresh_error);
+                pthread_mutex_unlock(&rt->state_mutex);
+                sbj_free(latest);
+                if (rc) { *err = refresh_error; sbj_free(snapshot); sbj_free(request); return -1; }
+            }
+        }
+        sbj_free(request); sbj_free(snapshot);
+        pthread_mutex_lock(&rt->state_mutex);
+        snapshot = sb_agent_sync_snapshot(rt->config_sync);
+        pthread_mutex_unlock(&rt->state_mutex);
+    }
+    int apply_rc = apply_confirmed_state(rt, snapshot, err);
+    bool conflict = sbj_get_bool(snapshot, "conflict", false);
+    sbj_free(snapshot);
+    if (apply_rc) return -1;
+    if (network_rc) { *err = network_error; return -1; }
+    if (conflict) return sb_fail(err, SB_ERR_CONFLICT, "Configuration conflict: local edits remain pending; review both versions");
+    return 0;
+}
+
 static bool run_cycle(agent_runtime *rt) {
     sb_strvec errors = {0};
     queued_actions actions = take_queued_actions(rt);
     {
         sb_err error = {0};
-        char *etag = copy_etag(rt);
-        sb_agent_config_response config;
-        int rc = sb_agent_client_poll_config(rt->client, etag, &config, &error);
-        free(etag);
-        if (rc == 0) {
-            if (config.modified) rc = apply_config(rt, &config, &error);
-            else set_rule_source(rt, config.rule_source);
-            sb_agent_config_response_free(&config);
-        }
+        int rc = sync_configuration(rt, &error);
         if (rc != 0) record_error(&errors, "config poll/apply", error.msg);
     }
     {
@@ -1237,39 +1434,104 @@ static sbj *ui_status(void *user, sb_err *err) {
     sbj_set(status, "pending", pending);
     sbj_set(status, "telemetry", sbj_clone(rt->last_telemetry));
     sbj_set(status, "proxy_users", sb_proxy_runtime_status(rt->proxy_runtime));
+    sbj *snapshot = sb_agent_sync_snapshot(rt->config_sync), *sync = sbj_object();
+    const char *sync_keys[] = {"base_version", "patch_version", "local_version", "pending", "conflict"};
+    for (size_t i = 0; i < sizeof sync_keys / sizeof sync_keys[0]; ++i)
+        sbj_set(sync, sync_keys[i], sbj_clone(sbj_get(snapshot, sync_keys[i])));
+    sbj_set(status, "config_sync", sync); sbj_free(snapshot);
     pthread_mutex_unlock(&rt->state_mutex);
     return status;
 }
 
+static void settings_sync_version(sbj *settings, const sbj *snapshot) {
+    if (!settings) return;
+    sbj *version = sbj_object();
+    const char *keys[] = {"base_version", "patch_version", "local_version"};
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; ++i)
+        sbj_set(version, keys[i], sbj_clone(sbj_get(snapshot, keys[i])));
+    sbj_set(settings, "_sync_version", version);
+}
+
 static sbj *ui_settings(void *user, sb_err *err) {
-    (void)err;
     agent_runtime *rt = user;
     pthread_mutex_lock(&rt->state_mutex);
-    sbj *settings = sb_agent_config_options_to_json(&rt->transform_options);
+    sbj *snapshot = sb_agent_sync_snapshot(rt->config_sync);
+    sbj *settings = NULL;
+    if (sbj_get_int(snapshot, "base_version", 0)) {
+        sb_agent_config_options options;
+        if (!confirmed_options(sbj_get(snapshot, "agent_settings"), &options, err)) {
+            settings = sb_agent_config_options_to_json(&options); sb_agent_config_options_free(&options);
+        }
+    } else settings = sb_agent_config_options_to_json(&rt->transform_options);
+    settings_sync_version(settings, snapshot);
+    sbj_free(snapshot);
     pthread_mutex_unlock(&rt->state_mutex);
     return settings;
 }
 
 static sbj *ui_update_settings(const sbj *value, void *user, sb_err *err) {
     agent_runtime *rt = user;
-    sb_agent_config_options current;
+    if (!sbj_is_object(value)) { sb_fail(err, SB_ERR_VALIDATION, "agent settings must be a JSON object"); return NULL; }
     pthread_mutex_lock(&rt->state_mutex);
-    sb_agent_config_options_copy(&current, &rt->transform_options);
-    pthread_mutex_unlock(&rt->state_mutex);
-    sb_agent_config_options updated;
-    int rc = sb_agent_config_options_from_json(value, &current, &updated, err);
-    sb_agent_config_options_free(&current);
-    if (rc != 0) return NULL;
-    if (sb_agent_config_options_save(rt->settings_path, &updated, err) != 0) {
-        sb_agent_config_options_free(&updated);
-        return NULL;
+    sbj *snapshot = sb_agent_sync_snapshot(rt->config_sync);
+    const sbj *expected = sbj_get(value, "expected");
+    if (expected) {
+        const char *versions[] = {"base_version", "patch_version", "local_version"};
+        for (size_t i = 0; i < sizeof versions / sizeof versions[0]; ++i) {
+            if (!sbj_is_integer(sbj_get(expected, versions[i]))) {
+                sbj_free(snapshot); pthread_mutex_unlock(&rt->state_mutex);
+                sb_fail(err, SB_ERR_VALIDATION, "Expected configuration versions are required"); return NULL;
+            }
+            if (!sbj_equal(sbj_get(expected, versions[i]), sbj_get(snapshot, versions[i]))) {
+                sbj_free(snapshot); pthread_mutex_unlock(&rt->state_mutex);
+                sb_fail(err, SB_ERR_CONFLICT, "Configuration changed; reload and review before saving settings"); return NULL;
+            }
+        }
     }
-    sbj *result = sb_agent_config_options_to_json(&updated);
+    sbj *settings = sbj_clone(sbj_get(snapshot, "agent_settings"));
+    const char *key; const sbj *entry;
+    SBJ_OBJ_FOREACH(value, i, key, entry) {
+        if (strcmp(key, "expected") && strcmp(key, "_sync_version")) sbj_set(settings, key, sbj_clone(entry));
+    }
+    sb_agent_config_options updated;
+    int rc = confirmed_options(settings, &updated, err);
+    sbj_set(snapshot, "agent_settings", settings);
+    sbj *result = NULL;
+    if (!rc) {
+        if (!sb_agent_sync_queue(rt->config_sync, snapshot, err)) {
+            result = sb_agent_config_options_to_json(&updated);
+            sbj *queued = sb_agent_sync_snapshot(rt->config_sync);
+            settings_sync_version(result, queued); sbj_free(queued);
+            rt->refresh_requested = true; pthread_cond_signal(&rt->wakeup);
+        }
+        sb_agent_config_options_free(&updated);
+    }
+    sbj_free(snapshot);
+    pthread_mutex_unlock(&rt->state_mutex);
+    return result;
+}
+
+static sbj *ui_config_state(void *user, sb_err *err) {
+    (void)err;
+    agent_runtime *rt = user;
     pthread_mutex_lock(&rt->state_mutex);
-    sb_agent_config_options_free(&rt->transform_options);
-    rt->transform_options = updated;
-    rt->refresh_requested = true;
-    pthread_cond_signal(&rt->wakeup);
+    sbj *snapshot = sb_agent_sync_snapshot(rt->config_sync);
+    sbj_set(snapshot, "last_error", sbj_str(rt->last_error));
+    pthread_mutex_unlock(&rt->state_mutex);
+    return snapshot;
+}
+
+static sbj *ui_update_config_state(const sbj *value, void *user, sb_err *err) {
+    agent_runtime *rt = user;
+    if (!sbj_string_is(sbj_get(value, "resolve"), "use_server")) {
+        sb_agent_config_options options;
+        if (confirmed_options(sbj_get(value, "agent_settings"), &options, err)) return NULL;
+        sb_agent_config_options_free(&options);
+    }
+    pthread_mutex_lock(&rt->state_mutex);
+    int rc = sb_agent_sync_queue(rt->config_sync, value, err);
+    sbj *result = rc ? NULL : sb_agent_sync_snapshot(rt->config_sync);
+    if (!rc) { rt->refresh_requested = true; pthread_cond_signal(&rt->wakeup); }
     pthread_mutex_unlock(&rt->state_mutex);
     return result;
 }
@@ -1341,7 +1603,38 @@ fail:
 static sbj *ui_select_proxy(const char *group, size_t group_len, const char *proxy,
                              size_t proxy_len, void *user, sb_err *err) {
     agent_runtime *rt = user;
-    return sb_agent_clash_select_proxy_n(rt->clash, group, group_len, proxy, proxy_len, err);
+    if (!group_len || !proxy_len || memchr(group, '\0', group_len) || memchr(proxy, '\0', proxy_len)) {
+        sb_fail(err, SB_ERR_VALIDATION, "Invalid selector choice"); return NULL;
+    }
+    char *group_name = sb_strndup(group, group_len), *proxy_name = sb_strndup(proxy, proxy_len);
+    sbj *available = ui_proxies(user, err);
+    const sbj *entry = sbj_get(sbj_get(available, "proxies"), group_name);
+    bool allowed = sbj_string_is(sbj_get(entry, "type"), "Selector"), found = false;
+    const sbj *choice;
+    SBJ_ARR_FOREACH(sbj_get(entry, "all"), i, choice) if (sbj_string_is(choice, proxy_name)) found = true;
+    sbj_free(available);
+    if (!allowed || !found) {
+        free(group_name); free(proxy_name); sb_fail(err, SB_ERR_VALIDATION, "The node is not a choice of this selector"); return NULL;
+    }
+    pthread_mutex_lock(&rt->state_mutex);
+    sbj *snapshot = sb_agent_sync_snapshot(rt->config_sync);
+    sbj *settings = sbj_get(snapshot, "agent_settings");
+    sbj *selections = sbj_get(settings, "selector_selections");
+    if (!sbj_is_object(selections)) { selections = sbj_object(); sbj_set(settings, "selector_selections", selections); }
+    sbj_set_str(selections, group_name, proxy_name);
+    int rc = sb_agent_sync_queue(rt->config_sync, snapshot, err);
+    sbj_free(snapshot);
+    if (!rc) { rt->refresh_requested = true; pthread_cond_signal(&rt->wakeup); }
+    pthread_mutex_unlock(&rt->state_mutex);
+    free(group_name); free(proxy_name);
+    if (rc) return NULL;
+    sb_err live_error = {0};
+    sbj *result = sb_agent_clash_select_proxy_n(rt->clash, group, group_len, proxy, proxy_len, &live_error);
+    if (!result) {
+        result = sbj_object(); sbj_set_bool(result, "queued", true);
+        sbj_set_bool(result, "live", false); sbj_set_str(result, "error", live_error.msg);
+    }
+    return result;
 }
 
 static sbj *ui_test_route(const char *url, void *user, sb_err *err) {
@@ -1432,6 +1725,8 @@ int sb_agent_main(int argc, char **argv) {
                 .settings = ui_settings,
                 .update_settings = ui_update_settings,
                 .config = ui_config,
+                .config_state = ui_config_state,
+                .update_config_state = ui_update_config_state,
                 .proxies = ui_proxies,
                 .select_proxy = ui_select_proxy,
                 .test_route = ui_test_route,

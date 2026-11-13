@@ -9,6 +9,7 @@
 
 #include "sb/auth.h"
 #include "sb/config_renderer.h"
+#include "sb/config_sync.h"
 #include "sb/proxy_parser.h"
 #include "sb/store.h"
 #include "sb/tailscale.h"
@@ -151,7 +152,7 @@ TEST(sqlite_runner_applies_canonical_migrations_idempotently) {
     sb_store *s = open_store(&t);
     REQUIRE(s);
     sb_err err = {0};
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
     sb_config_profile p;
     sb_config_profile_init(&p);
     REQUIRE(sb_store_find_profile(s, "android-client", &p, &err) == 1);
@@ -161,7 +162,7 @@ TEST(sqlite_runner_applies_canonical_migrations_idempotently) {
               "bootstrap-dns");
     sb_config_profile_free(&p);
     CHECK_EQ_INT(sb_database_migrate(sb_store_database(s), migrations(), &err), 0);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
     sb_store_free(s);
     temp_db_free(&t);
 }
@@ -1167,12 +1168,12 @@ TEST(migration_runner_edge_cases) {
     sb_store *s = sb_store_open(t.path, dir, &err);
     if (!s) fprintf(stderr, "open: %s\n", err.msg);
     REQUIRE(s);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
     sb_store_free(s);
     remove_migration_dir(dir);
 
     /* a failing migration is rolled back and not recorded */
-    const char *bad_names[] = {"20_add_things.sql"};
+    const char *bad_names[] = {"21_add_things.sql"};
     const char *bad_sql[] = {"CREATE TABLE later_things (id TEXT);\nBOGUS STATEMENT;\n"};
     dir = make_migration_dir(bad_names, bad_sql, 1);
     CHECK(sb_store_open(t.path, dir, &err) == NULL);
@@ -1180,12 +1181,12 @@ TEST(migration_runner_edge_cases) {
     remove_migration_dir(dir);
     s = sb_store_open(t.path, migrations(), &err);
     REQUIRE(s);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
     CHECK_EQ_INT(sb_database_execute(sb_store_database(s), "SELECT * FROM later_things", &err), -1);
     sb_store_free(s);
 
     /* description and non-transactional migrations */
-    const char *nt_names[] = {"20_no_tx.sql"};
+    const char *nt_names[] = {"21_no_tx.sql"};
     const char *nt_sql[] = {"-- no-transaction\nSELECT 1;\n"};
     dir = make_migration_dir(nt_names, nt_sql, 1);
     CHECK(sb_store_open(t.path, dir, &err) == NULL);
@@ -1206,15 +1207,15 @@ TEST(migration_runner_edge_cases) {
     remove_migration_dir(dir);
 
     /* a new migration is applied with the SQLx description (underscores -> spaces) */
-    const char *ok_names[] = {"20_add_more_things.sql"};
+    const char *ok_names[] = {"21_add_more_things.sql"};
     const char *ok_sql[] = {"CREATE TABLE more_things (id TEXT);\n"};
     dir = make_migration_dir(ok_names, ok_sql, 1);
     s = sb_store_open(t.path, dir, &err);
     REQUIRE(s);
-    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 21);
     CHECK_EQ_INT(sb_database_execute(sb_store_database(s),
                                      "CREATE TEMP TABLE probe AS SELECT description FROM _sqlx_migrations "
-                                     "WHERE version = 20 AND description = 'add more things'",
+                                     "WHERE version = 21 AND description = 'add more things'",
                                      &err),
                  0);
     sb_store_free(s);
@@ -1503,4 +1504,29 @@ TEST(tailscale_persists_private_keys_and_renders_self_without_script_disclosure)
     CHECK(sbj_is_array(sbj_get(saved.tailscale, "route_cidrs")));
     sb_host_free(&host); sb_host_free(&saved);
     sb_store_free(s); temp_db_free(&t);
+}
+
+TEST(config_sync_migration_preserves_existing_tailscale_database) {
+    temp_db t; temp_db_init(&t); sb_err err = {0};
+    char *legacy = make_migration_dir(NULL, NULL, 0);
+    char *new_migration = sb_path_join(legacy, "020_server_config_sync.sql");
+    REQUIRE(unlink(new_migration) == 0); free(new_migration);
+    sb_store *s = sb_store_open(t.path, legacy, &err); REQUIRE(s);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 19);
+    sb_host host, saved; sb_host_init(&host); sb_host_init(&saved);
+    REQUIRE(sb_store_find_host(s, "self", &host, &err) == 1);
+    sbj_set_bool(host.tailscale, "enabled", true);
+    sbj_set_str(host.tailscale, "auth_key", "tskey-auth-before-config-sync");
+    REQUIRE(sb_store_update_host(s, &host, &saved, &err) == 0);
+    sb_host_free(&host); sb_host_free(&saved); sb_store_free(s); remove_migration_dir(legacy);
+
+    s = sb_store_open(t.path, migrations(), &err); REQUIRE(s);
+    CHECK_EQ_INT(sb_database_applied_migration_count(sb_store_database(s), &err), 20);
+    sb_host_init(&host); REQUIRE(sb_store_find_host(s, "self", &host, &err) == 1);
+    CHECK(sb_tailscale_enabled(host.tailscale));
+    CHECK_STR(sbj_get_str(host.tailscale, "auth_key", ""), "tskey-auth-before-config-sync");
+    CHECK(sb_config_sync_source_version(sb_store_database(s), &err) > 0);
+    CHECK_EQ_INT(sb_config_sync_exists(sb_store_database(s), "self", &err), 0);
+    CHECK_EQ_INT(sb_database_migrate(sb_store_database(s), migrations(), &err), 0);
+    sb_host_free(&host); sb_store_free(s); temp_db_free(&t);
 }

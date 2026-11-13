@@ -49,6 +49,8 @@ int sbl_import(sbj* profile, const char* name, const char* url, const char* body
 int sbl_refresh_subscription(sbj* profile, const char* id, sb_err* err);
 int sbl_enroll(sbj* profile, const char* url, const char* code, sb_err* err);
 int sbl_sync_profile(sbj* profile, bool* changed, sb_err* err);
+bool sbl_sync_pending(const sbj* profile);
+int sbl_sync_resolve_profile(sbj* profile, bool keep_local, bool* changed, sb_err* err);
 char* sbl_build(const sbj* profile, bool tun, uid_t uid, int proxy_port, int clash_port,
                 const char* secret, const char* cache_path, sb_err* err);
 

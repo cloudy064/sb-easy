@@ -4,6 +4,7 @@
       <div>
         <h2>{{ t('page.profiles.title') }}</h2>
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.profiles.desc') }}</p>
+        <p class="text-sm text-muted">{{ locale === 'zh' ? 'Default 是所有设备的共享基础配置。个性化修改请在设备详情中编辑 patch。其他 Profile 保留用于旧设备迁移。' : 'Default is the shared base for all devices. Edit individual patches in device details. Other profiles remain for migration.' }}</p>
       </div>
       <button class="btn-primary" @click="openCreate">{{ t('profiles.add') }}</button>
     </div>
@@ -164,7 +165,7 @@ import client from '../api/client'
 import RulesEditor from '../components/RulesEditor.vue'
 import type { ConfigProfile } from '../types'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const store = useHostsStore()
 const nodesStore = useProxyNodesStore()
 
@@ -177,6 +178,8 @@ const loading = ref(true)
 const deleteTarget = ref<ConfigProfile | null>(null)
 
 interface EditorState {
+  baseVersion: number | null
+  profileMode: 'managed' | 'full'
   open: boolean
   id: string
   name: string
@@ -192,6 +195,8 @@ interface EditorState {
 
 function editorState(values: Partial<EditorState> = {}): EditorState {
   return {
+    baseVersion: null,
+    profileMode: 'managed',
     open: false,
     id: '',
     name: '',
@@ -270,12 +275,25 @@ function openCreate() {
   model.inbounds.push({ type: 'mixed', tag: 'mixed-in', listen: '0.0.0.0', listen_port: 7890 })
   editor.value = editorState({ open: true })
 }
-function openEdit(p: ConfigProfile) {
+async function openEdit(p: ConfigProfile) {
+  let baseVersion: number | null = null
+  if (p.id === 'default') {
+    try {
+      const { data } = await client.get('/config/default')
+      p = data.profile
+      baseVersion = data.base_version
+    } catch (e: any) {
+      editor.value = editorState({ open: true, id: 'default', error: e?.response?.data?.error || 'Unable to load default configuration' })
+      return
+    }
+  }
   let obj: any = {}
   try { obj = JSON.parse(p.template) } catch { /* fall back to empty */ }
   setModel(obj)
   editor.value = editorState({
     open: true,
+    baseVersion,
+    profileMode: p.mode,
     id: p.id,
     name: p.name,
     ruleScript: p.rule_script || '',
@@ -283,8 +301,8 @@ function openEdit(p: ConfigProfile) {
   })
 }
 
-function openScript(profile: ConfigProfile) {
-  openEdit(profile)
+async function openScript(profile: ConfigProfile) {
+  await openEdit(profile)
   editor.value.mode = 'script'
 }
 
@@ -333,7 +351,15 @@ async function save() {
       editor.value.mode = 'script'
       return
     }
-    if (editor.value.id) {
+    if (editor.value.id === 'default') {
+      if (editor.value.baseVersion === null) throw new Error(locale.value === 'zh' ? '请关闭编辑器后重新加载基础配置' : 'Close and reload the default configuration')
+      await client.put('/config/default', {
+        base_version: editor.value.baseVersion,
+        profile: { name: editor.value.name, mode: editor.value.profileMode, template: payload,
+          rule_script: editor.value.ruleScript, rule_script_enabled: editor.value.ruleScriptEnabled },
+      })
+      await store.fetchProfiles()
+    } else if (editor.value.id) {
       await store.updateProfile(
         editor.value.id,
         editor.value.name,

@@ -5,6 +5,12 @@ spirit of wg-easy. One central server manages many hosts, their proxies, configs
 and clients — and can run/supervise sing-box itself, so there's nothing extra to
 install.
 
+Managed configuration is owned by the server: one shared **Default** plus a
+per-device patch. Unmodified fields inherit future default changes; edits made
+on clients are queued durably and synchronized back with server timestamp
+versions and conflict checks. See [the product model](docs/concepts.md) and
+[the synchronization protocol](docs/config-sync.md).
+
 - **Backend**: C11 (CivetWeb + SQLite + QuickJS), serving the Vue frontend.
 - **Data plane**: sing-box (supervised in-process by sb-easy when managed).
 - **Frontend**: Vue 3 + TS + Pinia.
@@ -133,7 +139,8 @@ endpoint = `sb-easy agent`) and how to add agent nodes, see
 Node mode in the production image remains `sb-easy agent`; it dispatches to the
 dedicated C agent with `SB_EASY_SERVER` + `AGENT_TOKEN` (see
 `agent/.env.example`). The agent hosts the embedded sing-box engine and
-preserves the established node-local egress/override environment variables. Set a
+imports explicit legacy egress/override settings into server-owned device
+settings on first synchronization. Set a
 separate `AGENT_UI_PASSWORD` to enable its local management page on
 `0.0.0.0:51822` (`AGENT_UI_BIND` and `AGENT_UI_USERNAME` are configurable).
 The local console is an independent Svelte build served from `AGENT_UI_PATH`;
@@ -141,11 +148,14 @@ the image sets it to `/usr/share/sb-easy/agent-ui`, while a bare Agent can run
 API-only when it is unset. The C service contains no embedded HTML and another
 compatible UI can be substituted without rebuilding it. The
 page shows live Clash API traffic plus runtime/config status, supports live
-selector-group node switching, persists
-node-local outbound settings, and queues refresh/reload/restart operations
+selector-group node switching, edits server-owned
+device settings with a durable offline queue, and queues refresh/reload/restart operations
 without exposing the Agent token. The configuration view exposes the current
 raw JSON and can open a short-lived test connection for a URL to report the
 actual sing-box rule, selector chain, and final proxy/direct decision.
+Its configuration page also edits arbitrary device patches and resolves
+concurrent server/client changes. The panel's device configuration page exposes
+the same patch; the Default editor checks the version before saving.
 
 The unified managed-node build keeps the C Agent as the host executable and
 links the official sing-box engine into that same process. Go is used only in

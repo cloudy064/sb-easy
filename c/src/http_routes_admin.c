@@ -6,6 +6,7 @@
  * The C++ server registers no /api/one-time/... handler (the one-time-link
  * route only builds the URL), so those paths reach the core's JWT advice and
  * "API route not found" fallback exactly as they did with Drogon. */
+#include "sb/config_sync.h"
 #include "http_internal.h"
 
 #include <stdint.h>
@@ -842,6 +843,18 @@ static int handle_config_full(sb_http_req *req, sb_http_resp *resp, sb_err *err)
     sb_config_renderer renderer;
     sbj *config;
     int rc = -1;
+
+    int synced = sb_config_sync_exists(sb_store_database(srv->store), "self", err);
+    if (synced < 0) goto done;
+    if (synced) {
+        sb_host host; sb_host_init(&host);
+        int found = sb_store_find_host(srv->store, "self", &host, err);
+        sbj *state = found == 1 ? sb_http_host_config_state(srv, &host, false, NULL, err) : NULL;
+        sb_host_free(&host);
+        if (!state) goto done;
+        sb_resp_json(resp, 200, sbj_clone(sbj_get(state, "config"))); sbj_free(state);
+        rc = 0; goto done;
+    }
 
     if (sb_store_render_request_for_host(srv->store, "self", &request, err) != 0) goto done;
     free(request.clash_controller);

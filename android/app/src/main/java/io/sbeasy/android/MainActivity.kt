@@ -665,6 +665,12 @@ private fun HomeScreen(
                     Text(if (control.syncPhase == SyncPhase.SYNCING) "正在同步…" else "立即同步", color = AccentDark)
                 }
                 control.lastError?.let { ErrorText(it) }
+                if (control.lastError?.contains("本机待同步修改已保留") == true) {
+                    Row {
+                        TextButton(onClick = { scope.launch { runCatching { CoreGraph.repository.resolveConfigurationConflict(false) } } }) { Text("采用服务器配置") }
+                        TextButton(onClick = { scope.launch { runCatching { CoreGraph.repository.resolveConfigurationConflict(true) } } }) { Text("保留本机修改") }
+                    }
+                }
                 runtimeError?.let { ErrorText(it) }
             }
         }

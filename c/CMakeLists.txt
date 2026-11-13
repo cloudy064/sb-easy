@@ -198,6 +198,10 @@ if(BUILD_TESTING)
     # This HTTP fixture exercises the production 50 ms QuickJS deadline.
     # Keep sanitizer overhead from concurrent CTests out of that wall-clock budget.
     set_tests_properties(control_plane_e2e PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
+    add_test(NAME config_sync_e2e
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_sync_e2e.py
+            --server $<TARGET_FILE:sb-easy-c-server> --agent $<TARGET_FILE:sb-easy-c-agent>)
+    set_tests_properties(config_sync_e2e PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
     if(SB_EASY_EMBED_SINGBOX AND sb_proxy_bridge_complete AND SB_EASY_PROXY_TEST_CLIENT)
         if(NOT EXISTS "${SB_EASY_PROXY_TEST_CLIENT}")
             message(FATAL_ERROR "SB_EASY_PROXY_TEST_CLIENT does not exist")

@@ -168,12 +168,7 @@
               <label>{{ t('device.enroll.name') }}</label>
               <input v-model.trim="deviceName" required :placeholder="t('device.enroll.name.placeholder')" />
             </div>
-            <div class="form-group">
-              <label>{{ t('hosts.profile') }}</label>
-              <select v-model="deviceProfileId">
-                <option v-for="profile in hostsStore.profiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
-              </select>
-            </div>
+            <p class="text-sm text-muted">{{ locale === 'zh' ? '新设备继承共享 Default。注册后可在设备详情中添加个性化 patch。' : 'New devices inherit the shared Default. Add a device patch after enrollment.' }}</p>
             <TailscaleSettings v-model="deviceTailscale" />
             <p v-if="deviceSaveError" class="text-sm enrollment-error" role="alert">{{ deviceSaveError }}</p>
             <div class="modal-actions">
@@ -380,7 +375,7 @@ import client from '../api/client'
 import { serverTimestampAgeMs } from '../api/time'
 import type { AgentEnrollment, Host, WireGuardPeer } from '../types'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const hostsStore = useHostsStore()
 const auth = useAuthStore()
 const wgStore = useWireGuardStore()
@@ -422,7 +417,6 @@ const loading = ref(false)
 const showCreate = ref(false)
 const showEnrollment = ref(false)
 const deviceName = ref('')
-const deviceProfileId = ref('android-client')
 const deviceCreating = ref(false)
 const deviceTailscale = ref(tailscaleForm())
 const deviceSaveError = ref('')
@@ -458,9 +452,6 @@ async function openEnrollment(initialName = '') {
   deviceName.value = initialName
   deviceTailscale.value = tailscaleForm()
   deviceSaveError.value = ''
-  deviceProfileId.value = hostsStore.profiles.some((profile) => profile.id === 'android-client')
-    ? 'android-client'
-    : (hostsStore.profiles[0]?.id ?? 'default')
   deviceEnrollment.value = null
   deviceHostId.value = null
   showEnrollment.value = true
@@ -488,7 +479,7 @@ async function createDeviceEnrollment() {
     if (!deviceHostId.value) {
       const host = await hostsStore.createHost({
         name: deviceName.value,
-        profile_id: deviceProfileId.value,
+        profile_id: 'default',
         tailscale: tailscaleUpdate(deviceTailscale.value),
         capabilities: {
           runs_singbox: true,
@@ -501,7 +492,6 @@ async function createDeviceEnrollment() {
     } else {
       await hostsStore.updateHost(deviceHostId.value, {
         name: deviceName.value,
-        profile_id: deviceProfileId.value,
         tailscale: tailscaleUpdate(deviceTailscale.value),
       })
     }

@@ -378,6 +378,11 @@ if(BUILD_TESTING)
     add_test(NAME windows_kill_switch_policy COMMAND windows_kill_switch_test)
     set_tests_properties(windows_kill_switch_policy PROPERTIES TIMEOUT 10)
 
+    add_executable(windows_config_sync_test tests/config_sync_test.c)
+    target_link_libraries(windows_config_sync_test PRIVATE sb_windows_protocol)
+    sb_windows_target(windows_config_sync_test)
+    add_test(NAME windows_config_sync COMMAND windows_config_sync_test)
+
     add_executable(windows_controller_test tests/controller_test.c)
     target_link_libraries(windows_controller_test PRIVATE sb_windows_protocol)
     sb_windows_target(windows_controller_test)

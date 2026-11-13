@@ -37,6 +37,7 @@
 
     <!-- CONFIG -->
     <div v-if="tab === 'config'">
+      <DeviceConfigPanel v-if="auth.isAdmin" :host-id="id" :runtime-settings="!isSelf" @updated="config = $event" />
       <div class="flex-between mb-3">
         <span class="text-xs text-muted">{{ t('device.tab.config.hint') }}</span>
         <div class="flex-center gap-2">
@@ -186,6 +187,7 @@ import { useAuthStore } from '../stores/auth'
 import { useHostsStore } from '../stores/hosts'
 import HostManageModal from '../components/HostManageModal.vue'
 import DeviceHistoryPanel from '../components/DeviceHistoryPanel.vue'
+import DeviceConfigPanel from '../components/DeviceConfigPanel.vue'
 import client from '../api/client'
 import { formatRate, formatBytes } from '../api/realtime'
 import { serverTimestampAgeMs } from '../api/time'

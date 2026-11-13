@@ -1,4 +1,5 @@
 #include "sb/agent_client.h"
+#include "sb/agent_sync.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -286,6 +287,20 @@ static sbj *send_json(sb_agent_client *client, const char *method, const char *p
     if (client_send(client, method, path, body, NULL, &resp, err) != 0) return NULL;
     sbj *result = require_success_json(&resp, err);
     sb_http_response_free(&resp);
+    return result;
+}
+
+sbj *sb_agent_client_config_state(sb_agent_client *client, const sbj *update, sb_err *err) {
+    sb_http_response response = {0};
+    if (client_send(client, update ? "PUT" : "GET", "/api/agent/config-state", update, NULL, &response, err)) return NULL;
+    sbj *result = NULL;
+    if (response.status == 409) sb_fail(err, SB_ERR_CONFLICT, "Server configuration changed; review the conflict before retrying");
+    else if (response.status == 404) sb_fail(err, SB_ERR_NOT_FOUND, "Server does not support configuration state synchronization");
+    else result = require_success_json(&response, err);
+    if (result && !sb_agent_sync_state_valid(result)) {
+        sbj_free(result); result = NULL; sb_fail(err, SB_ERR_UPSTREAM, "Invalid server configuration state");
+    }
+    sb_http_response_free(&response);
     return result;
 }
 

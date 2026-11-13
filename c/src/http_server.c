@@ -2,6 +2,7 @@
  * cpp/src/http_server.cpp (register_http_routes / run_http_server) on top of
  * civetweb, reproducing the Drogon behaviours the C++ server relies on.
  * See http_internal.h for the contract shared with the route groups. */
+#include "sb/config_sync.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -2316,27 +2317,33 @@ static int self_singbox_render(sb_http_server *srv, sb_singbox_supervisor *super
         sbj *config = NULL;
         char *body = NULL, *etag = NULL;
         rc = -1;
-        if (sb_store_render_request_for_host(srv->store, "self", &request, err) == 0) {
+        int synced = sb_config_sync_exists(sb_store_database(srv->store), "self", err);
+        if (synced > 0) {
+            sbj *state = sb_http_host_config_state(srv, &host, false, NULL, err);
+            if (state) config = sbj_clone(sbj_get(state, "config"));
+            sbj_free(state);
+        } else if (synced == 0 && sb_store_render_request_for_host(srv->store, "self", &request, err) == 0) {
             free(request.clash_controller);
             request.clash_controller = sb_http_clash_controller_address(srv->opts.clash_api_url);
             request.clash_controller_len = request.clash_controller ? strlen(request.clash_controller) : 0;
             sb_str_set(&request.clash_secret, srv->opts.clash_api_secret);
             request.clash_secret_len = request.clash_secret ? strlen(request.clash_secret) : 0;
-            if (sb_config_renderer_init(&renderer, NULL, err) == 0 &&
-                (config = sb_config_renderer_render(&renderer, &request, err)) != NULL) {
-                body = sbj_dump(config, 2);
-                etag = sb_config_etag("self", body, srv->opts.config_hash_seed);
-                if (etag) sb_observability_target(sb_store_database(srv->store), "self", etag, sb_unix_now(), NULL);
-                if (!etag) {
-                    sb_fail(err, SB_ERR_GENERIC, "config ETag hashing failed");
-                } else if (*last_etag && strcmp(*last_etag, etag) == 0) {
-                    rc = 0;
-                } else if (sb_singbox_supervisor_apply_config(supervisor, body, strlen(body), err) == 0) {
-                    free(*last_etag);
-                    *last_etag = sb_strdup(etag);
-                    SB_INFO("managed sing-box config applied: %s", etag);
-                    rc = 0;
-                }
+            if (sb_config_renderer_init(&renderer, NULL, err) == 0)
+                config = sb_config_renderer_render(&renderer, &request, err);
+        }
+        if (config) {
+            body = sbj_dump(config, 2);
+            etag = sb_config_etag("self", body, srv->opts.config_hash_seed);
+            if (etag) sb_observability_target(sb_store_database(srv->store), "self", etag, sb_unix_now(), NULL);
+            if (!etag) {
+                sb_fail(err, SB_ERR_GENERIC, "config ETag hashing failed");
+            } else if (*last_etag && strcmp(*last_etag, etag) == 0) {
+                rc = 0;
+            } else if (sb_singbox_supervisor_apply_config(supervisor, body, strlen(body), err) == 0) {
+                free(*last_etag);
+                *last_etag = sb_strdup(etag);
+                SB_INFO("managed sing-box config applied: %s", etag);
+                rc = 0;
             }
         }
         free(etag);

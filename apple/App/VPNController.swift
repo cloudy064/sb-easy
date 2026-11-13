@@ -133,9 +133,9 @@ import Combine
     }
     func select(group: String, target: String) {
         run {
+            guard let id = self.selected?.id else { throw ClientError.stale }
+            try await Repository.shared.selectChoice(profileID: id, group: group, target: target)
             _ = try await self.message(ProviderRequest(action: "select", group: group, target: target))
-            // libbox's per-profile cache persists selector choices. The C default
-            // setting is only written through the explicit offline preferences UI.
             await self.poll()
         }
     }

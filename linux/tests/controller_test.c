@@ -6,6 +6,7 @@
 #include <unistd.h>
 typedef struct {
     GMainLoop* loop;
+    GThread* main_thread;
     sbl_controller* c;
     sbl_event* event;
 } fixture;
@@ -19,6 +20,10 @@ typedef struct {
     } while (0)
 static void receive(sbl_event* event, void* data) {
     fixture* f = data;
+    if (g_thread_self() != f->main_thread) {
+        fprintf(stderr, "Controller callback ran outside the main thread\n");
+        abort();
+    }
     f->event = event;
     g_main_loop_quit(f->loop);
 }
@@ -28,12 +33,14 @@ static void perform(fixture* f, sbl_action action, const char* a, const char* b,
     f->event = NULL;
     if (!sbl_controller_submit(f->c, action, a, b, d, number))
         abort();
+    /* An idle main context must not let a fast worker deliver synchronously. */
+    g_usleep(20000);
     g_main_loop_run(f->loop);
 }
 int main(int argc, char** argv) {
     if (argc != 5)
         return 2;
-    fixture f = {.loop = g_main_loop_new(NULL, FALSE)};
+    fixture f = {.loop = g_main_loop_new(NULL, FALSE), .main_thread = g_thread_self()};
     unsigned char key[32];
     memset(key, 51, sizeof key);
     char *data = sb_asprintf("%s/data", argv[1]),

@@ -96,6 +96,17 @@ static sbj *cb_config(void *user, sb_err *err) {
     return sbj_clone(state->config);
 }
 
+static sbj *cb_config_state(void *user, sb_err *err) {
+    (void)user; (void)err;
+    return sbj_parse_cstr("{\"base_version\":100,\"patch_version\":101,\"local_version\":3,\"pending\":true,\"conflict\":false,\"patch\":{},\"agent_settings\":{}}");
+}
+static sbj *cb_update_config_state(const sbj *value, void *user, sb_err *err) {
+    if (sbj_get_int(value, "local_version", 0) != 3) {
+        sb_fail(err, SB_ERR_CONFLICT, "Configuration changed; reload and review before saving"); return NULL;
+    }
+    return cb_config_state(user, err);
+}
+
 static sbj *cb_proxies(void *user, sb_err *err) {
     (void)user;
     (void)err;
@@ -157,6 +168,8 @@ static sb_agent_ui_callbacks fixture_callbacks(fixture_state *state) {
         .settings = cb_settings,
         .update_settings = cb_update_settings,
         .config = cb_config,
+        .config_state = cb_config_state,
+        .update_config_state = cb_update_config_state,
         .proxies = cb_proxies,
         .select_proxy = cb_select_proxy,
         .test_route = cb_test_route,
@@ -354,6 +367,8 @@ TEST(agent_ui_contract) {
     CHECK_EQ_INT(unauthorized_api.status, 401);
     CHECK_STR(json_str(unauthorized_api.json, "error"), "本地管理会话已失效，请重新登录");
     ui_response_free(&unauthorized_api);
+    ui_response unauthorized_state = request(&c, "GET", "/api/config-state", NULL);
+    CHECK_EQ_INT(unauthorized_state.status, 401); ui_response_free(&unauthorized_state);
 
     /* SPA routes should fall back to the configured external index. */
     ui_response login_page = request(&c, "GET", "/login", NULL);
@@ -404,6 +419,15 @@ TEST(agent_ui_contract) {
     CHECK(sbj_get_bool(login.json, "authenticated", false));
     CHECK_STR(json_str(login.json, "username"), "local-admin");
     ui_response_free(&login);
+
+    ui_response sync_state = request(&c, "GET", "/api/config-state", NULL);
+    CHECK_EQ_INT(sync_state.status, 200);
+    CHECK_EQ_INT(sbj_get_int(sync_state.json, "base_version", 0), 100);
+    CHECK(sbj_get_bool(sync_state.json, "pending", false)); ui_response_free(&sync_state);
+    sync_state = request(&c, "PUT", "/api/config-state", "{\"local_version\":2}");
+    CHECK_EQ_INT(sync_state.status, 409); ui_response_free(&sync_state);
+    sync_state = request(&c, "PUT", "/api/config-state", "{\"local_version\":3}");
+    CHECK_EQ_INT(sync_state.status, 200); ui_response_free(&sync_state);
 
     /* Authenticated users should receive the secured external UI shell. */
     ui_response root = request(&c, "GET", "/", NULL);

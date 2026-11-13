@@ -282,7 +282,7 @@ def run(args, root):
         api("/api/hosts/" + host["id"], method="DELETE")
         api("/api/hosts/profiles/" + prof["id"], method="DELETE")
         print("PASS: profile name and script bytes survive create, update, list, preview and rendering")
-        shared = api("/api/hosts/profiles", profile("jp-fixed-a"))
+        shared = api("/api/hosts/profiles/default", profile("jp-fixed-a"), "PUT")
         agents = []
         for n in range(2):
             with socket.socket() as controller:

@@ -43,10 +43,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         do {
                             do {
                                 try engine.start(candidate, directory: directory)
+                                try self.applySelections(candidate, engine: engine)
                                 self.rolledBack = buildFailed; self.activeRuntime = candidate
                             } catch {
                                 guard let fallback = profile.lastGoodRuntime else { throw error }
                                 try engine.start(fallback, directory: directory)
+                                try self.applySelections(fallback, engine: engine)
                                 self.rolledBack = true; self.activeRuntime = fallback
                             }
                             self.engine = engine
@@ -79,6 +81,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             try? await SecureStore.shared.update(next, expectedRevision: profile.revision)
         }
     }
+    private func applySelections(_ runtime: String, engine: SBEngine) throws {
+        for (group, target) in try Core.selectorDefaults(runtime) { try engine.select(group, target: target) }
+    }
     private func startTimer() {
         timer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: work)
@@ -100,10 +105,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     guard self.generation == token, let engine = self.engine else { reply?(self.encoded(ProviderReply(ok: false, error: "VPN 已停止"))); return }
                     do {
                         if candidate != self.activeRuntime {
-                            do { try engine.reload(candidate); self.rolledBack = false }
+                            do { try engine.reload(candidate); try self.applySelections(candidate, engine: engine); self.rolledBack = false }
                             catch {
                                 guard let fallback = self.activeRuntime ?? profile.lastGoodRuntime else { throw error }
                                 try engine.reload(fallback); self.rolledBack = true
+                                try self.applySelections(fallback, engine: engine)
                                 reply?(self.encoded(ProviderReply(ok: false, error: "更新失败，已恢复上次配置", rollback: true)))
                                 return
                             }

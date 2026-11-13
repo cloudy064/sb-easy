@@ -251,7 +251,7 @@ char *sb_prepare_agent_config(const char *body, size_t len,
     }
 
     sbj *outbounds = sbj_get(config, "outbounds");
-    if (sbj_is_array(outbounds)) {
+    if (options->local_proxy_egress && sbj_is_array(outbounds)) {
         for (size_t i = 0; i < outbounds->v.arr.len; ++i) {
             if (transform_outbound(&outbounds->v.arr.items[i], options, original_route_final,
                                    renamed, &changes, err) != 0)
@@ -265,7 +265,7 @@ char *sb_prepare_agent_config(const char *body, size_t len,
     }
 
     sbj *dns = sbj_get(config, "dns");
-    if (sbj_is_object(dns)) {
+    if (options->local_proxy_egress && sbj_is_object(dns)) {
         sbj *servers = sbj_get(dns, "servers");
         sbj *server;
         SBJ_ARR_FOREACH(servers, i, server) {
@@ -372,6 +372,7 @@ sbj *sb_agent_config_options_to_json(const sb_agent_config_options *options) {
     sbj_set(value, "outbound_overrides",
             options->outbound_overrides ? sbj_clone(options->outbound_overrides)
                                         : sbj_object());
+    sbj_set(value, "local_route_rules", options->local_route_rules ? sbj_clone(options->local_route_rules) : sbj_array());
     return value;
 }
 
@@ -450,6 +451,15 @@ int sb_agent_config_options_from_json(const sbj *value,
         if (!parsed) goto fail;
         sbj_free(options.outbound_overrides);
         options.outbound_overrides = parsed;
+    }
+    found = sbj_get(value, "local_route_rules");
+    if (found) {
+        if (!sbj_is_array(found)) { sb_fail(err, SB_ERR_VALIDATION, "local_route_rules must be an array"); goto fail; }
+        const sbj *rule;
+        SBJ_ARR_FOREACH(found, i, rule) {
+            if (!sbj_is_object(rule)) { sb_fail(err, SB_ERR_VALIDATION, "local_route_rules entries must be objects"); goto fail; }
+        }
+        sbj_free(options.local_route_rules); options.local_route_rules = sbj_clone(found);
     }
     *out = options;
     return 0;

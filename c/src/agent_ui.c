@@ -317,6 +317,8 @@ static void response_from_error(response *resp, const sb_err *err) {
         free(message);
     } else if (err->code == SB_ERR_VALIDATION) {
         response_error(resp, 400, err->msg);
+    } else if (err->code == SB_ERR_CONFLICT) {
+        response_error(resp, 409, err->msg);
     } else {
         response_error(resp, 500, err->msg);
     }
@@ -488,7 +490,7 @@ static void handle_logout(sb_agent_ui *ui, const request *req, response *resp) {
     resp->set_cookie = session_cookie("", 0);
 }
 
-static void handle_update_settings(sb_agent_ui *ui, const request *req, response *resp) {
+static void handle_update_settings(sb_agent_ui *ui, const request *req, response *resp, bool config_state) {
     if (req->body_len > MAXIMUM_SETTINGS_BODY_SIZE) {
         response_error(resp, 413, "设置内容超过 512 KiB");
         return;
@@ -499,7 +501,8 @@ static void handle_update_settings(sb_agent_ui *ui, const request *req, response
         response_from_error(resp, &err);
         return;
     }
-    sbj *result = ui->callbacks.update_settings(value, ui->callbacks.user, &err);
+    sbj *result = config_state ? ui->callbacks.update_config_state(value, ui->callbacks.user, &err) :
+        ui->callbacks.update_settings(value, ui->callbacks.user, &err);
     sbj_free(value);
     response_from_result(resp, result, &err);
 }
@@ -598,6 +601,7 @@ typedef enum {
     R_STATUS,
     R_SETTINGS,
     R_CONFIG,
+    R_CONFIG_STATE,
     R_PROXIES,
     R_ROUTE_TEST,
     R_ACTION_REFRESH,
@@ -616,6 +620,7 @@ static const struct {
     {"/api/status", R_STATUS, M_GET},
     {"/api/settings", R_SETTINGS, M_GET | M_PUT},
     {"/api/config", R_CONFIG, M_GET},
+    {"/api/config-state", R_CONFIG_STATE, M_GET | M_PUT},
     {"/api/proxies", R_PROXIES, M_GET | M_PUT},
     {"/api/route-test", R_ROUTE_TEST, M_POST},
     {"/api/actions/refresh", R_ACTION_REFRESH, M_POST},
@@ -760,10 +765,15 @@ static void route_request(sb_agent_ui *ui, const request *req, response *resp) {
             return;
         case R_SETTINGS:
             if (method == M_GET) response_from_result(resp, cb->settings(cb->user, &err), &err);
-            else handle_update_settings(ui, req, resp);
+            else handle_update_settings(ui, req, resp, false);
             return;
         case R_CONFIG:
             response_from_result(resp, cb->config(cb->user, &err), &err);
+            return;
+        case R_CONFIG_STATE:
+            if (!cb->config_state || !cb->update_config_state) response_error(resp, 404, "Configuration synchronization is unavailable");
+            else if (method == M_GET) response_from_result(resp, cb->config_state(cb->user, &err), &err);
+            else handle_update_settings(ui, req, resp, true);
             return;
         case R_PROXIES:
             if (method == M_GET) response_from_result(resp, cb->proxies(cb->user, &err), &err);

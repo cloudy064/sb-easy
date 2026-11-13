@@ -228,6 +228,13 @@ TEST(config_transform_contract) {
     text = sb_prepare_agent_config(input, strlen(input), &options, &err);
     CHECK_STR(text, input);
     free(text);
+    sbj_arr_push(options.local_route_rules, sbj_parse_cstr("{\"domain\":[\"local.example\"],\"outbound\":\"direct\"}"));
+    text = sb_prepare_agent_config(input, strlen(input), &options, &err); REQUIRE(text);
+    t = sbj_parse_cstr(text); free(text);
+    CHECK_STR(sbj_get_str(sbj_arr_at(sbj_get(t, "outbounds"), 1), "detour", ""), "wg-internal");
+    CHECK_STR(sbj_get_str(sbj_arr_at(sbj_get(sbj_get(t, "dns"), "servers"), 0), "detour", ""), "wg-internal");
+    CHECK_EQ_INT(sbj_arr_len(sbj_get(sbj_get(t, "route"), "rules")), 2);
+    sbj_free(t); sbj_free(options.local_route_rules); options.local_route_rules = sbj_array();
     options.local_proxy_egress = true;
 
     /* default outside the selector is rejected */
@@ -454,6 +461,43 @@ TEST(agent_client_contract) {
 }
 
 /* ---- Clash client ----------------------------------------------------- */
+
+static void config_state_api(const fixture_request *req, sb_buf *out) {
+    char *auth = header_value(req->headers, "Authorization");
+    if (!strcmp(req->target, "/prefix/api/agent/config-state") && sb_streq(auth, "Bearer state-token")) {
+        if (!strcmp(req->method, "PUT")) {
+            sbj *body = sbj_parse_cstr(req->body);
+            if (sbj_get_int(body, "base_version", 0) == 100 && sbj_get_int(body, "patch_version", -1) == 0 &&
+                sbj_is_null(sbj_get(sbj_get(body, "patch"), "dns")))
+                respond(out, "200 OK", NULL, "{\"base_version\":100,\"patch_version\":101,\"base\":{},\"patch\":{\"dns\":null},\"config\":{},\"agent_settings\":{}}");
+            else respond(out, "409 Conflict", NULL, "{}");
+            sbj_free(body);
+        } else respond(out, "200 OK", NULL, "{\"base_version\":100,\"patch_version\":0,\"base\":{},\"patch\":{},\"config\":{},\"agent_settings\":{}}");
+    } else if (sb_streq(auth, "Bearer malformed")) respond(out, "200 OK", NULL, "{\"base_version\":100}");
+    else respond(out, "404 Not Found", NULL, "{}");
+    free(auth);
+}
+
+TEST(agent_configuration_state_transport_preserves_versions_and_conflicts) {
+    fixture f; fixture_start(&f, config_state_api);
+    char *server = sb_asprintf("http://127.0.0.1:%d/prefix/", f.port);
+    sb_agent_client_options options = {server, "state-token", 2000}; sb_err err = {0};
+    sb_agent_client *client = sb_agent_client_new(&options, &err); REQUIRE(client);
+    sbj *state = sb_agent_client_config_state(client, NULL, &err); REQUIRE(state);
+    CHECK_EQ_INT(sbj_get_int(state, "base_version", 0), 100);
+    sbj *patch = sbj_parse_cstr("{\"dns\":null}"); sbj_set(state, "patch", patch);
+    sbj *ack = sb_agent_client_config_state(client, state, &err); REQUIRE(ack);
+    CHECK_EQ_INT(sbj_get_int(ack, "patch_version", 0), 101); sbj_free(ack);
+    sbj_set_int(state, "patch_version", 101);
+    CHECK(sb_agent_client_config_state(client, state, &err) == NULL); CHECK_EQ_INT(err.code, SB_ERR_CONFLICT);
+    sbj_free(state); sb_agent_client_free(client);
+    options.token = "malformed"; client = sb_agent_client_new(&options, &err); REQUIRE(client);
+    CHECK(sb_agent_client_config_state(client, NULL, &err) == NULL); CHECK_EQ_INT(err.code, SB_ERR_UPSTREAM);
+    sb_agent_client_free(client);
+    options.token = "old-server"; client = sb_agent_client_new(&options, &err); REQUIRE(client);
+    CHECK(sb_agent_client_config_state(client, NULL, &err) == NULL); CHECK_EQ_INT(err.code, SB_ERR_NOT_FOUND);
+    sb_agent_client_free(client); fixture_stop(&f); free(server);
+}
 
 static void clash_api(const fixture_request *req, sb_buf *out) {
     char *auth = header_value(req->headers, "Authorization");

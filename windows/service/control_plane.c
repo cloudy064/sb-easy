@@ -778,6 +778,31 @@ done:
     return result;
 }
 
+static int config_state(void *context, const sbj *identity, const sbj *update,
+                        HANDLE cancel, sbj **out, sbw_error *error) {
+    *out = NULL;
+    server_address server = {0}; http_response response = {0}; int result = -1;
+    const char *address = required_field(identity, "server", error), *token = required_field(identity, "agent_token", error);
+    char *payload = update ? sbj_dump(update, -1) : sb_strdup("");
+    if (!address || !token || parse_server(address, &server, error) < 0) goto done;
+    if (send_request(&server, update ? L"PUT" : L"GET", L"/api/agent/config-state", payload, strlen(payload), false,
+                     token, "", MAX_CONFIG_BODY, cancel, ((winhttp_client *)context)->timeout, &response, error) != 0) goto done;
+    if (response.status == 404 && !update) { result = 0; goto done; }
+    if (response.status == 409) { sbw_fail(error, "CONFIG_CONFLICT", "The server and this device both changed configuration. Local changes were retained; choose which version to keep."); goto done; }
+    if (response.status != 200) { failure(error, "http_error"); goto done; }
+    sbj *value = response_json(&response.body, error);
+    if (!sbj_is_object(value) || !sbj_is_integer(sbj_get(value, "base_version")) || sbj_get_int(value, "base_version", 0) <= 0 ||
+        !sbj_is_integer(sbj_get(value, "patch_version")) || sbj_get_int(value, "patch_version", -1) < 0 ||
+        !sbj_is_object(sbj_get(value, "base")) || !sbj_is_object(sbj_get(value, "config")) ||
+        !sbj_is_object(sbj_get(value, "patch")) || !sbj_is_object(sbj_get(value, "agent_settings")) ||
+        !sbw_json_string(sbj_get(value, "etag"), 4096, false)) {
+        sbj_free(value); failure(error, "invalid_response"); goto done;
+    }
+    *out = value; result = 0;
+done:
+    sbw_secret_free(payload); server_free(&server); response_free(&response); return result;
+}
+
 static int upload_capture(void *context, const sbj *identity, const char *digest,
                           const void *data, size_t length, HANDLE cancel, sbw_error *error) {
     if (!digest || strlen(digest) != 64 || !data || length < 24 || length > 768U * 1024U)
@@ -854,6 +879,7 @@ sbw_control_plane *sbw_winhttp_new(DWORD timeout, sbw_error *error) {
     winhttp_client *client = sb_xcalloc(1, sizeof(*client));
     client->timeout = timeout;
     api->context = client; api->enroll = enroll; api->fetch_config = fetch_config; api->upload_capture = upload_capture; api->destroy = free;
+    api->config_state = config_state;
     api->report_status = report_status; api->pending_commands = pending_commands;
     api->acknowledge_command = acknowledge_command; api->report_telemetry = report_telemetry;
     return api;

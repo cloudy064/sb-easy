@@ -7,7 +7,7 @@ sbj *sbw_tray_request(const char *body, size_t length, sbw_error *error) {
     static const char *methods[] = {
         "service.start", "protocol.hello", "status.get", "enrollment.status", "enrollment.apply",
         "updates.status", "updates.check", "updates.download", "updates.install", "updates.cancel", "updates.recover",
-        "enrollment.forget", "config.summary", "config.refresh", "config.validate", "config.inspect",
+        "enrollment.forget", "config.summary", "config.refresh", "config.resolve", "config.validate", "config.inspect",
         "routing.gpt_default", "routing.gpt_server", "routing.gpt_node", "routing.set", "routing.group_save",
         "routing.group_remove", "routing.probe", "routing.delay", "routing.health.set", "routing.health.check",
         "routing.automatic.set", "preferences.export", "preferences.preview", "preferences.apply",

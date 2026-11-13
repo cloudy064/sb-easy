@@ -8,11 +8,7 @@
         <div class="section-block">
           <h4>{{ t('hosts.name') }}</h4>
           <div class="form-group"><input v-model="f.name" required placeholder="e.g. edge-hk-01" /></div>
-          <div class="form-group"><label>{{ t('hosts.profile') }}</label>
-            <select v-model="f.profile_id">
-              <option v-for="p in store.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
-          </div>
+          <p class="text-xs text-muted">{{ locale === 'zh' ? '使用共享 Default 基础配置；设备专属修改在设备详情的配置 patch 中保存。旧 Profile 会在首次同步时迁移为设备差异。' : 'Uses the shared Default. Save device changes as a patch in device details. Existing profiles migrate on first sync.' }}</p>
           <div class="cap-checks">
             <label class="chk"><input type="checkbox" v-model="f.caps.runs_singbox" /> {{ t('hosts.cap.singbox') }}</label>
             <label class="chk"><input type="checkbox" v-model="f.caps.is_wg_member" /> {{ t('hosts.cap.wg') }}</label>
@@ -85,7 +81,7 @@ import type { Host } from '../types'
 const props = defineProps<{ host: Host | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const store = useHostsStore()
 const nodesStore = useProxyNodesStore()
 
@@ -99,7 +95,6 @@ const tailscale = ref(tailscaleForm(props.host?.tailscale))
 
 const f = ref({
   name: props.host?.name ?? '',
-  profile_id: props.host?.profile_id ?? 'default',
   caps: {
     runs_singbox: props.host?.capabilities.runs_singbox ?? true,
     is_wg_member: props.host?.capabilities.is_wg_member ?? true,
@@ -130,7 +125,7 @@ async function save() {
     if (isCreate.value) {
       await store.createHost({
         name: f.value.name.trim(),
-        profile_id: f.value.profile_id,
+        profile_id: 'default',
         capabilities: { ...f.value.caps },
         wg_address: f.value.wg_address || undefined,
         wg_endpoint: f.value.wg_endpoint || undefined,
@@ -141,7 +136,6 @@ async function save() {
       const caps = { ...props.host.capabilities, ...f.value.caps }
       await store.updateHost(props.host.id, {
         name: f.value.name.trim(),
-        profile_id: f.value.profile_id,
         capabilities: caps,
         wg_endpoint: f.value.wg_endpoint,
         clash_api: f.value.clash_api,

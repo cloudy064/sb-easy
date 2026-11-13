@@ -198,6 +198,10 @@ sbj *sb_http_normalize_diagnostic_report(const sbj *body, sb_err *err);
 void sb_http_telemetry_put(sb_http_server *srv, const char *host_id, sbj *telemetry);
 sbj *sb_http_telemetry_get(sb_http_server *srv, const char *host_id); /* clone */
 sbj *sb_http_log_lines(sb_http_server *srv); /* JSON array of strings (clone) */
+/* Canonical base + device patch state, also used by the self supervisor and
+ * full-config download so their rendered output agrees with device preview. */
+sbj *sb_http_host_config_state(sb_http_server *srv, sb_host *host, bool provision,
+                                const sbj *write, sb_err *err);
 
 /* Route group registration (each implemented in its own file). */
 void sb_http_register_admin_routes(sb_http_server *srv);

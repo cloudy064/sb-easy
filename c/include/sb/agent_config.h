@@ -19,9 +19,8 @@ typedef struct {
     sbj *outbound_server_overrides;    /* object: tag -> server string */
     sbj *outbound_overrides;           /* object: tag -> outbound object */
     char *default_proxy_outbound;      /* NULL == std::nullopt */
-    /* Node-local route rules are prepended after the panel config is rendered.
-     * They are intentionally kept outside the Agent UI settings so a panel
-     * refresh cannot discard local policy. JSON array. */
+    /* Legacy route rules are migrated to server-owned agent_settings and
+     * prepended after the panel config is rendered. JSON array. */
     sbj *local_route_rules;
 } sb_agent_config_options;
 

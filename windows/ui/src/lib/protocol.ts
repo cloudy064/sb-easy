@@ -116,6 +116,9 @@ export interface SubscriptionImport { name: string; body?: string; url?: string;
 export interface SubscriptionsSummary { managed: SubscriptionSource[]; local: LocalSubscriptionSource[]; sources_available: boolean }
 
 export interface ConfigSummary extends ConfigMetadata {
+  config_sync_pending?: boolean
+  config_base_version?: number
+  config_patch_version?: number
   health_policy?: HealthPolicy
   health?: HealthSnapshot
   subscriptions?: SubscriptionsSummary
@@ -221,6 +224,7 @@ export interface ResultMap {
   'enrollment.forget': EnrollmentResult
   'config.summary': ConfigSummary
   'config.refresh': ConfigSummary
+  'config.resolve': ConfigSummary
   'config.validate': ConfigSummary
   'routing.gpt_default': ConfigSummary
   'routing.gpt_server': ConfigSummary
@@ -258,7 +262,7 @@ export interface ResultMap {
 
 export type Method = keyof ResultMap
 export type EmptyParams = Record<string, never>
-export type ParamsMap = { [M in Method]: M extends 'updates.check' ? { manifest_url: string } : M extends 'updates.download' | 'updates.install' ? { release_id: string } : M extends 'preferences.export' ? { password: string } : M extends 'preferences.preview' ? { password: string; envelope: PreferencesEnvelope } : M extends 'preferences.apply' ? { preview_id: string } : M extends 'preferences.cloud.login' ? { server: string; username: string; password: string } : M extends 'preferences.cloud.mfa' ? { session_id: string; code: string } : M extends 'preferences.cloud.logout' | 'preferences.cloud.get' ? { session_id: string } : M extends 'preferences.cloud.put' ? { session_id: string; password: string; revision: number } : M extends 'preferences.cloud.delete' ? { session_id: string; revision: number } : M extends 'routing.health.set' ? HealthPolicy : M extends 'routing.automatic.set' ? { group: string; candidates: string[] } : M extends 'mode.set' ? { mode: 'managed' | 'independent' } : M extends 'subscriptions.import' ? { name: string; body?: string; url?: string; id?: string; refresh_interval_minutes?: number } : M extends 'subscriptions.refresh' ? { id: string } : M extends 'management.settings.set' ? Partial<ManagementSettings> : M extends 'routing.group_save' ? LocalRoutingGroup : M extends 'routing.group_remove' ? { id: string } : M extends 'routing.probe' ? { url: string; timeout_ms?: number } : M extends 'routing.delay' ? { target: string; url?: string; timeout_ms?: number } : M extends 'httpdebug.attach' ? { domains: string[] } : M extends 'extensions.catalog_update' ? { envelope: string } : M extends 'extensions.install' | 'extensions.rollback' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
+export type ParamsMap = { [M in Method]: M extends 'config.resolve' ? { keep_local: boolean } : M extends 'updates.check' ? { manifest_url: string } : M extends 'updates.download' | 'updates.install' ? { release_id: string } : M extends 'preferences.export' ? { password: string } : M extends 'preferences.preview' ? { password: string; envelope: PreferencesEnvelope } : M extends 'preferences.apply' ? { preview_id: string } : M extends 'preferences.cloud.login' ? { server: string; username: string; password: string } : M extends 'preferences.cloud.mfa' ? { session_id: string; code: string } : M extends 'preferences.cloud.logout' | 'preferences.cloud.get' ? { session_id: string } : M extends 'preferences.cloud.put' ? { session_id: string; password: string; revision: number } : M extends 'preferences.cloud.delete' ? { session_id: string; revision: number } : M extends 'routing.health.set' ? HealthPolicy : M extends 'routing.automatic.set' ? { group: string; candidates: string[] } : M extends 'mode.set' ? { mode: 'managed' | 'independent' } : M extends 'subscriptions.import' ? { name: string; body?: string; url?: string; id?: string; refresh_interval_minutes?: number } : M extends 'subscriptions.refresh' ? { id: string } : M extends 'management.settings.set' ? Partial<ManagementSettings> : M extends 'routing.group_save' ? LocalRoutingGroup : M extends 'routing.group_remove' ? { id: string } : M extends 'routing.probe' ? { url: string; timeout_ms?: number } : M extends 'routing.delay' ? { target: string; url?: string; timeout_ms?: number } : M extends 'httpdebug.attach' ? { domains: string[] } : M extends 'extensions.catalog_update' ? { envelope: string } : M extends 'extensions.install' | 'extensions.rollback' ? { id: ExtensionId } : M extends 'extensions.change' ? { id: ExtensionId; action: 'enable' | 'disable' | 'remove' } : M extends 'subscriptions.fetch' ? ({ url: string } | { id: string }) : M extends 'subscriptions.save' ? { id?: string; name: string; url?: string; nodes: Record<string, unknown>[] } : M extends 'subscriptions.remove' ? { id: string } : M extends 'routing.set' ? ({ group: string; mode: 'server' | 'default' } | { group: string; mode: 'node'; node: string }) : M extends 'routing.gpt_node' ? { outbound: string } : M extends 'enrollment.apply' ? { uri: string } : M extends 'capture.configure' | 'capture.validate' ? { config: CaptureConfig } : M extends 'capture.upload' | 'capture.delete' ? { digest: string } : M extends 'capture.read' ? { digest: string; offset: number } : EmptyParams }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -411,6 +415,7 @@ export function validParams<M extends Method>(method: M, value: unknown): value 
   if (method === 'extensions.catalog_update') return Object.keys(value).length === 1 && boundedString(value.envelope, 900 * 1024) && new TextEncoder().encode(value.envelope as string).length <= 900 * 1024
   if (method === 'extensions.install' || method === 'extensions.rollback') return Object.keys(value).length === 1 && isExtensionId(value.id)
   if (method === 'extensions.change') return Object.keys(value).length === 2 && isExtensionId(value.id) && ['enable','disable','remove'].includes(value.action as string)
+  if (method === 'config.resolve') return Object.keys(value).length === 1 && typeof value.keep_local === 'boolean'
   if (method === 'routing.set') return typeof value.group === 'string' && /^[a-z0-9-]{1,64}$/.test(value.group) &&
     (value.mode === 'node' ? Object.keys(value).length === 3 && boundedString(value.node, 512) && !/[\u0000-\u001f\u007f]/.test(value.node) && new TextEncoder().encode(value.node).length <= 512 :
       Object.keys(value).length === 2 && (value.mode === 'server' || (value.mode === 'default' && value.group !== 'default')))
@@ -505,6 +510,7 @@ export function validResult<M extends Method>(method: M, value: unknown): value 
         (value.runtime_error === undefined || (isRecord(value.runtime_error) && boundedString(value.runtime_error.code, 128) && boundedString(value.runtime_error.message, 2048)))
     case 'config.summary':
     case 'config.refresh':
+    case 'config.resolve':
     case 'routing.gpt_default':
     case 'routing.gpt_server':
     case 'routing.gpt_node':

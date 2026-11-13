@@ -217,6 +217,9 @@ static sbj* public_profile(const sbj* profile) {
     char* host = sbl_url_host(sbj_get_str(profile, "server", ""));
     sbj_set_str(out, "server_host", host ? host : "");
     free(host);
+    sbj_set_bool(out, "config_sync_pending", sbl_sync_pending(profile));
+    sbj_set_int(out, "config_base_version", sbj_get_int(sbj_get(profile, "config_sync"), "base_version", 0));
+    sbj_set_int(out, "config_patch_version", sbj_get_int(sbj_get(profile, "config_sync"), "patch_version", 0));
     sbj_set_bool(out, "source_ready", *sbj_get_str(profile, "source", "") != 0);
     sbj *subs = sbj_array(), *nodes = sbj_array();
     const sbj* input = sbj_get(profile, "subscriptions");
@@ -662,6 +665,7 @@ static int execute(job* j, sbj** result, sb_err* err) {
         sbj_del(profile, "host_id");
         sbj_del(profile, "last_good");
         sbj_del(profile, "pending_refresh");
+        sbj_del(profile, "config_sync");
         sbj_set(profile, "settings", sbj_object());
         break;
     case SBL_IMPORT:
@@ -704,12 +708,18 @@ static int execute(job* j, sbj** result, sb_err* err) {
     case SBL_REFRESH:
         rc = refresh(c, profile, j->a, false, &update_runtime, err);
         break;
-    case SBL_SYNC: {
+    case SBL_SYNC:
+    case SBL_SYNC_KEEP_LOCAL:
+    case SBL_SYNC_USE_SERVER: {
         bool changed = false, nodes_changed = false;
-        rc = sbl_sync_profile(profile, &changed, err);
+        if (!sbj_has(profile, "system_proxy")) sbj_set_bool(profile, "system_proxy", sbj_get_bool(next, "system_proxy", false));
+        rc = j->action == SBL_SYNC ? sbl_sync_profile(profile, &changed, err) :
+            sbl_sync_resolve_profile(profile, j->action == SBL_SYNC_KEEP_LOCAL, &changed, err);
         if (!rc)
             rc = refresh(c, profile, "", j->number != 0, &nodes_changed, err);
         update_runtime = changed || nodes_changed;
+        if (!rc && sbj_string_is(sbj_get(profile, "mode"), "managed"))
+            sbj_set_bool(next, "system_proxy", sbj_get_bool(profile, "system_proxy", false));
         break;
     }
     case SBL_SETTINGS: {
@@ -735,13 +745,8 @@ static int execute(job* j, sbj** result, sb_err* err) {
     }
     case SBL_PROXY_SETTING:
         sbj_set_bool(next, "system_proxy", j->number != 0);
-        if (connected(c) && !c->remote) {
-            rc = j->number ? sbl_proxy_apply(c->data_dir, c->runtime.proxy_port,
-                                             c->runtime.secret, err)
-                           : sbl_proxy_restore(c->data_dir, err);
-            if (!rc)
-                c->system_proxy = j->number != 0;
-        }
+        if (profile && sbj_string_is(sbj_get(profile, "mode"), "managed"))
+            sbj_set_bool(profile, "system_proxy", j->number != 0);
         break;
     case SBL_REFRESH_INTERVAL:
         sbj_set_int(profile, "refresh_minutes", j->number);
@@ -772,8 +777,17 @@ static int execute(job* j, sbj** result, sb_err* err) {
         sbj_free(next);
         return -1;
     }
+    bool proxy_changed = connected(c) && !c->remote &&
+        sbj_get_bool(next, "system_proxy", false) != sbj_get_bool(c->state, "system_proxy", false);
+    if (proxy_changed) {
+        bool desired = sbj_get_bool(next, "system_proxy", false);
+        rc = desired ? sbl_proxy_apply(c->data_dir, c->runtime.proxy_port, c->runtime.secret, err)
+                     : sbl_proxy_restore(c->data_dir, err);
+        if (rc) { sbj_free(next); return -1; }
+        c->system_proxy = desired;
+    }
     rc = commit(c, next, update_runtime, err);
-    if (rc && j->action == SBL_PROXY_SETTING && connected(c) && !c->remote) {
+    if (rc && proxy_changed) {
         bool enabled = sbj_get_bool(c->state, "system_proxy", false);
         if (enabled)
             sbl_proxy_apply(c->data_dir, c->runtime.proxy_port, c->runtime.secret,
@@ -816,7 +830,9 @@ static void worker(void* data, void* user) {
     delivery* d = sb_xcalloc(1, sizeof *d);
     d->c = c;
     d->event = event;
-    g_main_context_invoke(NULL, deliver, d);
+    /* invoke() may acquire an idle context and run on this worker.  Always
+     * queue delivery so GTK callbacks run from the main loop. */
+    g_idle_add_full(G_PRIORITY_DEFAULT, deliver, d, NULL);
     wipe(j->a);
     wipe(j->b);
     wipe(j->d);

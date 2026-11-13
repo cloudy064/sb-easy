@@ -52,6 +52,20 @@ actor SecureStore {
             self.directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?.appendingPathComponent("Vault", isDirectory: true)
         } else { self.directory = nil }
     }
+    // Keep the app and VPN extension from overlapping GET/PUT/commit cycles.
+    // A separate nonblocking lock leaves the vault available for local edits.
+    func acquireConfigSyncLock(_ id: String) throws -> Int32 {
+        guard UUID(uuidString: id) != nil, let directory else { throw ClientError.storage }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let path = directory.appendingPathComponent("config-sync-\(id).lock")
+        let fd = open(path.path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw ClientError.storage }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            close(fd)
+            throw ClientError.invalid("此设备配置正在同步，请稍后重试")
+        }
+        return fd
+    }
     private func locked<T>(_ body: (URL, SymmetricKey) throws -> T) throws -> T {
         guard let directory else { throw ClientError.storage }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

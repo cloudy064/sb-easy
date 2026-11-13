@@ -100,6 +100,8 @@ static sbj *capture_dispatch(sbw_controller *controller, const char *method, con
 static sbj *httpdebug_dispatch(sbw_controller *controller, const char *method, const sbj *params, sbw_error *error);
 static int extension_stop(sbw_controller *controller, const char *id, bool revoked, sbw_error *error);
 static void extensions_tick(sbw_controller *controller, uint64_t now, bool force);
+static bool sync_pending(const sbw_controller *controller);
+
 static sbj *config_counts(const sbj *candidate, sbw_error *error) {
     const sbj *content = sbj_get(candidate, "content");
     if (!sbw_json_string(content, 8U * 1024U * 1024U, false)) goto invalid;
@@ -173,6 +175,9 @@ static sbj *config_summary(sbw_controller *controller) {
     sbj_set(result, "health", sbj_clone(controller->health_snapshot));
     sbj_set_bool(result, "routing_live", controller->active && controller->runtime.core_running);
     sbj_set_bool(result, "candidate_available", controller->candidate != NULL);
+    sbj_set_bool(result, "config_sync_pending", sync_pending(controller));
+    sbj_set_int(result, "config_base_version", sbj_get_int(sbj_get(controller->identity, "config_sync"), "base_version", 0));
+    sbj_set_int(result, "config_patch_version", sbj_get_int(sbj_get(controller->identity, "config_sync"), "patch_version", 0));
     sbj_set_str(result, "downloaded_etag", sbj_get_str(controller->candidate, "etag", NULL));
     sbj_set_str(result, "active_etag", sbj_get_str(controller->active, "etag", NULL));
     sbj_set_str(result, "last_good_etag", sbj_get_str(controller->last_good, "etag", NULL));
@@ -346,7 +351,7 @@ bool sbw_is_mutating_method(const char *method) {
     if (sb_streq(method, "routing.health.set") || sb_streq(method, "routing.automatic.set") || sb_streq(method, "routing.health.check")) return true;
     if(sb_streq(method,"httpdebug.start")||sb_streq(method,"httpdebug.attach")||sb_streq(method,"httpdebug.stop"))return true;
     return sb_streq(method,"mode.set") || sb_streq(method,"management.settings.set") || sb_streq(method,"routing.group_save") || sb_streq(method,"routing.group_remove") || sb_streq(method,"routing.probe") || sb_streq(method,"routing.delay") || sb_streq(method,"extensions.install") || sb_streq(method,"extensions.change") || sb_streq(method,"extensions.catalog_update") || sb_streq(method,"extensions.rollback") || (sb_streq(method,"subscriptions.fetch") || sb_streq(method,"subscriptions.save") || sb_streq(method,"subscriptions.remove") || sb_streq(method,"subscriptions.import") || sb_streq(method,"subscriptions.refresh")) || sb_streq(method, "traffic.clear") || sb_streq(method, "routing.gpt_default") || sb_streq(method, "routing.gpt_server") || sb_streq(method, "routing.gpt_node") || sb_streq(method, "routing.set") || sb_streq(method, "enrollment.apply") || sb_streq(method, "enrollment.forget") ||
-        sb_streq(method, "config.refresh") || sb_streq(method, "config.validate") ||
+        sb_streq(method, "config.refresh") || sb_streq(method, "config.resolve") || sb_streq(method, "config.validate") ||
         sb_streq(method, "connection.start") || sb_streq(method, "connection.stop");
 }
 static bool ready(sbw_controller *controller, sbw_error *error) {
@@ -655,16 +660,167 @@ static int connection_activate(sbw_controller *controller, const sbj *source, co
     sbw_runtime_config_free(&next);
     return sbw_fail(error, final_error.code, final_error.message);
 }
+static const char *management_sync_keys[] = {"auto_connect", "auto_reconnect", "telemetry_enabled", "sync_interval_seconds", "kill_switch_enabled"};
+static bool management_key(const char *key) {
+    for (size_t i = 0; i < sizeof(management_sync_keys) / sizeof(management_sync_keys[0]); ++i)
+        if (sb_streq(key, management_sync_keys[i])) return true;
+    return false;
+}
+static bool management_value_valid(const char *key, const sbj *value) {
+    if (!management_key(key)) return false;
+    if (!sb_streq(key, "sync_interval_seconds")) return sbj_is_bool(value);
+    return sbj_is_integer(value) && sbj_as_int(value, 0) >= 15 && sbj_as_int(value, 0) <= 3600;
+}
+static sbj *sync_management(const sbw_controller *controller) {
+    const sbj *prior = sbj_get(sbj_get(sbj_get(controller->identity, "config_sync"), "agent_settings"), "windows_management");
+    sbj *out = sbj_is_object(prior) ? sbj_clone(prior) : sbj_object();
+    sbj *defaults = default_management_settings();
+    for (size_t i = 0; i < sizeof(management_sync_keys) / sizeof(management_sync_keys[0]); ++i) {
+        const char *key = management_sync_keys[i]; const sbj *value = sbj_get(controller->management_settings, key);
+        const sbj *expected = sbj_has(prior, key) ? sbj_get(prior, key) : sbj_get(defaults, key);
+        if (sbj_equal(value, expected)) continue;
+        sbj_del(out, key);
+        if (value && !sbj_equal(value, sbj_get(defaults, key))) sbj_set(out, key, sbj_clone(value));
+    }
+    sbj_free(defaults); return out;
+}
+static sbj *server_management(sbw_controller *controller, const sbj *state, sbw_error *error) {
+    const sbj *remote = sbj_get(sbj_get(state, "agent_settings"), "windows_management");
+    if (remote && !sbj_is_object(remote)) { sbw_fail(error, "INVALID_RESPONSE", "Invalid Windows management settings."); return NULL; }
+    sbj *settings = default_management_settings();
+    /* The current user's connect/disconnect intent is runtime state. */
+    sbj_set_bool(settings, "manual_disconnect", sbj_get_bool(controller->management_settings, "manual_disconnect", false));
+    for (size_t i = 0; i < sbj_obj_len(remote); ++i) {
+        const char *key = sbj_obj_key(remote, i); const sbj *value = sbj_obj_val(remote, i);
+        if (!management_key(key)) continue; /* Preserve future fields in the acknowledged snapshot. */
+        if (!management_value_valid(key, value)) { sbj_free(settings); sbw_fail(error, "INVALID_RESPONSE", "Invalid management setting or synchronization interval (15 to 3600 seconds)."); return NULL; }
+        sbj_set(settings, key, sbj_clone(value));
+    }
+    return settings;
+}
+/* Commit desired management settings and its acknowledged config snapshot together.
+ * WFP changes retain the existing validation, administrator-recovery and rollback rules. */
+static int save_synced_state(sbw_controller *controller, const sbj *identity, const sbj *candidate,
+                             const sbj *management, sbw_error *error) {
+    if (!management || sbj_equal(management, controller->management_settings))
+        return save_state(controller, identity, candidate, controller->last_good, error);
+    bool previous_protection = sbj_get_bool(controller->management_settings, "kill_switch_enabled",
+        sbj_get_int(controller->kill_switch, "filter_count", 0) > 0);
+    bool desired_protection = sbj_get_bool(management, "kill_switch_enabled", false);
+    bool change_protection = sbj_is_bool(sbj_get(management, "kill_switch_enabled")) &&
+        !sbj_equal(sbj_get(management, "kill_switch_enabled"), sbj_get(controller->management_settings, "kill_switch_enabled"));
+    if (change_protection && desired_protection && sbw_kill_switch_recovery_disabled())
+        return sbw_fail(error, "KILL_SWITCH_RECOVERY_ACTIVE", "Leak protection was disabled by administrator recovery. Restart the service successfully before enabling it again.");
+    const wchar_t *tun = controller->runtime.core_running ? controller->active_config.interface_name : NULL;
+    if (change_protection && apply_kill_switch(controller, desired_protection, tun, error)) return -1;
+    sbj *saved = persisted_state(controller, identity, candidate, controller->last_good);
+    sbj_set(saved, "management", sbj_clone(management));
+    int result = controller->store->save(controller->store->context, saved, error); sbj_free(saved);
+    if (result) {
+        if (change_protection) {
+            sbw_error restore = {0};
+            if (apply_kill_switch(controller, previous_protection, tun, &restore))
+                return sbw_fail(error, "KILL_SWITCH_STATE_UNCERTAIN", "Settings could not be saved and the previous leak-protection policy could not be restored. Check the reported firewall state before continuing.");
+        }
+        return result;
+    }
+    AcquireSRWLockExclusive(&controller->state_lock);
+    sbj_free(controller->management_settings); controller->management_settings = sbj_clone(management);
+    if (controller->last_good && controller->runtime.core_running) sbj_set(controller->last_good, "local_identity", sbj_clone(identity));
+    if (controller->recovery.desired_connected && !controller->runtime.core_running &&
+        sbj_get_bool(controller->management_settings, "auto_reconnect", true) && !controller->recovery.retry_at_ms)
+        controller->recovery.retry_at_ms = GetTickCount64();
+    ReleaseSRWLockExclusive(&controller->state_lock);
+    controller->next_sync_ms = 0;
+    return 0;
+}
+/* Only configuration fields enter synchronization; device tokens/identity and runtime state stay local. */
+static const char *sync_keys[] = {"windows_routing", "windows_local_groups", "windows_health", "local_subscriptions",
+                                 "windows_gpt_outbound", "windows_gpt_use_default"};
+static sbj *sync_preferences(const sbj *identity) {
+    const sbj *saved = sbj_get(sbj_get(sbj_get(identity, "config_sync"), "agent_settings"), "windows_preferences");
+    sbj *out = sbj_is_object(saved) ? sbj_clone(saved) : sbj_object();
+    for (size_t i = 0; i < sizeof(sync_keys) / sizeof(sync_keys[0]); ++i) {
+        sbj_del(out, sync_keys[i]);
+        if (sbj_has(identity, sync_keys[i])) sbj_set(out, sync_keys[i], sbj_clone(sbj_get(identity, sync_keys[i])));
+    }
+    return out;
+}
+static bool sync_pending(const sbw_controller *controller) {
+    const sbj *snapshot = sbj_get(controller->identity, "config_sync"), *settings = sbj_get(snapshot, "agent_settings");
+    const sbj *saved = sbj_get(settings, "windows_preferences"), *management_saved = sbj_get(settings, "windows_management");
+    sbj *current = sync_preferences(controller->identity), *management = sync_management(controller);
+    bool pending = snapshot && ((saved ? !sbj_equal(saved, current) : sbj_obj_len(current) != 0) ||
+        (management_saved ? !sbj_equal(management_saved, management) : sbj_obj_len(management) != 0));
+    sbj_free(current); sbj_free(management); return pending;
+}
+static int refresh_server_state(sbw_controller *controller, HANDLE cancel, sbj **identity, sbj **download, sbw_error *error) {
+    *identity = NULL; *download = NULL;
+    if (!controller->remote->config_state) return 0;
+    sbj *remote = NULL, *current = sync_preferences(controller->identity), *management = sync_management(controller), *update = NULL;
+    int result = -1;
+    if (controller->remote->config_state(controller->remote->context, controller->identity, NULL, cancel, &remote, error)) goto done;
+    if (!remote) { result = 0; goto done; }
+    const sbj *snapshot = sbj_get(controller->identity, "config_sync");
+    const sbj *remote_settings = sbj_get(remote, "agent_settings");
+    bool migrate = !snapshot && !sbj_get_bool(remote, "agent_settings_initialized", false) && !sbj_obj_len(remote_settings) && (sbj_obj_len(current) || sbj_obj_len(management));
+    if (migrate || sync_pending(controller)) {
+        const sbj *expected = snapshot ? snapshot : remote;
+        sbj *settings = sbj_clone(sbj_get(expected, "agent_settings"));
+        if (sbj_obj_len(current)) sbj_set(settings, "windows_preferences", sbj_clone(current));
+        else sbj_del(settings, "windows_preferences");
+        if (sbj_obj_len(management)) sbj_set(settings, "windows_management", sbj_clone(management));
+        else sbj_del(settings, "windows_management");
+        update = sbj_object();
+        sbj_set(update, "base_version", sbj_clone(sbj_get(expected, "base_version")));
+        sbj_set(update, "patch_version", sbj_clone(sbj_get(expected, "patch_version")));
+        sbj_set(update, "patch", sbj_clone(sbj_get(expected, "patch")));
+        sbj_set(update, "agent_settings", settings);
+        if (!sbj_equal(sbj_get(update, "patch"), sbj_get(remote, "patch")) || !sbj_equal(settings, remote_settings)) {
+            sbj *accepted = NULL;
+            if (controller->remote->config_state(controller->remote->context, controller->identity, update, cancel, &accepted, error)) goto done;
+            sbj_free(remote); remote = accepted;
+        }
+    }
+    sbj *next = sbj_clone(controller->identity);
+    if (!snapshot && (sbj_obj_len(current) || sbj_obj_len(management))) {
+        sbj *backup = sbj_clone(current); sbj_set(backup, "management", sbj_clone(management));
+        sbj_set(next, "config_legacy_backup", backup);
+    }
+    const sbj *preferences = sbj_get(sbj_get(remote, "agent_settings"), "windows_preferences");
+    if (preferences && !sbj_is_object(preferences)) { sbj_free(next); sbw_fail(error, "INVALID_RESPONSE", "Invalid Windows configuration settings."); goto done; }
+    for (size_t i = 0; i < sizeof(sync_keys) / sizeof(sync_keys[0]); ++i) {
+        sbj_del(next, sync_keys[i]);
+        if (sbj_has(preferences, sync_keys[i])) sbj_set(next, sync_keys[i], sbj_clone(sbj_get(preferences, sync_keys[i])));
+    }
+    sbj_set(next, "config_sync", sbj_clone(remote));
+    sbj *config = sbj_object(); char *content = sbj_dump(sbj_get(remote, "config"), -1);
+    sbj_set_str(config, "content", content); sbw_secret_free(content);
+    sbj_set_str(config, "etag", sbj_get_str(remote, "etag", ""));
+    sbj_set_str(config, "rule_source", sbj_get_str(remote, "rule_source", "profile"));
+    sbj_set_str(config, "profile_id", sbj_get_str(remote, "profile_id", "default"));
+    sbj_set_str(config, "profile_name", sbj_get_str(remote, "profile_name", "Default"));
+    sbj_set_int(config, "settings_version", sbj_get_int(remote, "patch_version", 0));
+    *identity = next; *download = config; result = 0;
+done:
+    sbj_free(remote); sbj_free(current); sbj_free(management); sbj_free(update); return result;
+}
 /* All helpers below run under mutation_lock; readers take state_lock. */
 static int refresh_configuration(sbw_controller *controller, bool force, HANDLE cancel, sbw_error *error) {
     if (!controller->identity) return sbw_fail(error, "NOT_ENROLLED", "Enroll this device before downloading configuration.");
     if (sbw_identity_is_independent(controller->identity))
         return sbw_fail(error, "INDEPENDENT_MODE", "This device uses local subscriptions; refresh a subscription to update its nodes.");
-    sbj *download = NULL;
+    sbj *download = NULL, *synced_identity = NULL, *synced_management = NULL;
     const char *etag = force ? "" : sbj_get_str(controller->candidate, "etag", "");
-    if (controller->remote->fetch_config(controller->remote->context, controller->identity, etag,
+    if (refresh_server_state(controller, cancel, &synced_identity, &download, error)) return -1;
+    if (!download && controller->remote->fetch_config(controller->remote->context, controller->identity, etag,
                                          cancel, &download, error) != 0) return -1;
+    const sbj *next_identity = synced_identity ? synced_identity : controller->identity;
     int result = -1;
+    if (synced_identity) {
+        synced_management = server_management(controller, sbj_get(synced_identity, "config_sync"), error);
+        if (!synced_management) goto done;
+    }
     if (cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) {
         sbw_fail(error, "CANCELLED", "The background operation was interrupted."); goto done;
     }
@@ -686,13 +842,18 @@ static int refresh_configuration(sbw_controller *controller, bool force, HANDLE 
         if (!sbw_json_string(sbj_get(download, keys[i]), 4096, false))
             sbj_set_str(download, keys[i], sbj_get_str(controller->identity, keys[i], ""));
     sbj_del(download, "not_modified");
-    sbj *effective = sbw_routing_apply(download, controller->identity, false, error);
+    sbj *effective = sbw_routing_apply(download, next_identity, false, error);
     if (!effective) goto done;
     sbj_free(effective);
     /* Equal revisions may still carry profile/source metadata updates. */
-    if (sbj_equal(download, controller->candidate)) { result = 0; goto done; }
-    if (save_state(controller, controller->identity, download, controller->last_good, error) != 0) goto done;
+    if (sbj_equal(download, controller->candidate) && sbj_equal(next_identity, controller->identity) &&
+        (!synced_management || sbj_equal(synced_management, controller->management_settings))) { result = 0; goto done; }
+    if (save_synced_state(controller, next_identity, download, synced_management, error) != 0) goto done;
     AcquireSRWLockExclusive(&controller->state_lock);
+    if (synced_identity) { sbj_free(controller->identity); controller->identity = synced_identity; synced_identity = NULL; }
+    if (sbj_get_int(download, "settings_version", 0) != sbj_get_int(controller->candidate, "settings_version", 0)) {
+        free(controller->auto_attempted_etag); controller->auto_attempted_etag = NULL;
+    }
     sbj_free(controller->candidate); controller->candidate = download; download = NULL;
     free(controller->checked_etag); controller->checked_etag = NULL;
     controller->checked_valid = false;
@@ -700,7 +861,7 @@ static int refresh_configuration(sbw_controller *controller, bool force, HANDLE 
     ReleaseSRWLockExclusive(&controller->state_lock);
     result = 0;
 done:
-    sbj_free(download); return result;
+    sbj_free(download); sbj_free(synced_identity); sbj_free(synced_management); return result;
 }
 static sbj *management_status(sbw_controller *controller) {
     sbj *result = sbj_clone(controller->management_settings);
@@ -738,11 +899,7 @@ static int management_settings_change(sbw_controller *controller, const sbj *par
     sbj *next = sbj_clone(controller->management_settings);
     for (size_t i = 0; i < sbj_obj_len(params); ++i) {
         const char *key = sbj_obj_key(params, i); const sbj *value = sbj_obj_val(params, i);
-        bool flag = sb_streq(key, "auto_connect") || sb_streq(key, "auto_reconnect") || sb_streq(key, "telemetry_enabled") || sb_streq(key, "kill_switch_enabled");
-        if (flag && sbj_is_bool(value)) sbj_set(next, key, sbj_clone(value));
-        else if (sb_streq(key, "sync_interval_seconds") && sbj_is_integer(value) &&
-                 sbj_get_int(params, key, 0) >= 15 && sbj_get_int(params, key, 0) <= 3600)
-            sbj_set(next, key, sbj_clone(value));
+        if (management_value_valid(key, value)) sbj_set(next, key, sbj_clone(value));
         else { sbj_free(next); return sbw_fail(error, "INVALID_REQUEST", "Invalid management setting or synchronization interval (15 to 3600 seconds)."); }
     }
     bool previous_protection = sbj_get_bool(controller->management_settings, "kill_switch_enabled",
@@ -1460,7 +1617,7 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         ReleaseSRWLockExclusive(&controller->mutation_lock);return result;
     }
     bool is_apply = strcmp(method, "enrollment.apply") == 0;
-    if (!sbj_is_object(params) || (!is_apply && strncmp(method,"updates.",8) && strncmp(method,"preferences.",12) && strncmp(method,"subscriptions.",14) && strncmp(method,"extensions.",11) && !sb_streq(method, "mode.set") && !sb_streq(method, "management.settings.set") && !sb_streq(method, "routing.health.set") && !sb_streq(method, "routing.automatic.set") && !sb_streq(method, "routing.group_save") && !sb_streq(method, "routing.group_remove") && !sb_streq(method, "routing.probe") && !sb_streq(method, "routing.delay") && !sb_streq(method, "routing.gpt_node") && !sb_streq(method, "routing.set") && strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
+    if (!sbj_is_object(params) || (!is_apply && strncmp(method,"updates.",8) && strncmp(method,"preferences.",12) && strncmp(method,"subscriptions.",14) && strncmp(method,"extensions.",11) && !sb_streq(method, "mode.set") && !sb_streq(method, "config.resolve") && !sb_streq(method, "management.settings.set") && !sb_streq(method, "routing.health.set") && !sb_streq(method, "routing.automatic.set") && !sb_streq(method, "routing.group_save") && !sb_streq(method, "routing.group_remove") && !sb_streq(method, "routing.probe") && !sb_streq(method, "routing.delay") && !sb_streq(method, "routing.gpt_node") && !sb_streq(method, "routing.set") && strncmp(method, "capture.", 8) && sbj_obj_len(params) != 0)) {
         sbw_fail(error, "INVALID_REQUEST", "This operation expects object params."); return NULL;
     }
     if (!strncmp(method, "extensions.", 11)) {
@@ -1911,6 +2068,34 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         sbj_free(controller->command_receipts); controller->command_receipts = sbj_array();
         result = enrollment_status(controller);
         ReleaseSRWLockExclusive(&controller->state_lock);
+    } else if (sb_streq(method, "config.resolve")) {
+        if (sbj_obj_len(params) != 1 || !sbj_is_bool(sbj_get(params, "keep_local")) || !controller->identity ||
+            sbw_identity_is_independent(controller->identity) || !controller->remote->config_state) {
+            sbw_fail(error, "INVALID_REQUEST", "Choose the local or server configuration for an enrolled device."); goto done;
+        }
+        sbj *remote = NULL;
+        if (controller->remote->config_state(controller->remote->context, controller->identity, NULL, controller->cancel, &remote, error)) goto done;
+        if (!remote) { sbw_fail(error, "UNSUPPORTED", "The server does not support configuration synchronization."); goto done; }
+        new_identity = sbj_clone(controller->identity);
+        if (!sbj_get_bool(params, "keep_local", false)) {
+            const sbj *preferences = sbj_get(sbj_get(remote, "agent_settings"), "windows_preferences");
+            if (preferences && !sbj_is_object(preferences)) { sbj_free(remote); sbw_fail(error, "INVALID_RESPONSE", "Invalid Windows settings."); goto done; }
+            for (size_t i = 0; i < sizeof(sync_keys) / sizeof(sync_keys[0]); ++i) {
+                sbj_del(new_identity, sync_keys[i]);
+                if (sbj_has(preferences, sync_keys[i])) sbj_set(new_identity, sync_keys[i], sbj_clone(sbj_get(preferences, sync_keys[i])));
+            }
+        }
+        sbj *management = sbj_get_bool(params, "keep_local", false) ? NULL : server_management(controller, remote, error);
+        if (!sbj_get_bool(params, "keep_local", false) && !management) { sbj_free(remote); goto done; }
+        sbj_set(new_identity, "config_sync", remote);
+        int saved = save_synced_state(controller, new_identity, controller->candidate, management, error);
+        sbj_free(management);
+        if (saved) goto done;
+        AcquireSRWLockExclusive(&controller->state_lock);
+        sbj_free(controller->identity); controller->identity = new_identity; new_identity = NULL;
+        ReleaseSRWLockExclusive(&controller->state_lock);
+        if (refresh_configuration(controller, true, controller->cancel, error)) goto done;
+        AcquireSRWLockShared(&controller->state_lock); result = config_summary(controller); ReleaseSRWLockShared(&controller->state_lock);
     } else if (sb_streq(method, "config.validate")) {
         if (!controller->candidate) { sbw_fail(error, "NO_CANDIDATE", "Download a candidate configuration before validating it."); goto done; }
         if (!controller->core) { sbw_fail(error, "CORE_UNAVAILABLE", "The pinned sing-box core is not available. Run the core preparation script first."); goto done; }

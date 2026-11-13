@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { api, ApiError } from './lib/api'
+  import ConfigSync from './ConfigSync.svelte'
   import type { AgentSettings, AgentStatus, ClashProxy, ProxyPayload } from './lib/types'
 
   export let initialStatus: AgentStatus | null = null
@@ -12,6 +13,7 @@
   let page: Page = 'overview'
   let status: AgentStatus = initialStatus ?? {}
   let settings: AgentSettings = {}
+  let settingsVersion: { base_version: number; patch_version: number; local_version: number } | null = null
   let config: Record<string, unknown> = {}
   let proxyPayload: ProxyPayload = { proxies: {} }
   let loading = true
@@ -69,6 +71,7 @@
       )
       if (!result) return
       ;[status, settings, config, proxyPayload] = result
+      settingsVersion = settings._sync_version ?? null
       loadSettingsForm()
     } catch (error) {
       notify(error instanceof Error ? error.message : '加载失败', true)
@@ -169,14 +172,21 @@
     saving = true
     try {
       const body = {
+        expected: settingsVersion ? {
+          base_version: settingsVersion.base_version,
+          patch_version: settingsVersion.patch_version,
+          local_version: settingsVersion.local_version,
+        } : undefined,
         local_proxy_egress: localEgress,
         default_proxy_outbound: defaultOutbound.trim() || null,
         outbound_server_overrides: JSON.parse(serverOverrides || '{}'),
         outbound_overrides: JSON.parse(outboundOverrides || '{}'),
       }
       const updated = await guarded(() => api<AgentSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }))
-      if (updated) settings = updated
-      notify('设置已保存，配置刷新已排队')
+      if (!updated) return
+      settings = updated
+      settingsVersion = updated._sync_version ?? null
+      notify('修改已加入待同步队列，服务器接收后应用')
     } catch (error) {
       notify(error instanceof Error ? error.message : '设置保存失败', true)
     } finally {
@@ -219,7 +229,7 @@
     <nav>
       <button class:active={page === 'overview'} on:click={() => (page = 'overview')}><span>◫</span>总览</button>
       <button class:active={page === 'proxies'} on:click={() => (page = 'proxies')}><span>⇄</span>代理</button>
-      <button class:active={page === 'settings'} on:click={() => (page = 'settings')}><span>⌁</span>本机设置</button>
+      <button class:active={page === 'settings'} on:click={() => (page = 'settings')}><span>⌁</span>设备设置</button>
       <button class:active={page === 'config'} on:click={() => (page = 'config')}><span>&#123; &#125;</span>运行配置</button>
     </nav>
     <div class="sidebar-foot">
@@ -230,7 +240,7 @@
 
   <main class="workspace">
     <header class="topbar">
-      <div><p class="eyebrow">LOCAL AGENT</p><h1>{page === 'overview' ? '总览' : page === 'proxies' ? '代理策略' : page === 'settings' ? '本机设置' : '运行配置'}</h1></div>
+      <div><p class="eyebrow">LOCAL AGENT</p><h1>{page === 'overview' ? '总览' : page === 'proxies' ? '代理策略' : page === 'settings' ? '设备设置' : '运行配置'}</h1></div>
       <div class="top-actions"><span class="status-pill"><i class:online={status.running === true}></i>{status.running ? '运行中' : '需检查'}</span><button class="secondary" on:click={loadAll}>刷新</button></div>
     </header>
 
@@ -286,9 +296,9 @@
       {:else if page === 'settings'}
         <section class="settings-grid">
           <form class="card settings-card" on:submit|preventDefault={saveSettings}>
-            <p class="eyebrow">NODE LOCAL</p><h2>本地出站调整</h2><p>这些设置只保存在当前设备，保存后会重新拉取并验证配置。</p>
+            <p class="eyebrow">DEVICE SETTINGS</p><h2>设备出站调整</h2><p>这些修改会定时同步到服务器，作为本设备的个性化配置保存。</p>
             <label class="toggle-row"><span><b>使用本机代理出口</b><small>移除代理节点上的管理隧道 detour</small></span><input type="checkbox" bind:checked={localEgress} /></label>
-            <label>默认代理出站 tag<input bind:value={defaultOutbound} placeholder="留空则沿用 Profile" /></label>
+            <label>默认代理出站 tag<input bind:value={defaultOutbound} placeholder="留空则沿用默认配置" /></label>
             <label>服务器地址覆盖（tag → server）<textarea bind:value={serverOverrides} rows="7" spellcheck="false"></textarea></label>
             <label>完整出站覆盖（tag → outbound）<textarea bind:value={outboundOverrides} rows="10" spellcheck="false"></textarea></label>
             <div class="form-actions"><button class="primary" class:busy={saving} disabled={saving}>{saving ? '正在保存…' : '保存并应用'}</button><button type="button" class="secondary" on:click={loadSettingsForm}>恢复</button></div>
@@ -297,6 +307,7 @@
         </section>
       {:else}
         <section class="config-stack">
+          <ConfigSync {onSessionExpired} />
           <article class="card route-card"><div><p class="eyebrow">LIVE ROUTE</p><h2>URL 实际路由测试</h2><p>建立一次短连接，读取最终规则、选择链和出站。</p></div><form on:submit|preventDefault={testRoute}><input bind:value={routeUrl} required /><button class="primary" class:busy={routeBusy} disabled={routeBusy}>{routeBusy ? '测试中…' : '测试走向'}</button></form>{#if routeResult}<pre>{JSON.stringify(routeResult, null, 2)}</pre>{/if}</article>
           <article class="card config-card"><div class="card-heading"><div><p class="eyebrow">SING-BOX</p><h2>当前运行配置</h2></div><span>{Array.isArray(config.outbounds) ? config.outbounds.length : 0} 个出站</span></div><pre>{JSON.stringify(config, null, 2)}</pre></article>
         </section>

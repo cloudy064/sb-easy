@@ -341,6 +341,16 @@ async function forget(): Promise<void> {
   }
 }
 
+async function resolveConfig(keepLocal: boolean) {
+  if (!canAct('config.resolve')) return
+  operation.value = 'sync'
+  try {
+    config.value = await bridge.request('config.resolve', { keep_local: keepLocal }, { timeoutMs: 45_000 })
+    await refresh()
+  } catch (error) { actionFailed.value = true; actionNotice.value = errorMessage(error) }
+  finally { operation.value = null; if (!destroyed) await refresh() }
+}
+
 async function downloadConfig(): Promise<void> {
   if (!canAct('config.refresh') || !enrollment.value?.enrolled) return
   operation.value = 'sync'
@@ -661,6 +671,8 @@ onBeforeUnmount(() => {
 
                 <section v-if="enrollment?.enrolled || status?.mode === 'independent'" class="device-card" aria-labelledby="config-title" data-testid="candidate-summary">
           <div class="section-heading"><h2 id="config-title">{{ status?.mode === 'independent' ? '独立配置' : '服务器配置' }}</h2><button v-if="enrollment?.enrolled" class="secondary-button" data-testid="config-refresh" :disabled="!canAct('config.refresh')" @click="downloadConfig">{{ operation === 'sync' ? '正在下载…' : '下载最新配置' }}</button></div>
+          <p v-if="config?.config_base_version" class="input-hint">基础配置 {{ config.config_base_version }} · 个性化配置 {{ config.config_patch_version || '继承默认' }} · {{ config.config_sync_pending ? '本机修改等待同步' : '已同步到服务器' }}</p>
+          <div v-if="config?.config_sync_pending && supports('config.resolve')" class="confirmation-actions"><button class="secondary-button" :disabled="locked" @click="resolveConfig(false)">采用服务器配置</button><button class="secondary-button" :disabled="locked" @click="resolveConfig(true)">保留本机修改并同步</button></div>
           <div class="config-stage"><span class="status-tag" :class="{ pending: configMetadata?.candidate_available && stage.state !== 'valid' }">{{ stage.label }}</span><p>{{ stage.detail }}</p></div>
           <dl class="diagnostic-list compact"><div><dt>候选配置版本</dt><dd><code>{{ configMetadata?.downloaded_etag || '尚未下载' }}</code></dd></div><div><dt>当前激活版本</dt><dd><code>{{ configMetadata?.active_etag || '无 · 尚未激活' }}</code></dd></div><div v-if="configMetadata?.last_good_etag"><dt>上次可用版本</dt><dd><code>{{ configMetadata.last_good_etag }}</code></dd></div><div><dt>规则来源</dt><dd>{{ configMetadata?.rule_source || '尚未读取' }}</dd></div><div><dt>Profile</dt><dd>{{ profileName }}</dd></div></dl>
           <div v-if="config?.candidate_available" class="config-counts" aria-label="候选配置摘要"><span><strong>{{ config.counts.inbounds }}</strong> 入站</span><span><strong>{{ config.counts.outbounds }}</strong> 出站</span><span><strong>{{ config.counts.rules }}</strong> 路由规则</span></div>

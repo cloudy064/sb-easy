@@ -59,6 +59,9 @@ struct Profile: Codable, Identifiable {
     var sourceETag: String?
     var subscriptions: [Subscription] = []
     var preferences = Preferences()
+    var selectorChoices: [String: String]?
+    var configSync: ManagedConfigSync?
+    var configSyncError: String?
     var lastGoodRuntime: String?
     var lastGoodETag: String?
     var revision = 0
@@ -131,13 +134,34 @@ enum Core {
         let subs = String(decoding: try JSONSerialization.data(withJSONObject: subscriptions), as: UTF8.self)
         let settings = try json(profile.preferences)
         let host = (credentials.server.flatMap { URLComponents(string: $0)?.host } ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
-        return try string { error in
+        let rendered = try string { error in
             if let source = profile.sourceConfig, profile.mode == .managed {
                 return sba_build_runtime(source, subs, settings, host, error)
             }
             if profile.mode == .managed { return nil }
             return sba_build_runtime(nil, subs, settings, "", error)
         }
+        guard let choices = profile.selectorChoices, !choices.isEmpty else { return rendered }
+        var object = try ManagedConfigSync.object(rendered)
+        var outbounds = object["outbounds"] as? [[String: Any]] ?? []
+        for (group, target) in choices {
+            guard let index = outbounds.firstIndex(where: { $0["tag"] as? String == group }),
+                  outbounds[index]["type"] as? String == "selector",
+                  (outbounds[index]["outbounds"] as? [String] ?? []).contains(target) else { throw ClientError.invalid("服务器保存的节点选择已不在当前配置中") }
+            outbounds[index]["default"] = target
+        }
+        object["outbounds"] = outbounds
+        return try ManagedConfigSync.encoded(object)
+    }
+    static func selectorDefaults(_ runtime: String) throws -> [String: String] {
+        let object = try ManagedConfigSync.object(runtime)
+        var result: [String: String] = [:]
+        for outbound in object["outbounds"] as? [[String: Any]] ?? [] {
+            guard outbound["type"] as? String == "selector", let tag = outbound["tag"] as? String,
+                  let target = outbound["default"] as? String ?? (outbound["outbounds"] as? [String])?.first else { continue }
+            result[tag] = target
+        }
+        return result
     }
     static func outboundTags(_ runtime: String) throws -> [String] {
         let root = try JSONSerialization.jsonObject(with: Data(runtime.utf8)) as? [String: Any]

@@ -75,6 +75,9 @@ void sb_agent_client_proxy_capability(sb_agent_client *client, bool enabled);
 /* etag may be NULL. */
 int sb_agent_client_poll_config(sb_agent_client *client, const char *etag,
                                 sb_agent_config_response *out, sb_err *err);
+/* Server-owned default + device patch state; PUT carries observed timestamp
+ * versions and returns SB_ERR_CONFLICT on HTTP 409. Caller owns result. */
+sbj *sb_agent_client_config_state(sb_agent_client *client, const sbj *update, sb_err *err);
 int sb_agent_client_pending_commands(sb_agent_client *client, sb_agent_command_vec *out,
                                      sb_err *err);
 /* result may be NULL (JSON null). */

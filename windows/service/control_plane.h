@@ -30,6 +30,9 @@ typedef struct sbw_control_plane {
     int (*report_telemetry)(void *context, const sbj *identity, const sbj *telemetry,
                             HANDLE cancel, sbw_error *error);
     void (*destroy)(void *context);
+    /* NULL update reads the server-owned config; 404 returns a NULL state for legacy centers. */
+    int (*config_state)(void *context, const sbj *identity, const sbj *update,
+                        HANDLE cancel, sbj **state, sbw_error *error);
 } sbw_control_plane;
 
 /* Output JSON is owned by the caller. The cancellation event is borrowed only

@@ -2,7 +2,8 @@
 
 > 反映实际生产部署：**服务器 = 面板 + WireGuard hub + 配置同步**；**每个端点 = agent**
 > （跑 sing-box、用 WireGuard 连进服务器内网、从服务器下载配置做代理）。
-> 改一次服务器的配置画像（Profile）→ 所有 agent 自动同步。
+> 受管配置采用共享 Default + 服务端设备 patch；客户端定时双向同步。
+> 完整语义与旧设备迁移见 [配置同步协议](config-sync.md)。
 
 ## 拓扑
 
@@ -73,7 +74,7 @@ loopback 临时端口运行；开发环境的明文入口不用于远程设备�
 
 ## 二、加一个 agent 端点
 
-1. **面板里添加设备**：Devices → 添加设备，填写名称并选择**配置画像（Profile）**。
+1. **面板里添加设备**：Devices → 添加设备，填写名称，默认使用共享 **Default**。设备专属修改在设备详情的 patch 中管理。
 2. **拿一次性授权码**：复制页面给出的 `AGENT_ENROLLMENT_CODE` 安装命令。Android App 扫描同一个二维码，授权逻辑完全一致。
 3. **端点上跑 agent**（Docker，同一镜像）：
    ```sh
@@ -132,8 +133,13 @@ Agent 本地管理页默认监听 `0.0.0.0:51822`，访问
 > 这套都写在服务器的 Profile 里，**改一次服务器即同步到 agent**。
 
 ## 四、中心化配置同步
-agent 每 ~10s 用 ETag 轮询 `/api/agent/config`；改了服务器的 Profile，agent 自动拉取并
-reload sing-box。改一处 → 全端点生效，无需逐个登录。
+新版 C Agent 在原有轮询周期（默认约 10 秒）同步 `/api/agent/config-state`。
+服务端保存 Default、设备 patch 和设备运行设置，客户端先持久保存本地修改再定时上报。
+Default 更新后，未被设备 patch 覆盖的字段在下次同步时生效；空 patch 设备完全继承默认。
+冲突不会静默覆盖，客户端保留待提交修改并提示处理；配置校验失败时继续使用上次可用配置。
+
+旧设备通过 `/api/agent/config` 的 ETag 下载继续兼容。首次接入新协议时将旧 Profile
+差异迁移到设备 patch；原生客户端按各自后台调度周期同步，Apple 还受系统生命周期限制。
 
 ### 代理用户与多节点额度
 

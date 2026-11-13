@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 final class NoRedirect: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -74,15 +75,17 @@ actor Repository {
         if let returned = data["server"] as? String {
             guard try HTTPS.url(returned, server: true).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == base else { throw ClientError.response }
         }
-        let credentials = Credentials(server: base, hostID: host, token: token)
+        var credentials = Credentials(server: base, hostID: host, token: token)
         var profile = Profile(name: name.isEmpty ? (remoteProfile["name"] as? String ?? "管理配置") : String(name.prefix(80)), mode: .managed)
         // Enrollment consumes a one-time code. Preserve the returned identity
         // before fetching configuration so a transient outage remains recoverable.
         try await store.add(profile, credentials: credentials)
         do {
-            try await fetchConfig(&profile, credentials: credentials)
+            let syncLock = try await store.acquireConfigSyncLock(profile.id)
+            defer { flock(syncLock, LOCK_UN); close(syncLock) }
+            try await fetchConfig(&profile, credentials: &credentials)
             _ = try Core.runtime(profile, credentials: credentials)
-            try await store.update(profile, expectedRevision: profile.revision)
+            try await store.update(profile, expectedRevision: profile.revision, credentials: credentials)
         } catch { throw ClientError.invalid("注册成功，暂未取得可用配置；请稍后刷新") }
     }
     static var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0" }
@@ -96,7 +99,7 @@ actor Repository {
         return "macos"
         #endif
     }
-    private func fetchConfig(_ profile: inout Profile, credentials: Credentials) async throws {
+    private func fetchLegacyConfig(_ profile: inout Profile, credentials: Credentials) async throws {
         let response = try await HTTPS.request(HTTPS.endpoint(credentials, "/api/agent/config"), token: credentials.token, etag: profile.sourceETag)
         if response.status == 304 && profile.sourceConfig != nil { return }
         guard response.status == 200, !response.data.contains(0), let text = String(data: response.data, encoding: .utf8) else { throw ClientError.response }
@@ -106,6 +109,93 @@ actor Repository {
         else { candidate.sourceETag = nil }
         _ = try Core.runtime(candidate, credentials: credentials)
         profile = candidate
+    }
+    private func policy(_ profile: Profile, credentials: Credentials) throws -> String {
+        var value: [String: Any] = [:]
+        if profile.preferences.selected_tag != nil || !profile.preferences.local_groups.isEmpty {
+            value["preferences"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(profile.preferences))
+        }
+        if !profile.subscriptions.isEmpty {
+            value["subscriptions"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(profile.subscriptions))
+            value["subscription_urls"] = credentials.subscriptionURLs
+        }
+        if let choices = profile.selectorChoices, !choices.isEmpty { value["selector_choices"] = choices }
+        return try ManagedConfigSync.encoded(value)
+    }
+    private func queuePolicy(_ profile: inout Profile, credentials: Credentials) throws {
+        guard profile.mode == .managed else { return }
+        var sync = profile.configSync ?? ManagedConfigSync()
+        try sync.queue(policy(profile, credentials: credentials))
+        profile.configSync = sync
+        profile.configSyncError = nil
+    }
+    private func applyState(_ profile: inout Profile, credentials: inout Credentials) throws {
+        guard let sync = profile.configSync, sync.pendingPolicy == nil, let remote = sync.remote else { return }
+        let state = try ManagedConfigSync.validated(remote)
+        let saved = try ManagedConfigSync.object(ManagedConfigSync.policy(in: state))
+        guard saved["preferences"] == nil || saved["preferences"] is [String: Any],
+              saved["selector_choices"] == nil || saved["selector_choices"] is [String: String],
+              saved["subscription_urls"] == nil || saved["subscription_urls"] is [String: String] else { throw ClientError.response }
+        var candidate = profile
+        var nextCredentials = credentials
+        candidate.sourceConfig = try ManagedConfigSync.encoded(state["config"] as? [String: Any] ?? [:])
+        let etag = state["etag"] as? String
+        candidate.sourceETag = etag.flatMap { $0.utf8.count <= 512 && $0.utf8.allSatisfy({ $0 >= 32 && $0 != 127 }) ? $0 : nil }
+        var preferences = saved["preferences"] as? [String: Any] ?? [:]
+        if preferences["local_groups"] == nil { preferences["local_groups"] = [] }
+        candidate.preferences = try JSONDecoder().decode(Preferences.self, from: JSONSerialization.data(withJSONObject: preferences))
+        candidate.subscriptions = try JSONDecoder().decode([Subscription].self, from: JSONSerialization.data(withJSONObject: saved["subscriptions"] ?? []))
+        candidate.selectorChoices = saved["selector_choices"] as? [String: String]
+        guard candidate.subscriptions.count <= 32 else { throw ClientError.response }
+        let urls = saved["subscription_urls"] as? [String: String] ?? [:]
+        for url in urls.values { _ = try HTTPS.url(url) }
+        nextCredentials.subscriptionURLs = urls
+        _ = try Core.runtime(candidate, credentials: nextCredentials)
+        profile = candidate; credentials = nextCredentials
+    }
+    private func fetchConfig(_ profile: inout Profile, credentials: inout Credentials) async throws {
+        let endpoint = try HTTPS.endpoint(credentials, "/api/agent/config-state")
+        let response = try await HTTPS.request(endpoint, token: credentials.token, limit: 8 * 1024 * 1024)
+        if (response.status == 404 || response.status == 405) && profile.configSync?.remote == nil {
+            try await fetchLegacyConfig(&profile, credentials: credentials)
+            return
+        }
+        guard response.status == 200, let text = String(data: response.data, encoding: .utf8) else { throw ClientError.response }
+        var sync = profile.configSync ?? ManagedConfigSync()
+        let serverState = try ManagedConfigSync.validated(text)
+        if profile.configSync == nil && serverState["agent_settings_initialized"] as? Bool != true {
+            let legacy = try policy(profile, credentials: credentials)
+            if legacy != "{}" { try sync.queue(legacy) }
+        }
+        try sync.observe(text)
+        profile.configSyncError = nil
+        do {
+            if let body = try sync.request() {
+                let saved = try await HTTPS.request(endpoint, method: "PUT", token: credentials.token, body: body, limit: 8 * 1024 * 1024)
+                if saved.status == 409 {
+                    let latest = try await HTTPS.request(endpoint, token: credentials.token, limit: 8 * 1024 * 1024)
+                    guard latest.status == 200, let latestText = String(data: latest.data, encoding: .utf8) else { throw ClientError.response }
+                    try sync.observe(latestText)
+                } else {
+                    guard saved.status == 200, let savedText = String(data: saved.data, encoding: .utf8) else { throw ClientError.response }
+                    try sync.observe(savedText)
+                }
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch { profile.configSyncError = "上报失败，待同步修改已保留" }
+        profile.configSync = sync
+        do { try applyState(&profile, credentials: &credentials) }
+        catch { profile.configSyncError = "服务器配置未能通过本机校验，保留上次可用配置" }
+    }
+    func resolveConfig(profileID: String, expectedRevision: Int, keepLocal: Bool) async throws {
+        var (profile, credentials) = try await store.profile(profileID)
+        guard profile.revision == expectedRevision, var sync = profile.configSync else { throw ClientError.stale }
+        try sync.resolve(keepLocal: keepLocal)
+        profile.configSync = sync
+        profile.configSyncError = nil
+        do { try applyState(&profile, credentials: &credentials) }
+        catch { profile.configSyncError = "服务器配置未能通过本机校验，保留上次可用配置" }
+        try await store.update(profile, expectedRevision: expectedRevision, credentials: credentials)
     }
     func createIndependent(name: String, content: String, remote: Bool) async throws {
         var profile = Profile(name: name.isEmpty ? "独立配置" : String(name.prefix(80)), mode: .independent)
@@ -135,15 +225,19 @@ actor Repository {
         profile.subscriptions.append(sub)
         if remote { credentials.subscriptionURLs[sub.id] = try HTTPS.url(content).absoluteString }
         _ = try Core.runtime(profile, credentials: credentials)
+        try queuePolicy(&profile, credentials: credentials)
         try await store.update(profile, expectedRevision: profile.revision, credentials: credentials)
     }
     func refresh(_ id: String, dueOnly: Bool = false) async throws {
         guard refreshing.insert(id).inserted else { throw ClientError.invalid("正在刷新此配置，请稍后重试") }
         defer { refreshing.remove(id) }
+        let syncLock = try await store.acquireConfigSyncLock(id)
+        defer { flock(syncLock, LOCK_UN); close(syncLock) }
         var (profile, credentials) = try await store.profile(id)
         let revision = profile.revision
         var failed = false
-        if profile.mode == .managed { try await fetchConfig(&profile, credentials: credentials) }
+        if profile.mode == .managed { try await fetchConfig(&profile, credentials: &credentials) }
+        let beforeRefresh = try policy(profile, credentials: credentials)
         for index in profile.subscriptions.indices {
             let old = profile.subscriptions[index]
             guard old.remote, let url = credentials.subscriptionURLs[old.id],
@@ -165,15 +259,17 @@ actor Repository {
             }
         }
         _ = try Core.runtime(profile, credentials: credentials)
-        try await store.update(profile, expectedRevision: revision)
+        if try policy(profile, credentials: credentials) != beforeRefresh { try queuePolicy(&profile, credentials: credentials) }
+        try await store.update(profile, expectedRevision: revision, credentials: credentials)
         if failed && !dueOnly { throw ClientError.invalid("部分订阅刷新失败，已保留原配置") }
     }
     func refreshInterval(profileID: String, subscriptionID: String, minutes: Int) async throws {
         guard minutes == 0 || (15...10080).contains(minutes) else { throw ClientError.invalid("刷新间隔须为 15 分钟到 7 天，或关闭自动刷新") }
-        var (profile, _) = try await store.profile(profileID)
+        var (profile, credentials) = try await store.profile(profileID)
         guard let index = profile.subscriptions.firstIndex(where: { $0.id == subscriptionID }), profile.subscriptions[index].remote else { throw ClientError.stale }
         profile.subscriptions[index].refreshMinutes = minutes
         profile.subscriptions[index].nextRefresh = minutes > 0 ? Date().addingTimeInterval(Double(minutes * 60)) : nil
+        try queuePolicy(&profile, credentials: credentials)
         try await store.update(profile, expectedRevision: profile.revision)
     }
     func removeSubscription(profileID: String, subscriptionID: String) async throws {
@@ -181,6 +277,7 @@ actor Repository {
         profile.subscriptions.removeAll { $0.id == subscriptionID }
         credentials.subscriptionURLs.removeValue(forKey: subscriptionID)
         _ = try Core.runtime(profile, credentials: credentials)
+        try queuePolicy(&profile, credentials: credentials)
         try await store.update(profile, expectedRevision: profile.revision, credentials: credentials)
     }
     func preferences(_ value: Preferences, profileID: String) async throws {
@@ -188,13 +285,23 @@ actor Repository {
         var (profile, credentials) = try await store.profile(profileID)
         profile.preferences = value
         _ = try Core.runtime(profile, credentials: credentials)
+        try queuePolicy(&profile, credentials: credentials)
+        try await store.update(profile, expectedRevision: profile.revision)
+    }
+    func selectChoice(profileID: String, group: String, target: String) async throws {
+        var (profile, credentials) = try await store.profile(profileID)
+        var choices = profile.selectorChoices ?? [:]
+        choices[group] = target
+        profile.selectorChoices = choices
+        _ = try Core.runtime(profile, credentials: credentials)
+        try queuePolicy(&profile, credentials: credentials)
         try await store.update(profile, expectedRevision: profile.revision)
     }
     func report(_ id: String, connected: Bool, rolledBack: Bool) async {
         guard let (profile, credentials) = try? await store.profile(id), profile.mode == .managed else { return }
         do {
             let body = try JSONSerialization.data(withJSONObject: ["singbox_running": connected, "singbox_version": Self.coreVersion, "app_version": Self.appVersion,
-                "config_etag": profile.lastGoodETag ?? "", "last_error": rolledBack ? "Candidate rejected; last successful configuration restored" : ""])
+                "config_etag": profile.lastGoodETag ?? "", "last_error": profile.configSyncError ?? (rolledBack ? "Candidate rejected; last successful configuration restored" : "")])
             _ = try await HTTPS.request(HTTPS.endpoint(credentials, "/api/agent/status"), method: "POST", token: credentials.token, body: body, limit: 64 * 1024)
         } catch { /* A control-plane outage must not replace a working tunnel. */ }
     }

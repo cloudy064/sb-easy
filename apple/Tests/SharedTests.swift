@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Darwin
 
 final class MemorySecrets: SecretStore {
     private let lock = NSLock()
@@ -14,6 +15,63 @@ final class MemorySecrets: SecretStore {
 }
 final class SharedTests: XCTestCase {
     private let fixture = "trojan://fixture-secret@proxy.example:443?security=tls#fixture"
+    private func syncState(base: Int64 = 100, patch: Int64 = 0, policy: [String: Any] = [:]) throws -> String {
+        try ManagedConfigSync.encoded(["base_version": base, "patch_version": patch,
+            "base": [:], "config": [:], "patch": [:], "agent_settings": policy.isEmpty ? [:] : ["apple": policy]])
+    }
+    func testManagedDefaultsAndSparsePolicyOutbox() throws {
+        var sync = ManagedConfigSync()
+        try sync.observe(syncState())
+        XCTAssertNil(try sync.request())
+        try sync.queue("{\"preferences\":{\"selected_tag\":\"fixture\"}}")
+        let request = try XCTUnwrap(sync.request())
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        XCTAssertEqual((value["base_version"] as? NSNumber)?.int64Value, 100)
+        let restored = try JSONDecoder().decode(ManagedConfigSync.self, from: JSONEncoder().encode(sync))
+        XCTAssertEqual(restored.pendingPolicy, sync.pendingPolicy)
+        try sync.observe(syncState(patch: 101, policy: ["preferences": ["selected_tag": "fixture"]]))
+        XCTAssertNil(sync.pendingPolicy)
+        XCTAssertFalse(sync.conflict)
+    }
+    func testManagedConflictDoesNotOverwriteServer() throws {
+        var sync = ManagedConfigSync()
+        try sync.observe(syncState())
+        try sync.queue("{\"preferences\":{\"selected_tag\":\"local\"}}")
+        try sync.observe(syncState(patch: 101, policy: ["preferences": ["selected_tag": "server"]]))
+        XCTAssertTrue(sync.conflict)
+        XCTAssertNotNil(sync.pendingPolicy)
+        XCTAssertNil(try sync.request())
+        try sync.resolve(keepLocal: true)
+        let request = try XCTUnwrap(sync.request())
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        XCTAssertEqual((value["patch_version"] as? NSNumber)?.int64Value, 101)
+        try sync.resolve(keepLocal: false)
+        XCTAssertNotNil(sync.pendingPolicy)
+        try sync.observe(syncState(patch: 101, policy: ["preferences": ["selected_tag": "server"]]))
+        XCTAssertNil(sync.pendingPolicy)
+    }
+    func testManagedResetAndLostAcknowledgement() throws {
+        var sync = ManagedConfigSync()
+        try sync.observe(syncState(patch: 101, policy: ["preferences": ["selected_tag": "fixture"]]))
+        try sync.queue("{}")
+        let request = try XCTUnwrap(sync.request())
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        XCTAssertNil((value["agent_settings"] as? [String: Any])?["apple"])
+        try sync.observe(syncState(patch: 102))
+        XCTAssertNil(sync.pendingPolicy)
+        XCTAssertFalse(sync.conflict)
+        XCTAssertThrowsError(try ManagedConfigSync.validated("{\"base_version\":true}"))
+    }
+    func testManagedUndoSurvivesEarlierUpload() throws {
+        var sync = ManagedConfigSync()
+        try sync.observe(syncState())
+        try sync.queue("{\"preferences\":{\"selected_tag\":\"earlier\"}}")
+        try sync.queue("{}")
+        XCTAssertEqual(sync.pendingPolicy, "{}")
+        try sync.observe(syncState(patch: 101, policy: ["preferences": ["selected_tag": "earlier"]]))
+        XCTAssertEqual(sync.pendingPolicy, "{}")
+        XCTAssertTrue(sync.conflict)
+    }
     func testHTTPSAuthorityAndRedirectBoundary() throws {
         XCTAssertEqual(try HTTPS.url("https://control.example/prefix", server: true).host, "control.example")
         for value in ["http://control.example", "https://user:secret@control.example", "https://control.example/#token", "https://control.example/\\bad", "https://control.example/\n"] {
@@ -70,5 +128,21 @@ final class SharedTests: XCTestCase {
         do { _ = try await first.profile(managed.id); XCTFail("deleted profile readable") } catch {}
         let remaining = try await first.profile(independent.id)
         XCTAssertEqual(remaining.0.id, independent.id)
+    }
+    func testConfigurationSyncLockSerializesAppAndTunnel() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = SecureStore(directory: directory, keychain: MemorySecrets())
+        let second = SecureStore(directory: directory, keychain: MemorySecrets())
+        let id = UUID().uuidString
+        let fd = try await first.acquireConfigSyncLock(id)
+        do {
+            let overlapping = try await second.acquireConfigSyncLock(id)
+            close(overlapping)
+            XCTFail("overlapping configuration exchange acquired the lock")
+        } catch {}
+        flock(fd, LOCK_UN); close(fd)
+        let next = try await second.acquireConfigSyncLock(id)
+        flock(next, LOCK_UN); close(next)
     }
 }

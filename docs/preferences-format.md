@@ -1,5 +1,9 @@
 # Encrypted archives and private preference sync
 
+This is the manual encrypted archive/backup protocol. Automatic managed-device
+configuration uses [server-owned defaults and device patches](config-sync.md);
+the opaque archive is not a second configuration authority.
+
 The password stays on the client. The center stores an opaque encrypted archive
 owned by the authenticated panel account. Managed-agent credentials are never
 accepted as panel-account authorization.

@@ -12,12 +12,12 @@
 extern "C" {
 #endif
 
-/* C++ AgentUiCallbacks. Every callback is required and may run on any
+/* C++ AgentUiCallbacks. Callbacks are required unless marked optional and may run on any
  * civetweb worker thread. JSON callbacks return an owned value, or NULL with
  * err set; the error kind selects the HTTP status like the C++
  * handle_response(): SB_ERR_BAD_JSON (nlohmann json::exception) -> 400
  * "无效的 JSON 请求：<msg>", SB_ERR_VALIDATION (std::invalid_argument) -> 400
- * "<msg>", anything else -> 500 "<msg>". */
+ * "<msg>", SB_ERR_CONFLICT -> 409, anything else -> 500 "<msg>". */
 typedef struct {
     sbj *(*status)(void *user, sb_err *err);
     sbj *(*settings)(void *user, sb_err *err);
@@ -29,6 +29,9 @@ typedef struct {
     sbj *(*test_route)(const char *url, void *user, sb_err *err);
     int (*request_action)(const char *action, void *user, sb_err *err);
     void *user;
+    /* Optional versioned configuration synchronization callbacks. */
+    sbj *(*config_state)(void *user, sb_err *err);
+    sbj *(*update_config_state)(const sbj *value, void *user, sb_err *err);
 } sb_agent_ui_callbacks;
 
 /* C++ AgentLocalUiOptions. Strings are borrowed for the duration of

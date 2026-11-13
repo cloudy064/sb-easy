@@ -1881,13 +1881,26 @@ int sb_store_create_profile(sb_store *s, const sb_config_profile *profile, sb_co
     return rc;
 }
 
-int sb_store_update_profile(sb_store *s, const sb_config_profile *profile, sb_config_profile *out,
-                            sb_err *err) {
+static int update_profile(sb_store *s, const sb_config_profile *profile, int64_t expected_version,
+                           sb_config_profile *out, sb_err *err) {
     if (sb_str_empty(profile->id) || !profile->name || profile->name_len == 0 || !sbj_is_object(profile->profile))
         return sb_fail(err, SB_ERR_VALIDATION, "Profile id, name, and object template are required");
     int rc = -1;
     LOCK(s);
     sqlite3 *h = H(s);
+    if (expected_version >= 0) {
+        if (sbq_exec(h, "BEGIN IMMEDIATE", err) != 0) { UNLOCK(s); return -1; }
+        sqlite3_stmt *clock = sbq_prepare(h, "SELECT version FROM config_sync_clock WHERE id=1", err);
+        if (!clock) { sbq_rollback(h); UNLOCK(s); return -1; }
+        int row = sbq_step_row(clock, err);
+        bool matches = row == 1 && sbq_int(clock, 0) == expected_version;
+        sqlite3_finalize(clock);
+        if (!matches) {
+            sbq_rollback(h);
+            UNLOCK(s);
+            return row < 0 ? -1 : sb_fail(err, SB_ERR_CONFLICT, "Base configuration changed; fetch before saving");
+        }
+    }
     sqlite3_stmt *st = sbq_prepare(h,
                                    "UPDATE config_profiles SET name = ?1, template = ?2, "
                                    "mode = ?3, rule_script = ?4, rule_script_enabled = ?5, "
@@ -1907,8 +1920,23 @@ int sb_store_update_profile(sb_store *s, const sb_config_profile *profile, sb_co
                 rc = reload_profile(h, profile->id, out, err);
         }
     }
+    if (expected_version >= 0) {
+        if (rc == 0) rc = sbq_commit(h, err);
+        if (rc != 0) sbq_rollback(h);
+    }
     UNLOCK(s);
     return rc;
+}
+
+int sb_store_update_profile(sb_store *s, const sb_config_profile *profile, sb_config_profile *out,
+                            sb_err *err) {
+    return update_profile(s, profile, -1, out, err);
+}
+
+int sb_store_update_profile_at_version(sb_store *s, const sb_config_profile *profile,
+                                       int64_t expected_version, sb_config_profile *out, sb_err *err) {
+    if (expected_version <= 0) return sb_fail(err, SB_ERR_VALIDATION, "A positive base_version is required");
+    return update_profile(s, profile, expected_version, out, err);
 }
 
 int sb_store_delete_profile(sb_store *s, const char *id, sb_err *err) {
@@ -3227,8 +3255,8 @@ int sb_store_record_subscription_failure(sb_store *s, const sb_subscription *exp
  * render request
  * ====================================================================== */
 
-int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render_request *out,
-                                     sb_err *err) {
+static int render_request_for_host(sb_store *s, const char *host_id, bool shared_default,
+                                    sb_render_request *out, sb_err *err) {
     int rc = -1;
     sb_config_profile profile;
     sb_config_profile_init(&profile);
@@ -3248,11 +3276,26 @@ int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render
     if (r == 0) sb_fail(err, SB_ERR_NOT_FOUND, "Host not found");
     if (r != 1) goto done;
 
-    profile_id = sbq_opt_text(host, 3);
+    profile_id = shared_default ? sb_strdup("default") : sbq_opt_text(host, 3);
     if (!profile_id) profile_id = sb_strdup("default");
     r = find_profile_locked(h, profile_id, &profile, err);
     if (r == 0) sb_fail(err, SB_ERR_GENERIC, "host profile not found: %s", profile_id);
     if (r != 1) goto done;
+
+    /* A full JSON profile has arbitrary inline credentials and cannot be
+     * projected through host_outbounds. Never expose that global blob to a
+     * device whose administrator assigned a restricted node pool. */
+    if (shared_default && profile.mode == SB_PROFILE_FULL) {
+        sqlite3_stmt *assigned = sbq_prepare(h, "SELECT 1 FROM host_outbounds WHERE host_id=? LIMIT 1", err);
+        if (!assigned) goto done;
+        sbq_bind_text(assigned, 1, host_id); int restricted = sbq_step_row(assigned, err);
+        sqlite3_finalize(assigned);
+        if (restricted < 0) goto done;
+        if (restricted) {
+            sb_fail(err, SB_ERR_VALIDATION, "A managed default profile is required for devices with assigned nodes");
+            goto done;
+        }
+    }
 
     if (profile.mode == SB_PROFILE_MANAGED) {
         if (read_nodes(h,
@@ -3320,6 +3363,16 @@ done:
     sb_proxy_node_vec_free(&nodes);
     sb_config_profile_free(&profile);
     return rc;
+}
+
+int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render_request *out,
+                                     sb_err *err) {
+    return render_request_for_host(s, host_id, false, out, err);
+}
+
+int sb_store_render_request_for_default(sb_store *s, const char *host_id, sb_render_request *out,
+                                        sb_err *err) {
+    return render_request_for_host(s, host_id, true, out, err);
 }
 
 /* PCAP payloads are bounded by HTTP and per-host quotas. Digest is checked by

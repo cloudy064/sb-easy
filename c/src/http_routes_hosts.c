@@ -13,6 +13,7 @@
 
 #include "sb/config_etag.h"
 #include "sb/config_renderer.h"
+#include "sb/config_sync.h"
 #include "sb/script_engine.h"
 #include "sb/types.h"
 #include "sb/tailscale.h"
@@ -281,7 +282,39 @@ done:
     return rc == 0 ? 0 : fail_json_aware(err);
 }
 
-/* DELETE /api/hosts/profiles/{id} */
+/* GET/PUT /api/config/default: shared profile with optimistic timestamp CAS. */
+static int handle_default_config(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    sb_database *db = sb_store_database(req->server->store);
+    sb_config_profile profile, updated; sb_config_profile_init(&profile); sb_config_profile_init(&updated);
+    sbj *body = NULL, *out = NULL; int rc = -1; int64_t version = 0;
+    if (!strcmp(req->method, "PUT")) {
+        body = sb_req_json_object(req, err); if (!body) goto done;
+        const sbj *expected = sbj_get(body, "base_version");
+        if (!sbj_is_integer(expected) || sbj_as_int(expected, -1) <= 0) {
+            sb_fail(err, SB_ERR_VALIDATION, "A positive base_version is required"); goto done;
+        }
+        if (sb_http_require_profile(req->server, "default", &profile, err) != 0 ||
+            profile_from_request(sbj_get(body, "profile"), &profile, err) != 0) goto done;
+        if (sb_store_update_profile_at_version(req->server->store, &profile,
+                sbj_as_int(expected, -1), &updated, err) != 0) goto done;
+    }
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        version = sb_config_sync_source_version(db, err); if (version < 0) goto done;
+        sb_config_profile_free(&profile); sb_config_profile_init(&profile);
+        if (sb_http_require_profile(req->server, "default", &profile, err) != 0) goto done;
+        if (version == sb_config_sync_source_version(db, err)) {
+            out = sbj_object(); sbj_set_int(out, "base_version", version);
+            sbj_set(out, "profile", sb_config_profile_to_json(&profile));
+            sb_resp_header(resp, "Cache-Control", "no-store"); sb_resp_json(resp, 200, out);
+            out = NULL; rc = 0; goto done;
+        }
+    }
+    sb_fail(err, SB_ERR_CONFLICT, "Base configuration changed during reading; retry the request");
+done:
+    sbj_free(body); sbj_free(out); sb_config_profile_free(&profile); sb_config_profile_free(&updated);
+    return rc == 0 ? 0 : fail_json_aware(err);
+}
+
 static int handle_delete_profile(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     if (sb_store_delete_profile(req->server->store, route_param(req), err) != 0) return fail_json_aware(err);
     respond_success(resp);
@@ -534,8 +567,9 @@ static int endpoint_tag_in_use(const sbj *endpoints, const sb_render_request *re
 /* managed_render_request(store, wireguard, host, provision, control_plane):
  * `host` may be replaced by its provisioned version; `out` must be
  * initialised (sb_render_request_init). */
-static int managed_render_request(sb_http_server *srv, sb_host *host, bool provision_network_identity,
-                                  const char *control_plane_server, sb_render_request *out, sb_err *err) {
+static int managed_render_request_mode(sb_http_server *srv, sb_host *host, bool provision_network_identity,
+                                  const char *control_plane_server, sb_render_request *out,
+                                  bool shared_default, sb_err *err) {
     bool embedded = false;
     if (uses_embedded_managed_network(host, &embedded, err) != 0) return -1;
     if (embedded && !sb_tailscale_enabled(host->tailscale) && provision_network_identity && !host->wg_address) {
@@ -549,7 +583,8 @@ static int managed_render_request(sb_http_server *srv, sb_host *host, bool provi
         *host = provisioned;
     }
 
-    if (sb_store_render_request_for_host(srv->store, host->id, out, err) != 0) return -1;
+    if ((shared_default ? sb_store_render_request_for_default(srv->store, host->id, out, err)
+                        : sb_store_render_request_for_host(srv->store, host->id, out, err)) != 0) return -1;
     if (uses_embedded_managed_network(host, &embedded, err) != 0) return -1;
     if (!embedded) return 0;
     sb_str_set(&out->control_plane_server, S(control_plane_server));
@@ -613,11 +648,81 @@ static int managed_render_request(sb_http_server *srv, sb_host *host, bool provi
     return 0;
 }
 
+static int managed_render_request(sb_http_server *srv, sb_host *host, bool provision_network_identity,
+                                  const char *control_plane_server, sb_render_request *out, sb_err *err) {
+    return managed_render_request_mode(srv, host, provision_network_identity, control_plane_server, out, false, err);
+}
+
 /* renderer.render(request) with a default-constructed ConfigRenderer. */
 static sbj *render_config(const sb_render_request *request, sb_err *err) {
     sb_config_renderer renderer;
     if (sb_config_renderer_init(&renderer, NULL, err) != 0) return NULL;
     return sb_config_renderer_render(&renderer, request, err);
+}
+
+/* All config-state endpoints use the same snapshot and server-assigned CAS.
+ * Initialization is deliberately explicit: older released clients continue
+ * their legacy contract until the device first requests config-state. */
+static void sync_self_controller(sb_http_server *srv, const sb_host *host, sb_render_request *request) {
+    if (!sb_streq(host->id, "self")) return;
+    free(request->clash_controller);
+    request->clash_controller = sb_http_clash_controller_address(srv->opts.clash_api_url);
+    request->clash_controller_len = request->clash_controller ? strlen(request->clash_controller) : 0;
+    sb_str_set(&request->clash_secret, srv->opts.clash_api_secret);
+    request->clash_secret_len = request->clash_secret ? strlen(request->clash_secret) : 0;
+}
+
+sbj *sb_http_host_config_state(sb_http_server *srv, sb_host *host, bool provision,
+                              const sbj *write, sb_err *err) {
+    sb_database *db = sb_store_database(srv->store);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        sb_render_request base_request, legacy_request;
+        sb_render_request_init(&base_request); sb_render_request_init(&legacy_request);
+        sbj *base = NULL, *legacy = NULL, *state = NULL;
+        int64_t version = sb_config_sync_source_version(db, err);
+        int exists = sb_config_sync_exists(db, host->id, err);
+        if (version < 0 || exists < 0) goto attempt_done;
+        if (managed_render_request_mode(srv, host, provision, srv->enrollment_server,
+                                         &base_request, true, err) != 0) goto attempt_done;
+        sync_self_controller(srv, host, &base_request);
+        base = render_config(&base_request, err); if (!base) goto attempt_done;
+        if (!exists) {
+            if (managed_render_request(srv, host, false, srv->enrollment_server, &legacy_request, err) != 0) goto attempt_done;
+            sync_self_controller(srv, host, &legacy_request);
+            legacy = render_config(&legacy_request, err); if (!legacy) goto attempt_done;
+        }
+        state = sb_config_sync_get(db, host->id, base, legacy, version, err);
+        if (!state) goto attempt_done;
+        if (write) {
+            const sbj *base_version = sbj_get(write, "base_version"), *patch_version = sbj_get(write, "patch_version");
+            if (!sbj_is_integer(base_version) || !sbj_is_integer(patch_version) ||
+                sbj_as_int(base_version, -1) < 0 || sbj_as_int(patch_version, -1) < 0) {
+                sb_fail(err, SB_ERR_VALIDATION, "base_version and patch_version must be nonnegative integers");
+                sbj_free(state); state = NULL; goto attempt_done;
+            }
+            sbj_free(state);
+            state = sb_config_sync_put(db, host->id, base, version, sbj_as_int(base_version, -1),
+                sbj_as_int(patch_version, -1), sbj_get(write, "patch"), sbj_get(write, "agent_settings"), err);
+            if (!state) goto attempt_done;
+        }
+        char *body = sbj_dump(sbj_get(state, "config"), 2);
+        char *etag = sb_config_etag(host->id, body, srv->opts.config_hash_seed); free(body);
+        if (!etag) { sbj_free(state); state = NULL; sb_fail(err, SB_ERR_GENERIC, "Configuration hash failed"); goto attempt_done; }
+        sbj_set_str(state, "etag", etag); free(etag);
+        sbj_set_str(state, "rule_source", base_request.rule_script ? "quickjs" : "profile");
+        sbj_set_str(state, "profile_id", "default");
+        sb_config_profile profile; sb_config_profile_init(&profile);
+        if (sb_http_require_profile(srv, "default", &profile, err) == 0)
+            sbj_set(state, "profile_name", sbj_strn(S(profile.name), profile.name_len));
+        sb_config_profile_free(&profile);
+attempt_done:
+        sbj_free(base); sbj_free(legacy);
+        sb_render_request_free(&base_request); sb_render_request_free(&legacy_request);
+        if (state) return state;
+        if (write || !err || err->code != SB_ERR_CONFLICT) return NULL;
+    }
+    sb_fail(err, SB_ERR_CONFLICT, "Configuration changed during rendering; retry the request");
+    return NULL;
 }
 
 /* ======================================================================
@@ -776,6 +881,14 @@ static int handle_host_config(sb_http_req *req, sb_http_resp *resp, sb_err *err)
     sb_host_init(&host);
     sb_render_request_init(&request);
     if (sb_http_require_host(srv, route_param(req), &host, err) != 0) goto done;
+    int synced = sb_config_sync_exists(sb_store_database(srv->store), host.id, err);
+    if (synced < 0) goto done;
+    if (synced) {
+        sbj *state = sb_http_host_config_state(srv, &host, false, NULL, err);
+        if (!state) goto done;
+        sb_resp_json(resp, 200, sbj_clone(sbj_get(state, "config"))); sbj_free(state);
+        rc = 0; goto done;
+    }
     if (managed_render_request(srv, &host, false, srv->enrollment_server, &request, err) != 0) goto done;
     sbj *config = render_config(&request, err);
     if (!config) goto done;
@@ -910,6 +1023,20 @@ static int resolve_agent_host(const sb_http_req *req, sb_host *out, sb_err *err)
     return 0;
 }
 
+static int handle_config_state(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
+    bool agent = sb_starts_with(req->path, "/api/agent/");
+    sb_host host; sb_host_init(&host); sbj *body = NULL, *state = NULL; int rc = -1;
+    if ((agent ? resolve_agent_host(req, &host, err)
+               : sb_http_require_host(req->server, route_param(req), &host, err)) != 0) goto done;
+    if (!strcmp(req->method, "PUT")) { body = sb_req_json_object(req, err); if (!body) goto done; }
+    state = sb_http_host_config_state(req->server, &host, agent, body, err); if (!state) goto done;
+    sb_resp_header(resp, "Cache-Control", "no-store");
+    sb_resp_header(resp, "ETag", sbj_get_str(state, "etag", ""));
+    sb_resp_json(resp, 200, state); state = NULL; rc = 0;
+done:
+    sbj_free(body); sbj_free(state); sb_host_free(&host); return rc == 0 ? 0 : fail_json_aware(err);
+}
+
 /* optional_string_field() / optional_boolean_field(): absent or null -> null,
  * otherwise the value itself when it has the right type. */
 static sbj *optional_field(const sbj *body, const char *field, bool boolean, sb_err *err) {
@@ -1009,12 +1136,21 @@ static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err
     sb_render_request_init(&request);
     if (resolve_agent_host(req, &host, err) != 0) goto done;
     previous_address = sb_strdup(host.wg_address);
-    if (managed_render_request(srv, &host, true, srv->enrollment_server, &request, err) != 0) goto done;
+    int synced = sb_config_sync_exists(sb_store_database(srv->store), host.id, err);
+    if (synced < 0) goto done;
+    const char *synced_rule_source = "profile";
+    if (synced) {
+        sbj *state = sb_http_host_config_state(srv, &host, true, NULL, err);
+        if (!state) goto done;
+        config = sbj_clone(sbj_get(state, "config"));
+        if (sbj_string_is(sbj_get(state, "rule_source"), "quickjs")) synced_rule_source = "quickjs";
+        sbj_free(state);
+    } else if (managed_render_request(srv, &host, true, srv->enrollment_server, &request, err) != 0) goto done;
     if (!sb_streq(host.wg_address, previous_address)) sb_http_sync_wireguard_best_effort(srv);
-    const char *profile_id = host.profile_id ? host.profile_id : "default";
+    const char *profile_id = synced ? "default" : (host.profile_id ? host.profile_id : "default");
     if (sb_http_require_profile(srv, profile_id, &profile, err) != 0) goto done;
-    const char *rule_source = request.rule_script ? "quickjs" : "profile";
-    config = render_config(&request, err);
+    const char *rule_source = synced ? synced_rule_source : (request.rule_script ? "quickjs" : "profile");
+    if (!config) config = render_config(&request, err);
     if (!config) goto done;
     char *sources_requested=sb_req_query_param(req,"sources");
     bool include_sources=sb_streq(sources_requested,"1");free(sources_requested);
@@ -1041,6 +1177,7 @@ static int handle_agent_config(sb_http_req *req, sb_http_resp *resp, sb_err *err
         body = NULL;
     }
     sb_resp_header(resp, "ETag", etag);
+    if (synced) sb_resp_header(resp, "X-SB-Easy-Config-Sync", "1");
     sb_resp_header(resp, "X-SB-Easy-Rule-Source", rule_source);
     sb_resp_header(resp, "X-SB-Easy-Profile-Id", profile_id);
     sb_resp_header_n(resp, "X-SB-Easy-Profile-Name", S(profile.name), profile.name_len);
@@ -1284,6 +1421,7 @@ static int handle_host_capture(sb_http_req *req, sb_http_resp *resp, sb_err *err
  * ====================================================================== */
 
 void sb_http_register_hosts_routes(sb_http_server *srv) {
+    sb_http_route(srv, "GET,PUT", "/api/config/default", handle_default_config);
     sb_http_route(srv, "POST", "/api/agent/captures/{digest}", handle_agent_capture);
     sb_http_route(srv, "GET", "/api/hosts/{id}/captures", handle_host_captures);
     sb_http_route(srv, "GET,DELETE", "/api/hosts/{id}/captures/{digest}", handle_host_capture);
@@ -1307,6 +1445,7 @@ void sb_http_register_hosts_routes(sb_http_server *srv) {
     sb_http_route(srv, "GET", "/api/hosts/{id}/outbounds", handle_get_host_outbounds);
     sb_http_route(srv, "PUT", "/api/hosts/{id}/outbounds", handle_set_host_outbounds);
     sb_http_route(srv, "GET", "/api/hosts/{id}/config", handle_host_config);
+    sb_http_route(srv, "GET,PUT", "/api/hosts/{id}/config-state", handle_config_state);
     sb_http_route(srv, "GET", "/api/hosts/{id}/wg-config", handle_host_wg_config);
     sb_http_route(srv, "GET", "/api/hosts/{id}/token", handle_host_token);
     sb_http_route(srv, "POST", "/api/hosts/{id}/rotate-token", handle_rotate_host_token);
@@ -1319,6 +1458,7 @@ void sb_http_register_hosts_routes(sb_http_server *srv) {
     /* Backward-compatible alias used by already released Android apps. */
     sb_http_route(srv, "POST", "/api/agent/enroll", handle_redeem_device_enrollment);
     sb_http_route(srv, "GET", "/api/agent/config", handle_agent_config);
+    sb_http_route(srv, "GET,PUT", "/api/agent/config-state", handle_config_state);
     sb_http_route(srv, "POST", "/api/agent/status", handle_agent_status);
     sb_http_route(srv, "GET", "/api/agent/commands", handle_agent_commands);
     sb_http_route(srv, "POST", "/api/agent/commands/{command_id}/ack", handle_agent_command_ack);

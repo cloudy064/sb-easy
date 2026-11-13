@@ -72,6 +72,20 @@ class ControlPlaneClient(context: Context) : AgentControlPlane {
         }
     }
 
+    override fun fetchConfigState(enrollment: Enrollment): JSONObject? {
+        val response = execute(authenticatedRequest(enrollment, "/api/agent/config-state").get().build())
+        response.use {
+            if (it.code == 404) return null
+            return requireJson(it.code, it.body?.string())
+        }
+    }
+
+    override fun putConfigState(enrollment: Enrollment, body: JSONObject): JSONObject {
+        val response = execute(authenticatedRequest(enrollment, "/api/agent/config-state")
+            .put(body.toString().toRequestBody(JSON_MEDIA_TYPE)).build())
+        response.use { return requireJson(it.code, it.body?.string()) }
+    }
+
     override fun reportStatus(enrollment: Enrollment, body: JSONObject) {
         executeAuthenticated(enrollment, "/api/agent/status", "POST", body).close()
     }

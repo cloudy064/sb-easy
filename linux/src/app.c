@@ -1063,6 +1063,8 @@ static void build_window(app* a) {
     g_signal_connect(enroll, "clicked", G_CALLBACK(enroll_clicked), a);
     pack(management, enroll);
     pack(management, action(a, "同步配置", SBL_SYNC, NULL));
+    pack(management, action(a, "采用服务器配置", SBL_SYNC_USE_SERVER, NULL));
+    pack(management, action(a, "保留本机修改并同步", SBL_SYNC_KEEP_LOCAL, NULL));
     pack(management, action(a, "脱离管理中心", SBL_DETACH, NULL));
     pack(identity_card, management);
     pack(content, identity_card);

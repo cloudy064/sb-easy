@@ -30,6 +30,8 @@ interface SubscriptionStorage {
 interface AgentControlPlane {
     fun enroll(rawUri: String, device: JSONObject, allowInsecureLocalHttp: Boolean = false): Enrollment
     fun fetchConfig(enrollment: Enrollment, etag: String?, force: Boolean): ConfigFetchResult
+    fun fetchConfigState(enrollment: Enrollment): JSONObject? = null
+    fun putConfigState(enrollment: Enrollment, body: JSONObject): JSONObject = error("Configuration sync unavailable")
     fun reportStatus(enrollment: Enrollment, body: JSONObject)
     fun commands(enrollment: Enrollment): List<AgentCommand>
     fun acknowledge(enrollment: Enrollment, command: AgentCommand, success: Boolean, result: String)

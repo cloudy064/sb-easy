@@ -78,6 +78,21 @@ struct Dashboard: View {
                     }
                 }
                 if let profile = model.selected {
+                    if profile.mode == .managed {
+                        Section("配置同步") {
+                            Text(profile.configSync?.conflict == true ? "服务器与本机修改冲突，待提交修改已保留" : profile.configSync?.pendingPolicy != nil ? "修改待同步到服务器" : "配置由服务器保存，未修改字段继承默认配置")
+                            if let error = profile.configSyncError { Text(error).foregroundStyle(.orange) }
+                            if let sync = profile.configSync, sync.conflict {
+                                DisclosureGroup("核对服务器版本") { Text(sync.remote ?? "").font(.caption) }
+                                Button("保留本机修改并重试") {
+                                    model.run { try await Repository.shared.resolveConfig(profileID: profile.id, expectedRevision: profile.revision, keepLocal: true) }
+                                }.disabled(model.busy)
+                                Button("采用服务器版本") {
+                                    model.run { try await Repository.shared.resolveConfig(profileID: profile.id, expectedRevision: profile.revision, keepLocal: false) }
+                                }.disabled(model.busy)
+                            }
+                        }
+                    }
                     Section("订阅") {
                         ForEach(profile.subscriptions) { subscription in
                             VStack(alignment: .leading, spacing: 5) {

@@ -288,6 +288,8 @@ int sb_store_create_profile(sb_store *s, const sb_config_profile *profile,
                             sb_config_profile *out, sb_err *err);
 int sb_store_update_profile(sb_store *s, const sb_config_profile *profile,
                             sb_config_profile *out, sb_err *err);
+int sb_store_update_profile_at_version(sb_store *s, const sb_config_profile *profile,
+                                       int64_t expected_version, sb_config_profile *out, sb_err *err);
 int sb_store_delete_profile(sb_store *s, const char *id, sb_err *err);
 
 int sb_store_list_hosts(sb_store *s, sb_host_vec *out, sb_err *err);
@@ -380,6 +382,9 @@ sbj *sb_store_list_wg_imports(sb_store *s, sb_err *err);
 /* Fills *out (initialised by the caller with sb_render_request_init). */
 int sb_store_render_request_for_host(sb_store *s, const char *host_id, sb_render_request *out,
                                      sb_err *err);
+/* Shared default profile, projected onto the device's authorized node pool. */
+int sb_store_render_request_for_default(sb_store *s, const char *host_id, sb_render_request *out,
+                                        sb_err *err);
 
 int sb_store_save_capture(sb_store *s, const char *host_id, const char *digest, const void *data, size_t len, sb_err *err);
 sbj *sb_store_list_captures(sb_store *s, const char *host_id, sb_err *err);

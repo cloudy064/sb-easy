@@ -225,10 +225,83 @@ int sbl_enroll(sbj* p, const char* url, const char* code, sb_err* err) {
     sbj_set_str(p, "server", cred.server);
     sbj_set_str(p, "token", cred.token);
     sbj_set_str(p, "host_id", cred.host_id);
+    sbj_del(p, "config_sync");
     sbj_set_str(p, "name",
                 cred.host_name && *cred.host_name ? cred.host_name : "托管连接");
     sb_device_credential_free(&cred);
     return 0;
+}
+static sbj* sync_preferences(const sbj* p) {
+    const sbj* previous = sbj_get(sbj_get(sbj_get(p, "config_sync"), "agent_settings"), "linux_preferences");
+    sbj* out = sbj_is_object(previous) ? sbj_clone(previous) : sbj_object();
+    sbj_del(out, "settings"); sbj_del(out, "subscriptions"); sbj_del(out, "refresh_minutes"); sbj_del(out, "system_proxy");
+    if (sbj_obj_len(sbj_get(p, "settings"))) sbj_set(out, "settings", sbj_clone(sbj_get(p, "settings")));
+    if (sbj_arr_len(sbj_get(p, "subscriptions"))) sbj_set(out, "subscriptions", sbj_clone(sbj_get(p, "subscriptions")));
+    if (sbj_get_bool(p, "system_proxy", false)) sbj_set_bool(out, "system_proxy", true);
+    if (sbj_get_int(p, "refresh_minutes", 360) != 360) sbj_set_int(out, "refresh_minutes", sbj_get_int(p, "refresh_minutes", 360));
+    return out;
+}
+bool sbl_sync_pending(const sbj* p) {
+    const sbj* snapshot = sbj_get(p, "config_sync");
+    if (!snapshot) return false;
+    const sbj* saved = sbj_get(sbj_get(snapshot, "agent_settings"), "linux_preferences");
+    sbj* current = sync_preferences(p);
+    bool pending = saved ? !sbj_equal(current, saved) : sbj_obj_len(current) != 0;
+    sbj_free(current); return pending;
+}
+static int sync_apply_preferences(sbj* p, const sbj* state, sb_err* err) {
+    const sbj* preferences = sbj_get(sbj_get(state, "agent_settings"), "linux_preferences");
+    if (preferences && !sbj_is_object(preferences))
+        return sb_fail(err, SB_ERR_VALIDATION, "Invalid server Linux preferences");
+    const sbj *settings = sbj_get(preferences, "settings"), *subscriptions = sbj_get(preferences, "subscriptions");
+    if ((settings && !sbj_is_object(settings)) || (subscriptions && !sbj_is_array(subscriptions)) ||
+        (sbj_has(preferences, "system_proxy") && !sbj_is_bool(sbj_get(preferences, "system_proxy"))))
+        return sb_fail(err, SB_ERR_VALIDATION, "Invalid server Linux preferences");
+    sbj_set(p, "settings", settings ? sbj_clone(settings) : sbj_object());
+    sbj_set(p, "subscriptions", subscriptions ? sbj_clone(subscriptions) : sbj_array());
+    sbj_set_int(p, "refresh_minutes", sbj_get_int(preferences, "refresh_minutes", 360));
+    sbj_set_bool(p, "system_proxy", sbj_get_bool(preferences, "system_proxy", false));
+    return 0;
+}
+static int sync_exchange(sbj* p, sb_agent_client* client, sbj** output, sb_err* err) {
+    *output = NULL;
+    sbj* remote = sb_agent_client_config_state(client, NULL, err);
+    if (!remote) return -1;
+    const sbj* snapshot = sbj_get(p, "config_sync");
+    sbj* current = sync_preferences(p);
+    bool migrate = !snapshot && !sbj_get_bool(remote, "agent_settings_initialized", false) && !sbj_obj_len(sbj_get(remote, "agent_settings")) && sbj_obj_len(current);
+    if (migrate || sbl_sync_pending(p)) {
+        const sbj* expected = snapshot ? snapshot : remote;
+        sbj *update = sbj_object(), *settings = sbj_clone(sbj_get(expected, "agent_settings"));
+        if (sbj_obj_len(current)) sbj_set(settings, "linux_preferences", sbj_clone(current));
+        else sbj_del(settings, "linux_preferences");
+        sbj_set(update, "base_version", sbj_clone(sbj_get(expected, "base_version")));
+        sbj_set(update, "patch_version", sbj_clone(sbj_get(expected, "patch_version")));
+        sbj_set(update, "patch", sbj_clone(sbj_get(expected, "patch")));
+        sbj_set(update, "agent_settings", settings);
+        if (!sbj_equal(sbj_get(update, "patch"), sbj_get(remote, "patch")) ||
+            !sbj_equal(settings, sbj_get(remote, "agent_settings"))) {
+            sbj* accepted = sb_agent_client_config_state(client, update, err);
+            if (!accepted) { sbj_free(update); sbj_free(current); sbj_free(remote); return -1; }
+            sbj_free(remote); remote = accepted;
+        }
+        sbj_free(update);
+    }
+    sbj_free(current); *output = remote; return 0;
+}
+int sbl_sync_resolve_profile(sbj* p, bool keep_local, bool* changed, sb_err* err) {
+    if (!sbj_string_is(sbj_get(p, "mode"), "managed"))
+        return sb_fail(err, SB_ERR_VALIDATION, "Only managed profiles synchronize with the server");
+    sb_agent_client_options opts = {.server = sbj_get_str(p, "server", ""),
+        .token = sbj_get_str(p, "token", ""), .timeout_ms = 15000};
+    sb_agent_client* client = sb_agent_client_new(&opts, err);
+    if (!client) return -1;
+    sbj* remote = sb_agent_client_config_state(client, NULL, err);
+    sb_agent_client_free(client);
+    if (!remote) return -1;
+    if (!keep_local && sync_apply_preferences(p, remote, err)) { sbj_free(remote); return -1; }
+    sbj_set(p, "config_sync", remote);
+    return sbl_sync_profile(p, changed, err);
 }
 int sbl_sync_profile(sbj* p, bool* changed, sb_err* err) {
     *changed = false;
@@ -239,7 +312,29 @@ int sbl_sync_profile(sbj* p, bool* changed, sb_err* err) {
                                     .timeout_ms = 15000};
     sb_err private_error = {0};
     sb_agent_client* client = sb_agent_client_new(&opts, &private_error);
+    if (!client) return sb_fail(err, SB_ERR_VALIDATION, "Invalid management server credentials");
     sb_agent_client_proxy_capability(client, false);
+    sbj* remote = NULL;
+    if (!sync_exchange(p, client, &remote, &private_error)) {
+        sb_agent_client_free(client);
+        sbj* previous = sync_preferences(p);
+        if (!sbj_has(p, "config_sync") && sbj_obj_len(previous)) sbj_set(p, "config_legacy_backup", sbj_clone(previous));
+        if (sync_apply_preferences(p, remote, err)) { sbj_free(previous); sbj_free(remote); return -1; }
+        sbj* next = sync_preferences(p);
+        char* content = sbj_dump(sbj_get(remote, "config"), -1);
+        *changed = strcmp(sbj_get_str(p, "source", ""), content) != 0 || !sbj_equal(previous, next);
+        sbj_set_str(p, "source", content); sbj_set_str(p, "etag", sbj_get_str(remote, "etag", ""));
+        sbj_set_int(p, "synced_at", (int64_t)time(NULL));
+        sbj_set(p, "config_sync", remote);
+        free(content); sbj_free(previous); sbj_free(next); return 0;
+    }
+    if (private_error.code != SB_ERR_NOT_FOUND) {
+        sb_agent_client_free(client);
+        return sb_fail(err, private_error.code, private_error.code == SB_ERR_CONFLICT ?
+            "Configuration conflict. Local edits were retained; choose server configuration or keep local edits." :
+            "Management sync failed. Saved configuration and pending changes were retained.");
+    }
+    memset(&private_error, 0, sizeof(private_error));
     sb_agent_config_response response = {0};
     int rc = client ? sb_agent_client_poll_config(client, sbj_get_str(p, "etag", ""),
                                                   &response, &private_error)

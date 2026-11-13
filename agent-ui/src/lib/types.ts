@@ -37,6 +37,7 @@ export interface ProxyPayload {
 }
 
 export interface AgentSettings {
+  _sync_version?: { base_version: number; patch_version: number; local_version: number }
   local_proxy_egress?: boolean
   default_proxy_outbound?: string | null
   outbound_server_overrides?: Record<string, string>

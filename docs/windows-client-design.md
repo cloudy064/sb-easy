@@ -1,5 +1,10 @@
 # sb-easy Windows Client Design
 
+Configuration ownership update (2026-11-13): managed clients use the
+[shared server default and per-device patch protocol](config-sync.md).
+The Windows service remains the local execution authority; persistent managed
+settings are synchronized to the server with version checks and conflict recovery.
+
 Status: **approved for implementation**
 
 Implementation update (2026-10-05): an executable development preview

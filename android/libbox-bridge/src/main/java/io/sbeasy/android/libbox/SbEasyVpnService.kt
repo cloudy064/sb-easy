@@ -342,7 +342,10 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
         // keeping the cache namespace preserves rule sets for offline startup.
         val client = io.nekohasekai.libbox.Libbox.newStandaloneCommandClient()
         try {
-            io.sbeasy.android.core.LocalRouting.selectionsFromConfig(config.content).forEach { (tag, selected) ->
+            val selections = if (CoreGraph.repository.managedConfigurationIsServerOwned())
+                io.sbeasy.android.core.managedSelectorDefaults(config.content)
+            else io.sbeasy.android.core.LocalRouting.selectionsFromConfig(config.content)
+            selections.forEach { (tag, selected) ->
                 client.selectOutbound(tag, selected)
             }
         } finally {
@@ -540,10 +543,10 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
 
     override suspend fun selectOutbound(groupTag: String, outboundTag: String) {
         commandMonitor?.selectOutbound(groupTag, outboundTag) ?: error("VPN 未运行")
-        getSharedPreferences(SELECTION_PREFERENCES, MODE_PRIVATE)
-            .edit()
-            .putString(groupTag, outboundTag)
-            .apply()
+        if (!CoreGraph.repository.managedConfigurationIsServerOwned()) {
+            getSharedPreferences(SELECTION_PREFERENCES, MODE_PRIVATE)
+                .edit().putString(groupTag, outboundTag).apply()
+        }
     }
 
     override suspend fun urlTest(groupTag: String) {
@@ -571,6 +574,7 @@ class SbEasyVpnService : VpnService(), CommandServerHandler, RuntimeControl {
     }
 
     private fun restoreRememberedSelections(groups: List<ProxyGroupSnapshot>) {
+        if (CoreGraph.repository.managedConfigurationIsServerOwned()) return
         val preferences = getSharedPreferences(SELECTION_PREFERENCES, MODE_PRIVATE)
         groups.filter { it.selectable }.forEach { group ->
             // Device-owned groups get their authoritative defaults from the

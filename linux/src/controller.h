@@ -25,7 +25,9 @@ typedef enum {
     SBL_PROXY_SETTING,
     SBL_REFRESH_INTERVAL,
     SBL_COPY_PROXY,
-    SBL_SHUTDOWN
+    SBL_SHUTDOWN,
+    SBL_SYNC_KEEP_LOCAL,
+    SBL_SYNC_USE_SERVER
 } sbl_action;
 typedef struct sbl_controller sbl_controller;
 typedef struct {

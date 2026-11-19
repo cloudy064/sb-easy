@@ -222,12 +222,16 @@ static void mutation_authorization(void) {
     server_fixture fixture; fixture_init(&fixture, controller);
     HANDLE pipe = connect_pipe(fixture.name, true);
     sbj *reply = request(pipe, "enrollment.forget"); CHECK(error_is(reply, "FORBIDDEN")); sbj_free(reply);
+    reply = request(pipe, "tailscale.status"); CHECK(error_is(reply, "FORBIDDEN")); sbj_free(reply);
     reply = request(pipe, "status.get"); CHECK(sbj_get_bool(reply, "ok", false)); sbj_free(reply); CloseHandle(pipe);
     pipe = connect_pipe(fixture.name, false);
     char *text = request_text("enrollment.apply", test_enrollment());
     reply = exchange(pipe, text, false); free(text);
     if (sbj_get_bool(reply, "ok", false)) {
         CHECK(sbj_get_bool(sbj_get(reply, "result"), "enrolled", false)); test_redacted(reply); sbj_free(reply);
+        reply = request(pipe, "tailscale.status");
+        CHECK(sbj_get_bool(reply, "ok", false));
+        CHECK(!sbj_get_bool(sbj_get(reply, "result"), "active", true)); test_redacted(reply); sbj_free(reply);
         reply = request(pipe, "config.refresh");
         const sbj *status = sbj_get(reply, "result");
         CHECK(sbj_string_is(sbj_get(status, "downloaded_etag"), "revision-1") && sbj_is_null(sbj_get(status, "active_etag")));
@@ -238,6 +242,7 @@ static void mutation_authorization(void) {
     } else {
         /* Noninteractive nonadministrator CI identities must remain forbidden. */
         CHECK(error_is(reply, "FORBIDDEN"));
+        sbj_free(reply); reply = request(pipe, "tailscale.status"); CHECK(error_is(reply, "FORBIDDEN"));
     }
     sbj_free(reply); CloseHandle(pipe);
     fixture_stop(&fixture); fixture_free(&fixture);

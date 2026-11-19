@@ -16,7 +16,7 @@ export function rates(previous: RuntimeSnapshot | null, current: RuntimeSnapshot
 export function shortVersion(value: string | null | undefined): string { return value ? value.replace(/^"|"$/g, '').slice(0, 14) : '—' }
 export function nodeKind(value: string): string {
   const key = value.toLowerCase()
-  return ({ selector: '手动代理组', urltest: '自动测速组', direct: '直接连接', block: '阻止连接' } as Record<string, string>)[key] ?? value
+  return ({ selector: '手动代理组', urltest: '自动测速组', direct: '直接连接', block: '阻止连接', tailscale: 'Tailscale 内网' } as Record<string, string>)[key] ?? value
 }
 export function ruleAction(value: string): string {
   return ({ route: '按出口转发', sniff: '识别域名与协议', 'hijack-dns': '使用分流 DNS', reject: '阻止连接', resolve: '解析目标地址', 'route-options': '调整连接选项' } as Record<string, string>)[value] ?? '由内核处理'

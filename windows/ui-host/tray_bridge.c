@@ -14,7 +14,7 @@ sbj *sbw_tray_request(const char *body, size_t length, sbw_error *error) {
         "preferences.cloud.login", "preferences.cloud.mfa", "preferences.cloud.logout", "preferences.cloud.get",
         "preferences.cloud.put", "preferences.cloud.delete", "mode.set", "management.settings.get", "management.settings.set",
         "subscriptions.import", "subscriptions.refresh", "subscriptions.fetch", "subscriptions.save", "subscriptions.remove",
-        "connection.start", "connection.stop", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot",
+        "connection.start", "connection.stop", "runtime.snapshot", "tailscale.status", "traffic.snapshot", "traffic.clear", "logs.snapshot",
         "extensions.list", "extensions.change", "extensions.catalog", "extensions.catalog_update", "extensions.rollback",
         "extensions.install", "extensions.progress", "httpdebug.open", "httpdebug.export", "httpdebug.trust",
         "httpdebug.untrust", "httpdebug.start", "httpdebug.stop", "httpdebug.snapshot", "httpdebug.attach", "httpdebug.certificate",

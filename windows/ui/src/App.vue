@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import SubscriptionsPanel from './components/SubscriptionsPanel.vue'
 import ServiceRouting from './components/ServiceRouting.vue'
+import TailscalePanel from './components/TailscalePanel.vue'
 import LocalGroupEditor from './components/LocalGroupEditor.vue'
 import ManagementSettingsPanel from './components/ManagementSettings.vue'
 import UsageModePanel from './components/UsageMode.vue'
@@ -601,6 +602,7 @@ onBeforeUnmount(() => {
         <section class="connection-card" :class="{ 'is-running': status?.core_running }" aria-labelledby="connection-title" aria-live="polite" :aria-busy="locked" data-testid="connection-summary">
           <div class="connection-top"><div><div class="state-kicker"><span class="state-dot" :class="{ ready: status?.core_running }"></span>{{ status?.core_running ? '本机代理已就绪' : '连接状态' }}</div><h2 id="connection-title">{{ stateLabel }}</h2><p>{{ stateDetail }}</p></div><div class="connection-action"><button v-if="!status?.core_running || controls.canStart || operation === 'start'" class="connect-button" data-testid="connection-start" :disabled="!canAct('connection.start') || !controls.canStart" @click="changeConnection('start')"><AppIcon name="power" />{{ operation === 'start' ? '正在启动…' : controls.startLabel }}</button><button v-if="controls.canStop || operation === 'stop'" class="secondary-button" data-testid="connection-stop" :disabled="!canAct('connection.stop') || !controls.canStop" @click="changeConnection('stop')">{{ operation === 'stop' ? '正在断开…' : '断开连接' }}</button></div></div>
         </section>
+        <TailscalePanel :bridge="bridge" :supported="supports('tailscale.status')" :connected="connection === 'online'" :running="status?.core_running === true" :disabled="locked" :auto-refresh="autoRefresh" :revision="`${configMetadata?.active_etag ?? ''}/${configMetadata?.downloaded_etag ?? ''}`" />
         <ServiceRouting v-if="routingGroups.length" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.set')" :pending="pendingRouting" :live="config?.routing_live === true" @select="setServiceRouting" />
         <HealthSettingsPanel v-if="supports('routing.health.set') && config?.health_policy && config.candidate_available" :policy="config.health_policy" :snapshot="config.health" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.health.set')" :running="status?.core_running === true" @save="saveHealthPolicy" @automatic="saveAutomaticGroup" @check="checkHealth" />
         <LocalGroupEditor v-if="supports('routing.group_save') && config?.candidate_available" :groups="routingGroups" :nodes="routingNodes" :disabled="!canAct('routing.group_save')" :pending="pendingRouting" @save="saveLocalGroup" @remove="removeLocalGroup" />

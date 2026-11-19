@@ -1,5 +1,18 @@
 # sb-easy Windows service and local web management
 
+## 0.8.1: local Tailscale status
+
+The connection page now shows whether the central Tailscale configuration has
+been downloaded and loaded, followed by the running engine's actual login and
+connection state, device name, network and Tailscale addresses. Status refreshes
+every ten seconds while the page is visible; addresses can be copied directly.
+Unavailable or expired status is never presented as connected. Configuration
+and authorization keys remain managed in the central panel.
+
+The C11 service reads the bundled sing-box API on a private authenticated
+loopback listener, verifies process ownership and returns only display fields.
+The MSI upgrade preserves the existing device registration and Tailscale state.
+
 ## 0.8.0: browser management with a lightweight tray
 
 The native implementation remains C11. The standalone WebView2 desktop window
@@ -24,7 +37,7 @@ tray restarts, reopen the page from the tray to obtain its new session.
 
 ### Installation and upgrades
 
-Install the **0.8.0 MSI** with administrator rights. An upgrade replaces the old
+Install the **0.8.1 MSI** with administrator rights. An upgrade replaces the old
 desktop host with the tray/web launcher, removes its packaged WebView2 loader
 and desktop shortcut, and preserves `%ProgramData%\sb-easy` device data. The
 background service is restarted during installation. The Start menu shortcut
@@ -48,7 +61,7 @@ From PowerShell with Visual Studio C tools, Python 3.10+, OpenSSL and Node.js:
 ```
 
 WiX 5.0.2 and its `WixToolset.UI.wixext/5.0.2` extension are required to package
-the service installer. The result is `build/sb-easy-0.8.0-windows-x64.msi`, plus
+the service installer. The result is `build/sb-easy-0.8.1-windows-x64.msi`, plus
 a portable ZIP. `windows/ui` is now browser UI source, also shared by optional
 plugin bundles; it is not a WebView2 desktop client. The native HTTP tests cover
 authorization, foreign-origin rejection, file boundaries and RPC transport.

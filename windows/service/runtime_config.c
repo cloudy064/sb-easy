@@ -320,6 +320,32 @@ static int diagnostic_inbound(sbj *candidate,sbw_runtime_config *out,sbw_error *
     sbj_arr_push(users,user);sbj_set(in,"users",users);sbj_arr_push(inbounds,in);return 0;
 }
 
+static int tailscale_api(sbj *candidate, sbw_runtime_config *out, sbw_error *error) {
+    bool enabled = false;
+    const sbj *endpoints = sbj_get(candidate, "endpoints");
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
+        if (sbj_string_is(sbj_get(sbj_arr_at(endpoints, i), "type"), "tailscale")) enabled = true;
+    if (!enabled) return 0;
+    sbw_runtime_config api = {0};
+    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+        if (choose_local_api(&api, error)) { sbw_runtime_config_free(&api); return -1; }
+        if (api.port != out->port && api.port != out->probe_port) break;
+        sbw_runtime_config_free(&api);
+    }
+    if (!api.port) return fail(error, "RUNTIME_RESOURCE_ERROR");
+    out->tailscale_port = api.port; out->tailscale_secret = api.secret;
+    /* Downloaded services remain forbidden. This service is owned entirely by
+     * the local adapter and exposes no listener outside loopback. */
+    sbj *services = sbj_array(), *service = sbj_object();
+    sbj_set_str(service, "type", "api");
+    sbj_set_str(service, "tag", "sb-easy-local-status");
+    sbj_set_str(service, "listen", "127.0.0.1");
+    sbj_set_int(service, "listen_port", out->tailscale_port);
+    sbj_set_str(service, "secret", out->tailscale_secret);
+    sbj_arr_push(services, service); sbj_set(candidate, "services", services);
+    return 0;
+}
+
 int sbw_runtime_config_prepare(const char *json, size_t length, const char *server,
                                sbw_runtime_config *out, sbw_error *error) {
     if (!out || !json || !length || length > 8U * 1024U * 1024U || !server) return fail(error, "RUNTIME_CONFIG_INVALID");
@@ -343,7 +369,8 @@ int sbw_runtime_config_prepare(const char *json, size_t length, const char *serv
     /* Capture stderr through the service's bounded, redacting collector. */
     sbj *log = sbj_object(); sbj_set_str(log, "level", "debug"); sbj_set_bool(log, "timestamp", true); sbj_set(candidate, "log", log);
     if (adapt_endpoints(candidate, error) != 0 || adapt_inbounds(candidate, out, error) != 0 || adapt_routes(candidate, host, error) != 0 ||
-        choose_local_api(out, error) != 0 || diagnostic_inbound(candidate,out,error) != 0) goto done;
+        choose_local_api(out, error) != 0 || diagnostic_inbound(candidate,out,error) != 0 ||
+        tailscale_api(candidate, out, error) != 0) goto done;
     char controller[32];
     (void)sprintf_s(controller, sizeof(controller), "127.0.0.1:%u", out->port);
     sbj *experimental = sbj_object(), *clash = sbj_object(), *origins = sbj_array();
@@ -374,7 +401,8 @@ done:
 
 void sbw_runtime_config_free(sbw_runtime_config *config) {
     if (!config) return;
-    sbw_secret_free(config->json); sbw_secret_free(config->secret); sbw_secret_free(config->probe_secret); free(config->interface_name);
+    sbw_secret_free(config->json); sbw_secret_free(config->secret); sbw_secret_free(config->probe_secret);
+    sbw_secret_free(config->tailscale_secret); free(config->interface_name);
     memset(config, 0, sizeof(*config));
 }
 
@@ -395,6 +423,10 @@ static int listener_owner(unsigned short port, DWORD expected_pid) {
     }
     free(table);
     return owner;
+}
+
+int sbw_runtime_loopback_owner(unsigned short port, DWORD pid, sbw_error *error) {
+    return port && pid && listener_owner(port, pid) == 1 ? 0 : fail(error, "CORE_HEALTH_IDENTITY");
 }
 
 static int interrupted(HANDLE cancel, HANDLE process, ULONGLONG deadline, sbw_error *error) {

@@ -12,6 +12,9 @@ int main(void) {
     CHECK(request && sbj_string_is(sbj_get(request, "method"), "config.resolve"));
     CHECK(sbj_get_bool(sbj_get(request, "params"), "keep_local", false));
     sbj_free(request);
+    const char tailscale[] = "{\"version\":1,\"id\":\"test\",\"method\":\"tailscale.status\",\"params\":{}}";
+    request = sbw_tray_request(tailscale, sizeof tailscale - 1, &error);
+    CHECK(request && sbj_string_is(sbj_get(request, "method"), "tailscale.status")); sbj_free(request);
     const char unknown[] = "{\"version\":1,\"id\":\"test\",\"method\":\"shell.execute\",\"params\":{}}";
     CHECK(!sbw_tray_request(unknown, sizeof unknown - 1, &error));
     CHECK(!strcmp(error.code, "NOT_IMPLEMENTED"));

@@ -32,6 +32,7 @@ char *sbw_handle_request(const char *raw, size_t length, sbw_controller *control
         const char *names[] = {"protocol.hello", "status.get", "enrollment.status", "enrollment.apply", "enrollment.forget", "config.refresh", "config.resolve", "config.summary", "config.validate", "routing.gpt_default", "routing.gpt_server", "routing.gpt_node", "routing.set", "routing.group_save", "routing.group_remove", "routing.probe", "routing.delay", "preferences.export", "preferences.preview", "preferences.apply", "preferences.cloud.login", "preferences.cloud.mfa", "preferences.cloud.logout", "preferences.cloud.get", "preferences.cloud.put", "preferences.cloud.delete", "routing.health.set", "routing.health.check", "routing.automatic.set", "mode.set", "management.settings.get", "management.settings.set", "subscriptions.import", "subscriptions.refresh", "subscriptions.fetch", "subscriptions.save", "subscriptions.remove", "connection.start", "connection.stop", "config.inspect", "runtime.snapshot", "traffic.snapshot", "traffic.clear", "logs.snapshot", "extensions.list", "extensions.change", "extensions.catalog", "extensions.catalog_update", "extensions.rollback", "extensions.install", "extensions.progress", "httpdebug.start", "httpdebug.stop", "httpdebug.snapshot", "httpdebug.attach", "httpdebug.certificate", "capture.snapshot", "capture.validate", "capture.configure", "capture.rotate", "capture.read", "capture.delete", "capture.upload"};
         for (size_t i = 0; i < (controller ? sizeof(names) / sizeof(names[0]) : 3U); ++i) sbj_arr_push(methods, sbj_str(names[i]));
         if (controller) {
+            sbj_arr_push(methods, sbj_str("tailscale.status"));
             const char *updates[] = {"updates.status", "updates.check", "updates.download", "updates.install", "updates.cancel", "updates.recover"};
             for (size_t i = 0; i < sizeof(updates) / sizeof(updates[0]); ++i) sbj_arr_push(methods, sbj_str(updates[i]));
         }
@@ -39,6 +40,7 @@ char *sbw_handle_request(const char *raw, size_t length, sbw_controller *control
         sbj_set_bool(features, "enrollment", controller != NULL); sbj_set_bool(features, "config_sync", controller != NULL);
         sbj_set_bool(features, "config_validation", controller != NULL);
         sbj_set_bool(features, "runtime_observability", controller != NULL);
+        sbj_set_bool(features, "tailscale_status", controller != NULL);
         sbj_set_bool(features, "vpn", controller != NULL);
         sbj_set_bool(features, "connection_control", controller != NULL); sbj_set_bool(features, "proxy_selection", controller != NULL);
         sbj_set_bool(features, "background_management", controller != NULL);

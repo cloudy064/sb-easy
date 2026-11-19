@@ -164,6 +164,15 @@ export interface RuntimeSnapshot {
   connections: RuntimeConnection[]; nodes: ProxyNode[]
 }
 
+export interface TailscaleEndpoint {
+  tag: string; backend_state: string; network_name: string
+  self?: { hostname: string; dns_name: string; ips: string[]; online: boolean; expired: boolean } | null
+}
+export interface TailscaleStatus {
+  configured: boolean; active: boolean; available: boolean; endpoints: TailscaleEndpoint[]
+  error?: { code: string; message: string }
+}
+
 export interface TrafficRow { app: string; host: string; outbound: string; rule: string; upload: number; download: number; last_seen: number }
 export interface TrafficSnapshot { version: 1; upload: number; download: number; sampled_at: number; cleared_at: number; limited: boolean; storage_ok: boolean; rows: TrafficRow[] }
 export interface CaptureConfig {
@@ -258,6 +267,7 @@ export interface ResultMap {
   'connection.stop': StatusResult
   'config.inspect': ConfigInspection
   'runtime.snapshot': RuntimeSnapshot
+  'tailscale.status': TailscaleStatus
 }
 
 export type Method = keyof ResultMap
@@ -423,7 +433,7 @@ export function validParams<M extends Method>(method: M, value: unknown): value 
   if (method === 'capture.upload' || method === 'capture.delete' || method === 'capture.read') return typeof value.digest === 'string' && /^[a-f0-9]{64}$/.test(value.digest) && (method === 'capture.read' ? Object.keys(value).length === 2 && safeCount(value.offset) && value.offset <= 786432 : Object.keys(value).length === 1)
   if (method === 'routing.gpt_node') return Object.keys(value).length === 1 && boundedString(value.outbound, 512) && !/[\u0000-\u001f\u007f]/.test(value.outbound) && new TextEncoder().encode(value.outbound).length <= 512
   if (method === 'enrollment.apply') return Object.keys(value).length === 1 && boundedString(value.uri, 16_384)
-  if (!['routing.health.check', 'management.settings.get', 'extensions.catalog', 'extensions.progress', 'extensions.list', 'service.start', 'protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot', 'traffic.snapshot', 'traffic.clear', 'logs.snapshot', 'capture.snapshot', 'capture.rotate'].includes(method)) return false
+  if (!['tailscale.status', 'routing.health.check', 'management.settings.get', 'extensions.catalog', 'extensions.progress', 'extensions.list', 'service.start', 'protocol.hello', 'enrollment.status', 'enrollment.forget', 'status.get', 'config.summary', 'config.refresh', 'config.validate', 'routing.gpt_default', 'routing.gpt_server', 'connection.start', 'connection.stop', 'config.inspect', 'runtime.snapshot', 'traffic.snapshot', 'traffic.clear', 'logs.snapshot', 'capture.snapshot', 'capture.rotate'].includes(method)) return false
   return Object.keys(value).length === 0
 }
 
@@ -434,6 +444,7 @@ function validExtensionTrust(value: Record<string, unknown>): boolean {
 export function validResult<M extends Method>(method: M, value: unknown): value is ResultMap[M] {
   if (!isRecord(value)) return false
   switch (method) {
+    case 'tailscale.status': return validTailscaleStatus(value)
     case 'updates.status': case 'updates.check': case 'updates.download': case 'updates.install': case 'updates.cancel': case 'updates.recover': return validUpdateStatus(value)
     case 'preferences.export': return validPreferencesEnvelope(value.envelope)
     case 'preferences.preview': return validSession(value.preview_id) && safeCount(value.expires_in_seconds) && value.expires_in_seconds <= 300 && boundedStrings(value.subscription_names, 16, 100) && safeCount(value.node_count) && value.node_count <= 4096 && safeCount(value.routing_count) && value.routing_count <= 64 && value.device_settings_preserved === true
@@ -543,6 +554,23 @@ export function validResult<M extends Method>(method: M, value: unknown): value 
 
 function safeCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+function validTailscaleStatus(value: Record<string, unknown>): boolean {
+  const text = (item: unknown, max: number) => typeof item === 'string' && item.length <= max && !/[\u0000-\u001f\u007f]/.test(item)
+  const keys = (item: Record<string, unknown>, allowed: string[]) => Object.keys(item).every(key => allowed.includes(key))
+  return keys(value, ['configured', 'active', 'available', 'endpoints', 'error']) &&
+    ['configured', 'active', 'available'].every(key => typeof value[key] === 'boolean') &&
+    Array.isArray(value.endpoints) && value.endpoints.length <= 32 && value.endpoints.every(endpoint =>
+      isRecord(endpoint) && keys(endpoint, ['tag', 'backend_state', 'network_name', 'self']) &&
+      text(endpoint.tag, 512) && text(endpoint.backend_state, 64) && text(endpoint.network_name, 256) &&
+      (endpoint.self === undefined || endpoint.self === null || (isRecord(endpoint.self) &&
+        keys(endpoint.self, ['hostname', 'dns_name', 'ips', 'online', 'expired']) &&
+        text(endpoint.self.hostname, 253) && text(endpoint.self.dns_name, 253) &&
+        Array.isArray(endpoint.self.ips) && endpoint.self.ips.length <= 64 &&
+        endpoint.self.ips.every(ip => text(ip, 64) && /^[a-fA-F0-9:.]+$/.test(ip as string)) &&
+        typeof endpoint.self.online === 'boolean' && typeof endpoint.self.expired === 'boolean'))) &&
+    (value.error === undefined || (isRecord(value.error) && keys(value.error, ['code', 'message']) &&
+      text(value.error.code, 128) && text(value.error.message, 2048)))
 }
 function displayString(value: unknown): value is string { return typeof value === 'string' && value.length <= 128 && !value.includes('\0') }
 function displayStrings(value: unknown, max: number): boolean {

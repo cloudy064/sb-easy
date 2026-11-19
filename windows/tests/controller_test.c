@@ -309,6 +309,25 @@ static void test_preferences_import(void) {
 static DWORD WINAPI refresh_worker(void *context) {
     refresh_task *task = context; task->result = call(task->controller, "config.refresh", task->params, true); return 0;
 }
+static void test_tailscale_projection(void) {
+    test_data data; test_data_init(&data);
+    sbw_controller *controller = test_controller(&data, NULL);
+    sbj *empty = sbj_object(), *enrollment = test_enrollment();
+    expect_error(controller, "tailscale.status", empty, false, "FORBIDDEN");
+    sbj *extra = sbj_parse_cstr("{\"secret\":\"not-accepted\"}");
+    expect_error(controller, "tailscale.status", extra, true, "INVALID_REQUEST"); sbj_free(extra);
+    sbj *status = call(controller, "tailscale.status", empty, true);
+    CHECK(!sbj_get_bool(status, "configured", true) && !sbj_get_bool(status, "active", true)); sbj_free(status);
+    status = call(controller, "enrollment.apply", enrollment, true); sbj_free(status);
+    sbj_set_str(data.download, "content", "{\"endpoints\":[{\"type\":\"tailscale\",\"tag\":\"company-pc\",\"auth_key\":\"FIXTURE_SECRET_NEVER_RETURN_THIS\"}]}");
+    status = call(controller, "config.refresh", empty, true); sbj_free(status);
+    status = call(controller, "tailscale.status", empty, true);
+    CHECK(sbj_get_bool(status, "configured", false));
+    CHECK(!sbj_get_bool(status, "active", true) && !sbj_get_bool(status, "available", true));
+    CHECK(sbj_is_array(sbj_get(status, "endpoints")) && !sbj_arr_len(sbj_get(status, "endpoints")));
+    sbj_free(status); sbj_free(empty); sbj_free(enrollment); sbw_controller_free(controller); test_data_free(&data);
+}
+
 int wmain(int argc, wchar_t **argv) {
     int helper = sbw_core_signal_helper(argc, argv);
     if (helper >= 0) return helper;
@@ -404,5 +423,6 @@ int wmain(int argc, wchar_t **argv) {
     test_independent_modes();
     test_health_settings();
     test_preferences_import();
+    test_tailscale_projection();
     puts("C controller: enrollment, persistence, 304, fixture validation, revision binding, authorization, concurrency and redaction passed."); return 0;
 }

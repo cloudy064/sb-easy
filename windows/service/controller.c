@@ -5,6 +5,7 @@
 #include "controller.h"
 #include "runtime_config.h"
 #include "dashboard.h"
+#include "tailscale_status.h"
 #include "routing.h"
 #include "traffic.h"
 #include "capture.h"
@@ -1460,6 +1461,46 @@ done:
     sbj_free(connections); sbj_free(proxies);
     ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
 }
+static bool snapshot_has_tailscale(const sbj *snapshot) {
+    const sbj *content = sbj_get(snapshot, "content");
+    if (!sbw_json_string(content, 8U * 1024U * 1024U, false)) return false;
+    sbj *config = sbw_json_parse(content->v.str.ptr, content->v.str.len, 40, NULL);
+    const sbj *endpoints = sbj_get(config, "endpoints");
+    bool found = false;
+    for (size_t i = 0; i < sbj_arr_len(endpoints); ++i)
+        if (sbj_string_is(sbj_get(sbj_arr_at(endpoints, i), "type"), "tailscale")) found = true;
+    sbj_free(config); return found;
+}
+
+static sbj *tailscale_snapshot(sbw_controller *controller, sbw_error *error) {
+    if (!TryAcquireSRWLockExclusive(&controller->mutation_lock)) {
+        sbw_fail(error, "BUSY", "A connection operation is in progress."); return NULL;
+    }
+    sbj *result = NULL, *live = NULL;
+    if (!ready(controller, error) || cancelled(controller, error)) goto done;
+    observe_core(controller, false);
+    bool configured = snapshot_has_tailscale(controller->candidate);
+    bool active = controller->runtime.core_running && snapshot_has_tailscale(controller->active);
+    result = sbj_object();
+    sbj_set_bool(result, "configured", configured); sbj_set_bool(result, "active", active);
+    sbj_set_bool(result, "available", false); sbj_set(result, "endpoints", sbj_array());
+    if (active) {
+        sbw_error query_error = {0}; sbw_core_status process = {0};
+        if (sbw_core_poll(controller->core, &process, &query_error) == 0 && process.process_running &&
+            sbw_tailscale_status_get(&controller->active_config, process.process_id, controller->cancel, &live, &query_error) == 0) {
+            sbj_set_bool(result, "available", true);
+            sbj_set(result, "endpoints", sbj_clone(sbj_get(live, "endpoints")));
+        } else {
+            sbj *failure = sbj_object();
+            sbj_set_str(failure, "code", *query_error.code ? query_error.code : "TAILSCALE_UNAVAILABLE");
+            sbj_set_str(failure, "message", "Tailscale status is temporarily unavailable.");
+            sbj_set(result, "error", failure);
+        }
+    }
+done:
+    sbj_free(live); ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
+}
+
 static int extension_stop(sbw_controller *c, const char *id, bool revoked, sbw_error *error) {
     if (revoked && sb_streq(id, "http-debug")) {
         /* Revoke execution before any bounded but potentially slow core
@@ -1683,6 +1724,11 @@ sbj *sbw_controller_dispatch(sbw_controller *controller, const char *method, con
         if(!result){ReleaseSRWLockExclusive(&controller->mutation_lock);sbw_fail(error,"EXTENSION_FAILED","Statistics worker did not respond.");return NULL;}
         sbj_set_bool(result, "storage_ok", controller->traffic_storage_ok);
         ReleaseSRWLockExclusive(&controller->mutation_lock); return result;
+    }
+    if (sb_streq(method, "tailscale.status")) {
+        if (!authorized) { sbw_fail(error, "FORBIDDEN", "This operation requires an administrator or the active console session."); return NULL; }
+        if (!sbj_is_object(params) || sbj_obj_len(params)) { sbw_fail(error, "INVALID_REQUEST", "Expected empty params."); return NULL; }
+        return tailscale_snapshot(controller, error);
     }
     if (sb_streq(method, "runtime.snapshot") || sb_streq(method, "config.inspect")) {
         if (!authorized) { sbw_fail(error, "FORBIDDEN", "This operation requires an administrator or the active console session."); return NULL; }

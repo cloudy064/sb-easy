@@ -196,7 +196,7 @@ char *sb_subscription_fetcher_fetch_metadata(sb_subscription_fetcher *f, const c
         }
         req.max_body_bytes = f->options.maximum_body_bytes;
         req.max_redirects = 0;
-        req.user_agent = "sb-easy-cpp/" SB_EASY_VERSION;
+        req.user_agent = "sb-easy/" SB_EASY_VERSION " (sing-box)";
         sb_http_response resp;
         sb_err herr = {0};
         int rc = sb_http_perform(&req, &resp, &herr);

@@ -585,7 +585,7 @@ TEST(subscription_fetcher_against_local_server) {
     char *body = sb_subscription_fetcher_fetch(f, URL("/sub"), &len, &err); /* 1 */
     CHECK_STR(body, "trojan://pw@t.example:443#fetched\n");
     CHECK_EQ_INT(len, 34);
-    CHECK_CONTAINS(s.last_request, "User-Agent: sb-easy-cpp/");
+    CHECK_CONTAINS(s.last_request, "User-Agent: sb-easy/" SB_EASY_VERSION " (sing-box)\r\n");
     CHECK_CONTAINS(s.last_request, "Accept: text/plain, application/yaml, application/json");
     free(body);
 

@@ -1,6 +1,7 @@
 /target
 /build
 /dist/
+/tmp/
 __pycache__/
 
 # Node / Vue
@@ -53,6 +54,7 @@ cutover-backup-*/
 # Downloadable release artifacts
 /downloads/*.apk
 /downloads/*.sha256
+/downloads/windows-v*/
 /windows/ui/dist-capture/
 
 /windows/ui/dist-statistics/

@@ -163,3 +163,9 @@ Default 更新后，未被设备 patch 覆盖的字段在下次同步时生效�
 - **安全**：随机 `JWT_SECRET`；强 admin 密码；Clash API 监听 `127.0.0.1`；公网部署收紧
   `CORS_ORIGINS` 与防火墙。
 - **健康**：容器 healthcheck + `restart: unless-stopped`，重启/宕机自恢复。
+
+### 平台代理测速
+
+在“代理”页面可以测一个节点，或点击“全部测速”检测所有已启用节点。平台按保存的节点配置启动独立的 sing-box，通过该节点向 `https://www.gstatic.com/generate_204` 发起 HTTPS 请求。显示的毫秒数包括建立连接和完成请求的时间。单次连接超过 6.5 秒会记为未连通。测速进程启动失败或暂时不可用时会保留上次结果。
+
+默认由面板调用镜像内的 `sing-box`，无需设备在线。如果面板容器的网络无法访问节点，可以在同一服务器上运行镜像中的 `sb-easy-c-probe /run/sb-easy/node-probe.sock`，让它使用服务器网络。把同一个私有目录挂载到面板和测速容器，在面板设置 `SB_EASY_PROBE_SOCKET=/run/sb-easy/node-probe.sock`。两个进程需要有权访问该套接字。若服务器已有按路由标记直连的规则，可在测速容器设置与该规则匹配的 `SB_EASY_PROBE_ROUTING_MARK`，并授予设置该标记所需的网络能力。

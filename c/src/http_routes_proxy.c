@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "sb/clash_client.h"
+#include "sb/node_probe.h"
 #include "sb/proxy_parser.h"
 #include "sb/subscription_fetcher.h"
 #include "sb/subscription_service.h"
@@ -152,34 +153,6 @@ static int clash_passthrough(sb_http_req *req, sb_http_resp *resp, clash_method 
     return 0;
 }
 
-/* test_proxy_latency(): NULL-latency (returns false) on any transport error,
- * non-2xx status or missing numeric "delay" (matches the Rust API). */
-static bool test_proxy_latency(sb_http_server *srv, const clash_target *target, const char *tag,
-                               size_t tag_len, double *latency) {
-    if (sb_str_empty(target->base_url)) return false;
-    char *name = sb_http_encode_component_n(tag, tag_len);
-    char *url = sb_http_encode_component(default_delay_url);
-    char *path = sb_asprintf("/proxies/%s/delay?url=%s&timeout=5000", name, url);
-    free(name);
-    free(url);
-    sb_clash_target t = {target->base_url, target->secret};
-    sb_clash_response response = {0};
-    sb_err cerr = {0};
-    bool measured = false;
-    if (sb_clash_get(srv->clash, &t, path, &response, &cerr) == 0) {
-        if (response.status >= 200 && response.status < 300) {
-            const sbj *delay = sbj_get(response.body, "delay");
-            if (sbj_is_number(delay)) {
-                *latency = sbj_as_double(delay, 0.0);
-                measured = true;
-            }
-        }
-        sb_clash_response_free(&response);
-    }
-    free(path);
-    return measured;
-}
-
 /* ---- /api/sing-box/... Clash HTTP control ------------------------------- */
 
 static int h_clash_proxies(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
@@ -291,28 +264,6 @@ static sbj *strvec_json(const sb_strvec *values) {
     sbj *array = sbj_array();
     for (size_t i = 0; i < values->len; ++i) sbj_arr_push(array, sbj_str(values->items[i]));
     return array;
-}
-
-/* {"queued": true, "host": host_id} */
-static void respond_queued(sb_http_resp *resp, const char *host_id) {
-    sbj *body = sbj_object();
-    sbj_set_bool(body, "queued", true);
-    sbj_set_str(body, "host", host_id);
-    sb_resp_json(resp, 200, body);
-}
-
-/* require_host() + enqueue_host_command() for remote latency tests. */
-static int enqueue_remote_test(sb_http_server *srv, const char *host_id, const char *command, sb_err *err) {
-    sb_host host;
-    sb_host_init(&host);
-    int rc = sb_http_require_host(srv, host_id, &host, err);
-    sb_host_free(&host);
-    if (rc != 0) return -1;
-    sb_host_command queued;
-    sb_host_command_init(&queued);
-    rc = sb_store_enqueue_host_command(srv->store, host_id, command, &queued, err);
-    sb_host_command_free(&queued);
-    return rc;
 }
 
 /* required_port(): "<field> must be an integer" / "... between 1 and 65535".
@@ -475,12 +426,12 @@ done:
     return rc;
 }
 
-/* One std::async measurement of test-all. */
+/* Batch checks use the same platform measurement as a single-node request. */
 typedef struct {
     sb_http_server *srv;
-    const clash_target *target;
-    const char *tag;
-    size_t tag_len;
+    const sb_proxy_record *node;
+    sb_err error;
+    int rc;
     double latency;
     bool measured;
     bool threaded;
@@ -489,7 +440,8 @@ typedef struct {
 
 static void *latency_job_main(void *arg) {
     latency_job *job = arg;
-    job->measured = test_proxy_latency(job->srv, job->target, job->tag, job->tag_len, &job->latency);
+    job->rc = sb_node_probe(job->node, job->srv->opts.singbox_binary, &job->error,
+                            &job->latency, &job->measured);
     return NULL;
 }
 
@@ -498,26 +450,10 @@ static void latency_job_wait(latency_job *job) {
     job->threaded = false;
 }
 
-/* POST /api/proxy/nodes/test-all: remote hosts get a queued agent command;
- * locally every enabled node is measured, eight at a time. */
 static int h_nodes_test_all(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     sb_http_server *srv = req->server;
-    char *host_id = trimmed_query_param(req, "host");
-    if (*host_id && strcmp(host_id, "self") != 0) {
-        int rc = enqueue_remote_test(srv, host_id, "test-proxies", err);
-        if (rc == 0) respond_queued(resp, host_id);
-        free(host_id);
-        return rc;
-    }
-    free(host_id);
-
-    clash_target target;
-    if (resolve_clash_target(req, &target, err) != 0) return -1;
     sb_proxy_record_vec all = {0};
-    if (sb_store_list_proxy_nodes(srv->store, &all, err) != 0) {
-        clash_target_free(&target);
-        return -1;
-    }
+    if (sb_store_list_proxy_nodes(srv->store, &all, err) != 0) return -1;
     size_t count = 0;
     for (size_t i = 0; i < all.len; ++i)
         if (all.items[i].enabled) ++count;
@@ -537,17 +473,20 @@ static int h_nodes_test_all(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
             latency_job *job = &jobs[i - offset];
             memset(job, 0, sizeof *job);
             job->srv = srv;
-            job->target = &target;
-            job->tag = nodes[i]->tag;
-            job->tag_len = nodes[i]->tag_len;
+            job->node = nodes[i];
             job->threaded = pthread_create(&job->thread, NULL, latency_job_main, job) == 0;
             if (!job->threaded) latency_job_main(job);
         }
         for (size_t i = offset; i < end; ++i) {
             latency_job *job = &jobs[i - offset];
             latency_job_wait(job);
-            if (rc != 0) continue; /* futures are still awaited after a throw */
-            rc = sb_store_update_proxy_latency(srv->store, nodes[i]->id, job->measured ? &job->latency : NULL,
+            if (rc != 0) continue;
+            if (job->rc != 0) {
+                *err = job->error;
+                rc = -1;
+                continue;
+            }
+            rc = sb_store_update_proxy_latency(srv->store, nodes[i], job->measured ? &job->latency : NULL,
                                                err);
             if (rc != 0) continue;
             sbj_setn(results, nodes[i]->tag, nodes[i]->tag_len, job->measured ? sbj_float(job->latency) : sbj_null());
@@ -565,7 +504,6 @@ static int h_nodes_test_all(sb_http_req *req, sb_http_resp *resp, sb_err *err) {
     sbj_free(results);
     free(nodes);
     sb_proxy_record_vec_free(&all);
-    clash_target_free(&target);
     return rc;
 }
 
@@ -573,29 +511,13 @@ static int h_node_test_latency(sb_http_req *req, sb_http_resp *resp, sb_err *err
     sb_http_server *srv = req->server;
     sb_proxy_record node;
     sb_proxy_record_init(&node);
-    char *host_id = NULL;
     int rc = sb_http_require_proxy(srv, req->params[0], &node, err);
     if (rc != 0) goto done;
-    host_id = trimmed_query_param(req, "host");
-    if (*host_id && strcmp(host_id, "self") != 0) {
-        sbj *tags = sbj_array();
-        sbj_arr_push(tags, sbj_str(node.tag));
-        char *list = sbj_dump(tags, -1);
-        sbj_free(tags);
-        char *command = sb_asprintf("test-proxies %s", list);
-        free(list);
-        rc = enqueue_remote_test(srv, host_id, command, err);
-        free(command);
-        if (rc == 0) respond_queued(resp, host_id);
-        goto done;
-    }
-    clash_target target;
-    rc = resolve_clash_target(req, &target, err);
+    double latency = 0;
+    bool measured = false;
+    rc = sb_node_probe(&node, srv->opts.singbox_binary, err, &latency, &measured);
     if (rc != 0) goto done;
-    double latency = 0.0;
-    bool measured = test_proxy_latency(srv, &target, node.tag, node.tag_len, &latency);
-    clash_target_free(&target);
-    rc = sb_store_update_proxy_latency(srv->store, node.id, measured ? &latency : NULL, err);
+    rc = sb_store_update_proxy_latency(srv->store, &node, measured ? &latency : NULL, err);
     if (rc != 0) goto done;
     sbj *body = sbj_object();
     sbj_set_str(body, "node_id", node.id);
@@ -603,7 +525,6 @@ static int h_node_test_latency(sb_http_req *req, sb_http_resp *resp, sb_err *err
     sbj_set(body, "tested_at", sbj_str_take(sb_http_utc_now()));
     sb_resp_json(resp, 200, body);
 done:
-    free(host_id);
     sb_proxy_record_free(&node);
     return rc;
 }

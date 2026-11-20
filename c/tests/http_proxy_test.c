@@ -503,6 +503,7 @@ static void contract_prepare(sb_store *store, void *user) {
 
 static void contract_customize(sb_http_server_options *o, void *user) {
     contract_ctx *c = user;
+    sb_str_set(&o->singbox_binary, "c/tests/fixtures/probe-sing-box.py");
     if (c->clash_url_override) {
         sb_str_set(&o->clash_api_url, c->clash_url_override);
     } else {
@@ -544,17 +545,6 @@ static char *add_clash_host(sb_test_server *t, const char *name, const char *cla
     sb_host_free(&host);
     sb_host_free(&created);
     return id;
-}
-
-static char *first_pending_command(sb_test_server *t, const char *host_id, size_t *count) {
-    sb_host_command_vec v = {0};
-    sb_err err = {0};
-    char *command = NULL;
-    if (sb_store_list_host_commands(t->store, host_id, true, &v, &err) == 0 && v.len > 0)
-        command = sb_strdup(v.items[0].command);
-    if (count) *count = v.len;
-    sb_host_command_vec_free(&v);
-    return command;
 }
 
 /* ---- the C++ contract (proxy / subscription / Clash / WebSocket parts) ------ */
@@ -689,31 +679,35 @@ TEST(contract) {
     CHECK_STR(jstr(r.json, "server"), "http-proxy.example.com");
     sb_test_response_free(&r);
 
-    /* Single-node latency tests persist a Clash delay result. */
+    /* Global latency tests use the stored node, even if no device has its tag. */
     path = sb_asprintf("/api/proxy/nodes/%s/test-latency", node_id);
     sb_test_request(&t, "POST", path, NULL, &r);
     CHECK_EQ_INT(r.status, 200);
     CHECK_STR(jstr(r.json, "node_id"), node_id);
-    CHECK(sbj_get_double(r.json, "latency", -1) == 42.0);
-    CHECK_CONTAINS(r.body, "\"latency\":42.0");
+    CHECK(sbj_get_double(r.json, "latency", -1) >= 0);
     CHECK(jstr(r.json, "tested_at") != NULL);
     sb_test_response_free(&r);
-    CHECK(sb_fixture_saw(&c.clash,
-                         "GET /local/proxies/HTTP%20SS%20renamed/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
-                         "&timeout=5000"));
     free(path);
 
-    /* Remote latency tests enqueue a targeted agent command. */
+    /* Clients with a saved host still get an immediate platform result. */
     path = sb_asprintf("/api/proxy/nodes/%s/test-latency?host=%s", node_id, c.remote_id);
     sb_test_request(&t, "POST", path, NULL, &r);
-    free(path);
     CHECK_EQ_INT(r.status, 200);
-    CHECK(sbj_get_bool(r.json, "queued", false));
-    CHECK_STR(jstr(r.json, "host"), c.remote_id);
+    CHECK(sbj_get_double(r.json, "latency", -1) >= 0);
+    CHECK(!sbj_get(r.json, "queued"));
     sb_test_response_free(&r);
-    char *command = first_pending_command(&t, c.remote_id, NULL);
-    CHECK_STR(command, "test-proxies [\"HTTP SS renamed\"]");
-    free(command);
+
+    REQUIRE(setenv("SB_EASY_PROBE_SOCKET", "/no-such-platform-worker/socket", 1) == 0);
+    sb_test_request(&t, "POST", path, NULL, &r);
+    unsetenv("SB_EASY_PROBE_SOCKET");
+    CHECK_ERROR(&r, 503, "Platform latency checker unavailable");
+    sb_test_response_free(&r);
+    free(path);
+    path = sb_asprintf("/api/proxy/nodes/%s", node_id);
+    sb_test_request(&t, "GET", path, NULL, &r);
+    CHECK(sbj_get_double(r.json, "latency", -1) >= 0);
+    sb_test_response_free(&r);
+    free(path);
 
     /* sing-box outbound import adds structured nodes. */
     sb_test_request(&t, "POST", "/api/proxy/nodes/import",
@@ -769,20 +763,22 @@ TEST(contract) {
     CHECK_EQ_INT(r.status, 200);
     CHECK_EQ_INT(jint(r.json, "tested"), 2);
     CHECK_EQ_INT(sbj_obj_len(sbj_get(r.json, "results")), 2);
-    CHECK(sbj_get_double(sbj_get(r.json, "results"), "Imported VLESS", -1) == 42.0);
+    CHECK(sbj_get_double(sbj_get(r.json, "results"), "Imported VLESS", -1) >= 0);
     sb_test_response_free(&r);
 
-    /* Remote bulk latency tests enqueue an agent command. */
+    /* The bulk endpoint also ignores an old host selection. */
     path = sb_asprintf("/api/proxy/nodes/test-all?host=%s", c.remote_id);
     sb_test_request(&t, "POST", path, NULL, &r);
     free(path);
     CHECK_EQ_INT(r.status, 200);
-    CHECK(sbj_get_bool(r.json, "queued", false));
+    CHECK_EQ_INT(jint(r.json, "tested"), 2);
+    CHECK(!sbj_get(r.json, "queued"));
     sb_test_response_free(&r);
-    size_t pending = 0;
-    command = first_pending_command(&t, c.remote_id, &pending);
-    CHECK_EQ_INT(pending, 2);
-    free(command);
+    sb_host_command_vec pending = {0};
+    sb_err err = {0};
+    CHECK_EQ_INT(sb_store_list_host_commands(t.store, c.remote_id, true, &pending, &err), 0);
+    CHECK_EQ_INT(pending.len, 0);
+    sb_host_command_vec_free(&pending);
 
     free(sub_id);
     free(node_id);
@@ -958,7 +954,7 @@ TEST(clash_without_url) {
     CHECK_ERROR(&r, 503, "No sing-box Clash API URL is configured");
     sb_test_response_free(&r);
 
-    /* Without a controller latency tests record null. */
+    /* A failed proxy connection records a tested, unreachable node. */
     sb_test_request(&t, "POST", "/api/proxy/nodes",
                     "{\"tag\":\"T\",\"node_type\":\"trojan\",\"server\":\"t.example.com\",\"server_port\":443,"
                     "\"protocol_config\":{\"password\":\"p\"}}",
@@ -1096,7 +1092,8 @@ TEST(proxy_node_validation) {
     sb_test_response_free(&r);
     free(path);
     sb_test_request(&t, "POST", "/api/proxy/nodes/test-all?host=missing-host", NULL, &r);
-    CHECK_ERROR(&r, 404, "Host not found");
+    CHECK_EQ_INT(r.status, 200);
+    CHECK_EQ_INT(jint(r.json, "tested"), 0);
     sb_test_response_free(&r);
     sb_test_request(&t, "POST", "/api/proxy/nodes/test-all", NULL, &r);
     CHECK_EQ_INT(r.status, 200);

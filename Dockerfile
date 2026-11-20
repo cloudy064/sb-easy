@@ -76,10 +76,11 @@ RUN --mount=type=cache,target=/src/build,id=sb-easy-c-panel-build,sharing=locked
         -DSB_EASY_SINGBOX_BRIDGE_INCLUDE_DIR=/opt/sb-easy-singbox \
         -DSB_EASY_WARNINGS_AS_ERRORS=ON \
     && cmake --build build \
-        --target sb-easy-c-render sb-easy-c-server sb-easy-c-agent sb-easy-singbox-embedded-smoke \
+        --target sb-easy-c-probe sb-easy-c-render sb-easy-c-server sb-easy-c-agent sb-easy-singbox-embedded-smoke \
         --parallel 2 \
     && build/sb-easy-singbox-embedded-smoke \
     && install -d /out \
+    && install -m 0755 build/sb-easy-c-probe /out/sb-easy-c-probe \
     && install -m 0755 build/sb-easy-c-render /out/sb-easy-c-render \
     && install -m 0755 build/sb-easy-c-server /out/sb-easy-c-server \
     && install -m 0755 build/sb-easy-c-agent /out/sb-easy-c-agent
@@ -164,6 +165,7 @@ RUN apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update && apt-g
 WORKDIR /app
 COPY --from=backend-builder /out/sb-easy-c-server /usr/local/bin/sb-easy
 COPY --from=backend-builder /out/sb-easy-c-agent /usr/local/bin/sb-easy-agent
+COPY --from=backend-builder /out/sb-easy-c-probe /usr/local/bin/sb-easy-c-probe
 COPY --from=backend-builder /out/sb-easy-c-render /usr/local/bin/sb-easy-c-render
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist

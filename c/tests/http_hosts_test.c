@@ -539,8 +539,8 @@ TEST(hosts_contract) {
 
     r = call_as(&t, original_token, "POST", "/api/agent/proxy-latency",
                 "{\"results\":{\"http-node\":42.5,\"missing-node\":null}}");
-    CHECK_EQ_INT(r.status, 200); /* latency reports update matching proxy tags */
-    CHECK_EQ_INT(jint(r.json, "updated"), 1);
+    CHECK_EQ_INT(r.status, 200); /* legacy reports leave platform measurements intact */
+    CHECK_EQ_INT(jint(r.json, "updated"), 0);
     sb_test_response_free(&r);
 
     char *token_path = sb_asprintf("/api/hosts/%s/token", host_id);
@@ -1277,7 +1277,7 @@ TEST(agent_reports) {
     CHECK_STR(r.body, "{\"ok\":true,\"updated\":0}");
     sb_test_response_free(&r);
     r = call_as(&t, token, "POST", "/api/agent/proxy-latency", "{\"results\":{\"Tag One\":12,\"Other\":null}}");
-    CHECK_STR(r.body, "{\"ok\":true,\"updated\":1}");
+    CHECK_STR(r.body, "{\"ok\":true,\"updated\":0}");
     sb_test_response_free(&r);
 
     /* telemetry snapshot replaces the previous one */

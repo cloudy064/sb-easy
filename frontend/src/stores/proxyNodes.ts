@@ -35,43 +35,16 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     nodes.value = nodes.value.filter(n => n.id !== id)
   }
 
-  async function testLatency(id: string, params: Record<string, string> = {}) {
-    const { data } = await client.post(`/proxy/nodes/${id}/test-latency`, null, { params })
-    if (!data.queued) {
-      const node = nodes.value.find(n => n.id === id)
-      if (node) node.latency = data.latency
+  async function testLatency(id: string) {
+    const { data } = await client.post<{ latency: number | null; tested_at: string }>(
+      `/proxy/nodes/${id}/test-latency`,
+    )
+    const node = nodes.value.find(n => n.id === id)
+    if (node) {
+      node.latency = data.latency
+      node.last_latency_test = data.tested_at
     }
-    return data as { queued?: boolean; latency?: number | null }
-  }
-
-  // One-click delay test. For the local host it returns results synchronously
-  // ({ results }); for a remote host it enqueues the test on that host's agent
-  // ({ queued: true }) and the latencies arrive later (poll fetchNodes()).
-  async function testAll(params: Record<string, string> = {}) {
-    const { data } = await client.post('/proxy/nodes/test-all', null, { params })
-    if (!data.queued) {
-      const results: Record<string, number | null> = data.results || {}
-      for (const node of nodes.value) {
-        if (node.tag in results) node.latency = results[node.tag]
-      }
-    }
-    return data as { queued?: boolean; tested?: number }
-  }
-
-  // Refresh latency / last_latency_test in place — no `loading` flash and the
-  // existing node objects keep their identity, so the live test poller doesn't
-  // flicker the whole list every cycle.
-  async function refreshLatencies() {
-    const { data } = await client.get('/proxy/nodes')
-    const fresh: ProxyNode[] = Array.isArray(data) ? data : []
-    const byId = new Map(fresh.map((f) => [f.id, f]))
-    for (const n of nodes.value) {
-      const f = byId.get(n.id)
-      if (f) {
-        n.latency = f.latency
-        n.last_latency_test = f.last_latency_test
-      }
-    }
+    return data.latency
   }
 
   // Import proxy nodes from an existing config profile or pasted sing-box JSON.
@@ -82,5 +55,5 @@ export const useProxyNodesStore = defineStore('proxyNodes', () => {
     return data as { found: number; added: number; updated: number; skipped: string[]; errors: string[] }
   }
 
-  return { nodes, loading, fetchNodes, refreshLatencies, createNode, updateNode, deleteNode, testLatency, testAll, importNodes }
+  return { nodes, loading, fetchNodes, createNode, updateNode, deleteNode, testLatency, importNodes }
 })

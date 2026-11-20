@@ -2577,59 +2577,20 @@ int sb_store_acknowledge_host_command_n(sb_store *s, const char *host_id, const 
     return rc;
 }
 
-int sb_store_update_proxy_latencies(sb_store *s, const sbj *results, size_t *updated, sb_err *err) {
-    if (!sbj_is_object(results)) return sb_fail(err, SB_ERR_VALIDATION, "results must be a JSON object");
-    LOCK(s);
-    sqlite3 *h = H(s);
-    size_t count = 0;
-    int rc = sbq_begin(h, err);
-    const char *tag;
-    sbj *value;
-    SBJ_OBJ_FOREACH(results, i, tag, value) {
-        if (rc != 0) break;
-        double latency = 0.0;
-        bool has = false;
-        if (!sbj_is_null(value)) {
-            if (!sbj_is_number(value)) {
-                rc = sb_fail(err, SB_ERR_VALIDATION, "proxy latency values must be numbers or null");
-                break;
-            }
-            latency = sbj_as_double(value, 0.0);
-            has = true;
-        }
-        sqlite3_stmt *st = sbq_prepare(h,
-                                       "UPDATE proxy_nodes SET latency = ?1, "
-                                       "last_latency_test = datetime('now') WHERE tag = ?2",
-                                       err);
-        if (!st) {
-            rc = -1;
-            break;
-        }
-        sbq_bind_opt_double(st, 1, has ? &latency : NULL);
-        int bound = sbq_bind_text_n(st, 2, tag, results->v.obj.key_lens[i], err);
-        rc = exec_bound(st, bound, err);
-        if (rc == 0) count += (size_t)sqlite3_changes(h);
-    }
-    if (rc == 0) rc = sbq_commit(h, err);
-    if (rc != 0) sbq_rollback(h);
-    UNLOCK(s);
-    if (rc == 0 && updated) *updated = count;
-    return rc;
-}
-
-int sb_store_update_proxy_latency(sb_store *s, const char *id, const double *latency, sb_err *err) {
+int sb_store_update_proxy_latency(sb_store *s, const sb_proxy_record *expected, const double *latency, sb_err *err) {
     LOCK(s);
     sqlite3 *h = H(s);
     int rc = -1;
     sqlite3_stmt *st = sbq_prepare(h,
                                    "UPDATE proxy_nodes SET latency = ?1, "
-                                   "last_latency_test = datetime('now') WHERE id = ?2",
+                                   "last_latency_test = datetime('now') WHERE id = ?2 AND fingerprint = ?3",
                                    err);
     if (st) {
         sbq_bind_opt_double(st, 1, latency);
-        sbq_bind_text(st, 2, S(id));
+        sbq_bind_text(st, 2, expected->id);
+        sbq_bind_text(st, 3, expected->fingerprint);
         rc = exec_stmt(st, err);
-        if (rc == 0 && sqlite3_changes(h) == 0) rc = sb_fail(err, SB_ERR_NOT_FOUND, "Node not found");
+        if (rc == 0 && sqlite3_changes(h) == 0) rc = sb_fail(err, SB_ERR_CONFLICT, "Node changed during the latency test");
     }
     UNLOCK(s);
     return rc;

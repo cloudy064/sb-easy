@@ -697,25 +697,19 @@ TEST(agent_repository_isolates_tokens_status_commands_and_latency) {
                 "'127.0.0.1', 8388, "
                 "'{\"method\":\"aes-128-gcm\",\"password\":\"secret\"}', "
                 "'latency-node')");
-    sbj *results = sbj_parse_cstr("{\"latency-node\":12.5,\"missing-node\":null}");
-    size_t updated = 99;
-    CHECK_EQ_INT(sb_store_update_proxy_latencies(s, results, &updated, &err), 0);
-    CHECK_EQ_INT(updated, 1);
-    sbj_free(results);
-    results = sbj_parse_cstr("{\"latency-node\":\"x\"}");
-    CHECK_EQ_INT(sb_store_update_proxy_latencies(s, results, &updated, &err), -1);
-    CHECK_STR(err.msg, "proxy latency values must be numbers or null");
-    sbj_free(results);
     double lat = 7.25;
-    CHECK_EQ_INT(sb_store_update_proxy_latency(s, "latency-node", &lat, &err), 0);
     sb_proxy_record rec;
     sb_proxy_record_init(&rec);
     REQUIRE(sb_store_find_proxy_node(s, "latency-node", &rec, &err) == 1);
+    CHECK_EQ_INT(sb_store_update_proxy_latency(s, &rec, &lat, &err), 0);
+    sb_proxy_record_free(&rec);
+    REQUIRE(sb_store_find_proxy_node(s, "latency-node", &rec, &err) == 1);
     CHECK(rec.has_latency && rec.latency == 7.25);
     CHECK(rec.last_latency_test != NULL);
+    sb_str_set(&rec.fingerprint, "previous-configuration");
+    CHECK_EQ_INT(sb_store_update_proxy_latency(s, &rec, NULL, &err), -1);
+    CHECK(err.code == SB_ERR_CONFLICT);
     sb_proxy_record_free(&rec);
-    CHECK_EQ_INT(sb_store_update_proxy_latency(s, "missing-node", NULL, &err), -1);
-    CHECK(err.code == SB_ERR_NOT_FOUND);
 
     REQUIRE(sb_store_find_host(s, created.id, &found, &err) == 1);
     found.enabled = false;
@@ -1341,12 +1335,6 @@ TEST(proxy_bytes_survive_import_latency_and_backup) {
     CHECK_EQ_INT(result.added, 2);
     CHECK_EQ_INT(result.errors.len, 0);
     sb_proxy_upsert_result_free(&result);
-    sbj *latencies = sbj_object();
-    sbj_setn(latencies, "tag\0two", 7, sbj_int(123));
-    size_t updated = 0;
-    REQUIRE(sb_store_update_proxy_latencies(s, latencies, &updated, &err) == 0);
-    CHECK_EQ_INT(updated, 1);
-    sbj_free(latencies);
     sb_proxy_record_vec records = {0};
     REQUIRE(sb_store_list_proxy_nodes(s, &records, &err) == 0);
     REQUIRE(records.len == 2);
@@ -1357,7 +1345,13 @@ TEST(proxy_bytes_survive_import_latency_and_backup) {
     }
     CHECK(strcmp(records.items[0].fingerprint, records.items[1].fingerprint) != 0);
     sb_proxy_record *two = memcmp(records.items[0].tag, "tag\0two", 7) == 0 ? &records.items[0] : &records.items[1];
-    CHECK(two->has_latency && two->latency == 123);
+    double latency = 123;
+    REQUIRE(sb_store_update_proxy_latency(s, two, &latency, &err) == 0);
+    sb_proxy_record measured;
+    sb_proxy_record_init(&measured);
+    REQUIRE(sb_store_find_proxy_node(s, two->id, &measured, &err) == 1);
+    CHECK(measured.has_latency && measured.latency == latency);
+    sb_proxy_record_free(&measured);
     sbj *backup = sb_store_export_backup(s, &err);
     REQUIRE(backup);
     for (size_t i = 0; i < records.len; ++i)

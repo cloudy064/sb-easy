@@ -111,8 +111,7 @@ TEST(background_evaluation_node_failure_staleness_and_restart_persistence) {
     sb_str_set(&input.server, "node.example"); input.server_len = strlen(input.server); input.server_port = 443;
     sbj_set_str(input.protocol_config, "password", "private-node-password");
     REQUIRE(sb_store_create_proxy_node(t.store, &input, &node, &err) == 0); sb_proxy_record_free(&input);
-    sbj *latencies = sbj_object(); sbj_set_null(latencies, node.tag); size_t updated = 0;
-    REQUIRE(sb_store_update_proxy_latencies(t.store, latencies, &updated, &err) == 0); sbj_free(latencies);
+    REQUIRE(sb_store_update_proxy_latency(t.store, &node, NULL, &err) == 0);
     sb_observability *worker = sb_observability_new(db); REQUIRE(sb_observability_start(worker, &err) == 0);
     bool seen = false;
     for (int i = 0; i < 100 && !seen; ++i) {

@@ -6,9 +6,8 @@
         <p class="text-sm text-muted" style="margin-top:0.25rem">{{ t('page.nodes.desc') }}</p>
       </div>
       <div class="flex-center gap-3">
-        <HostSelect @change="load" />
-        <button class="btn-secondary" @click="testAllNodes" :disabled="anyTesting" :title="'Delay-test all enabled nodes via the selected host'">
-          {{ anyTesting ? 'Testing…' : 'Test all' }}
+        <button class="btn-secondary" @click="testAllNodes" :disabled="anyTesting || !store.nodes.some(n => n.enabled)" :title="t('proxies.test.hint')">
+          {{ batchTotal ? t('proxies.test.running') + ' ' + batchDone + '/' + batchTotal : t('proxies.test.all') }}
         </button>
         <button class="btn-secondary" @click="openImport">Import</button>
         <button class="btn-primary" @click="showCreate = true">Add Node</button>
@@ -72,10 +71,10 @@
         <div class="node-card-bottom">
           <div class="latency-group">
             <span v-if="node.latency !== null" class="latency-value" :class="latencyColor(node.latency)">{{ node.latency }}<span class="latency-unit">ms</span></span>
-            <span v-else-if="node.last_latency_test" class="latency-dead" title="Tested but unreachable — kept (it may come from a subscription)">✕ dead</span>
-            <span v-else class="latency-untested">Not tested</span>
-            <button class="latency-test-btn" :disabled="isTesting(node.id)" :title="isTesting(node.id) ? 'Testing…' : 'Test latency'" @click="testOne(node)">
-              <span v-if="isTesting(node.id)" class="spinner-sm"></span>
+            <span v-else-if="node.last_latency_test" class="latency-dead">{{ t('proxies.tier.dead') }}</span>
+            <span v-else class="latency-untested">{{ t('proxies.tier.untested') }}</span>
+            <button class="latency-test-btn" :disabled="!!batchTotal || testing.has(node.id)" :title="t('proxies.test.one')" :aria-label="t('proxies.test.one') + ' · ' + node.tag" @click="testOne(node)">
+              <span v-if="testing.has(node.id)" class="spinner-sm"></span>
               <svg v-else width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8">
                 <path d="M15.5 9a6.5 6.5 0 1 1-2-4.7" stroke-linecap="round"/><path d="M15.5 3v3h-3"/>
               </svg>
@@ -261,7 +260,7 @@
       </div>
     </div>
 
-    <div v-if="toast" class="toast"><div class="toast-item toast-success">{{ toast }}</div></div>
+    <div v-if="toast" class="toast" role="status"><div class="toast-item">{{ toast }}</div></div>
   </div>
 </template>
 
@@ -270,13 +269,10 @@ import { useI18n } from '../composables/i18n'
 const { t } = useI18n()
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useProxyNodesStore } from '../stores/proxyNodes'
-import HostSelect from '../components/HostSelect.vue'
-import { useHostTarget } from '../composables/hostTarget'
 import client from '../api/client'
 import type { ProxyNode, ConfigProfile, Subscription } from '../types'
 
 const store = useProxyNodesStore()
-const { reqParams } = useHostTarget()
 const search = ref('')
 const filterType = ref('')
 const filterSource = ref('')
@@ -433,61 +429,69 @@ const filteredNodes = computed(() =>
   })
 )
 
-// ── Progressive per-node testing ──
-// `testing[id]` drives the per-node spinner. A node clears when its
-// last_latency_test changes from the snapshot taken when testing started — so
-// results from the agent fill in one-by-one as it reports them.
-const testing = reactive<Record<string, boolean>>({})
-const anyTesting = computed(() => Object.keys(testing).length > 0)
-function isTesting(id: string): boolean { return !!testing[id] }
-let pollTimer: ReturnType<typeof setInterval> | null = null
+const testing = reactive(new Set<string>())
+const batchDone = ref(0)
+const batchTotal = ref(0)
+const anyTesting = computed(() => testing.size > 0 || batchTotal.value > 0)
+const toast = ref('')
+let active = true
+let toastTimer: ReturnType<typeof setTimeout> | undefined
 
-function startTesting(ids: string[]): Record<string, string | null> {
-  const snap: Record<string, string | null> = {}
-  for (const id of ids) {
-    testing[id] = true
-    snap[id] = store.nodes.find(n => n.id === id)?.last_latency_test ?? null
-  }
-  return snap
+function notify(message: string) {
+  clearTimeout(toastTimer)
+  toast.value = message
+  toastTimer = setTimeout(() => { toast.value = '' }, 6000)
 }
-function clearTesting() { for (const k of Object.keys(testing)) delete testing[k] }
-function pollResults(snap: Record<string, string | null>) {
-  if (pollTimer) clearInterval(pollTimer)
-  let elapsed = 0
-  pollTimer = setInterval(async () => {
-    elapsed += 1.5
-    await store.refreshLatencies() // in-place: no loading flash, no list flicker
-    for (const n of store.nodes) {
-      if (testing[n.id] && (n.last_latency_test ?? null) !== (snap[n.id] ?? null)) delete testing[n.id]
-    }
-    if (!anyTesting.value || elapsed > 180) {
-      clearInterval(pollTimer!); pollTimer = null; clearTesting()
-    }
-  }, 1500)
+
+async function measure(id: string) {
+  testing.add(id)
+  try {
+    return await store.testLatency(id)
+  } finally {
+    testing.delete(id)
+  }
+}
+
+async function testOne(node: ProxyNode) {
+  if (batchTotal.value || testing.has(node.id)) return
+  try {
+    await measure(node.id)
+  } catch {
+    if (active) notify(t('proxies.test.failed'))
+  }
 }
 
 async function testAllNodes() {
+  if (anyTesting.value) return
   const ids = store.nodes.filter(n => n.enabled).map(n => n.id)
   if (!ids.length) return
-  const snap = startTesting(ids)
-  const r = await store.testAll(reqParams.value as Record<string, string>)
-  if (r.queued) { notify('Test dispatched — results fill in as each node completes.'); pollResults(snap) }
-  else clearTesting() // local host: synchronous, latencies already patched
-}
-async function testOne(node: ProxyNode) {
-  const snap = startTesting([node.id])
-  const r = await store.testLatency(node.id, reqParams.value as Record<string, string>)
-  if (r.queued) pollResults(snap)
-  else delete testing[node.id]
+  batchTotal.value = ids.length
+  batchDone.value = 0
+  let next = 0, failed = 0
+  async function run() {
+    while (active && next < ids.length) {
+      const id = ids[next++]!
+      try {
+        await measure(id)
+      } catch {
+        failed++
+      } finally {
+        batchDone.value++
+      }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(6, ids.length) }, run))
+    if (active) notify(failed ? t('proxies.test.incomplete') + ' ' + failed + '/' + ids.length : t('proxies.test.complete'))
+  } finally {
+    batchTotal.value = 0
+  }
 }
 
-onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
-
-const toast = ref('')
-function notify(msg: string) {
-  toast.value = msg
-  setTimeout(() => (toast.value = ''), 4000)
-}
+onBeforeUnmount(() => {
+  active = false
+  clearTimeout(toastTimer)
+})
 
 function protocolLabel(t: string) {
   return { shadowsocks:'SS', vmess:'VMess', trojan:'Trojan', vless:'VLESS', hysteria2:'HY2', tuic:'TUIC', http:'HTTP', socks:'SOCKS5' }[t] || t

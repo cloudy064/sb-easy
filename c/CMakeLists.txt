@@ -192,6 +192,9 @@ if(BUILD_TESTING)
         set_tests_properties(${name} PROPERTIES
             ENVIRONMENT "SB_EASY_MIGRATIONS=${CMAKE_CURRENT_SOURCE_DIR}/../migrations")
     endforeach()
+    add_test(NAME node_probe_socket
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/node_probe_socket.py
+                $<TARGET_FILE:sb-easy-c-probe>)
     add_test(NAME control_plane_e2e
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/control_plane_e2e.py
             --server $<TARGET_FILE:sb-easy-c-server> --agent $<TARGET_FILE:sb-easy-c-agent>)

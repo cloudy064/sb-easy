@@ -1287,12 +1287,23 @@ static int handle_agent_proxy_latency(sb_http_req *req, sb_http_resp *resp, sb_e
     if (resolve_agent_host(req, &host, err) != 0) goto done;
     body = sb_req_json_object(req, err);
     if (!body) goto done;
-    size_t updated = 0;
+    /* Previously queued agents may still report. Platform measurements have
+     * one origin, so acknowledge these reports without changing node health. */
     const sbj *results = sbj_get(body, "results");
-    if (results && sb_store_update_proxy_latencies(req->server->store, results, &updated, err) != 0) goto done;
+    if (results && !sbj_is_object(results)) {
+        sb_fail(err, SB_ERR_VALIDATION, "results must be a JSON object");
+        goto done;
+    }
+    for (size_t i = 0; i < sbj_obj_len(results); ++i) {
+        const sbj *value = results->v.obj.vals[i];
+        if (!sbj_is_null(value) && !sbj_is_number(value)) {
+            sb_fail(err, SB_ERR_VALIDATION, "proxy latency values must be numbers or null");
+            goto done;
+        }
+    }
     sbj *out = sbj_object();
     sbj_set_bool(out, "ok", true);
-    sbj_set(out, "updated", sbj_uint(updated));
+    sbj_set_int(out, "updated", 0);
     sb_resp_json(resp, 200, out);
     rc = 0;
 done:

@@ -332,10 +332,8 @@ int sb_store_acknowledge_host_command(sb_store *s, const char *host_id, const ch
 int sb_store_acknowledge_host_command_n(sb_store *s, const char *host_id, const char *command_id,
                                         const char *status, const char *result, size_t result_len,
                                         sb_err *err);
-int sb_store_update_proxy_latencies(sb_store *s, const sbj *results, size_t *updated,
-                                    sb_err *err);
-/* latency NULL == std::nullopt */
-int sb_store_update_proxy_latency(sb_store *s, const char *id, const double *latency,
+/* Store a completed measurement only if the probed configuration still matches. */
+int sb_store_update_proxy_latency(sb_store *s, const sb_proxy_record *expected, const double *latency,
                                   sb_err *err);
 
 int sb_store_list_proxy_nodes(sb_store *s, sb_proxy_record_vec *out, sb_err *err);

@@ -2,7 +2,7 @@
 
 ## 开发预览：Android 1.4.0（版本码 29）/ sing-box 1.14.3
 
-当前应用版本从统一的 [`client-releases.json`](../config/client-releases.json) 读取，为 `1.4.0` / `29`；内核从 [`runtime-versions.json`](../config/runtime-versions.json) 读取，锁定 `1.14.3` / `7054cac5124465ffdb145870d7c01885566711b1`。已重建包含采集扩展的四 ABI libbox AAR，并适配 DNS 服务器迭代器、原生 JNI 证书存储、CrashReport 路径及新增平台回调；普通 VPN 不提供 root shell、二层桥接或 SSH 托管能力。1.4.0 已随 [1.1.0 开发预览](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) 提供五种测试签名 APK、对应源码和校验值；未经真机/模拟器验收。公开发布的 1.3.4 与本次签名相同，但实际系统覆盖安装仍待验证。
+当前应用版本从统一的 [`client-releases.json`](../config/client-releases.json) 读取，为 `1.4.1` / `30`；内核从 [`runtime-versions.json`](../config/runtime-versions.json) 读取，锁定 `1.14.3` / `7054cac5124465ffdb145870d7c01885566711b1`。已重建包含采集扩展的四 ABI libbox AAR，并适配 DNS 服务器迭代器、原生 JNI 证书存储、CrashReport 路径及新增平台回调；普通 VPN 不提供 root shell、二层桥接或 SSH 托管能力。1.4.0 已随 [1.1.0 开发预览](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) 提供五种测试签名 APK、对应源码和校验值；未经真机/模拟器验收。公开发布的 1.3.4 与本次签名相同，但实际系统覆盖安装仍待验证。
 
 新版原生验证覆盖本地健康 API 的鉴权/TLS/截止时间，以及 Claude/GPT/自定义/默认分流和 DNS 出口、FakeIP/IPv6、HTTPS/SVCB 地址提示、核心重启映射和直连切换。IPv4-only TUN 通过显式 A 查询与 AAAA 空答案保留原行为，不再使用 `strategy` DNS 规则字段；1.14 已按服务器隔离 DNS 缓存，因此移除旧 `independent_cache`。
 
@@ -82,11 +82,11 @@ real installation/recovery/UID acceptance before a stable release.
 
 ## 开发预览：主应用更新与旧版恢复
 
-“设置 → 应用与内核更新、旧版恢复”使用独立应用签名目录。目录公钥默认空，正式发布者尚未配置时更新关闭；通过 `-PsbAppCatalogKeys=/absolute/public-keys.json` 注入外部公钥。下载同时检查实际 APK 的版本、单一当前签名证书、ABI/min SDK，以及由实际 AAR 构建生成的内核版本、源码 revision、overlay 和逐架构原生库摘要；内核跟随应用整体更新。目录序号防重放、累计撤销、HTTPS/长度/摘要验证和原子缓存提交均在本机执行。
+从 1.4.1 起，打开 **设置 → 检查更新与旧版恢复 → 检查更新**。受管模式优先由中心匹配 GitHub 上的 Android 稳定版和本机架构，独立模式直接读取官方发布清单。安装包从 GitHub 下载。旧手机首次使用此功能，请从 Release 选择对应架构的 APK 覆盖安装。官方构建内置应用目录公钥，自建发行方可用 `-PsbAppCatalogKeys=/absolute/public-keys.json` 覆盖。下载同时检查实际 APK 的版本、单一当前签名证书、ABI/min SDK，以及由实际 AAR 构建生成的内核版本、源码 revision、overlay 和逐架构原生库摘要；内核跟随应用整体更新。目录序号防重放、累计撤销、HTTPS/长度/摘要验证和原子缓存提交均在本机执行。
 
 安装前保存已验证的当前 APK，并强制通过系统文档选择器导出**应用外救援 ZIP**：恢复 APK、签名目录、加密偏好与无需打开应用即可阅读的恢复说明一起保存。只有写入后重新读回、摘要匹配，且当前 APK/目标 APK/偏好未变化时才允许提交 Android PackageInstaller；安装仍要求断开 VPN 和系统确认。新版启动即崩溃时也能从系统文件管理器取得救援材料。当前版已撤销时不作为恢复候选，无安全旧版时明确提示只能保存目标 APK、不能回退。较旧 APK 仍需手动卸载重装；卸载丢失设备秘密、缓存及本机防重放/撤销状态，受管设备需重新注册，不声称无损或静默回滚。完整发布命令、信任格式和恢复限制见 [Android 应用更新协议](../docs/android-app-updates-v1.md)。
 
-本地 JVM/OpenSSL/HTTPS 负例与 APK 构建检查不等于真机自更新验收。`AppUpdatePackageTest` 可在设备上检查实际安装包的 manifest、证书与内核来源；系统确认、自更新重启、取消/失败及卸载恢复仍需在线设备验收，当前没有正式更新源或生产信任密钥。
+本地 JVM/OpenSSL/HTTPS 负例与 APK 构建检查不等于真机自更新验收。`AppUpdatePackageTest` 可在设备上检查实际安装包的 manifest、证书与内核来源；系统确认、自更新重启、取消/失败及卸载恢复仍需在线设备验收。
 
 ## 1.3.4 — packet capture temporarily withdrawn
 

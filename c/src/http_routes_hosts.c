@@ -1432,6 +1432,7 @@ static int handle_host_capture(sb_http_req *req, sb_http_resp *resp, sb_err *err
  * ====================================================================== */
 
 void sb_http_register_hosts_routes(sb_http_server *srv) {
+    sb_http_route(srv, "GET", "/api/agent/android-update/{abis}", sb_http_android_update);
     sb_http_route(srv, "GET,PUT", "/api/config/default", handle_default_config);
     sb_http_route(srv, "POST", "/api/agent/captures/{digest}", handle_agent_capture);
     sb_http_route(srv, "GET", "/api/hosts/{id}/captures", handle_host_captures);

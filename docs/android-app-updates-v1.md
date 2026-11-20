@@ -4,7 +4,7 @@
 
 ## 信任与目录
 
-`config/app-catalog-keys.json` 默认是空公钥表，在线更新关闭。发布构建通过 Gradle `-PsbAppCatalogKeys=/absolute/public-keys.json` 注入审核后的公钥。目录内不能引入公钥。应用与 HTTP 插件的 APK 签名统一使用 `android/signing.gradle` 的外部 keystore 参数；签名私钥、密码与目录私钥均不存入仓库。
+官方构建使用 `config/app-catalog-keys.json` 中的发布者公钥。自建发行方可用 Gradle 参数 `-PsbAppCatalogKeys=/absolute/public-keys.json` 指定自己的公钥表。空表会关闭更新。目录内不能引入公钥。应用与 HTTP 插件的 APK 签名统一使用 `android/signing.gradle` 的外部 keystore 参数；签名私钥、密码与目录私钥均不存入仓库。
 
 公钥格式为 `{"format":"sb-easy.app-catalog.keys","version":1,"keys":{"publisher-id":"BASE64_SPKI_DER"}}`，最多 16 个 RSA 2048–4096 位公钥。目录 envelope 的字段严格为 `format`、`version`、`algorithm`、`key_id`、`payload`、`signature`；其值分别使用 `sb-easy.app-catalog`、`1`、`rsa-pss-sha256`、受信任密钥 ID，以及规范 Base64 编码的 payload 原始 UTF-8 字节和签名。
 
@@ -28,12 +28,20 @@ payload 字段：
 | `min_os` | 24–999；必须与 APK 真实 minSdkVersion 一致 |
 | `abis` | 无重复的 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64` 子集；必须与 APK 原生库架构集合完全一致且支持本机 |
 | `signer_sha256` | 单一当前 APK 签名证书的 SHA-256；同时必须等于当前已安装应用的单一证书，不自动信任轮换谱系 |
-| `url` | HTTPS，无账户信息或片段；不跟随重定向 |
+| `url` | HTTPS，无账户信息或片段。官方仓库的 Release 附件允许一次到 GitHub 下载域名的 HTTPS 跳转 |
 | `sha256` / `bytes` | APK 精确 SHA-256 与字节数，上限 160 MiB |
 | `core_version` / `source_revision` | 内核三段版本与完整 40 位小写 Git revision |
 | `provenance_sha256` | APK 的 `assets/libbox-provenance.json` 原始字节 SHA-256 |
 
 相同 build 与 ABI 集合不重复。相同 build 的不同 ABI 包必须共享版本名、签名证书、系统要求、core version、source revision 和 provenance 摘要。撤销按 build 覆盖其所有 ABI 包。
+
+## GitHub 更新检查
+
+从 1.4.1 开始，设置内的“检查更新”自动选择安装包。首次从旧版升级时，从 GitHub Release 手动覆盖安装一次。受管配置同步沿用 HTTPS 要求，使用旧公网 HTTP 中心的设备在迁移中心地址后可继续在线同步。
+
+中心的公开接口 `GET /api/agent/android-update/{abis}` 接收手机支持的 CPU 架构，例如 `arm64-v8a,armeabi-v7a`。中心读取 GitHub Releases API 的分页列表，按三段数字比较已公开的 `android-vX.Y.Z` 正式标签，跳过草稿、预发布和其他平台。中心按手机给出的架构顺序匹配，最后尝试 universal 包，返回标签、架构、签名目录和 APK 的 GitHub 地址。元数据缓存五分钟，上游请求失败后等待三十秒再试。中心部署需要能通过 HTTPS 访问 `api.github.com`。
+
+此接口只接收架构名称。旧 HTTP 中心也可以提供公开下载线索，设备令牌和配置仍使用原有的受管传输策略。独立模式和无法连接中心时，手机从仓库默认分支的 `config/client-releases.json` 查找 Android 发布记录。两条路径都将地址绑定到官方仓库和版本标签，在手机上核验发布者签名。GitHub 附件可以跳转一次到 `release-assets.githubusercontent.com` 或 `objects.githubusercontent.com` 的 HTTPS 443 端口，下载请求不携带设备凭据。
 
 ## 实际构建来源
 
@@ -47,7 +55,7 @@ sidecar 绑定实际 AAR SHA-256 和四个 ABI 的 `libbox.so` SHA-256，并声�
 
 界面提供 HTTPS 目录及本地签名目录导入；不接受绕过目录的本地 APK 更新。在线下载只允许更高 versionCode。在下载前，当前安装包必须匹配当前目录或既有已验证缓存中的签名记录，并保存为恢复副本。已被撤销的当前版本可升级到安全版本，但不能保留为恢复候选。分拆 APK 安装无法作为单一 APK 备份，会明确拒绝该更新路径。
 
-网络请求与下载均有连接、读取和总时限；超出声明长度、提前中断、HTTP 重定向、TLS 失败或摘要不符会丢弃 `.part`，保留现有安装及已验证缓存。完整校验后以原子文件写入目录回执并重命名提交 APK，保留当前与目标两份缓存。缓存使用前重新核验目录签名、APK、兼容性与当前累计撤销；缓存恢复允许原签名回执过期，不能忽略已知撤销。
+网络请求与下载均有连接、读取和总时限；超出声明长度、提前中断、未授权的重定向、TLS 失败或摘要不符会丢弃 `.part`，保留现有安装及已验证缓存。完整校验后以原子文件写入目录回执并重命名提交 APK，保留当前与目标两份缓存。缓存使用前重新核验目录签名、APK、兼容性与当前累计撤销；缓存恢复允许原签名回执过期，不能忽略已知撤销。
 
 安装通过 Android `PackageInstaller.Session`，API 31+ 显式要求 `USER_ACTION_REQUIRED`，使用显式、未导出的结果 Activity 和有随机 nonce 的 mutable PendingIntent 接收系统确认/结果。系统安装回调 API 的要求见 [Android Session 文档](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session) 和 [SessionParams 文档](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams)。开始安装及系统确认前均要求 VPN 已断开；不会静默安装或自动恢复 VPN。
 
@@ -65,7 +73,9 @@ Android 不允许普通应用直接降低 versionCode。较旧缓存的恢复方
 
 ## 发布工具
 
-外部发布者公钥先转成构建信任配置：
+每次发布使用标签 `android-vX.Y.Z`，上传 `sb-easy-android-vX.Y.Z-<abi>.apk` 和名为 `sb-easy-android-catalog.json` 的签名目录。签名目录应保留受支持旧版的恢复记录和此前的撤销记录。更新仓库的 Android 发布清单后，独立客户端也能找到同一批附件。目录最长有效 90 天，续签时递增序号并更新 Release 上的目录附件。
+
+自建发行方可以生成自己的构建信任配置。
 
 ```bash
 python3 updates/android/publish.py trust --public-key /secure/publisher-public.pem \
@@ -86,7 +96,7 @@ python3 updates/android/publish.py sign --payload /secure/app-payload.json \
 python3 updates/android/publish.py verify --catalog build/app-catalog.json --keys /secure/app-public-keys.json
 ```
 
-`sign` 必须提供实际发布 APK 所在目录，并重新核验每份实际 APK 与 payload 的所有字段；目录私钥必须对应已注入宿主的公钥。仓库不提供生产私钥、发布域名或虚构的正式更新源。
+`sign` 必须提供实际发布 APK 所在目录，并重新核验每份实际 APK 与 payload 的所有字段；目录私钥必须对应已注入宿主的公钥。发布者将目录私钥保存在仓库和中心之外。
 
 ## 验证边界
 

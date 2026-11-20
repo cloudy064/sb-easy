@@ -24,9 +24,11 @@ The historical C++ implementation has been removed; it remains available in Git
 history. The Rust `backend/` directory is an archived reference only and is
 excluded from primary CI and release builds.
 
-The current source targets the C server/agent **1.1.0**, Android **1.4.0 (29)**,
+The current source targets the C server/agent **1.1.0**, Android **1.4.1 (30)**,
 Windows **0.8.0** (service, tray and local browser UI), Linux Desktop **0.1.0**, and macOS/iOS/tvOS **0.1.0 (1)**,
 using sing-box **1.14.3**.
+Android 1.4.1 adds an in-app update check. Managed devices ask their center to select the GitHub Release asset for their CPU. The phone downloads and verifies the APK. [Android 1.4.1 downloads](https://github.com/cloudy064/sb-easy/releases/tag/android-v1.4.1)
+
 The [1.1.0 development preview](https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1) provides Android 1.4.0 test-signed APKs,
 Windows 0.7.0 unsigned ZIP/MSI packages and a Linux Desktop 0.1.0 unsigned Debian 12 amd64 DEB,
 with corresponding source, third-party notices and SHA-256 checksums.

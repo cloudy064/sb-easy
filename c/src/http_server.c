@@ -2115,6 +2115,7 @@ sb_http_server *sb_http_server_new(sb_store *store, const sb_http_server_options
     sb_http_server_options_copy(&srv->opts, options);
     srv->store = store;
     pthread_mutex_init(&srv->telemetry_mutex, NULL);
+    pthread_mutex_init(&srv->android_release_mutex, NULL);
     srv->telemetry = sbj_object();
     pthread_mutex_init(&srv->log_mutex, NULL);
     pthread_mutex_init(&srv->self_singbox_mutex, NULL);
@@ -2262,6 +2263,8 @@ void sb_http_server_free(sb_http_server *srv) {
     if (srv->fetcher) sb_subscription_fetcher_free(srv->fetcher);
     router_free(router_of(srv));
     sbj_free(srv->telemetry);
+    sbj_free(srv->android_release);
+    pthread_mutex_destroy(&srv->android_release_mutex);
     pthread_mutex_destroy(&srv->telemetry_mutex);
     sb_strvec_free(&srv->log_lines);
     pthread_mutex_destroy(&srv->log_mutex);

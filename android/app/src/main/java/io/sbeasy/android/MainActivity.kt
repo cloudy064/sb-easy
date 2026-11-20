@@ -1638,7 +1638,7 @@ private fun LogsScreen(logs: List<RuntimeLog>, diagnosticLogs: List<RuntimeLog>,
 @Composable
 private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, phase: VpnPhase, onDisconnect: () -> Unit) {
     var updates by remember { mutableStateOf(false) }
-    if (updates) { AppUpdatesScreen(onBack = { updates = false }, onDisconnect = onDisconnect); return }
+    if (updates) { AppUpdatesScreen(control.enrollment?.server, onBack = { updates = false }, onDisconnect = onDisconnect); return }
     var preferences by remember { mutableStateOf(false) }
     if (preferences) { PreferencesScreen(onBack = { preferences = false }); return }
     val scope = rememberCoroutineScope()
@@ -1679,7 +1679,7 @@ private fun SettingsScreen(control: ControlPlaneSnapshot, coreVersion: String?, 
         item {
             AppCard {
                 Text("配置与恢复", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                OutlinedButton(onClick = { updates = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("应用与内核更新、旧版恢复") }
+                OutlinedButton(onClick = { updates = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("检查更新与旧版恢复") }
                 OutlinedButton(onClick = { preferences = true }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("加密偏好备份与中心漫游") }
                 Text("新配置会先校验，再热更新；失败时保留上一份可用配置。控制面请求始终绕过 VPN 走底层网络。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 7.dp))
                 OutlinedButton(onClick = { scope.launch { runCatching { CoreGraph.repository.syncConfiguration(force = true) }.onFailure { message = it.message } } }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("立即同步配置") }

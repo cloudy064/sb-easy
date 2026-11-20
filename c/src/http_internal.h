@@ -165,6 +165,11 @@ struct sb_http_server {
     pthread_mutex_t telemetry_mutex;
     sbj *telemetry;
 
+    /* Shared GitHub release metadata. APKs are downloaded by the phone. */
+    pthread_mutex_t android_release_mutex;
+    sbj *android_release;
+    int64_t android_release_retry_ms;
+
     /* ServerLogBuffer: last 1000 non-empty lines. */
     pthread_mutex_t log_mutex;
     sb_strvec log_lines;
@@ -212,6 +217,8 @@ int sb_http_security_authorize(const sb_http_req *req, sb_err *err);
 int sb_http_security_login(sb_http_req *req, sb_http_resp *resp, const char *user_id,
                            const char *method, sb_err *err);
 void sb_http_register_hosts_routes(sb_http_server *srv);
+int sb_http_android_update(sb_http_req *req, sb_http_resp *resp, sb_err *err);
+void sb_android_release_consider(const sbj *page, sbj **latest);
 void sb_http_register_proxy_routes(sb_http_server *srv);
 void sb_http_register_proxy_user_routes(sb_http_server *srv);
 /* WebSocket bridge: registered on the civetweb context by the core after

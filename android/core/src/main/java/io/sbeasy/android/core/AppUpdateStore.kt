@@ -1,6 +1,7 @@
 package io.sbeasy.android.core
 
 import android.content.Context
+import android.os.Build
 import android.util.AtomicFile
 import java.io.File
 import java.io.OutputStream
@@ -17,6 +18,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 data class CachedApp(val release: AppRelease, val file: File)
+data class CheckedAppUpdate(val release: AppRelease, val viaCenter: Boolean)
 data class AppUpdateSnapshot(val catalog: VerifiedAppCatalog? = null, val revoked: Map<Long, String> = emptyMap(),
     val cached: List<CachedApp> = emptyList(), val received: Long = 0, val total: Long = 0, val busy: Boolean = false,
     val error: String = "", val trustedKeyCount: Int = 0)
@@ -75,6 +77,23 @@ object AppUpdateStore {
         } finally { mutable.value = mutable.value.copy(busy = false) }
     }
     suspend fun accept(text: String) = operations.withLock { acceptLocked(text) }
+    suspend fun checkGitHub(server: String?): CheckedAppUpdate = operations.withLock {
+        ready()
+        require(keys.isNotEmpty()) { "此构建未配置应用更新公钥" }
+        mutable.value = mutable.value.copy(busy = true, received = 0, total = 0, error = "")
+        try {
+            val (asset, viaCenter) = withContext(Dispatchers.IO) { transfer.discover(server, Build.SUPPORTED_ABIS.toList()) }
+            val envelope = withContext(Dispatchers.IO) { transfer.catalog(asset.catalogUrl) }
+            acceptLocked(envelope)
+            val release = requireNotNull(mutable.value.catalog).releases.singleOrNull {
+                it.url == asset.apkUrl && "android-v${it.version}" == asset.tag &&
+                    it.abis == (if (asset.abi == "universal") AppCatalog.ABIS else setOf(asset.abi))
+            }
+                ?: error("最新 APK 与发布者签名目录不一致")
+            requireAllowed(release)
+            CheckedAppUpdate(release, viaCenter)
+        } finally { mutable.value = mutable.value.copy(busy = false) }
+    }
     private suspend fun acceptLocked(text: String) {
         ready()
         val next = withContext(Dispatchers.Default) { AppCatalog.verify(text, keys) }

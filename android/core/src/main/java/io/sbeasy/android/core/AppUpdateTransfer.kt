@@ -7,24 +7,46 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 
-/** All requests use a bounded HTTPS transfer; redirects never change the signed destination. */
+/** Release downloads may make one credential-free hop from GitHub to its official asset CDN. */
 internal class AppUpdateTransfer(client: OkHttpClient = OkHttpClient.Builder().build()) {
     private val http = client.newBuilder().followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
-        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).callTimeout(180, TimeUnit.SECONDS).build()
-    fun catalog(rawUrl: String): String {
-        val url = AppCatalog.https(rawUrl)
-        return http.newCall(Request.Builder().url(url).header("User-Agent", "sb-easy-android/updates").build()).execute().use { response ->
-            require(response.isSuccessful) { "读取应用目录失败：HTTP ${response.code}" }
-            val body = requireNotNull(response.body); require(body.contentLength() <= PluginCatalog.MAX_ENVELOPE) { "应用目录超过 1 MiB" }
-            body.byteStream().use { PreferencesEnvelope.utf8(AppRuntimeProvenance.readBounded(it, PluginCatalog.MAX_ENVELOPE)) }
+        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(15, TimeUnit.MINUTES).build()
+    private val hints = http.newBuilder().callTimeout(20, TimeUnit.SECONDS).build()
+
+    private fun get(rawUrl: String, client: OkHttpClient): Response {
+        val request = Request.Builder().url(AppCatalog.https(rawUrl)).header("User-Agent", "sb-easy-android/updates").build()
+        val response = client.newCall(request).execute()
+        if (response.code !in setOf(301, 302, 303, 307, 308)) return response
+        val target = response.use { GitHubAppUpdates.assetRedirect(request.url, requireNotNull(it.header("Location"))) }
+        return client.newCall(Request.Builder().url(target).build()).execute()
+    }
+    private fun document(response: Response): String = response.use {
+        require(it.isSuccessful) { "读取更新信息失败：HTTP ${it.code}" }
+        val body = requireNotNull(it.body)
+        require(body.contentLength() <= PluginCatalog.MAX_ENVELOPE) { "更新信息超过 1 MiB" }
+        body.byteStream().use { input -> PreferencesEnvelope.utf8(AppRuntimeProvenance.readBounded(input, PluginCatalog.MAX_ENVELOPE)) }
+    }
+    fun catalog(rawUrl: String): String = document(get(rawUrl, hints))
+
+    fun discover(server: String?, abis: List<String>): Pair<AndroidUpdateAsset, Boolean> {
+        val deviceAbis = abis.filter { it in AppCatalog.ABIS }.distinct()
+        require(deviceAbis.isNotEmpty()) { "本机 CPU 架构不受支持" }
+        if (server != null) {
+            val json = try {
+                document(hints.newCall(GitHubAppUpdates.centerRequest(server, deviceAbis)).execute())
+            } catch (_: Exception) { null }
+            if (json != null) return GitHubAppUpdates.fromCenter(StrictJson.objectValue(json), deviceAbis) to true
         }
+        val inventory = StrictJson.objectValue(catalog(GitHubAppUpdates.INVENTORY))
+        return GitHubAppUpdates.fromInventory(inventory, deviceAbis) to false
     }
     suspend fun artifact(release: AppRelease, part: File, progress: (Long) -> Unit = {}) {
         require(release.bytes in 1..PluginCatalog.MAX_ARTIFACT)
         val url = AppCatalog.https(release.url)
         try {
-            http.newCall(Request.Builder().url(url).header("User-Agent", "sb-easy-android/updates").build()).execute().use { response ->
+            get(url, http).use { response ->
                 require(response.isSuccessful) { "APK 下载失败：HTTP ${response.code}" }
                 val body = requireNotNull(response.body)
                 require(body.contentLength() == -1L || body.contentLength() == release.bytes) { "APK 下载长度与签名目录不符" }

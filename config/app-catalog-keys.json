@@ -1,1 +1,7 @@
-{"format":"sb-easy.app-catalog.keys","version":1,"keys":{}}
+{
+  "format": "sb-easy.app-catalog.keys",
+  "version": 1,
+  "keys": {
+    "android-releases-2026": "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAmroqAIotC+RyWCReT93ouJJ/gY72oRtCXKSS+o2LvFhkrolyo9wEN7bJindLt46p8jfmNwBDRHFceEniCWZTe+H8RUQuvuXN9fzFQnwTrfyp245iRh8xu/a1BlCJJQ9fi9kx3d8E//KN5sbWEs/xUvJu92wqlb8HnggnYqNSB5I9lYaXU1bEbeC4rng9eX4YPpDfaAFZeLfCeMpgadn5YvTwa70Qy2JkgE7mvRCejIEcqzGZ1bk0EP9giPKWWomQp6Svd3eqwo+iRMAtynP6Nyo2k39lhe42zU14FYxZJq7EXz02PdMAP3KBh3RfeDacsYkq+hIcgMlx/qn7wrMV7GvilxrDaOjyNto1+JYkHakxyqAOZ56zo08OhtqmDnKYzcbLYGDz0XkRdmDfiWSi1mEI1YtadcGwISs9SAFvR4alGLWl1HK9qXDyD51o7TTUjNFyVWBQOGPRMYDYAT7KYoUf0zLukUyngvw5eVIRLppvti0pwGYGbE2ChLJjHM2hAgMBAAE="
+  }
+}

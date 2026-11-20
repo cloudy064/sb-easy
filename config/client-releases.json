@@ -3,8 +3,8 @@
   "repository": "https://github.com/cloudy064/sb-easy",
   "development": {
     "android": {
-      "version": "1.4.0",
-      "version_code": 29
+      "version": "1.4.1",
+      "version_code": 30
     },
     "windows": {
       "version": "0.8.1"
@@ -22,57 +22,57 @@
   },
   "published": {
     "android": {
-      "version": "1.4.0",
+      "version": "1.4.1",
       "core_version": "1.14.3",
       "channel": "test-signed",
-      "tag": "v1.1.0-preview.1",
-      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/v1.1.0-preview.1",
-      "verified_at": "2026-10-23",
+      "tag": "android-v1.4.1",
+      "release_url": "https://github.com/cloudy064/sb-easy/releases/tag/android-v1.4.1",
+      "verified_at": "2026-11-20",
       "artifacts": [
         {
-          "name": "sb-easy-android-1.4.0-preview.1-arm64-v8a.apk",
+          "name": "sb-easy-android-v1.4.1-arm64-v8a.apk",
           "format": "apk",
           "architecture": "arm64-v8a",
-          "size": 44708084,
-          "sha256": "a80f1d2daafaa571c09d79668649d7009aa7e0de94c50f20cc68ea74f826d42f",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-arm64-v8a.apk"
+          "size": 44790165,
+          "sha256": "12e83f1be0086d2ead001190c4274053d5284b8df8926aaa8acc82d4773c8e85",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/sb-easy-android-v1.4.1-arm64-v8a.apk"
         },
         {
-          "name": "sb-easy-android-1.4.0-preview.1-armeabi-v7a.apk",
+          "name": "sb-easy-android-v1.4.1-armeabi-v7a.apk",
           "format": "apk",
           "architecture": "armeabi-v7a",
-          "size": 44592864,
-          "sha256": "da552b54808fdb67366de305d37ba76d1a41a2bcc887f4222eb33425c99cfe96",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-armeabi-v7a.apk"
+          "size": 44674949,
+          "sha256": "d90f79b187a85ce06072f978af39cc39afa6569cf0c25beeba8706a3c615fda6",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/sb-easy-android-v1.4.1-armeabi-v7a.apk"
         },
         {
-          "name": "sb-easy-android-1.4.0-preview.1-universal.apk",
+          "name": "sb-easy-android-v1.4.1-universal.apk",
           "format": "apk",
           "architecture": "universal",
-          "size": 140950993,
-          "sha256": "1192fbe51ce597136c1973f1d54fe17154c708043af6a79a5c682459b19c6408",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-universal.apk"
+          "size": 141033074,
+          "sha256": "5d64f69ddcd098536a05b27467078e4517cb8454b86b1f7a54ff78359719ba83",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/sb-easy-android-v1.4.1-universal.apk"
         },
         {
-          "name": "sb-easy-android-1.4.0-preview.1-x86.apk",
+          "name": "sb-easy-android-v1.4.1-x86.apk",
           "format": "apk",
           "architecture": "x86",
-          "size": 47883576,
-          "sha256": "56ddcc1db5567b79a7b2e4c8adb7a35b5d92237c5b61d42b1b9d77d30e31eaf7",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-x86.apk"
+          "size": 47965661,
+          "sha256": "638a382d9a2ec227ac22154bc25c2a7292b4dd80b5cdb02c71cb37ff5a1dc652",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/sb-easy-android-v1.4.1-x86.apk"
         },
         {
-          "name": "sb-easy-android-1.4.0-preview.1-x86_64.apk",
+          "name": "sb-easy-android-v1.4.1-x86_64.apk",
           "format": "apk",
           "architecture": "x86_64",
-          "size": 47043878,
-          "sha256": "92f96ae55747844b26c161a9214ac415e8b1c70b01716481c24d5c1230a7252e",
-          "url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-android-1.4.0-preview.1-x86_64.apk"
+          "size": 47125963,
+          "sha256": "971f890c768b582214a60251658c29d8d98fbe8891d03ed8bbec2efe6f3683c6",
+          "url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/sb-easy-android-v1.4.1-x86_64.apk"
         }
       ],
-      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/SHA256SUMS.txt",
-      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/v1.1.0-preview.1/sb-easy-672c912-source.tar.gz",
-      "version_code": 29,
+      "checksums_url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/SHA256SUMS.txt",
+      "source_url": "https://github.com/cloudy064/sb-easy/releases/download/android-v1.4.1/sb-easy-android-v1.4.1-source.tar.gz",
+      "version_code": 30,
       "features": {
         "packet_capture": true,
         "http_debug": true

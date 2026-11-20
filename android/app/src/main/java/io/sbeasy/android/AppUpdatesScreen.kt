@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-internal fun AppUpdatesScreen(onBack: () -> Unit, onDisconnect: () -> Unit) {
+internal fun AppUpdatesScreen(server: String?, onBack: () -> Unit, onDisconnect: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snapshot by AppUpdateStore.state.collectAsState()
@@ -34,6 +34,8 @@ internal fun AppUpdatesScreen(onBack: () -> Unit, onDisconnect: () -> Unit) {
     val preferences = remember { context.getSharedPreferences("app_catalog_ui", android.content.Context.MODE_PRIVATE) }
     var url by remember { mutableStateOf(preferences.getString("url", "").orEmpty()) }
     var busy by remember { mutableStateOf(false) }
+    var checked by remember(server) { mutableStateOf<CheckedAppUpdate?>(null) }
+    var manual by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var installStatus by remember { mutableStateOf(AppUpdateInstaller.status(context)) }
     var pending by remember { mutableStateOf<CachedApp?>(null) }
@@ -104,27 +106,53 @@ internal fun AppUpdatesScreen(onBack: () -> Unit, onDisconnect: () -> Unit) {
         Text("应用与内核一起更新。每个安装包都会核验发布者目录、当前应用签名、实际版本与架构，以及 APK 中的内核来源和原生库。安装由 Android 系统确认。")
         snapshot.revoked[installedBuild]?.let { Text("当前版本已撤销：$it。请更新；此版本不会保留为恢复选项。", color = MaterialTheme.colorScheme.error) }
         if (snapshot.trustedKeyCount == 0) Text("此构建尚未配置应用更新发布者公钥，在线更新与目录导入已关闭。", color = MaterialTheme.colorScheme.error)
-        OutlinedTextField(url, { url = it }, enabled = !occupied, label = { Text("HTTPS 应用签名目录地址") }, modifier = Modifier.fillMaxWidth())
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = !occupied && snapshot.trustedKeyCount > 0, onClick = { action {
-                AppUpdateStore.refresh(url); preferences.edit().putString("url", url).apply(); message = "已读取签名目录。"
-            } }) { Text("读取目录") }
-            OutlinedButton(enabled = !occupied && snapshot.trustedKeyCount > 0, onClick = { catalogFile.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }) { Text("选择目录文件") }
+        Button(enabled = !occupied && snapshot.trustedKeyCount > 0, onClick = { action {
+            checked = null
+            checked = AppUpdateStore.checkGitHub(server)
+        } }) { Text("检查更新") }
+        checked?.takeIf { it.release in snapshot.catalog?.releases.orEmpty() }?.let { result ->
+            val release = result.release
+            val source = if (result.viaCenter) "中心已匹配 GitHub Release" else "已从 GitHub 核对发布信息"
+            Text(when {
+                release.build > installedBuild -> "发现新版本 ${release.version} · ${release.bytes / 1024 / 1024} MiB"
+                release.build == installedBuild -> "已是最新版本 ${release.version}"
+                else -> "当前构建比已发布的 ${release.version} 更新"
+            })
+            Text(source, style = MaterialTheme.typography.bodySmall)
+            if (release.build > installedBuild) Button(enabled = !occupied, onClick = { action {
+                confirmed = AppUpdateStore.download(release)
+                rescueReadyFor = null
+            } }) { Text("从 GitHub 下载并安装") }
         }
-        snapshot.catalog?.let { catalog ->
-            Text("目录序号 ${catalog.sequence} · " + if (catalog.fresh()) "有效" else "已过期，刷新后才能下载")
-            Text("离线缓存只能反映此前已获取的撤销记录。更新前会保留当前已验证 APK；目录需包含当前安装包的恢复记录。", style = MaterialTheme.typography.bodySmall)
-            val releases = catalog.releases.filter { release -> release.abis.any { it in Build.SUPPORTED_ABIS } }
-                .sortedBy { it.abis.size }.distinctBy { it.build }.sortedByDescending { it.build }
-            releases.forEach { release -> Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("${release.version}（${release.build}）· 内核 ${release.coreVersion}", style = MaterialTheme.typography.titleSmall)
-                Text("${release.abis.joinToString()} · ${release.bytes / 1024 / 1024} MiB · Android API ${release.minOs}+", style = MaterialTheme.typography.bodySmall)
-                snapshot.revoked[release.build]?.let { Text("已撤销：$it", color = MaterialTheme.colorScheme.error) }
-                if (!AppUpdateStore.compatible(release)) Text("不符合本机签名、系统或架构要求。", style = MaterialTheme.typography.bodySmall)
-                Button(enabled = !occupied && catalog.fresh() && release.build > installedBuild && AppUpdateStore.compatible(release), onClick = { action {
-                    val downloaded = AppUpdateStore.download(release); rescueReadyFor = null; confirmed = downloaded
-                } }) { Text("下载并验证更新") }
-            } } }
+        if (occupied) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (snapshot.total > 0) Text("${snapshot.received / 1024} / ${snapshot.total / 1024} KiB")
+        }
+        if (message.isNotEmpty()) Text(message)
+        TextButton(enabled = !occupied, onClick = { manual = !manual }) { Text(if (manual) "收起签名目录" else "手动选择签名目录") }
+        if (manual) {
+            OutlinedTextField(url, { url = it }, enabled = !occupied, label = { Text("HTTPS 应用签名目录地址") }, modifier = Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(enabled = !occupied && snapshot.trustedKeyCount > 0, onClick = { action {
+                    AppUpdateStore.refresh(url); preferences.edit().putString("url", url).apply(); message = "已读取签名目录。"
+                } }) { Text("读取目录") }
+                OutlinedButton(enabled = !occupied && snapshot.trustedKeyCount > 0, onClick = { catalogFile.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }) { Text("选择目录文件") }
+            }
+            snapshot.catalog?.let { catalog ->
+                Text("目录序号 ${catalog.sequence} · " + if (catalog.fresh()) "有效" else "已过期，刷新后才能下载")
+                Text("离线缓存只能反映此前已获取的撤销记录。更新前会保留当前已验证 APK；目录需包含当前安装包的恢复记录。", style = MaterialTheme.typography.bodySmall)
+                val releases = catalog.releases.filter { release -> release.abis.any { it in Build.SUPPORTED_ABIS } }
+                    .sortedBy { it.abis.size }.distinctBy { it.build }.sortedByDescending { it.build }
+                releases.forEach { release -> Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${release.version}（${release.build}）· 内核 ${release.coreVersion}", style = MaterialTheme.typography.titleSmall)
+                    Text("${release.abis.joinToString()} · ${release.bytes / 1024 / 1024} MiB · Android API ${release.minOs}+", style = MaterialTheme.typography.bodySmall)
+                    snapshot.revoked[release.build]?.let { Text("已撤销：$it", color = MaterialTheme.colorScheme.error) }
+                    if (!AppUpdateStore.compatible(release)) Text("不符合本机签名、系统或架构要求。", style = MaterialTheme.typography.bodySmall)
+                    Button(enabled = !occupied && catalog.fresh() && release.build > installedBuild && AppUpdateStore.compatible(release), onClick = { action {
+                        val downloaded = AppUpdateStore.download(release); rescueReadyFor = null; confirmed = downloaded
+                    } }) { Text("下载并验证更新") }
+                } } }
+            }
         }
         if (runtime.phase !in setOf(VpnPhase.DISCONNECTED, VpnPhase.ERROR) || RuntimeBridge.control != null) {
             Text("安装前需要断开 VPN。下载与验证可以先完成。")
@@ -142,14 +170,13 @@ internal fun AppUpdatesScreen(onBack: () -> Unit, onDisconnect: () -> Unit) {
         OutlinedButton(enabled = !occupied, onClick = { showPreferences = true }) { Text("导出加密偏好备份") }
         Text("降级恢复：先把恢复 ZIP 与加密偏好保存到应用外并确认可读取，再手动卸载、解压并安装旧 APK。偏好备份不含设备令牌、WireGuard 私钥、CA 或更新信任状态；受管设备需重新注册。重装后读取新目录恢复最新撤销记录。此过程不能保证无损回滚。", style = MaterialTheme.typography.bodySmall)
         pending?.let { candidate -> OutlinedButton(enabled = !occupied, onClick = { action { install(candidate) } }) { Text("继续系统安装") } }
-        if (occupied) { LinearProgressIndicator(Modifier.fillMaxWidth()); if (snapshot.total > 0) Text("${snapshot.received / 1024} / ${snapshot.total / 1024} KiB") }
-        if (message.isNotEmpty()) Text(message)
         if (installStatus.isNotEmpty()) Text(installStatus, style = MaterialTheme.typography.bodySmall)
         if (snapshot.error.isNotEmpty()) Text(snapshot.error, color = MaterialTheme.colorScheme.error)
     }
     confirmed?.let { candidate -> AlertDialog(onDismissRequest = { if (!occupied) { confirmed = null; rescuePassword = ""; rescueRepeat = "" } }, title = { Text("安装前保存应用外救援包") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("即将安装 ${candidate.release.version}（${candidate.release.build}），内核 ${candidate.release.coreVersion}。先断开 VPN，把恢复 APK、签名回执、加密偏好和说明保存到应用外；成功读回后才能提交系统安装。")
+            if (!AppUpdateInstaller.stopped()) OutlinedButton(enabled = !occupied, onClick = onDisconnect) { Text("断开 VPN") }
             if (installedBuild in snapshot.revoked) Text("当前版已撤销，不会作为恢复 APK。优先保存已验证的安全旧版；没有安全旧版时只保存目标 APK 与偏好，不能承诺回退旧版。", color = MaterialTheme.colorScheme.error)
             if (rescueReadyFor == candidate.release.sha256) Text(message)
             else {
